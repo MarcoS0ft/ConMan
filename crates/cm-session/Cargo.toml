@@ -5,5 +5,22 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# The libghostty-vt VT engine adapter (validated GO-WITH-CAVEATS in P0.2).
+# Default on. Building it requires the zig 0.15.2 toolchain (see
+# docs/devel/AI_GUIDANCE.md); on Windows debug builds, also
+# LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseSafe.
+default = ["engine-libghostty"]
+engine-libghostty = ["dep:libghostty-vt"]
+# Future pure-Rust fallback engine (alacritty_terminal) — not implemented yet.
+# Exists so a zig-free build is possible once the fallback lands.
+engine-alacritty = []
+
+[dependencies]
+cm-core = { path = "../cm-core" }
+thiserror = "2"
+# Pinned to the exact versions validated in the P0.2 spike.
+libghostty-vt = { version = "=0.2.0", optional = true }
+
 [lints]
 workspace = true
