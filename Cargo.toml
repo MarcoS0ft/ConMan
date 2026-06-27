@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/cm-core",
+    "crates/cm-storage",
+    "crates/cm-secrets",
+    "crates/cm-session",
+    "crates/cm-platform",
+    "crates/cm-ui",
+    "crates/conman",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

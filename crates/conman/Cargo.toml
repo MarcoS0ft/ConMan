@@ -1,0 +1,21 @@
+[package]
+name = "conman"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "conman"
+path = "src/main.rs"
+
+[dependencies]
+cm-core = { path = "../cm-core" }
+cm-storage = { path = "../cm-storage" }
+cm-secrets = { path = "../cm-secrets" }
+cm-session = { path = "../cm-session" }
+cm-platform = { path = "../cm-platform" }
+cm-ui = { path = "../cm-ui" }
+
+[lints]
+workspace = true
