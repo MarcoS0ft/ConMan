@@ -5,5 +5,15 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[dependencies]
+cm-core = { path = "../cm-core" }
+# Slint 1.17 (matches the P0.3 spike). Default features are disabled here: the P2.3
+# renderer needs only the graphics value types (`SharedPixelBuffer`, `Rgba8Pixel`), not a
+# windowing backend or GPU renderer — those are pulled in when the UI is assembled (P2.4).
+# This keeps the renderer headless-testable with no display/GL dependency.
+slint = { version = "1.17", default-features = false, features = ["std", "compat-1-2"] }
+# Software glyph rasterizer carried forward from the P0.3 spike.
+fontdue = "0.9"
+
 [lints]
 workspace = true
