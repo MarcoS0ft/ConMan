@@ -9,6 +9,9 @@ members = [
     "crates/cm-ui",
     "crates/conman",
 ]
+# Throwaway spike crates live here, standalone (own Cargo.lock), excluded from the
+# workspace so an alpha/experimental dependency never touches the real lockfile.
+exclude = ["spikes/"]
 
 [workspace.package]
 version = "0.0.0"
