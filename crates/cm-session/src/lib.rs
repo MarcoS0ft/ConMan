@@ -14,4 +14,9 @@ mod libghostty;
 #[cfg(feature = "engine-libghostty")]
 pub use libghostty::{EngineError, LibghosttyEngine};
 
+#[cfg(feature = "engine-libghostty")]
+mod local;
+#[cfg(feature = "engine-libghostty")]
+pub use local::{ExitStatus, LocalTerminalSession, SessionError};
+
 pub const NAME: &str = "cm-session";

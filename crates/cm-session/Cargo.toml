@@ -11,7 +11,9 @@ publish.workspace = true
 # docs/devel/AI_GUIDANCE.md); on Windows debug builds, also
 # LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseSafe.
 default = ["engine-libghostty"]
-engine-libghostty = ["dep:libghostty-vt"]
+# The libghostty engine + the local PTY session that drives it. portable-pty is
+# tied in here so a zig-free `--no-default-features` build stays minimal.
+engine-libghostty = ["dep:libghostty-vt", "dep:portable-pty"]
 # Future pure-Rust fallback engine (alacritty_terminal) — not implemented yet.
 # Exists so a zig-free build is possible once the fallback lands.
 engine-alacritty = []
@@ -21,6 +23,7 @@ cm-core = { path = "../cm-core" }
 thiserror = "2"
 # Pinned to the exact versions validated in the P0.2 spike.
 libghostty-vt = { version = "=0.2.0", optional = true }
+portable-pty = { version = "0.9.0", optional = true }
 
 [lints]
 workspace = true
