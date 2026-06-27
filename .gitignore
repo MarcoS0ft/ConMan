@@ -1,0 +1,36 @@
+# ── Rust ──────────────────────────────────────────────────────────────────
+/target/
+**/target/
+# Note: Cargo.lock IS committed — ConMan ships as an application, not a library.
+
+# ── Development docs (never tracked) ────────────────────────────────────────
+# Specs, plans, task files, memos, design notes — local to the working copy.
+docs/devel/
+
+# ── Local secrets / dev data ────────────────────────────────────────────────
+# Never let real connection profiles, credentials, or dev databases be tracked.
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+*.local.toml
+/secrets/
+
+# ── Editors / IDEs ──────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.iml
+*.swp
+*~
+
+# ── OS cruft ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Scratch ─────────────────────────────────────────────────────────────────
+/tmp/
+/scratch/
