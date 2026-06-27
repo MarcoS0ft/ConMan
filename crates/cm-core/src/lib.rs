@@ -27,6 +27,11 @@ pub use kind::ConnectionKind;
 pub use ports::{ConnectionRepository, CredentialStore};
 pub use settings::{ConnectionSettings, LocalSettings, RdpSettings, SshAuthMethod, SshSettings};
 
+/// Crate identifier printed by the skeleton `conman` binary to prove the
+/// workspace dependency graph wires up. Scaffolding from P0.1; will be removed
+/// once `conman` gains real logic.
+pub const NAME: &str = "cm-core";
+
 /// **Sketch only — not finalized in P0.4.**
 ///
 /// The session-layer ports are defined here once the P0.2 terminal spike and
