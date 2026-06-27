@@ -32,11 +32,6 @@ pub use terminal::{
     MouseAction, MouseButton, MouseEvent, TerminalEngine, TerminalSize,
 };
 
-/// Crate identifier printed by the skeleton `conman` binary to prove the
-/// workspace dependency graph wires up. Scaffolding from P0.1; will be removed
-/// once `conman` gains real logic.
-pub const NAME: &str = "cm-core";
-
 /// **Sketch only — `SessionProvider` is not yet finalized.**
 ///
 /// `TerminalEngine` was finalized in P2.1 and now lives in [`crate::terminal`].

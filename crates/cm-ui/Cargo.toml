@@ -7,13 +7,21 @@ publish.workspace = true
 
 [dependencies]
 cm-core = { path = "../cm-core" }
-# Slint 1.17 (matches the P0.3 spike). Default features are disabled here: the P2.3
-# renderer needs only the graphics value types (`SharedPixelBuffer`, `Rgba8Pixel`), not a
-# windowing backend or GPU renderer — those are pulled in when the UI is assembled (P2.4).
-# This keeps the renderer headless-testable with no display/GL dependency.
+# The local terminal session (PTY + libghostty engine, on its own threads). Brings in the
+# zig-built engine via its default `engine-libghostty` feature.
+cm-session = { path = "../cm-session" }
+# Slint 1.17. Default features stay off here: cm-ui defines the UI components and the
+# headless renderer, but the windowing backend + GPU renderer are selected by the `conman`
+# binary (feature unification). This keeps `cargo test -p cm-ui` free of any display/GL
+# requirement. `std` + `compat-1-2` are enough to compile the generated component code and
+# the renderer's `SharedPixelBuffer`/`Image` value types.
 slint = { version = "1.17", default-features = false, features = ["std", "compat-1-2"] }
 # Software glyph rasterizer carried forward from the P0.3 spike.
 fontdue = "0.9"
+
+[build-dependencies]
+# Compiles `ui/app.slint` into Rust (consumed via `slint::include_modules!`).
+slint-build = "1.17"
 
 [lints]
 workspace = true

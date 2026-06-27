@@ -4,5 +4,3 @@
 //! (Windows Credential Manager first; macOS Keychain and Linux Secret Service
 //! later). Stores, retrieves, and deletes secrets keyed by `CredentialRef`.
 //! Secrets are never logged, exported, or written to the store.
-
-pub const NAME: &str = "cm-secrets";

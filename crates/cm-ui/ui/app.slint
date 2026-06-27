@@ -1,0 +1,221 @@
+// ConMan — main application window (P2.4).
+//
+// A model-driven tab bar (NOT std-widgets TabWidget — that is static/non-closable) over a
+// single TerminalSurface that shows the active tab's rendered framebuffer. The Rust
+// controller (crates/cm-ui/src/controller.rs) owns the sessions + renderers + the redraw
+// Timer and pushes a fresh `Image` into `frame` each tick.
+
+// One tab in the bar.
+struct TabItem {
+    title: string,
+    id: int,
+}
+
+component TabButton inherits Rectangle {
+    in property <string> title;
+    in property <bool> active;
+    callback clicked();
+    callback closed();
+
+    height: 28px;
+    border-radius: 4px;
+    background: active ? #2d4a6b : (touch.has-hover ? #1f3147 : #16222f);
+
+    // Background click area (declared first → sits behind the close button's area).
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 5px;
+        spacing: 6px;
+        Text {
+            text: title;
+            color: active ? #ffffff : #9fb1c6;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            alignment: center;
+            close := Rectangle {
+                width: 16px;
+                height: 16px;
+                border-radius: 3px;
+                background: cbtouch.has-hover ? #b04050 : transparent;
+                Text {
+                    text: "✕";
+                    font-size: 11px;
+                    color: #c8d2dc;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: 100%;
+                    height: 100%;
+                }
+                cbtouch := TouchArea {
+                    clicked => { root.closed(); }
+                }
+            }
+        }
+    }
+}
+
+// The terminal viewport: an Image fed by the renderer, wrapped in a FocusScope for keys
+// and a TouchArea for pointer/scroll. Emits normalized input + size changes to Rust.
+component TerminalSurface inherits Rectangle {
+    in property <image> frame;
+
+    // text, special-key-code (0 = use text), modifier bitmask (1=ctrl 2=alt 4=shift 8=meta)
+    callback key-input(string, int, int);
+    // button (1=L 2=R 3=M), kind (1=down 2=up 3=move), x, y (logical px), modifier bitmask
+    callback pointer(int, int, length, length, int);
+    // scroll delta-x, delta-y (logical px)
+    callback scroll(length, length);
+    // surface size changed (logical px)
+    callback resized(length, length);
+
+    // Modifier bitmask matching cm-ui's input::MOD_* (1=ctrl 2=alt 4=shift 8=meta).
+    pure function mods(c: bool, a: bool, s: bool, m: bool) -> int {
+        (c ? 1 : 0) + (a ? 2 : 0) + (s ? 4 : 0) + (m ? 8 : 0)
+    }
+
+    background: #1e1e1e;
+    forward-focus: fs;
+
+    fs := FocusScope {
+        width: 100%;
+        height: 100%;
+
+        key-pressed(e) => {
+            root.key-input(
+                e.text,
+                (e.text == Key.Return) ? 1
+                    : (e.text == Key.Tab) ? 2
+                    : (e.text == Key.Backspace) ? 3
+                    : (e.text == Key.Escape) ? 4
+                    : (e.text == Key.UpArrow) ? 5
+                    : (e.text == Key.DownArrow) ? 6
+                    : (e.text == Key.LeftArrow) ? 7
+                    : (e.text == Key.RightArrow) ? 8
+                    : (e.text == Key.Home) ? 9
+                    : (e.text == Key.End) ? 10
+                    : (e.text == Key.PageUp) ? 11
+                    : (e.text == Key.PageDown) ? 12
+                    : (e.text == Key.Delete) ? 14
+                    : (e.text == Key.F1) ? 101
+                    : (e.text == Key.F2) ? 102
+                    : (e.text == Key.F3) ? 103
+                    : (e.text == Key.F4) ? 104
+                    : (e.text == Key.F5) ? 105
+                    : (e.text == Key.F6) ? 106
+                    : (e.text == Key.F7) ? 107
+                    : (e.text == Key.F8) ? 108
+                    : (e.text == Key.F9) ? 109
+                    : (e.text == Key.F10) ? 110
+                    : (e.text == Key.F11) ? 111
+                    : (e.text == Key.F12) ? 112
+                    : 0,
+                root.mods(e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta));
+            accept
+        }
+
+        Image {
+            source: frame;
+            width: 100%;
+            height: 100%;
+            image-fit: fill;
+            image-rendering: pixelated;
+        }
+
+        ta := TouchArea {
+            pointer-event(e) => {
+                fs.focus();
+                root.pointer(
+                    e.button == PointerEventButton.left ? 1
+                        : e.button == PointerEventButton.right ? 2
+                        : e.button == PointerEventButton.middle ? 3
+                        : 0,
+                    e.kind == PointerEventKind.down ? 1
+                        : e.kind == PointerEventKind.up ? 2
+                        : e.kind == PointerEventKind.move ? 3
+                        : 0,
+                    ta.mouse-x, ta.mouse-y,
+                    root.mods(e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta));
+            }
+            scroll-event(e) => {
+                root.scroll(e.delta-x, e.delta-y);
+                accept
+            }
+        }
+    }
+
+    changed width => { root.resized(self.width, self.height); }
+    changed height => { root.resized(self.width, self.height); }
+}
+
+export component AppWindow inherits Window {
+    title: "ConMan";
+    preferred-width: 1024px;
+    preferred-height: 640px;
+    background: #0d1a2b;
+    forward-focus: surface;
+
+    in property <[TabItem]> tabs;
+    in property <int> active-tab;
+    in property <image> frame;
+
+    callback select-tab(int);
+    callback close-tab(int);
+    callback new-tab();
+    callback key-input(string, int, int);
+    callback pointer(int, int, length, length, int);
+    callback scroll(length, length);
+    callback surface-resized(length, length);
+
+    VerticalLayout {
+        // ── Tab bar ──────────────────────────────────────────────────────────
+        Rectangle {
+            height: 36px;
+            background: #0a1422;
+            HorizontalLayout {
+                padding: 4px;
+                spacing: 4px;
+                alignment: start;
+                for tab[idx] in tabs: TabButton {
+                    title: tab.title;
+                    active: idx == active-tab;
+                    clicked => { root.select-tab(idx); }
+                    closed => { root.close-tab(idx); }
+                }
+                newbtn := Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 4px;
+                    background: nt.has-hover ? #1f3147 : #16222f;
+                    Text {
+                        text: "+";
+                        font-size: 18px;
+                        color: #9fb1c6;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+                    nt := TouchArea {
+                        clicked => { root.new-tab(); }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+
+        // ── Active terminal surface ──────────────────────────────────────────
+        surface := TerminalSurface {
+            frame: root.frame;
+            key-input(t, s, m) => { root.key-input(t, s, m); }
+            pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
+            scroll(dx, dy) => { root.scroll(dx, dy); }
+            resized(w, h) => { root.surface-resized(w, h); }
+        }
+    }
+}

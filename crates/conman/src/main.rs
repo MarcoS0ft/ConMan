@@ -1,19 +1,26 @@
 //! `conman` — the application binary and composition root.
 //!
-//! In later phases this is where concrete adapters are constructed and injected
-//! into the UI and session layers, and where the tokio and Slint event loops
-//! start. For now it only proves the workspace dependency graph wires up by
-//! naming every library crate.
+//! Selects the concrete Slint backend (via the `slint` feature set in `Cargo.toml`) and
+//! launches the UI. As later phases add storage/secrets/network adapters, this is where
+//! they are constructed and injected; for P2.4 the app is a local-terminal workbench whose
+//! Slint wiring lives in `cm_ui::run`.
+//!
+//! The `slint` dependency is declared to enable the windowing backend + renderers for the
+//! shared build (Cargo feature unification); the event loop itself is entered by
+//! `cm_ui::run`.
 
-fn main() {
-    for name in [
-        cm_core::NAME,
-        cm_storage::NAME,
-        cm_secrets::NAME,
-        cm_session::NAME,
-        cm_platform::NAME,
-        cm_ui::NAME,
-    ] {
-        println!("{name}");
+use std::process::ExitCode;
+
+// Pull the backend/renderer features into the shared `slint` build. Not otherwise used
+// here — the event loop is owned by `cm_ui`.
+use slint as _;
+
+fn main() -> ExitCode {
+    match cm_ui::run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("conman: fatal: {e}");
+            ExitCode::FAILURE
+        }
     }
 }

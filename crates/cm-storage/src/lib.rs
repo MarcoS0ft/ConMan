@@ -4,5 +4,3 @@
 //! store, with versioned schema migrations) and provides defensive JSON
 //! import/export as an interchange format. Stores metadata and credential
 //! references only; secrets never touch the store.
-
-pub const NAME: &str = "cm-storage";
