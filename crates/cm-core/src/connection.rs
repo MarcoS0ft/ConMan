@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::credential::CredentialRef;
 use crate::error::DomainError;
-use crate::ids::{ConnectionId, GroupId};
+use crate::ids::{ConnectionId, CredentialId, GroupId};
 use crate::kind::ConnectionKind;
 use crate::settings::ConnectionSettings;
 
@@ -15,10 +14,16 @@ pub struct Group {
     pub name: String,
     /// Ordering among siblings.
     pub sort: i64,
+    /// The credential inherited by connections in this group and its
+    /// descendants unless overridden. `None` means no default (inherit from
+    /// the parent group or leave unset).
+    pub default_credential: Option<CredentialId>,
 }
 
-/// A saved connection profile. Carries kind-specific [`ConnectionSettings`] and,
-/// optionally, a [`CredentialRef`] into the keychain (never the secret itself).
+/// A saved connection profile. Carries kind-specific [`ConnectionSettings`]
+/// and, optionally, a reference to a [`crate::Credential`] (never the secret
+/// itself). The effective credential is resolved by
+/// [`resolve_effective_credential`].
 ///
 /// Timestamps are `i64` epoch seconds (no `chrono` dependency).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,7 +34,9 @@ pub struct Connection {
     pub name: String,
     pub kind: ConnectionKind,
     pub settings: ConnectionSettings,
-    pub credential_ref: Option<CredentialRef>,
+    /// Explicit credential override for this connection. `None` means inherit
+    /// from the ancestor group chain (see [`resolve_effective_credential`]).
+    pub credential: Option<CredentialId>,
     /// Ordering among siblings.
     pub sort: i64,
     pub created_at: i64,
@@ -48,7 +55,7 @@ impl Connection {
         name: String,
         kind: ConnectionKind,
         settings: ConnectionSettings,
-        credential_ref: Option<CredentialRef>,
+        credential: Option<CredentialId>,
         sort: i64,
         created_at: i64,
         updated_at: i64,
@@ -59,7 +66,7 @@ impl Connection {
             name,
             kind,
             settings,
-            credential_ref,
+            credential,
             sort,
             created_at,
             updated_at,
@@ -80,4 +87,33 @@ impl Connection {
         }
         Ok(())
     }
+}
+
+/// Returns the effective [`CredentialId`] for a connection:
+///
+/// 1. `conn.credential` if explicitly set, or
+/// 2. the `default_credential` of the nearest ancestor group that has one
+///    (walking `parent_id` up the chain), or
+/// 3. `None` if neither the connection nor any ancestor group specifies one.
+///
+/// The walk is bounded by `groups.len()` to be cycle-safe: a valid (acyclic)
+/// group tree of N nodes has paths of at most N steps, so any longer walk
+/// would imply a cycle and is terminated.
+pub fn resolve_effective_credential(conn: &Connection, groups: &[Group]) -> Option<CredentialId> {
+    if let Some(id) = conn.credential {
+        return Some(id);
+    }
+
+    // Walk ancestor groups; bounded by group count for cycle safety.
+    let max_depth = groups.len();
+    let mut current_group_id = conn.group_id;
+    for _ in 0..max_depth {
+        let gid = current_group_id?;
+        let group = groups.iter().find(|g| g.id == gid)?;
+        if let Some(cred) = group.default_credential {
+            return Some(cred);
+        }
+        current_group_id = group.parent_id;
+    }
+    None
 }

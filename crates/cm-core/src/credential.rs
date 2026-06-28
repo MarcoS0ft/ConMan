@@ -3,11 +3,72 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-use crate::ids::ConnectionId;
+use crate::ids::{CredentialFolderId, CredentialId};
+
+// ---------------------------------------------------------------------------
+// CredentialKind
+// ---------------------------------------------------------------------------
+
+/// The kind of secret material stored for a [`Credential`].
+///
+/// Serde tags are a wire/format contract — pin them, do not churn them.
+/// `SshKeyWithPassphrase` indicates that both an SSH private key and its
+/// passphrase are stored in the keychain under the same [`CredentialId`] keyed
+/// by [`CredentialPurpose::SshKey`] and [`CredentialPurpose::SshPassphrase`]
+/// respectively ("passphrase-as-purpose" model).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CredentialKind {
+    #[serde(rename = "password")]
+    Password,
+    #[serde(rename = "ssh-key")]
+    SshKey,
+    #[serde(rename = "ssh-key-with-passphrase")]
+    SshKeyWithPassphrase,
+}
+
+// ---------------------------------------------------------------------------
+// Credential and CredentialFolder entities
+// ---------------------------------------------------------------------------
+
+/// A first-class, shareable credential object. Carries only non-secret
+/// metadata; the actual secret lives in the OS keychain keyed by
+/// [`CredentialRef`] (service=`"conman"`, account=`"cred:<id>:<purpose>"`).
+///
+/// Many connections may reference the same `Credential` via
+/// [`crate::Connection::credential`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Credential {
+    pub id: CredentialId,
+    pub name: String,
+    pub kind: CredentialKind,
+    /// The credential folder this credential belongs to; `None` means root.
+    pub folder_id: Option<CredentialFolderId>,
+    /// The login username stored alongside the credential (metadata only, not
+    /// a secret).
+    pub username: Option<String>,
+}
+
+/// A node in the credential folder tree. Folders nest arbitrarily via
+/// `parent_id`; a `None` parent is a root-level folder. The storage layer
+/// (P1.1) enforces the no-cycle constraint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialFolder {
+    pub id: CredentialFolderId,
+    /// Parent folder; `None` means root level.
+    pub parent_id: Option<CredentialFolderId>,
+    pub name: String,
+    /// Ordering among siblings.
+    pub sort: i64,
+}
+
+// ---------------------------------------------------------------------------
+// CredentialPurpose
+// ---------------------------------------------------------------------------
 
 /// What a stored secret is used for. The string forms (`"password"`,
 /// `"ssh-key"`, `"ssh-passphrase"`) are part of the [`CredentialRef`] account
-/// format and are a contract the keychain adapter (P1.3) relies on.
+/// format (`"cred:<id>:<purpose>"`) and are a contract the keychain adapter
+/// (P1.3) relies on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CredentialPurpose {
     Password,
@@ -26,12 +87,16 @@ impl CredentialPurpose {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CredentialRef
+// ---------------------------------------------------------------------------
+
 /// An opaque, stable key identifying a secret in the OS keychain. It is a
 /// `service` + `account` pair; the secret itself is **never** stored here.
 ///
 /// The format is a contract the keychain adapter (P1.3) relies on: the service
 /// is fixed ([`CredentialRef::SERVICE`]) and the account is
-/// `"<connection-id>:<purpose>"`.
+/// `"cred:<credential-id>:<purpose>"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CredentialRef {
     service: String,
@@ -42,11 +107,11 @@ impl CredentialRef {
     /// The fixed keychain service name for all ConMan credentials.
     pub const SERVICE: &'static str = "conman";
 
-    /// Builds the reference for a given connection and purpose.
-    pub fn new(connection: ConnectionId, purpose: CredentialPurpose) -> Self {
+    /// Builds the reference for a given credential and purpose.
+    pub fn new(credential: CredentialId, purpose: CredentialPurpose) -> Self {
         Self {
             service: Self::SERVICE.to_string(),
-            account: format!("{}:{}", connection.get(), purpose.as_str()),
+            account: format!("cred:{}:{}", credential.get(), purpose.as_str()),
         }
     }
 
@@ -55,11 +120,15 @@ impl CredentialRef {
         &self.service
     }
 
-    /// The keychain account name (`"<connection-id>:<purpose>"`).
+    /// The keychain account name (`"cred:<credential-id>:<purpose>"`).
     pub fn account(&self) -> &str {
         &self.account
     }
 }
+
+// ---------------------------------------------------------------------------
+// Secret
+// ---------------------------------------------------------------------------
 
 /// A secret value (e.g. a password or key) held only transiently at the
 /// boundary between a [`crate::CredentialStore`] and its consumers.

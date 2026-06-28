@@ -6,9 +6,10 @@
 use std::sync::Mutex;
 
 use cm_core::{
-    Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings,
-    CredentialPurpose, CredentialRef, DomainError, Group, GroupId, LocalSettings, RdpSettings,
-    RepositoryError, Secret, SshAuthMethod, SshSettings,
+    Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings, Credential,
+    CredentialFolder, CredentialFolderId, CredentialId, CredentialKind, CredentialPurpose,
+    CredentialRef, DomainError, Group, GroupId, LocalSettings, RdpSettings, RepositoryError,
+    Secret, SshAuthMethod, SshSettings, resolve_effective_credential,
 };
 
 fn rdp_settings() -> ConnectionSettings {
@@ -29,6 +30,35 @@ fn ssh_settings(auth: SshAuthMethod) -> ConnectionSettings {
     })
 }
 
+fn make_group(id: i64, parent_id: Option<i64>, default_credential: Option<i64>) -> Group {
+    Group {
+        id: GroupId::new(id),
+        parent_id: parent_id.map(GroupId::new),
+        name: format!("group-{id}"),
+        sort: 0,
+        default_credential: default_credential.map(CredentialId::new),
+    }
+}
+
+fn make_connection(group_id: Option<i64>, credential: Option<i64>) -> Connection {
+    Connection::new(
+        ConnectionId::UNSAVED,
+        group_id.map(GroupId::new),
+        "test-conn".to_string(),
+        ConnectionKind::LocalTerminal,
+        ConnectionSettings::Local(LocalSettings::default()),
+        credential.map(CredentialId::new),
+        0,
+        0,
+        0,
+    )
+    .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// ID newtype behaviour
+// ---------------------------------------------------------------------------
+
 #[test]
 fn id_newtype_behavior() {
     assert_eq!(ConnectionId::UNSAVED.get(), 0);
@@ -47,6 +77,158 @@ fn id_newtype_behavior() {
         ConnectionId::new(42)
     );
 }
+
+#[test]
+fn credential_id_newtype_behavior() {
+    assert_eq!(CredentialId::UNSAVED.get(), 0);
+    assert!(CredentialId::UNSAVED.is_unsaved());
+    assert!(!CredentialId::new(1).is_unsaved());
+    assert_eq!(CredentialId::new(99).get(), 99);
+
+    // Transparent serde.
+    assert_eq!(serde_json::to_string(&CredentialId::new(7)).unwrap(), "7");
+    assert_eq!(
+        serde_json::from_str::<CredentialId>("7").unwrap(),
+        CredentialId::new(7)
+    );
+}
+
+#[test]
+fn credential_folder_id_newtype_behavior() {
+    assert_eq!(CredentialFolderId::UNSAVED.get(), 0);
+    assert!(CredentialFolderId::UNSAVED.is_unsaved());
+    assert!(!CredentialFolderId::new(2).is_unsaved());
+    assert_eq!(CredentialFolderId::new(42).get(), 42);
+
+    assert_eq!(
+        serde_json::to_string(&CredentialFolderId::new(5)).unwrap(),
+        "5"
+    );
+    assert_eq!(
+        serde_json::from_str::<CredentialFolderId>("5").unwrap(),
+        CredentialFolderId::new(5)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CredentialKind serde tags (pinned)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn credential_kind_tag_strings_are_pinned() {
+    assert_eq!(
+        serde_json::to_string(&CredentialKind::Password).unwrap(),
+        "\"password\""
+    );
+    assert_eq!(
+        serde_json::to_string(&CredentialKind::SshKey).unwrap(),
+        "\"ssh-key\""
+    );
+    assert_eq!(
+        serde_json::to_string(&CredentialKind::SshKeyWithPassphrase).unwrap(),
+        "\"ssh-key-with-passphrase\""
+    );
+
+    assert_eq!(
+        serde_json::from_str::<CredentialKind>("\"password\"").unwrap(),
+        CredentialKind::Password
+    );
+    assert_eq!(
+        serde_json::from_str::<CredentialKind>("\"ssh-key\"").unwrap(),
+        CredentialKind::SshKey
+    );
+    assert_eq!(
+        serde_json::from_str::<CredentialKind>("\"ssh-key-with-passphrase\"").unwrap(),
+        CredentialKind::SshKeyWithPassphrase
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Credential and CredentialFolder round-trips
+// ---------------------------------------------------------------------------
+
+#[test]
+fn credential_round_trips_through_json() {
+    let cred = Credential {
+        id: CredentialId::new(3),
+        name: "prod-server-key".to_string(),
+        kind: CredentialKind::SshKeyWithPassphrase,
+        folder_id: Some(CredentialFolderId::new(1)),
+        username: Some("deploy".to_string()),
+    };
+    let json = serde_json::to_string(&cred).unwrap();
+    assert_eq!(serde_json::from_str::<Credential>(&json).unwrap(), cred);
+
+    // No folder, no username.
+    let cred2 = Credential {
+        id: CredentialId::new(7),
+        name: "vpn-pass".to_string(),
+        kind: CredentialKind::Password,
+        folder_id: None,
+        username: None,
+    };
+    let json2 = serde_json::to_string(&cred2).unwrap();
+    assert_eq!(serde_json::from_str::<Credential>(&json2).unwrap(), cred2);
+}
+
+#[test]
+fn credential_folder_round_trips_through_json() {
+    let folder = CredentialFolder {
+        id: CredentialFolderId::new(2),
+        parent_id: Some(CredentialFolderId::new(1)),
+        name: "Work".to_string(),
+        sort: 10,
+    };
+    let json = serde_json::to_string(&folder).unwrap();
+    assert_eq!(
+        serde_json::from_str::<CredentialFolder>(&json).unwrap(),
+        folder
+    );
+
+    // Root-level folder.
+    let root = CredentialFolder {
+        id: CredentialFolderId::new(1),
+        parent_id: None,
+        name: "Root".to_string(),
+        sort: 0,
+    };
+    let json = serde_json::to_string(&root).unwrap();
+    assert_eq!(
+        serde_json::from_str::<CredentialFolder>(&json).unwrap(),
+        root
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CredentialPurpose / CredentialRef (re-keyed)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn credential_ref_format_is_pinned() {
+    // Account format is now "cred:<credential-id>:<purpose>".
+    let cref = CredentialRef::new(CredentialId::new(12), CredentialPurpose::Password);
+    assert_eq!(cref.service(), "conman");
+    assert_eq!(cref.service(), CredentialRef::SERVICE);
+    assert_eq!(cref.account(), "cred:12:password");
+
+    assert_eq!(CredentialPurpose::SshKey.as_str(), "ssh-key");
+    assert_eq!(CredentialPurpose::SshPassphrase.as_str(), "ssh-passphrase");
+
+    // All purposes produce the correct prefix.
+    let ssh_key = CredentialRef::new(CredentialId::new(5), CredentialPurpose::SshKey);
+    assert_eq!(ssh_key.account(), "cred:5:ssh-key");
+
+    let passphrase = CredentialRef::new(CredentialId::new(5), CredentialPurpose::SshPassphrase);
+    assert_eq!(passphrase.account(), "cred:5:ssh-passphrase");
+
+    // Round-trip.
+    let json = serde_json::to_string(&cref).unwrap();
+    assert_eq!(serde_json::from_str::<CredentialRef>(&json).unwrap(), cref);
+}
+
+// ---------------------------------------------------------------------------
+// ConnectionKind / SshAuthMethod
+// ---------------------------------------------------------------------------
 
 #[test]
 fn connection_kind_tag_strings_are_pinned() {
@@ -77,7 +259,8 @@ fn ssh_auth_method_tag_strings_are_pinned() {
     let agent = serde_json::to_value(SshAuthMethod::Agent).unwrap();
     assert_eq!(agent["method"], "agent");
 
-    let key_ref = CredentialRef::new(ConnectionId::new(5), CredentialPurpose::SshKey);
+    // CredentialRef now keyed by CredentialId.
+    let key_ref = CredentialRef::new(CredentialId::new(5), CredentialPurpose::SshKey);
     let public_key = serde_json::to_value(SshAuthMethod::PublicKey {
         key_ref: key_ref.clone(),
     })
@@ -101,20 +284,9 @@ fn connection_settings_external_tags_are_pinned() {
     assert!(ssh.get("ssh").is_some());
 }
 
-#[test]
-fn credential_ref_format_is_pinned() {
-    let cref = CredentialRef::new(ConnectionId::new(12), CredentialPurpose::Password);
-    assert_eq!(cref.service(), "conman");
-    assert_eq!(cref.service(), CredentialRef::SERVICE);
-    assert_eq!(cref.account(), "12:password");
-
-    assert_eq!(CredentialPurpose::SshKey.as_str(), "ssh-key");
-    assert_eq!(CredentialPurpose::SshPassphrase.as_str(), "ssh-passphrase");
-
-    // Round-trip.
-    let json = serde_json::to_string(&cref).unwrap();
-    assert_eq!(serde_json::from_str::<CredentialRef>(&json).unwrap(), cref);
-}
+// ---------------------------------------------------------------------------
+// Connection validation and round-trips
+// ---------------------------------------------------------------------------
 
 #[test]
 fn connection_rejects_kind_settings_mismatch() {
@@ -163,7 +335,7 @@ fn validate_catches_tampered_deserialized_connection() {
         "name": "tampered",
         "kind": "ssh",
         "settings": { "local": { "program": null, "args": [], "working_dir": null, "env": [] } },
-        "credential_ref": null,
+        "credential": null,
         "sort": 0,
         "created_at": 0,
         "updated_at": 0
@@ -174,18 +346,16 @@ fn validate_catches_tampered_deserialized_connection() {
 
 #[test]
 fn connection_round_trips_through_json() {
+    // Connection with an explicit credential id and SSH PublicKey method.
     let original = Connection::new(
         ConnectionId::new(99),
         Some(GroupId::new(4)),
         "prod-jump".to_string(),
         ConnectionKind::Ssh,
         ssh_settings(SshAuthMethod::PublicKey {
-            key_ref: CredentialRef::new(ConnectionId::new(99), CredentialPurpose::SshKey),
+            key_ref: CredentialRef::new(CredentialId::new(5), CredentialPurpose::SshKey),
         }),
-        Some(CredentialRef::new(
-            ConnectionId::new(99),
-            CredentialPurpose::SshPassphrase,
-        )),
+        Some(CredentialId::new(5)),
         2,
         1_700_000_000,
         1_700_000_001,
@@ -200,15 +370,124 @@ fn connection_round_trips_through_json() {
 
 #[test]
 fn group_round_trips_through_json() {
+    // Group with a default credential.
     let group = Group {
         id: GroupId::new(1),
         parent_id: None,
         name: "root".to_string(),
         sort: 0,
+        default_credential: Some(CredentialId::new(3)),
     };
     let json = serde_json::to_string(&group).unwrap();
     assert_eq!(serde_json::from_str::<Group>(&json).unwrap(), group);
+
+    // Group with no default credential.
+    let group_no_cred = Group {
+        id: GroupId::new(2),
+        parent_id: Some(GroupId::new(1)),
+        name: "sub".to_string(),
+        sort: 1,
+        default_credential: None,
+    };
+    let json2 = serde_json::to_string(&group_no_cred).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Group>(&json2).unwrap(),
+        group_no_cred
+    );
 }
+
+// ---------------------------------------------------------------------------
+// resolve_effective_credential
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_uses_connection_credential_when_set() {
+    let groups = [make_group(1, None, Some(10))];
+    let conn = make_connection(Some(1), Some(42));
+    // Connection has explicit credential — ignore group default.
+    assert_eq!(
+        resolve_effective_credential(&conn, &groups),
+        Some(CredentialId::new(42))
+    );
+}
+
+#[test]
+fn resolve_inherits_from_direct_group() {
+    let groups = [make_group(1, None, Some(10))];
+    let conn = make_connection(Some(1), None);
+    assert_eq!(
+        resolve_effective_credential(&conn, &groups),
+        Some(CredentialId::new(10))
+    );
+}
+
+#[test]
+fn resolve_inherits_from_ancestor_group() {
+    // grandparent(id=1, cred=7) <- parent(id=2, cred=None) <- conn(group=2)
+    let groups = [make_group(1, None, Some(7)), make_group(2, Some(1), None)];
+    let conn = make_connection(Some(2), None);
+    assert_eq!(
+        resolve_effective_credential(&conn, &groups),
+        Some(CredentialId::new(7))
+    );
+}
+
+#[test]
+fn resolve_connection_credential_overrides_ancestor() {
+    // grandparent(id=1, cred=7) <- parent(id=2, cred=10) <- conn(group=2, cred=99)
+    let groups = [
+        make_group(1, None, Some(7)),
+        make_group(2, Some(1), Some(10)),
+    ];
+    let conn = make_connection(Some(2), Some(99));
+    assert_eq!(
+        resolve_effective_credential(&conn, &groups),
+        Some(CredentialId::new(99))
+    );
+}
+
+#[test]
+fn resolve_nearest_ancestor_wins() {
+    // grandparent(id=1, cred=7) <- parent(id=2, cred=10) <- conn(group=2)
+    // Parent is nearer than grandparent: cred 10 should win.
+    let groups = [
+        make_group(1, None, Some(7)),
+        make_group(2, Some(1), Some(10)),
+    ];
+    let conn = make_connection(Some(2), None);
+    assert_eq!(
+        resolve_effective_credential(&conn, &groups),
+        Some(CredentialId::new(10))
+    );
+}
+
+#[test]
+fn resolve_returns_none_when_no_credential_anywhere() {
+    let groups = [make_group(1, None, None), make_group(2, Some(1), None)];
+    let conn = make_connection(Some(2), None);
+    assert_eq!(resolve_effective_credential(&conn, &groups), None);
+}
+
+#[test]
+fn resolve_returns_none_for_root_connection_with_no_credential() {
+    // Connection at root level (no group) with no credential.
+    let conn = make_connection(None, None);
+    assert_eq!(resolve_effective_credential(&conn, &[]), None);
+}
+
+#[test]
+fn resolve_is_cycle_safe() {
+    // Fabricate a cycle: group 1 parent → 2, group 2 parent → 1.
+    // Neither has a default_credential. The bounded walk must terminate.
+    let groups = [make_group(1, Some(2), None), make_group(2, Some(1), None)];
+    let conn = make_connection(Some(1), None);
+    // Should return None (not hang) even though the parent chain is cyclic.
+    assert_eq!(resolve_effective_credential(&conn, &groups), None);
+}
+
+// ---------------------------------------------------------------------------
+// Secret hygiene
+// ---------------------------------------------------------------------------
 
 #[test]
 fn secret_redacts_and_does_not_leak() {
@@ -228,6 +507,10 @@ fn secret_redacts_and_does_not_leak() {
     assert_eq!(raw.expose(), &[0u8, 159, 146, 150]);
     assert!(!format!("{raw:?}").contains("159"));
 }
+
+// ---------------------------------------------------------------------------
+// ConnectionRepository object-safety and ergonomics
+// ---------------------------------------------------------------------------
 
 /// Test-only in-memory fake proving `ConnectionRepository` is object-safe and
 /// ergonomic. Not a deliverable adapter.
@@ -347,6 +630,7 @@ fn repository_is_object_safe_and_ergonomic() {
             parent_id: None,
             name: "servers".to_string(),
             sort: 0,
+            default_credential: None,
         })
         .unwrap();
     assert_eq!(gid, GroupId::new(1));
