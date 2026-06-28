@@ -3188,15 +3188,21 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
             st.tabs[i].pane_group.set_focused(ep_idx + 1);
             st.tabs[i].pane_group.close_focused();
         }
-        if !extra_panes_to_close.is_empty() && i == active {
-            let new_layout = st.tabs[i].pane_group.layout();
-            let new_focused = st.tabs[i].pane_group.focused();
-            ui.set_pane_layout(layout_to_int(new_layout));
-            ui.set_active_pane(new_focused as i32);
-            // Update the tab-strip badge.
+        if !extra_panes_to_close.is_empty() {
+            // Tab-strip badge update applies to ALL tabs whose pane count changed,
+            // not only the active one (fix j: background tabs must sync their badge).
             if let Some(mut item) = tab_model.row_data(i) {
-                item.pane_count = st.tabs[i].pane_group.count() as i32;
-                tab_model.set_row_data(i, item);
+                let new_count = st.tabs[i].pane_group.count() as i32;
+                if item.pane_count != new_count {
+                    item.pane_count = new_count;
+                    tab_model.set_row_data(i, item);
+                }
+            }
+            if i == active {
+                let new_layout = st.tabs[i].pane_group.layout();
+                let new_focused = st.tabs[i].pane_group.focused();
+                ui.set_pane_layout(layout_to_int(new_layout));
+                ui.set_active_pane(new_focused as i32);
             }
         }
 

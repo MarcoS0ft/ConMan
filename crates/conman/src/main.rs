@@ -52,13 +52,19 @@ fn build_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     let repo = SqliteRepository::open(&db_path)?;
 
     // Seed demo data only on the very first launch, gated on a persisted flag.
-    // Using list_groups().is_empty() would re-seed if the user deletes all groups
-    // (CONVENTIONS §P1.5 carry-over fix (i)).
+    // Seed demo data only when the DB is genuinely empty (no flag AND no groups).
+    // The double guard handles two distinct cases:
+    //  - Brand-new DB: flag absent + no groups → seed + set flag.
+    //  - Pre-existing populated DB migrated from an older build that never set the
+    //    flag: flag absent + groups present → set flag without seeding (backfill).
+    // This ensures we never duplicate data on an already-populated DB (fix k).
     {
         let svc = SettingsService::new(&repo);
         let already_seeded = svc.load_first_run_seeded()?;
         if !already_seeded {
-            seed_demo_data(&repo)?;
+            if repo.list_groups()?.is_empty() {
+                seed_demo_data(&repo)?;
+            }
             svc.save_first_run_seeded()?;
         }
     }
