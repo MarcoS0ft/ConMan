@@ -1930,6 +1930,9 @@ fn settings_from_form(form: &ConnProfile) -> ConnectionSettings {
                 let u = form.username.trim().to_owned();
                 if u.is_empty() { None } else { Some(u) }
             },
+            // width/height/color_depth added by P4.1; default them until the profile
+            // editor surfaces resolution/depth fields (later UI enhancement).
+            ..RdpSettings::default()
         }),
         2 => ConnectionSettings::Local(LocalSettings::default()),
         _ => ConnectionSettings::Ssh(SshSettings {
