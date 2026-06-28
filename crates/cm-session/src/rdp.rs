@@ -242,7 +242,10 @@ impl CertStore {
         }
     }
 
-    /// Serialize `map` as pretty JSON and write to `path` (creates parent dirs).
+    /// Serialize `map` as pretty JSON and write to `path` atomically.
+    ///
+    /// Writes to a sibling `.tmp` file first, then renames into place so a
+    /// crash mid-write leaves the previous version intact (crash-safe).
     fn write_json(
         map: &std::collections::HashMap<String, String>,
         path: &std::path::Path,
@@ -251,7 +254,10 @@ impl CertStore {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(map).map_err(std::io::Error::other)?;
-        std::fs::write(path, json)
+        // Write to a temp file in the same directory, then rename atomically.
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &json)?;
+        std::fs::rename(&tmp, path)
     }
 }
 
