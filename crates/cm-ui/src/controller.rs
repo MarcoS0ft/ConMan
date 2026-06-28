@@ -966,18 +966,25 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     ui.on_open_palette({
         let weak = ui.as_weak();
         let pal_model = palette_model.clone();
+        let tab_model_op = tab_model.clone();
         let state = state.clone();
         move || {
             if let Some(ui) = weak.upgrade() {
-                // Rebuild with current detached sessions so "Reattach: …" entries appear.
                 let labels: Vec<String> = state
                     .borrow()
                     .detached
                     .iter()
                     .map(|d| d.label.clone())
                     .collect();
+                let tabs: Vec<(usize, String)> = (0..tab_model_op.row_count())
+                    .filter_map(|i| {
+                        tab_model_op
+                            .row_data(i)
+                            .map(|t| (i, t.title.to_string()))
+                    })
+                    .collect();
                 let q = ui.get_palette_query();
-                rebuild_palette_model(&pal_model, &q, &labels);
+                rebuild_palette_model(&pal_model, &q, &labels, &tabs);
                 ui.set_palette_selected(0);
                 ui.set_palette_open(true);
             }
@@ -1325,6 +1332,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     ui.on_palette_edited({
         let weak = ui.as_weak();
         let pal_model = palette_model.clone();
+        let tab_model_pe = tab_model.clone();
         let state = state.clone();
         move |query| {
             let labels: Vec<String> = state
@@ -1333,7 +1341,14 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                 .iter()
                 .map(|d| d.label.clone())
                 .collect();
-            rebuild_palette_model(&pal_model, &query, &labels);
+            let tabs: Vec<(usize, String)> = (0..tab_model_pe.row_count())
+                .filter_map(|i| {
+                    tab_model_pe
+                        .row_data(i)
+                        .map(|t| (i, t.title.to_string()))
+                })
+                .collect();
+            rebuild_palette_model(&pal_model, &query, &labels, &tabs);
             if let Some(ui) = weak.upgrade() {
                 ui.set_palette_query(query);
                 ui.set_palette_selected(0);
@@ -3456,12 +3471,31 @@ fn resolve_cred_from_idx(
 // Command palette helpers
 // ---------------------------------------------------------------------------
 
+/// Collect the dynamic context needed to rebuild the palette:
+/// returns `(detached_labels, tab_entries)`.
+fn collect_palette_context(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+) -> (Vec<String>, Vec<(usize, String)>) {
+    let labels: Vec<String> = state
+        .borrow()
+        .detached
+        .iter()
+        .map(|d| d.label.clone())
+        .collect();
+    let tabs: Vec<(usize, String)> = (0..tab_model.row_count())
+        .filter_map(|i| tab_model.row_data(i).map(|t| (i, t.title.to_string())))
+        .collect();
+    (labels, tabs)
+}
+
 fn rebuild_palette_model(
     pal_model: &Rc<VecModel<PaletteAction>>,
     query: &SharedString,
     detached_labels: &[String],
+    tab_entries: &[(usize, String)],
 ) {
-    let filtered = filter_palette_actions(query.as_str(), detached_labels);
+    let filtered = filter_palette_actions(query.as_str(), detached_labels, tab_entries);
     while pal_model.row_count() > 0 {
         pal_model.remove(0);
     }
@@ -3511,26 +3545,16 @@ fn handle_palette_key(
                 s
             };
             let new_q = SharedString::from(new_q.as_str());
-            let labels: Vec<String> = state
-                .borrow()
-                .detached
-                .iter()
-                .map(|d| d.label.clone())
-                .collect();
-            rebuild_palette_model(pal_model, &new_q, &labels);
+            let (labels, tabs) = collect_palette_context(state, tab_model);
+            rebuild_palette_model(pal_model, &new_q, &labels, &tabs);
             ui.set_palette_query(new_q);
             ui.set_palette_selected(0);
         }
         0 if mods & 0b1001 == 0 && !text.is_empty() => {
             let q = ui.get_palette_query();
             let new_q = SharedString::from(format!("{}{}", q.as_str(), text.as_str()).as_str());
-            let labels: Vec<String> = state
-                .borrow()
-                .detached
-                .iter()
-                .map(|d| d.label.clone())
-                .collect();
-            rebuild_palette_model(pal_model, &new_q, &labels);
+            let (labels, tabs) = collect_palette_context(state, tab_model);
+            rebuild_palette_model(pal_model, &new_q, &labels, &tabs);
             ui.set_palette_query(new_q);
             ui.set_palette_selected(0);
         }
@@ -3550,22 +3574,91 @@ fn dispatch_palette_action(
     }
     let action = palette_model.row_data(idx).unwrap_or_default();
     match action.label.as_str() {
+        // ── ACTIONS ───────────────────────────────────────────────────────────
+        "Quick connect\u{2026}" => ui.set_quick_connect_open(true),
         "New local tab" => open_local_tab(state, tab_model, ui),
-        "New SSH connection" => ui.set_quick_connect_open(true),
+        "New SSH connection" => {
+            // Open the profile editor pre-set for SSH (kind index 0).
+            let st = state.borrow();
+            let selected_group_idx =
+                group_name_idx(None, st.conn_tree.groups());
+            let cred_idx = cred_name_idx(None, st.keys_panel.credentials(), st.keys_panel.folders());
+            drop(st);
+            let form = ConnProfile {
+                id: 0,
+                name: SharedString::from(""),
+                group_id: 0,
+                kind: 0, // SSH
+                host: SharedString::from(""),
+                port: SharedString::from("22"),
+                username: SharedString::from(""),
+                auth_method: 1,
+                selected_cred_idx: cred_idx,
+                effective_cred_name: SharedString::from(""),
+                effective_inherited: false,
+                selected_group_idx,
+            };
+            ui.set_profile_form(form);
+            ui.set_profile_editor_open(true);
+        }
+        "New RDP connection" => {
+            // Open the profile editor pre-set for RDP (kind index 1).
+            let st = state.borrow();
+            let selected_group_idx =
+                group_name_idx(None, st.conn_tree.groups());
+            let cred_idx = cred_name_idx(None, st.keys_panel.credentials(), st.keys_panel.folders());
+            drop(st);
+            let form = ConnProfile {
+                id: 0,
+                name: SharedString::from(""),
+                group_id: 0,
+                kind: 1, // RDP
+                host: SharedString::from(""),
+                port: SharedString::from("3389"),
+                username: SharedString::from(""),
+                auth_method: 1,
+                selected_cred_idx: cred_idx,
+                effective_cred_name: SharedString::from(""),
+                effective_inherited: false,
+                selected_group_idx,
+            };
+            ui.set_profile_form(form);
+            ui.set_profile_editor_open(true);
+        }
+        "Close current tab" => {
+            let active = state.borrow().active;
+            close_tab(state, tab_model, ui, active);
+        }
         "Toggle sidebar" => ui.set_sidebar_collapsed(!ui.get_sidebar_collapsed()),
+        // ── PANELS ────────────────────────────────────────────────────────────
         "Focus Connections" => ui.set_active_panel(0),
         "Focus Keys" => ui.set_active_panel(1),
-        "Focus Settings" => ui.set_active_panel(2),
-        // BLOCKED: Import / Export requires P1.2 (json-import-export), which has
-        // not yet been merged.  No-op here; wire once P1.2 lands.
+        "Open Settings" => ui.set_active_panel(2),
+        // ── DATA ──────────────────────────────────────────────────────────────
+        // BLOCKED: Import / Export requires P1.2 (json-import-export).
         "Import / Export\u{2026}" => {}
-        // P5.1: split/broadcast actions.
+        // ── PANES ─────────────────────────────────────────────────────────────
         "Split horizontal" => do_split(state, tab_model, ui, PaneLayout::HSplit),
         "Split vertical" => do_split(state, tab_model, ui, PaneLayout::VSplit),
         "Close pane" => do_close_pane(state, tab_model, ui, false),
         "Detach session" => do_close_pane(state, tab_model, ui, true),
         "Toggle broadcast" => ui.set_broadcast_active(!ui.get_broadcast_active()),
-        // Reattach: label is "Reattach: <session-label>" — find the matching detached entry.
+        // ── TABS (dynamic) ────────────────────────────────────────────────────
+        // "Switch to: <title>" — find the first tab with the matching title.
+        label if label.starts_with("Switch to: ") => {
+            let target = label.trim_start_matches("Switch to: ");
+            let pos = (0..tab_model.row_count()).find(|&i| {
+                tab_model
+                    .row_data(i)
+                    .map(|t| t.title.as_str() == target)
+                    .unwrap_or(false)
+            });
+            if let Some(idx) = pos {
+                select_tab(state, ui, idx as i32);
+            }
+        }
+        // ── SESSIONS (dynamic) ────────────────────────────────────────────────
+        // "Reattach: <label>" — find the matching detached entry.
         label if label.starts_with("Reattach: ") => {
             let target_label = label.trim_start_matches("Reattach: ").to_owned();
             let entry = {
@@ -3574,7 +3667,6 @@ fn dispatch_palette_action(
                 pos.map(|p| st.detached.remove(p))
             };
             if let Some(d) = entry {
-                // Open a new tab re-using the detached session.
                 reattach_session(state, tab_model, ui, d);
             }
         }
@@ -3587,6 +3679,16 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
         PaletteAction {
             category: SharedString::from("ACTIONS"),
             first_in_group: true,
+            label: SharedString::from("Quick connect\u{2026}"),
+            detail: SharedString::from("SSH quick-connect form"),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{E8B1}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        PaletteAction {
+            category: SharedString::from("ACTIONS"),
+            first_in_group: false,
             label: SharedString::from("New local tab"),
             detail: SharedString::from(""),
             shortcut: SharedString::from(""),
@@ -3598,9 +3700,29 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             category: SharedString::from("ACTIONS"),
             first_in_group: false,
             label: SharedString::from("New SSH connection"),
-            detail: SharedString::from(""),
+            detail: SharedString::from("Save a new SSH profile"),
             shortcut: SharedString::from(""),
             glyph: SharedString::from("\u{E968}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        PaletteAction {
+            category: SharedString::from("ACTIONS"),
+            first_in_group: false,
+            label: SharedString::from("New RDP connection"),
+            detail: SharedString::from("Save a new RDP profile"),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{E8B0}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        PaletteAction {
+            category: SharedString::from("ACTIONS"),
+            first_in_group: false,
+            label: SharedString::from("Close current tab"),
+            detail: SharedString::from(""),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{E8BB}"),
             status: SharedString::from(""),
             selected: false,
         },
@@ -3615,8 +3737,8 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             selected: false,
         },
         PaletteAction {
-            category: SharedString::from("ACTIONS"),
-            first_in_group: false,
+            category: SharedString::from("PANELS"),
+            first_in_group: true,
             label: SharedString::from("Focus Connections"),
             detail: SharedString::from(""),
             shortcut: SharedString::from(""),
@@ -3625,7 +3747,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             selected: false,
         },
         PaletteAction {
-            category: SharedString::from("ACTIONS"),
+            category: SharedString::from("PANELS"),
             first_in_group: false,
             label: SharedString::from("Focus Keys"),
             detail: SharedString::from(""),
@@ -3635,18 +3757,17 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             selected: false,
         },
         PaletteAction {
-            category: SharedString::from("ACTIONS"),
+            category: SharedString::from("PANELS"),
             first_in_group: false,
-            label: SharedString::from("Focus Settings"),
+            label: SharedString::from("Open Settings"),
             detail: SharedString::from(""),
             shortcut: SharedString::from(""),
             glyph: SharedString::from("\u{E713}"),
             status: SharedString::from(""),
             selected: false,
         },
-        // BLOCKED: Import / Export requires P1.2 (json-import-export), which
-        // has not yet landed.  This entry is present so the affordance appears
-        // in the palette; it is a no-op until P1.2 is merged and wired here.
+        // Import / Export — present so the affordance is discoverable; no-op
+        // until P1.2 (json-import-export) is merged and wired here.
         PaletteAction {
             category: SharedString::from("DATA"),
             first_in_group: true,
@@ -3657,7 +3778,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             status: SharedString::from(""),
             selected: false,
         },
-        // P5.1: Split-pane + broadcast actions.
+        // Split-pane + broadcast actions (P5.1).
         PaletteAction {
             category: SharedString::from("PANES"),
             first_in_group: true,
@@ -3711,9 +3832,27 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
     ]
 }
 
-fn filter_palette_actions(query: &str, detached_labels: &[String]) -> Vec<PaletteAction> {
-    // Build the full list: static actions + one "Reattach: <label>" per detached session.
+fn filter_palette_actions(
+    query: &str,
+    detached_labels: &[String],
+    tab_entries: &[(usize, String)],
+) -> Vec<PaletteAction> {
+    // Build the full list: static actions + TABS + SESSIONS.
     let mut all = initial_palette_actions();
+    // One "Switch to: <title>" entry per open tab.
+    for (i, (tab_idx, title)) in tab_entries.iter().enumerate() {
+        all.push(PaletteAction {
+            category: SharedString::from("TABS"),
+            first_in_group: i == 0,
+            label: SharedString::from(format!("Switch to: {title}").as_str()),
+            detail: SharedString::from(format!("tab {}", tab_idx + 1).as_str()),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{E8A7}"),
+            status: SharedString::from(""),
+            selected: false,
+        });
+    }
+    // One "Reattach: <label>" per detached session.
     for (i, label) in detached_labels.iter().enumerate() {
         all.push(PaletteAction {
             category: SharedString::from("SESSIONS"),
@@ -3784,7 +3923,7 @@ mod tests {
 
     #[test]
     fn palette_filter_empty_query_returns_all() {
-        let all = filter_palette_actions("", &[]);
+        let all = filter_palette_actions("", &[], &[]);
         let initial = initial_palette_actions();
         assert_eq!(all.len(), initial.len());
         for (a, b) in all.iter().zip(initial.iter()) {
@@ -3794,7 +3933,7 @@ mod tests {
 
     #[test]
     fn palette_filter_no_match_returns_empty() {
-        let result = filter_palette_actions("xyzzy_no_such_action", &[]);
+        let result = filter_palette_actions("xyzzy_no_such_action", &[], &[]);
         assert!(result.is_empty());
     }
 
@@ -3805,23 +3944,41 @@ mod tests {
     }
 
     #[test]
+    fn palette_contains_new_rdp_connection() {
+        let all = initial_palette_actions();
+        assert!(all.iter().any(|a| a.label.as_str() == "New RDP connection"));
+    }
+
+    #[test]
+    fn palette_contains_close_current_tab() {
+        let all = initial_palette_actions();
+        assert!(all.iter().any(|a| a.label.as_str() == "Close current tab"));
+    }
+
+    #[test]
+    fn palette_contains_quick_connect() {
+        let all = initial_palette_actions();
+        assert!(all.iter().any(|a| a.label.as_str().starts_with("Quick connect")));
+    }
+
+    #[test]
     fn palette_filter_narrows_by_label() {
-        let result = filter_palette_actions("sidebar", &[]);
+        let result = filter_palette_actions("sidebar", &[], &[]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label.as_str(), "Toggle sidebar");
     }
 
     #[test]
     fn palette_filter_first_row_always_has_group_header() {
-        let result = filter_palette_actions("tab", &[]);
-        assert!(!result.is_empty(), "expected at least one result for 'tab'");
+        let result = filter_palette_actions("split", &[], &[]);
+        assert!(!result.is_empty(), "expected at least one result for 'split'");
         assert!(result[0].first_in_group);
     }
 
     #[test]
     fn palette_filter_includes_reattach_entries() {
         let labels = vec!["server1".to_owned(), "server2".to_owned()];
-        let all = filter_palette_actions("", &labels);
+        let all = filter_palette_actions("", &labels, &[]);
         let reattach: Vec<_> = all
             .iter()
             .filter(|a| a.label.as_str().starts_with("Reattach: "))
@@ -3836,17 +3993,39 @@ mod tests {
     #[test]
     fn palette_filter_reattach_matches_query() {
         let labels = vec!["prod-server".to_owned(), "staging".to_owned()];
-        let result = filter_palette_actions("prod", &labels);
+        let result = filter_palette_actions("prod", &labels, &[]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label.as_str(), "Reattach: prod-server");
     }
 
     #[test]
+    fn palette_filter_includes_switch_to_tab_entries() {
+        let tabs = vec![(0usize, "web-dev-01".to_owned()), (1usize, "local".to_owned())];
+        let all = filter_palette_actions("", &[], &tabs);
+        let switch: Vec<_> = all
+            .iter()
+            .filter(|a| a.label.as_str().starts_with("Switch to: "))
+            .collect();
+        assert_eq!(switch.len(), 2);
+        assert_eq!(switch[0].label.as_str(), "Switch to: web-dev-01");
+        assert_eq!(switch[0].category.as_str(), "TABS");
+        assert!(switch[0].first_in_group);
+    }
+
+    #[test]
+    fn palette_filter_switch_to_tab_matches_query() {
+        let tabs = vec![(0usize, "web-dev-01".to_owned()), (1usize, "local".to_owned())];
+        let result = filter_palette_actions("web", &[], &tabs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].label.as_str(), "Switch to: web-dev-01");
+    }
+
+    #[test]
     fn rebuild_palette_model_replaces_not_appends() {
         let model: Rc<VecModel<PaletteAction>> = Rc::new(VecModel::default());
-        rebuild_palette_model(&model, &SharedString::from(""), &[]);
+        rebuild_palette_model(&model, &SharedString::from(""), &[], &[]);
         let first_count = model.row_count();
-        rebuild_palette_model(&model, &SharedString::from(""), &[]);
+        rebuild_palette_model(&model, &SharedString::from(""), &[], &[]);
         assert_eq!(model.row_count(), first_count);
     }
 
