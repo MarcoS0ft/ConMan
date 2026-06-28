@@ -176,13 +176,21 @@ impl HostKeyVerifier for UiHostKeyVerifier {
 
 /// Shows the cert-accept dialog (P4.2 slint UI) and blocks the RDP connection
 /// thread until the user accepts or rejects.
+///
+/// When `auto_accept` is `true` (set via `CONMAN_RDP_AUTO_ACCEPT_CERTS=1`) the
+/// verifier immediately returns `AcceptAndRemember` without showing the dialog —
+/// useful for headless CI / screenshot tests.
 struct UiCertVerifier {
     weak_ui: slint::Weak<AppWindow>,
     pending: Arc<Mutex<Option<Sender<CertDecision>>>>,
+    auto_accept: bool,
 }
 
 impl CertVerifier for UiCertVerifier {
     fn decide(&self, info: &CertInfo) -> CertDecision {
+        if self.auto_accept {
+            return CertDecision::AcceptAndRemember;
+        }
         let (tx, rx) = std::sync::mpsc::channel::<CertDecision>();
         if let Ok(mut p) = self.pending.lock() {
             *p = Some(tx);
@@ -852,9 +860,12 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                     open_ssh_tab(&state, &tab_model, &ui, s, auth, verifier);
                 }
                 ConnectionSettings::Rdp(s) => {
+                    let auto_accept =
+                        std::env::var("CONMAN_RDP_AUTO_ACCEPT_CERTS").as_deref() == Ok("1");
                     let verifier = Arc::new(UiCertVerifier {
                         weak_ui: weak.clone(),
                         pending: cert_pending.clone(),
+                        auto_accept,
                     });
                     // Use username from settings; password from keychain is out of scope.
                     let auth = RdpAuthInput {
@@ -1661,6 +1672,39 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                 auto_accept,
             });
             open_ssh_tab(&state, &tab_model, &ui, settings, auth, verifier);
+        }
+    }
+
+    // ── CONMAN_RDP_AUTOINIT (P4.2 test hook) ─────────────────────────────────
+    // Format: "username:password:host[:port]" — opens an RDP tab immediately on
+    // startup without requiring the user to click a connection in the panel.
+    if let Ok(init) = std::env::var("CONMAN_RDP_AUTOINIT") {
+        let parts: Vec<&str> = init.splitn(4, ':').collect();
+        if parts.len() >= 3 {
+            let username = parts[0].to_owned();
+            let password = parts[1].to_owned();
+            let host = parts[2].to_owned();
+            let port = parts
+                .get(3)
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(3389);
+            let auto_accept = std::env::var("CONMAN_RDP_AUTO_ACCEPT_CERTS").as_deref() == Ok("1");
+            let verifier = Arc::new(UiCertVerifier {
+                weak_ui: ui.as_weak(),
+                pending: cert_pending.clone(),
+                auto_accept,
+            });
+            let settings = RdpSettings {
+                host,
+                port,
+                ..RdpSettings::default()
+            };
+            let auth = RdpAuthInput {
+                username,
+                password: Secret::from_string(password),
+                domain: None,
+            };
+            open_rdp_tab(&state, &tab_model, &ui, settings, auth, verifier);
         }
     }
 
