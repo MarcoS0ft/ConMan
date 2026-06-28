@@ -290,6 +290,55 @@ fn group_name_idx(group_id: Option<GroupId>, groups: &[Group]) -> i32 {
         .unwrap_or(0)
 }
 
+/// Map a 1-based dropdown index back to the corresponding [`CredentialFolderId`].
+///
+/// Index 0 (the "Root" sentinel) returns `None`.  An out-of-bounds index also
+/// returns `None` (safe degradation to root).
+fn folder_id_from_name_idx(idx: i32, folders: &[CredentialFolder]) -> Option<CredentialFolderId> {
+    if idx <= 0 {
+        return None;
+    }
+    let mut sorted: Vec<&CredentialFolder> = folders.iter().collect();
+    sorted.sort_by_key(|f| (f.sort, f.id.get()));
+    sorted.get((idx - 1) as usize).map(|f| f.id)
+}
+
+/// Find the 1-based dropdown index for a given [`CredentialFolderId`] in the name list.
+///
+/// Returns 0 (the "Root" sentinel) when `folder_id` is `None` or not found.
+fn folder_name_idx(folder_id: Option<CredentialFolderId>, folders: &[CredentialFolder]) -> i32 {
+    let Some(fid) = folder_id else { return 0 };
+    let mut sorted: Vec<&CredentialFolder> = folders.iter().collect();
+    sorted.sort_by_key(|f| (f.sort, f.id.get()));
+    sorted
+        .iter()
+        .position(|f| f.id == fid)
+        .map(|i| i as i32 + 1)
+        .unwrap_or(0)
+}
+
+/// Returns `true` if `target` appears anywhere in the ancestor chain of
+/// `candidate_parent` (including `candidate_parent` itself).
+///
+/// Used in [`on_group_save`] to block descendant-as-parent cycles: the caller
+/// should reject any `candidate_parent` for which this returns `true`.
+fn is_ancestor_or_self(target: GroupId, candidate_parent: GroupId, groups: &[Group]) -> bool {
+    let mut current = Some(candidate_parent);
+    let mut depth = 0usize;
+    while let Some(id) = current {
+        if id == target {
+            return true;
+        }
+        depth += 1;
+        if depth > 64 {
+            // Cycle already exists in the DB; stop to avoid an infinite loop.
+            break;
+        }
+        current = groups.iter().find(|g| g.id == id).and_then(|g| g.parent_id);
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
@@ -941,12 +990,22 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
             let Some(ui) = weak.upgrade() else { return };
             let form = ui.get_group_form();
             // Resolve parent_id from the dropdown index (selected-parent-idx).
-            // Prevent a group from being its own parent (would create a cycle).
+            // Reject any parent choice that would form a cycle: the chosen parent
+            // must not be the group itself AND must not be any of its descendants.
+            // (`is_ancestor_or_self` covers both: it returns true when
+            //  candidate == self and when candidate is reachable from self.)
             let parent_id = {
                 let st = state.borrow();
                 let resolved =
                     group_id_from_name_idx(form.selected_parent_idx, st.conn_tree.groups());
-                resolved.filter(|&gid| form.id == 0 || gid != GroupId::new(form.id as i64))
+                resolved.filter(|&gid| {
+                    form.id == 0
+                        || !is_ancestor_or_self(
+                            GroupId::new(form.id as i64),
+                            gid,
+                            st.conn_tree.groups(),
+                        )
+                })
             };
             let default_credential = {
                 let st = state.borrow();
@@ -1146,15 +1205,29 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     });
 
     ui.on_new_cred({
+        let state = state.clone();
         let weak = ui.as_weak();
         move |folder_id| {
             let Some(ui) = weak.upgrade() else { return };
+            // Resolve the DB folder id to a combo index so the picker
+            // pre-selects the folder from which the "New Credential" action
+            // was triggered.
+            let selected_folder_idx = {
+                let st = state.borrow();
+                let fid = if folder_id == 0 {
+                    None
+                } else {
+                    Some(CredentialFolderId::new(folder_id as i64))
+                };
+                folder_name_idx(fid, st.keys_panel.folders())
+            };
             let form = CredFormData {
                 id: 0,
                 name: SharedString::from("New Credential"),
                 kind: 0,
                 username: SharedString::from(""),
                 folder_id,
+                selected_folder_idx,
                 secret: SharedString::from(""),
                 passphrase: SharedString::from(""),
             };
@@ -1223,12 +1296,17 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                 CredentialKind::SshKey => 1,
                 CredentialKind::SshKeyWithPassphrase => 2,
             };
+            let raw_folder_id = cred.folder_id.map(|f| f.get() as i32).unwrap_or(0);
+            // Resolve the credential's current folder to a combo-box index so
+            // the picker shows the correct folder when the editor opens.
+            let selected_folder_idx = folder_name_idx(cred.folder_id, st.keys_panel.folders());
             let form = CredFormData {
                 id: cred_id,
                 name: SharedString::from(cred.name.as_str()),
                 kind,
                 username: SharedString::from(cred.username.as_deref().unwrap_or("")),
-                folder_id: cred.folder_id.map(|f| f.get() as i32).unwrap_or(0),
+                folder_id: raw_folder_id,
+                selected_folder_idx,
                 secret: SharedString::from(""),
                 passphrase: SharedString::from(""),
             };
@@ -1272,10 +1350,11 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let mut form = ui.get_cred_form();
-            let fid = if form.folder_id == 0 {
-                None
-            } else {
-                Some(CredentialFolderId::new(form.folder_id as i64))
+            // Resolve folder from the combo index (selected-folder-idx) so that
+            // a move-between-folders edit is honoured, not the stale raw folder_id.
+            let fid = {
+                let st = state.borrow();
+                folder_id_from_name_idx(form.selected_folder_idx, st.keys_panel.folders())
             };
             let kind = match form.kind {
                 1 => CredentialKind::SshKey,
@@ -2467,5 +2546,129 @@ mod tests {
             entry.detail.as_str().contains("P1.2"),
             "detail must call out P1.2 as the dependency"
         );
+    }
+
+    // ── folder name-list helpers ─────────────────────────────────────────────
+
+    fn make_folder_sorted(id: i64, sort: i64, name: &str) -> CredentialFolder {
+        CredentialFolder {
+            id: CredentialFolderId::new(id),
+            parent_id: None,
+            name: name.to_owned(),
+            sort,
+        }
+    }
+
+    /// Groups with parent relationships for cycle tests.
+    fn make_group_with_parent(id: i64, parent: Option<i64>, sort: i64, name: &str) -> Group {
+        Group {
+            id: GroupId::new(id),
+            parent_id: parent.map(GroupId::new),
+            name: name.to_owned(),
+            sort,
+            default_credential: None,
+        }
+    }
+
+    #[test]
+    fn folder_id_from_name_idx_zero_is_root() {
+        let folders = vec![make_folder_sorted(1, 0, "Work")];
+        assert!(folder_id_from_name_idx(0, &folders).is_none());
+    }
+
+    #[test]
+    fn folder_id_from_name_idx_one_is_first_sorted_folder() {
+        let folders = vec![make_folder_sorted(7, 0, "Z"), make_folder_sorted(1, 0, "A")];
+        // sorted: A(id=1,sort=0) then Z(id=7,sort=0) → index 1 → id 1
+        let id = folder_id_from_name_idx(1, &folders).expect("should resolve");
+        assert_eq!(id, CredentialFolderId::new(1));
+    }
+
+    #[test]
+    fn folder_name_idx_round_trips() {
+        let folders = vec![
+            make_folder_sorted(5, 0, "Five"),
+            make_folder_sorted(2, 0, "Two"),
+        ];
+        // sorted by (sort=0, id): Two(id=2)→1, Five(id=5)→2
+        let idx_two = folder_name_idx(Some(CredentialFolderId::new(2)), &folders);
+        let idx_five = folder_name_idx(Some(CredentialFolderId::new(5)), &folders);
+        assert_eq!(idx_two, 1);
+        assert_eq!(idx_five, 2);
+        let recovered = folder_id_from_name_idx(idx_two, &folders).expect("should resolve");
+        assert_eq!(recovered, CredentialFolderId::new(2));
+    }
+
+    #[test]
+    fn folder_name_idx_none_returns_zero() {
+        let folders = vec![make_folder_sorted(1, 0, "F")];
+        assert_eq!(folder_name_idx(None, &folders), 0);
+    }
+
+    // ── is_ancestor_or_self ──────────────────────────────────────────────────
+
+    #[test]
+    fn ancestor_self_is_detected() {
+        let g = make_group_with_parent(1, None, 0, "G");
+        assert!(is_ancestor_or_self(GroupId::new(1), GroupId::new(1), &[g]));
+    }
+
+    #[test]
+    fn ancestor_direct_child_detected() {
+        // hierarchy: A(1) → B(2). Moving A under B would create a cycle.
+        let groups = vec![
+            make_group_with_parent(1, None, 0, "A"),
+            make_group_with_parent(2, Some(1), 0, "B"),
+        ];
+        // B is a descendant of A, so assigning B as A's parent is a cycle.
+        assert!(is_ancestor_or_self(
+            GroupId::new(1),
+            GroupId::new(2),
+            &groups
+        ));
+    }
+
+    #[test]
+    fn ancestor_transitive_descendant_detected() {
+        // A(1) → B(2) → C(3). Moving A under C is a deeper cycle.
+        let groups = vec![
+            make_group_with_parent(1, None, 0, "A"),
+            make_group_with_parent(2, Some(1), 0, "B"),
+            make_group_with_parent(3, Some(2), 0, "C"),
+        ];
+        assert!(is_ancestor_or_self(
+            GroupId::new(1),
+            GroupId::new(3),
+            &groups
+        ));
+    }
+
+    #[test]
+    fn ancestor_sibling_is_safe() {
+        // A(1) and B(2) are siblings under Root. Moving A under B is safe.
+        let groups = vec![
+            make_group_with_parent(1, None, 0, "A"),
+            make_group_with_parent(2, None, 0, "B"),
+        ];
+        assert!(!is_ancestor_or_self(
+            GroupId::new(1),
+            GroupId::new(2),
+            &groups
+        ));
+    }
+
+    #[test]
+    fn ancestor_unrelated_group_is_safe() {
+        // B(2) → C(3). Moving A(1) under C is fine; A is not in B/C's chain.
+        let groups = vec![
+            make_group_with_parent(1, None, 0, "A"),
+            make_group_with_parent(2, None, 0, "B"),
+            make_group_with_parent(3, Some(2), 0, "C"),
+        ];
+        assert!(!is_ancestor_or_self(
+            GroupId::new(1),
+            GroupId::new(3),
+            &groups
+        ));
     }
 }

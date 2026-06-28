@@ -86,6 +86,7 @@ export global Theme {
   out property <length> space-12: 48px;
 
   // ── Corner radii (clean-modern = subtle) ───────────────────────────────────
+  out property <length> radius-xs:   3px;   // tag/badge chips (kind pill, protocol label)
   out property <length> radius-sm:   6px;   // tabs, rows, inputs, icon buttons
   out property <length> radius-md:   8px;   // cards, segmented control
   out property <length> radius-lg:  12px;   // dialogs, command palette
@@ -131,4 +132,11 @@ export global Theme {
   out property <length> tree-row-height:    26px;
   out property <length> status-bar-height:  26px;
   out property <length> control-height:     32px;   // buttons, inputs, segmented
+  // ── Tree / keys panel row micro-metrics ──────────────────────────────────
+  // Inline kind/protocol badge (e.g. "SSH", "RDP", "pw", "key").
+  out property <length> tag-height:   15px;  // badge pill height in tree rows
+  // Compact icon button used inside hover action groups in tree rows.
+  out property <length> icon-btn:     22px;  // container side length
+  // Hairline gap between adjacent compact icon buttons.
+  out property <length> gap-hairline:  1px;
 }

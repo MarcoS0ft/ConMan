@@ -26,6 +26,9 @@ export struct CredFormData {
     kind: int,
     username: string,
     folder-id: int,
+    // 1-based index into AppWindow.folder-name-list; 0 = "Root (no folder)".
+    // Bound two-way to the folder ComboBox; resolved to a DB id in on_cred_save.
+    selected-folder-idx: int,
     secret: string,
     passphrase: string,
 }
@@ -117,9 +120,9 @@ export component CredEditor {
             }
             ComboBox {
                 model: root.folder-name-list;
-                // form.folder-id is the actual DB id; the combo index is
-                // looked up by Rust before opening the editor.
-                current-index: 0;
+                // Two-way bound: Rust sets selected-folder-idx before opening
+                // the editor; on_cred_save resolves it back to a DB id.
+                current-index <=> root.form.selected-folder-idx;
             }
         }
 
