@@ -2,20 +2,20 @@
 //!
 //! Provides two related trait families:
 //!
-//! - **[`TerminalSession`]** — the original terminal-specific trait used by the
-//!   P3.x UI controller. The controller continues to hold
-//!   `Box<dyn TerminalSession>` until the P4.2 migration; thereafter it will
-//!   hold `Box<dyn Session>`.
+//! - **[`TerminalSession`]** — the original terminal-specific trait used by
+//!   the P3.x UI controller. Kept intact for backward-compat; the controller
+//!   no longer holds it directly after the P4.2 migration.
 //!
-//! - **[`Session`]** — the unified trait introduced in P4.1. `RdpSession`,
-//!   `LocalTerminalSession`, and `SshTerminalSession` all implement it.  The
-//!   surface accessor returns a [`Surface`] enum that distinguishes a terminal
+//! - **[`Session`]** — the unified trait (P4.1+). `RdpSession`,
+//!   `LocalTerminalSession`, and `SshTerminalSession` all implement it.
+//!   The surface accessor returns a [`Surface`] enum distinguishing a terminal
 //!   grid channel from an RGBA framebuffer channel (ARCHITECTURE §4/§5).
+//!   P4.2 adds `resize_cells` and `send_input` so the controller can drive all
+//!   session kinds through `Box<dyn Session>` alone.
 //!
-//! Both terminal session types implement **both** traits. [`TerminalSession`] is
-//! kept intact for the P4.2 transition; callers that need terminal-specific
-//! methods (raw key/mouse/paste/resize-by-cells) use it directly; callers
-//! holding `Box<dyn Session>` use the unified lifecycle + surface interface.
+//! Neutral input types ([`RdpInputEvent`], [`RdpMouseButton`], [`SessionInput`])
+//! live here because they must be shared between the `Session` trait definition
+//! and the `rdp` module (which imports them) without creating a circular dep.
 
 use std::sync::mpsc::Receiver;
 
@@ -52,7 +52,88 @@ pub enum SessionStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Unified Session trait (P4.1)
+// Neutral RDP input types (P4.2 — moved here from rdp.rs so SessionInput can
+// reference them without a circular dep rdp→session→rdp).
+// ---------------------------------------------------------------------------
+
+/// Mouse button identifier for [`RdpInputEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RdpMouseButton {
+    Left,
+    Middle,
+    Right,
+    /// Typically Browser Back.
+    X1,
+    /// Typically Browser Forward.
+    X2,
+}
+
+/// Transport-neutral RDP input event.
+///
+/// Used by [`SessionInput::Rdp`] to send keyboard, mouse, and scroll events to
+/// an RDP session via [`Session::send_input`].  The driver converts these to
+/// `FastPathInputEvent`s inside `cm-session::rdp` using `ironrdp-input`.
+#[derive(Debug, Clone)]
+pub enum RdpInputEvent {
+    /// Keyboard scancode key-press.
+    KeyDown {
+        /// PS/2 scancode (0x00–0xFF).
+        scancode: u8,
+        /// True for extended keys (e.g. right-Ctrl, cursor keys, numpad-/).
+        extended: bool,
+    },
+    /// Keyboard scancode key-release.
+    KeyUp { scancode: u8, extended: bool },
+    /// Mouse cursor moved to absolute position.
+    MouseMove { x: u16, y: u16 },
+    /// Mouse button pressed.
+    MouseDown {
+        button: RdpMouseButton,
+        x: u16,
+        y: u16,
+    },
+    /// Mouse button released.
+    MouseUp {
+        button: RdpMouseButton,
+        x: u16,
+        y: u16,
+    },
+    /// Mouse wheel rotation.
+    Scroll {
+        /// Positive = scroll up / away from user; negative = scroll down.
+        delta: i16,
+        /// True for vertical scroll (the common case), false for horizontal.
+        vertical: bool,
+        x: u16,
+        y: u16,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Transport-neutral session input (P4.2)
+// ---------------------------------------------------------------------------
+
+/// Transport-neutral input event sent to any session via [`Session::send_input`].
+///
+/// Each session implementation handles the variants it understands and silently
+/// ignores the rest (terminal sessions ignore `Rdp*`; RDP sessions ignore
+/// `Key`/`Mouse`/`Paste`).
+#[derive(Debug, Clone)]
+pub enum SessionInput {
+    /// Terminal key event.
+    Key(KeyEvent),
+    /// Terminal mouse event.
+    Mouse(MouseEvent),
+    /// Paste raw bytes into the terminal (e.g. clipboard paste via bracketed-paste).
+    Paste(Vec<u8>),
+    /// RDP input events (keyboard / mouse / scroll).
+    Rdp(Vec<RdpInputEvent>),
+    /// Paste text into the RDP session via the CLIPRDR channel.
+    RdpPaste(String),
+}
+
+// ---------------------------------------------------------------------------
+// Unified Session trait (P4.1+P4.2)
 // ---------------------------------------------------------------------------
 
 /// A decoded RGBA framebuffer frame published by [`crate::RdpSession`].
@@ -86,6 +167,24 @@ pub enum Surface {
     Framebuffer(Receiver<FrameUpdate>),
 }
 
+impl Surface {
+    /// Return the terminal grid receiver if this is `TerminalGrid`.
+    pub fn as_terminal_grid(&self) -> Option<&Receiver<GridSnapshot>> {
+        match self {
+            Self::TerminalGrid(rx) => Some(rx),
+            Self::Framebuffer(_) => None,
+        }
+    }
+
+    /// Return the framebuffer receiver if this is `Framebuffer`.
+    pub fn as_framebuffer(&self) -> Option<&Receiver<FrameUpdate>> {
+        match self {
+            Self::Framebuffer(rx) => Some(rx),
+            Self::TerminalGrid(_) => None,
+        }
+    }
+}
+
 impl std::fmt::Debug for Surface {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -95,12 +194,11 @@ impl std::fmt::Debug for Surface {
     }
 }
 
-/// Unified live-session handle (introduced in P4.1).
+/// Unified live-session handle (P4.1+P4.2).
 ///
 /// `RdpSession`, `LocalTerminalSession`, and `SshTerminalSession` all implement
-/// this trait. The `cm-ui` controller currently holds `Box<dyn TerminalSession>`;
-/// it will migrate to `Box<dyn Session>` in P4.2 (`TerminalSession` is kept
-/// intact for that transition). Object-safe.
+/// this trait. The `cm-ui` controller holds `Box<dyn Session>` per tab after
+/// the P4.2 migration.  Object-safe.
 pub trait Session: Send {
     /// The surface channel for this session — inspect once, keep the receiver.
     fn surface(&self) -> &Surface;
@@ -108,13 +206,30 @@ pub trait Session: Send {
     fn status(&self) -> SessionStatus;
     /// Signal graceful shutdown and release resources.
     fn shutdown(&self);
-    /// Request a desktop resize (pixels for RDP; the terminal adapter converts
-    /// to cells via its current font metrics).
+    /// Request a desktop resize in pixels.
+    ///
+    /// For RDP sessions this sends a Display Control PDU. Terminal session
+    /// impls convert to cell dimensions (approximate or exact). See also
+    /// `resize_cells` for cell-level precision.
     fn resize_px(&self, width: u32, height: u32);
+
+    // ── P4.2 additions ────────────────────────────────────────────────────────
+
+    /// Resize by cell grid dimensions (terminal sessions; no-op for RDP).
+    ///
+    /// Preferred for terminal sessions where the UI has precise font metrics.
+    /// RDP sessions use [`resize_px`] instead.
+    fn resize_cells(&self, _cols: u16, _rows: u16) {}
+
+    /// Send transport-neutral input to the session.
+    ///
+    /// Each implementor handles the variants it supports and silently ignores
+    /// the rest. Default: no-op.
+    fn send_input(&self, _input: SessionInput) {}
 }
 
 // ---------------------------------------------------------------------------
-// Terminal-specific trait (P3.x; kept for backward-compat with cm-ui P3.2)
+// Terminal-specific trait (P3.x; kept for backward-compat)
 // ---------------------------------------------------------------------------
 
 /// A live terminal session over some byte-stream transport.
@@ -125,7 +240,6 @@ pub trait Session: Send {
 /// UI can hold `Box<dyn TerminalSession>` per tab.
 ///
 /// Implementors also implement [`Session`] (unified lifecycle + surface).
-/// P4.2 migrates the controller to `Box<dyn Session>`.
 pub trait TerminalSession {
     /// Stream of viewport snapshots; drain with `recv`/`try_recv`/`recv_timeout`.
     fn snapshots(&self) -> &Receiver<GridSnapshot>;

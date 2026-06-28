@@ -2,8 +2,9 @@
 //   Modal            — scrim + centered card; Esc cancels (wire at the window level).
 //   QuickConnectForm — host/port/username + auth SegmentedControl + conditional secret (P3.2).
 //   HostKeyDialog    — TOFU accept (unknown) and the loud mismatch warning (P3.1 policy).
+//   CertDialog       — RDP TOFU accept (unknown/self-signed) and the loud mismatch warning (P4.2).
 //
-//   import { Modal, QuickConnectForm, HostKeyDialog } from "screens/dialogs.slint";
+//   import { Modal, QuickConnectForm, HostKeyDialog, CertDialog } from "screens/dialogs.slint";
 
 import { Theme } from "../theme.slint";
 import { PrimaryButton, SecondaryButton, SegmentedControl, FormField, StatusDot } from "../components.slint";
@@ -218,6 +219,126 @@ export component HostKeyDialog inherits Rectangle {
                 if !mismatch : SecondaryButton { text: "Reject"; clicked => { root.reject(); } }
                 if mismatch : PrimaryButton { text: "Accept & replace"; destructive: true; clicked => { root.accept(); } }
                 if !mismatch : PrimaryButton { text: "Accept & continue"; clicked => { root.accept(); } }
+            }
+        }
+    }
+}
+
+// ── CertDialog ────────────────────────────────────────────────────────────────
+// Realizes the P4.2 CertVerifier decision for RDP connections.
+//
+// mismatch=false → unknown / self-signed certificate TOFU prompt
+//   Reject / "Accept & remember" (stores fingerprint in the persistent cert store).
+// mismatch=true  → fingerprint changed (MITM warning).
+//   Reject (default / primary) / "Accept & replace" (destructive).
+//
+// subject    — certificate Subject DN or Common Name.
+// fingerprint — SHA-256 fingerprint of the presented certificate.
+// stored-fingerprint — previously stored fingerprint (shown only when mismatch=true).
+export component CertDialog inherits Rectangle {
+    in property <bool>   mismatch: false;
+    in property <string> host: "192.0.2.10:3389";
+    in property <string> subject: "CN=HOSTNAME";
+    in property <string> fingerprint: "SHA256:00:11:22:33:44:55:66:77:88:99";
+    in property <string> stored-fingerprint: "";
+    callback reject();
+    callback accept();    // "Accept & remember" (unknown) OR "Accept & replace" (mismatch)
+
+    width: mismatch ? 510px : 490px;
+    background: Theme.color-base;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: mismatch ? Theme.color-error.with-alpha(0.4) : Theme.color-stroke;
+
+    TouchArea {}
+
+    VerticalLayout {
+        spacing: 0px;
+
+        // Loud error banner (mismatch only — potential MITM).
+        if mismatch : Rectangle {
+            background: Theme.color-error.with-alpha(0.13);
+            border-color: Theme.color-error.with-alpha(0.25);
+            border-width: 0px;
+            HorizontalLayout {
+                padding: Theme.space-3;
+                padding-left: Theme.space-6;
+                spacing: Theme.space-3;
+                Text { text: "\u{E7BA}"; font-family: Theme.font-family-icons;
+                    font-size: Theme.icon-alert;
+                    color: Theme.color-error; vertical-alignment: center; }
+                Text {
+                    text: "CERTIFICATE CHANGED — possible MITM attack";
+                    color: Theme.color-error;
+                    font-size: Theme.font-base;
+                    font-family: Theme.font-family;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        VerticalLayout {
+            padding: Theme.space-6;
+            spacing: Theme.space-4;
+
+            if !mismatch : Text {
+                text: "Unknown RDP certificate";
+                color: Theme.color-text;
+                font-size: Theme.font-lg;
+                font-family: Theme.font-family;
+                font-weight: 700;
+            }
+
+            Text {
+                text: mismatch
+                    ? "The certificate presented by " + host + " does not match the one ConMan has stored. This may indicate the server was rebuilt — or that someone is intercepting your connection. Do NOT continue unless you know why it changed."
+                    : "The certificate for " + host + " is self-signed or issued by an untrusted CA. Verify the fingerprint out-of-band before trusting it.";
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-base;
+                font-family: Theme.font-family;
+                wrap: word-wrap;
+            }
+
+            // Subject line.
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Text { text: "Subject:"; color: Theme.color-text-secondary;
+                    font-size: Theme.font-sm; font-family: Theme.font-family; vertical-alignment: center; }
+                Text { text: subject; color: Theme.color-text;
+                    font-size: Theme.font-mono; font-family: Theme.font-family-mono; vertical-alignment: center; }
+            }
+
+            // Fingerprint block.
+            Rectangle {
+                background: Theme.color-card;
+                border-radius: Theme.radius-md;
+                border-width: 1px;
+                border-color: Theme.color-stroke;
+                VerticalLayout {
+                    padding: Theme.space-3;
+                    spacing: Theme.space-2;
+                    if mismatch : Text { text: "STORED FINGERPRINT"; color: Theme.color-text-secondary;
+                        font-size: Theme.font-xs; font-family: Theme.font-family; font-weight: 600; }
+                    if mismatch : Text { text: stored-fingerprint; color: Theme.color-connected;
+                        font-size: Theme.font-mono; font-family: Theme.font-family-mono; }
+                    Text { text: mismatch ? "PRESENTED NOW" : "SHA-256 FINGERPRINT";
+                        color: Theme.color-text-secondary;
+                        font-size: Theme.font-xs; font-family: Theme.font-family; font-weight: 600; }
+                    Text { text: fingerprint;
+                        color: mismatch ? Theme.color-error : Theme.color-accent;
+                        font-size: Theme.font-mono; font-family: Theme.font-family-mono; }
+                }
+            }
+
+            // Actions.
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                Rectangle { horizontal-stretch: 1; }
+                if mismatch  : PrimaryButton { text: "Reject"; clicked => { root.reject(); } }
+                if !mismatch : SecondaryButton { text: "Reject"; clicked => { root.reject(); } }
+                if mismatch  : PrimaryButton { text: "Accept & replace"; destructive: true; clicked => { root.accept(); } }
+                if !mismatch : PrimaryButton { text: "Accept & remember"; clicked => { root.accept(); } }
             }
         }
     }

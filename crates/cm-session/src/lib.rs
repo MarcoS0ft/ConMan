@@ -14,7 +14,10 @@
 //! `docs/devel/AI_GUIDANCE.md`.
 
 mod session;
-pub use session::{ExitStatus, FrameUpdate, Session, SessionStatus, Surface, TerminalSession};
+pub use session::{
+    ExitStatus, FrameUpdate, RdpInputEvent, RdpMouseButton, Session, SessionInput, SessionStatus,
+    Surface, TerminalSession,
+};
 
 mod rdp;
 pub use rdp::{

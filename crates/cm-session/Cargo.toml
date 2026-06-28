@@ -78,10 +78,12 @@ tokio = { version = "1", features = [
     "time",
     "macros",
 ] }
+# serde_json: used by CertStore for persistent JSON cert storage (P4.2).
+# Promoted from dev-dep to dep so the production code can load/save the cert store.
+serde_json = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
-serde_json = "1"
 
 [lints]
 workspace = true

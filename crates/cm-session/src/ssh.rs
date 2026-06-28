@@ -29,7 +29,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::engine_owner::{Msg, Transport, run_engine_owner};
 use crate::libghostty::EngineError;
-use crate::session::{ExitStatus, Session, SessionStatus, Surface, TerminalSession};
+use crate::session::{
+    ExitStatus, Session, SessionInput, SessionStatus, Surface, TerminalSession,
+};
 use cm_core::SshSettings;
 
 /// Terminal type advertised to the remote in the PTY request.
@@ -511,11 +513,29 @@ impl Session for SshTerminalSession {
     }
 
     fn resize_px(&self, width: u32, height: u32) {
-        // Approximate 8×16 cell size. The UI layer drives precise resize via
-        // TerminalSession::resize() with real font metrics (P4.2).
+        // Fallback: approximate 8×16 cell size. Preferred path is resize_cells.
         let cols = u16::try_from(width / 8).unwrap_or(u16::MAX).max(2);
         let rows = u16::try_from(height / 16).unwrap_or(u16::MAX).max(1);
         <Self as TerminalSession>::resize(self, TerminalSize { cols, rows });
+    }
+
+    fn resize_cells(&self, cols: u16, rows: u16) {
+        <Self as TerminalSession>::resize(self, TerminalSize { cols, rows });
+    }
+
+    fn send_input(&self, input: SessionInput) {
+        match input {
+            SessionInput::Key(ev) => {
+                <Self as TerminalSession>::send_key(self, ev);
+            }
+            SessionInput::Mouse(ev) => {
+                <Self as TerminalSession>::send_mouse(self, ev);
+            }
+            SessionInput::Paste(bytes) => {
+                <Self as TerminalSession>::paste(self, bytes);
+            }
+            SessionInput::Rdp(_) | SessionInput::RdpPaste(_) => {}
+        }
     }
 }
 

@@ -35,10 +35,14 @@
 //! server accepts the TLS security protocol IronRDP advertises. The default
 //! `security_layer=rdp` (STANDARD_RDP_SECURITY) is not supported by IronRDP.
 //!
-//! **Unified input surface (P4.2 deferral)**: the `Session` trait will gain a
-//! transport-neutral `send_input(Vec<SessionInput>)` method in P4.2 when the
-//! UI controller migrates to `Box<dyn Session>`. For now, `RdpSession` exposes
-//! `send_input(Vec<RdpInputEvent>)` directly; callers must downcast.
+//! **Unified input (P4.2)**: `Session::send_input(SessionInput)` dispatches
+//! `SessionInput::Rdp(events)` to the wire and `SessionInput::RdpPaste(text)`
+//! to the CLIPRDR channel.  `RdpInputEvent` and `RdpMouseButton` are now
+//! defined in `session.rs` (shared neutral types).
+//!
+//! **Cert store persistence (P4.2)**: `CertStore::new_persistent(path)` loads
+//! existing entries from a JSON file and saves on every accepted fingerprint.
+//! Call with a path in the app-data directory so TOFU survives restarts.
 //!
 //! **Deactivation-Reactivation Sequence**: when the server sends `DeactivateAll`
 //! (which xrdp does during normal connection setup before first bitmap data),
@@ -75,7 +79,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use cm_core::{RdpSettings, Secret};
 
-use crate::session::{FrameUpdate, Session, SessionStatus, Surface};
+use crate::session::{
+    FrameUpdate, RdpInputEvent, RdpMouseButton, Session, SessionInput, SessionStatus, Surface,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -168,18 +174,50 @@ impl CertVerifier for FixedCertVerifier {
     }
 }
 
-/// ConMan certificate trust store.
+/// ConMan RDP certificate trust store.
 ///
-/// Persists accepted RDP server certificate fingerprints keyed by `host:port`.
-/// MVP: in-memory only (per-process). Persistent storage deferred to P4.2+.
-#[derive(Debug, Default)]
+/// Maps `host:port` → SHA-256 fingerprint for TOFU certificate verification.
+///
+/// **Persistent (P4.2):** construct with [`CertStore::new_persistent`] to back
+/// the store with a JSON file.  The file is created on the first accepted
+/// fingerprint and updated atomically on each subsequent one.  Use
+/// [`CertStore::new`] for an ephemeral in-memory-only instance (tests, etc.).
+#[derive(Debug)]
 pub struct CertStore {
     entries: Mutex<std::collections::HashMap<String, String>>,
+    /// Path to the JSON backing file; `None` = in-memory only.
+    save_path: Option<std::path::PathBuf>,
+}
+
+impl Default for CertStore {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(std::collections::HashMap::new()),
+            save_path: None,
+        }
+    }
 }
 
 impl CertStore {
+    /// Create an ephemeral (in-memory) cert store.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// Create a persistent cert store backed by `path`.
+    ///
+    /// Existing entries are loaded from the file if it exists; missing or
+    /// unparseable files start empty.  The file is created / updated on each
+    /// accepted fingerprint.
+    pub fn new_persistent(path: std::path::PathBuf) -> Arc<Self> {
+        let entries: std::collections::HashMap<String, String> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Arc::new(Self {
+            entries: Mutex::new(entries),
+            save_path: Some(path),
+        })
     }
 
     fn key(host: &str, port: u16) -> String {
@@ -194,11 +232,27 @@ impl CertStore {
             .and_then(|m| m.get(&Self::key(host, port)).cloned())
     }
 
-    /// Store / replace a fingerprint.
+    /// Store / replace a fingerprint; persists to disk if a path was configured.
     pub fn store(&self, host: &str, port: u16, fingerprint: &str) {
         if let Ok(mut m) = self.entries.lock() {
             m.insert(Self::key(host, port), fingerprint.to_owned());
+            if let Some(path) = &self.save_path {
+                let _ = Self::write_json(&m, path);
+            }
         }
+    }
+
+    /// Serialize `map` as pretty JSON and write to `path` (creates parent dirs).
+    fn write_json(
+        map: &std::collections::HashMap<String, String>,
+        path: &std::path::Path,
+    ) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(map)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(path, json)
     }
 }
 
@@ -220,64 +274,9 @@ pub struct RdpAuthInput {
 }
 
 // ---------------------------------------------------------------------------
-// Neutral RDP input events (no IronRDP types in the public API)
+// RdpMouseButton → ironrdp-input MouseButton conversion (P4.1; types moved to
+// session.rs in P4.2 so SessionInput can reference them without circular deps)
 // ---------------------------------------------------------------------------
-
-/// Transport-neutral RDP input event.
-///
-/// Callers supply these to [`RdpSession::send_input`]; the driver converts
-/// them to `FastPathInputEvent`s using `ironrdp-input` (the `InputDatabase`
-/// tracks key/button state across calls and generates correct up/down PDUs).
-///
-/// A unified `SessionInput` type covering both terminal and RDP input will be
-/// added to the [`Session`] trait in P4.2.
-#[derive(Debug, Clone)]
-pub enum RdpInputEvent {
-    /// Keyboard scancode key-press.
-    KeyDown {
-        /// PS/2 scancode (0x00–0xFF).
-        scancode: u8,
-        /// True for extended keys (e.g. right-Ctrl, cursor keys, numpad-/).
-        extended: bool,
-    },
-    /// Keyboard scancode key-release.
-    KeyUp { scancode: u8, extended: bool },
-    /// Mouse cursor moved to absolute position.
-    MouseMove { x: u16, y: u16 },
-    /// Mouse button pressed.
-    MouseDown {
-        button: RdpMouseButton,
-        x: u16,
-        y: u16,
-    },
-    /// Mouse button released.
-    MouseUp {
-        button: RdpMouseButton,
-        x: u16,
-        y: u16,
-    },
-    /// Mouse wheel rotation.
-    Scroll {
-        /// Positive = scroll up / away from user; negative = scroll down.
-        delta: i16,
-        /// True for vertical scroll (the common case), false for horizontal.
-        vertical: bool,
-        x: u16,
-        y: u16,
-    },
-}
-
-/// Mouse button identifier for [`RdpInputEvent`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RdpMouseButton {
-    Left,
-    Middle,
-    Right,
-    /// Typically Browser Back.
-    X1,
-    /// Typically Browser Forward.
-    X2,
-}
 
 impl From<RdpMouseButton> for MouseButton {
     fn from(b: RdpMouseButton) -> Self {
@@ -315,18 +314,18 @@ enum RdpCmd {
 /// **Remote → local** (remote copy):
 /// `on_remote_copy` sets `wants_paste_unicode` when CF_UNICODETEXT is
 /// available. The active loop polls this flag and calls `initiate_paste`
-/// to fetch the data. The response arrives in `on_format_data_response`.
+/// to fetch the data. The response arrives in `on_format_data_response`,
+/// which also updates `remote_clipboard_out` (a shared Mutex for the UI thread).
 ///
 /// **Local → remote** (paste into remote):
-/// The handle's `paste_text` sends `RdpCmd::PasteText(text)` which calls
-/// `initiate_copy` announcing CF_UNICODETEXT. The server requests the data
-/// via a `FormatDataRequest`, which triggers `on_format_data_request` storing
-/// the request. The active loop then calls `submit_format_data` with the
-/// UTF-16LE encoded text.
+/// `RdpCmd::PasteText(text)` calls `initiate_copy` announcing CF_UNICODETEXT.
+/// The server requests the data via a `FormatDataRequest`, which triggers
+/// `on_format_data_request` storing the request. The active loop then calls
+/// `submit_format_data` with the UTF-16LE encoded text.
 struct TextCliprdrBackend {
     /// Text from the most recent remote copy (set by `on_format_data_response`).
     remote_text: Option<String>,
-    /// Text queued to send to the remote (set by `paste_text`).
+    /// Text queued to send to the remote.
     local_text: Option<String>,
     /// CF_UNICODETEXT format ID (per MS-RDPECLIP, always format 13 on Windows).
     cf_unicode: ClipboardFormatId,
@@ -336,6 +335,9 @@ struct TextCliprdrBackend {
     /// Set when the server requests our clipboard data; the active loop should
     /// call `submit_format_data` with the encoded local text.
     pending_format_request: Option<ClipboardFormatId>,
+    /// Shared with [`RdpSession`] — updated when remote clipboard text arrives.
+    /// The UI thread polls this in the tick loop and writes to the system clipboard.
+    remote_clipboard_out: Arc<Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for TextCliprdrBackend {
@@ -353,13 +355,14 @@ impl std::fmt::Debug for TextCliprdrBackend {
 }
 
 impl TextCliprdrBackend {
-    fn new() -> Self {
+    fn new(remote_clipboard_out: Arc<Mutex<Option<String>>>) -> Self {
         Self {
             remote_text: None,
             local_text: None,
             cf_unicode: ClipboardFormatId::new(13), // CF_UNICODETEXT
             wants_paste_unicode: false,
             pending_format_request: None,
+            remote_clipboard_out,
         }
     }
 
@@ -413,7 +416,11 @@ impl CliprdrBackend for TextCliprdrBackend {
         if !response.is_error()
             && let Some(text) = decode_utf16le(response.data())
         {
-            self.remote_text = Some(text);
+            self.remote_text = Some(text.clone());
+            // Notify the UI thread: overwrite with the latest remote text.
+            if let Ok(mut out) = self.remote_clipboard_out.lock() {
+                *out = Some(text);
+            }
         }
     }
 
@@ -489,6 +496,12 @@ pub struct RdpSession {
     status: Arc<Mutex<SessionStatus>>,
     cmd_tx: UnboundedSender<RdpCmd>,
     driver: Mutex<Option<JoinHandle<()>>>,
+    /// Remote clipboard text received via CLIPRDR (CF_UNICODETEXT).
+    ///
+    /// Set by the driver thread whenever the remote announces a copy.  The UI
+    /// thread polls this in the tick loop and writes to the system clipboard.
+    /// Publicly readable so the cm-ui controller can clone the Arc.
+    pub remote_clipboard: Arc<Mutex<Option<String>>>,
 }
 
 impl RdpSession {
@@ -507,6 +520,9 @@ impl RdpSession {
         let (frame_tx, frame_rx) = mpsc::sync_channel::<FrameUpdate>(FRAME_CHANNEL_CAPACITY);
         let (cmd_tx, cmd_rx) = unbounded_channel::<RdpCmd>();
         let status = Arc::new(Mutex::new(SessionStatus::Connecting));
+        // Shared clipboard slot: driver writes, UI thread polls.
+        let remote_clipboard: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let driver_remote_clipboard = Arc::clone(&remote_clipboard);
 
         let driver_cfg = cfg.clone();
         let driver_status = Arc::clone(&status);
@@ -534,6 +550,7 @@ impl RdpSession {
                     frame_tx,
                     cmd_rx,
                     driver_status,
+                    driver_remote_clipboard,
                 ));
             })
             .map_err(RdpError::Thread)?;
@@ -543,22 +560,10 @@ impl RdpSession {
             status,
             cmd_tx,
             driver: Mutex::new(Some(driver_handle)),
+            remote_clipboard,
         })
     }
 
-    /// Send RDP input events (key/mouse).
-    ///
-    /// Events are neutral [`RdpInputEvent`]s; encoding to IronRDP Fast-Path
-    /// PDUs happens inside the driver using `ironrdp-input`. A unified
-    /// `Session::send_input` method is planned for P4.2.
-    pub fn send_input(&self, events: Vec<RdpInputEvent>) {
-        let _ = self.cmd_tx.send(RdpCmd::Input(events));
-    }
-
-    /// Paste `text` into the remote session via the CLIPRDR channel.
-    pub fn paste_text(&self, text: String) {
-        let _ = self.cmd_tx.send(RdpCmd::PasteText(text));
-    }
 }
 
 impl Session for RdpSession {
@@ -586,8 +591,29 @@ impl Session for RdpSession {
 
     fn resize_px(&self, width: u32, height: u32) {
         // Sends a Display Control resize PDU. Full resize (DeactivateAll /
-        // Reactivation sequence + framebuffer realloc) is deferred to P4.2.
+        // Reactivation sequence + framebuffer realloc) is handled by the
+        // active_loop's `should_reactivate` path.
         let _ = self.cmd_tx.send(RdpCmd::Resize { width, height });
+    }
+
+    /// No-op: RDP is resized in pixels via [`resize_px`].
+    fn resize_cells(&self, _cols: u16, _rows: u16) {}
+
+    /// Dispatch transport-neutral input.
+    ///
+    /// Handles `SessionInput::Rdp(events)` and `SessionInput::RdpPaste(text)`;
+    /// silently ignores terminal variants.
+    fn send_input(&self, input: SessionInput) {
+        match input {
+            SessionInput::Rdp(events) => {
+                let _ = self.cmd_tx.send(RdpCmd::Input(events));
+            }
+            SessionInput::RdpPaste(text) => {
+                let _ = self.cmd_tx.send(RdpCmd::PasteText(text));
+            }
+            // Terminal inputs are not applicable to RDP.
+            SessionInput::Key(_) | SessionInput::Mouse(_) | SessionInput::Paste(_) => {}
+        }
     }
 }
 
@@ -619,8 +645,20 @@ async fn drive(
     frame_tx: SyncSender<FrameUpdate>,
     cmd_rx: UnboundedReceiver<RdpCmd>,
     status: Arc<Mutex<SessionStatus>>,
+    remote_clipboard: Arc<Mutex<Option<String>>>,
 ) {
-    match drive_inner(&cfg, auth, verifier, cert_store, &frame_tx, cmd_rx, &status).await {
+    match drive_inner(
+        &cfg,
+        auth,
+        verifier,
+        cert_store,
+        &frame_tx,
+        cmd_rx,
+        &status,
+        remote_clipboard,
+    )
+    .await
+    {
         Ok(()) => {}
         Err(e) => set_status(&status, SessionStatus::Failed(e.to_string())),
     }
@@ -634,6 +672,7 @@ async fn drive_inner(
     frame_tx: &SyncSender<FrameUpdate>,
     mut cmd_rx: UnboundedReceiver<RdpCmd>,
     status: &Arc<Mutex<SessionStatus>>,
+    remote_clipboard: Arc<Mutex<Option<String>>>,
 ) -> Result<(), RdpError> {
     // 0. Ensure the ring crypto provider is installed before any TLS call.
     //    ironrdp-tls enables both aws-lc-rs (default) and ring features in
@@ -691,7 +730,7 @@ async fn drive_inner(
     //    `ClientConnector::new` takes a local socket address used only for
     //    RDPDR client identification; "0.0.0.0:0" is the right value for
     //    clients that do not bind a fixed local port.
-    let cliprdr = CliprdrClient::new(Box::new(TextCliprdrBackend::new()));
+    let cliprdr = CliprdrClient::new(Box::new(TextCliprdrBackend::new(remote_clipboard)));
     let local_addr: std::net::SocketAddr = "0.0.0.0:0"
         .parse()
         .expect("hardcoded \"0.0.0.0:0\" is a valid SocketAddr");

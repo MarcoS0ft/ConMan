@@ -18,7 +18,7 @@ import {
     PrimaryButton, SecondaryButton, EmptyState
 } from "components.slint";
 import { ListView, Palette } from "std-widgets.slint";
-import { Modal, QuickConnectForm, HostKeyDialog } from "screens/dialogs.slint";
+import { Modal, QuickConnectForm, HostKeyDialog, CertDialog } from "screens/dialogs.slint";
 import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
 import { SettingsPanel } from "screens/settings_panel.slint";
 import { ConnectingOverlay, ErrorOverlay } from "screens/session_overlays.slint";
@@ -139,6 +139,120 @@ component TerminalSurface inherits Rectangle {
     }
 
     changed width => { root.resized(self.width, self.height); }
+    changed height => { root.resized(self.width, self.height); }
+}
+
+// ── RdpSurface (P4.2) ──────────────────────────────────────────────────────
+// Framebuffer surface for RDP sessions. Renders a decoded RGBA slint::Image and
+// forwards keyboard (both key-down AND key-up), pointer, and scroll events to the
+// controller for conversion to IronRDP FastPath PDUs.
+//
+// Key design differences from TerminalSurface (which is FROZEN):
+//  - Uses both `key-pressed` and `key-released` events (RDP needs key-up PDUs).
+//  - `special()` pure function exposes F-key codes to the controller.
+//  - Background is pure black (the framebuffer fills it).
+//  - No toggle-palette callback (Ctrl-K palette is handled at the AppWindow level).
+component RdpSurface inherits Rectangle {
+    in property <image> frame;
+    // key-down: fired on key-pressed (key-down PDU to RDP).
+    callback key-down(string /* text */, int /* special */, int /* mods */);
+    // key-up: fired on key-released (key-up PDU to RDP).
+    callback key-up(string /* text */, int /* special */, int /* mods */);
+    callback pointer(int /* button */, int /* kind */, length /* x */, length /* y */, int /* mods */);
+    callback scroll(length /* dx */, length /* dy */);
+    callback resized(length /* w */, length /* h */);
+
+    pure function mods(c: bool, a: bool, s: bool, m: bool) -> int {
+        (c ? 1 : 0) + (a ? 2 : 0) + (s ? 4 : 0) + (m ? 8 : 0)
+    }
+
+    // Maps Slint Key.* strings to the same special codes used by TerminalSurface
+    // (plus F1–F12) so the Rust input module can produce the right PS/2 scancodes.
+    pure function special(text: string) -> int {
+        (text == Key.Return)    ? 1
+        : (text == Key.Tab)       ? 2
+        : (text == Key.Backspace) ? 3
+        : (text == Key.Escape)    ? 4
+        : (text == Key.UpArrow)   ? 5
+        : (text == Key.DownArrow) ? 6
+        : (text == Key.LeftArrow) ? 7
+        : (text == Key.RightArrow)? 8
+        : (text == Key.Home)      ? 9
+        : (text == Key.End)       ? 10
+        : (text == Key.PageUp)    ? 11
+        : (text == Key.PageDown)  ? 12
+        : (text == Key.Delete)    ? 14
+        : (text == Key.F1)        ? 15
+        : (text == Key.F2)        ? 16
+        : (text == Key.F3)        ? 17
+        : (text == Key.F4)        ? 18
+        : (text == Key.F5)        ? 19
+        : (text == Key.F6)        ? 20
+        : (text == Key.F7)        ? 21
+        : (text == Key.F8)        ? 22
+        : (text == Key.F9)        ? 23
+        : (text == Key.F10)       ? 24
+        : (text == Key.F11)       ? 25
+        : (text == Key.F12)       ? 26
+        : 0
+    }
+
+    background: #000000;
+    forward-focus: rdp-fs;
+
+    rdp-fs := FocusScope {
+        width: 100%;
+        height: 100%;
+
+        key-pressed(e) => {
+            root.key-down(
+                e.text,
+                root.special(e.text),
+                root.mods(e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta)
+            );
+            accept
+        }
+
+        key-released(e) => {
+            root.key-up(
+                e.text,
+                root.special(e.text),
+                root.mods(e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta)
+            );
+            accept
+        }
+
+        Image {
+            source: frame;
+            width: 100%;
+            height: 100%;
+            image-fit: fill;
+            image-rendering: pixelated;
+        }
+
+        rdp-ta := TouchArea {
+            pointer-event(e) => {
+                rdp-fs.focus();
+                root.pointer(
+                    e.button == PointerEventButton.left   ? 1
+                        : e.button == PointerEventButton.right  ? 2
+                        : e.button == PointerEventButton.middle ? 3
+                        : 0,
+                    e.kind == PointerEventKind.down  ? 1
+                        : e.kind == PointerEventKind.up   ? 2
+                        : e.kind == PointerEventKind.move ? 3
+                        : 0,
+                    rdp-ta.mouse-x, rdp-ta.mouse-y,
+                    root.mods(e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta));
+            }
+            scroll-event(e) => {
+                root.scroll(e.delta-x, e.delta-y);
+                accept
+            }
+        }
+    }
+
+    changed width  => { root.resized(self.width, self.height); }
     changed height => { root.resized(self.width, self.height); }
 }
 
@@ -427,12 +541,19 @@ export component AppWindow inherits Window {
     preferred-width: 1280px;
     preferred-height: 760px;
     background: Theme.color-base;
-    forward-focus: surface;
+    // Note: forward-focus is intentionally NOT set here because the active session
+    // surface (terminal or RDP) is conditional. Each surface's FocusScope grabs focus
+    // on the first pointer click via fs.focus() / rdp-fs.focus().
 
     // ── Session / tabs (P2.4 contract unchanged) ──────────────────────
     in property <[TabItem]> tabs;
     in property <int>       active-tab;
     in property <image>     frame;
+    // ── RDP surface (P4.2) ────────────────────────────────────────────
+    // rdp-frame: the decoded RGBA image from the active RDP session.
+    // rdp-active: true while an RDP tab is the active tab.
+    in property <image>     rdp-frame;
+    in-out property <bool>  rdp-active: false;
 
     // ── Side panel ────────────────────────────────────────────────────
     in property <[ConnRow]> connections;
@@ -495,6 +616,16 @@ export component AppWindow inherits Window {
     callback host-key-accept();
     callback host-key-reject();
 
+    // ── RDP cert dialog (P4.2) ───────────────────────────────────────
+    in-out property <bool>   cert-dialog-open: false;
+    in property <bool>       cert-dialog-mismatch: false;
+    in property <string>     cert-dialog-host: "";
+    in property <string>     cert-dialog-subject: "";
+    in property <string>     cert-dialog-fingerprint: "";
+    in property <string>     cert-dialog-stored-fp: "";
+    callback cert-accept();
+    callback cert-reject();
+
     // ── Appearance ────────────────────────────────────────────────────
     in-out property <int>   theme-mode: 2;
     in-out property <bool>  dark-mode <=> Theme.dark-mode;
@@ -555,6 +686,11 @@ export component AppWindow inherits Window {
     callback pointer(int, int, length, length, int);
     callback scroll(length, length);
     callback surface-resized(length, length);
+
+    // RDP surface key events (P4.2) — separate from terminal because RDP needs
+    // both key-down and key-up PDUs (key-released fires key-up).
+    callback rdp-key-down(string /* text */, int /* special */, int /* mods */);
+    callback rdp-key-up(string /* text */, int /* special */, int /* mods */);
 
     // ── Main shell ────────────────────────────────────────────────────
     VerticalLayout {
@@ -753,7 +889,8 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 horizontal-stretch: 1;
                 spacing: 0px;
-                surface := TerminalSurface {
+                // Terminal surface (P2.4; FROZEN — only shown when NOT an RDP tab).
+                if !rdp-active : TerminalSurface {
                     vertical-stretch: 1;
                     frame: root.frame;
                     key-input(t, s, m) => { root.key-input(t, s, m); }
@@ -764,6 +901,16 @@ export component AppWindow inherits Window {
                         root.palette-open = !root.palette-open;
                         if (!root.palette-open) { root.palette-selected = 0; }
                     }
+                }
+                // RDP surface (P4.2; only shown when an RDP tab is active).
+                if rdp-active : RdpSurface {
+                    vertical-stretch: 1;
+                    frame: root.rdp-frame;
+                    key-down(t, s, m) => { root.rdp-key-down(t, s, m); }
+                    key-up(t, s, m)   => { root.rdp-key-up(t, s, m); }
+                    pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
+                    scroll(dx, dy)    => { root.scroll(dx, dy); }
+                    resized(w, h)     => { root.surface-resized(w, h); }
                 }
                 if broadcast-active : Rectangle {
                     height: 46px;
@@ -875,6 +1022,21 @@ export component AppWindow inherits Window {
             stored-fingerprint: root.host-key-stored-fp;
             reject => { root.host-key-reject(); }
             accept => { root.host-key-accept(); }
+        }
+    }
+
+    // ── RDP cert dialog (P4.2) ────────────────────────────────────────────
+    Modal {
+        open: root.cert-dialog-open;
+        dismissed => {}
+        CertDialog {
+            mismatch:           root.cert-dialog-mismatch;
+            host:               root.cert-dialog-host;
+            subject:            root.cert-dialog-subject;
+            fingerprint:        root.cert-dialog-fingerprint;
+            stored-fingerprint: root.cert-dialog-stored-fp;
+            reject => { root.cert-reject(); }
+            accept => { root.cert-accept(); }
         }
     }
 

@@ -22,7 +22,9 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::engine_owner::{Msg, Transport, run_engine_owner, timing};
 use crate::libghostty::EngineError;
-use crate::session::{ExitStatus, Session, SessionStatus, Surface, TerminalSession};
+use crate::session::{
+    ExitStatus, Session, SessionInput, SessionStatus, Surface, TerminalSession,
+};
 
 /// Read buffer size for the PTY reader thread.
 const READ_BUF_LEN: usize = 8192;
@@ -270,11 +272,30 @@ impl Session for LocalTerminalSession {
     }
 
     fn resize_px(&self, width: u32, height: u32) {
-        // Approximate 8×16 cell size. The UI layer drives precise resize via
-        // TerminalSession::resize() with real font metrics (P4.2).
+        // Fallback: approximate 8×16 cell size. Preferred path is resize_cells.
         let cols = u16::try_from(width / 8).unwrap_or(u16::MAX).max(2);
         let rows = u16::try_from(height / 16).unwrap_or(u16::MAX).max(1);
         <Self as TerminalSession>::resize(self, TerminalSize { cols, rows });
+    }
+
+    fn resize_cells(&self, cols: u16, rows: u16) {
+        <Self as TerminalSession>::resize(self, TerminalSize { cols, rows });
+    }
+
+    fn send_input(&self, input: SessionInput) {
+        match input {
+            SessionInput::Key(ev) => {
+                <Self as TerminalSession>::send_key(self, ev);
+            }
+            SessionInput::Mouse(ev) => {
+                <Self as TerminalSession>::send_mouse(self, ev);
+            }
+            SessionInput::Paste(bytes) => {
+                <Self as TerminalSession>::paste(self, bytes);
+            }
+            // RDP inputs are not applicable to terminal sessions.
+            SessionInput::Rdp(_) | SessionInput::RdpPaste(_) => {}
+        }
     }
 }
 

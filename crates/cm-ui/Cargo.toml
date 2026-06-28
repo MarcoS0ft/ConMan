@@ -18,6 +18,11 @@ cm-session = { path = "../cm-session" }
 slint = { version = "1.17", default-features = false, features = ["std", "compat-1-2"] }
 # Software glyph rasterizer carried forward from the P0.3 spike.
 fontdue = "0.9"
+# dirs: provides the platform app-data directory for the persistent cert store (P4.2).
+dirs = "6"
+# arboard: cross-platform clipboard access for RDP CLIPRDR bidirectional sync (P4.2).
+# See docs/devel/memos/p4.2-clipboard-dep.md for the rationale.
+arboard = "3"
 
 [build-dependencies]
 # Compiles `ui/app.slint` into Rust (consumed via `slint::include_modules!`).
