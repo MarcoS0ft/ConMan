@@ -216,15 +216,21 @@ impl ConnectionTree {
         // (including nested).  We traverse from root → leaf so we can mark
         // ancestors.
         let mut out = Vec::new();
-        let mut root_groups: Vec<&Group> =
-            self.groups.iter().filter(|g| g.parent_id.is_none()).collect();
+        let mut root_groups: Vec<&Group> = self
+            .groups
+            .iter()
+            .filter(|g| g.parent_id.is_none())
+            .collect();
         root_groups.sort_by_key(|g| (g.sort, g.id.get()));
         for group in root_groups {
             self.push_group_filtered(group, 0, &q, &matching_conn_ids, &mut out);
         }
         // Root-level connections.
-        let mut root_conns: Vec<&Connection> =
-            self.connections.iter().filter(|c| c.group_id.is_none()).collect();
+        let mut root_conns: Vec<&Connection> = self
+            .connections
+            .iter()
+            .filter(|c| c.group_id.is_none())
+            .collect();
         root_conns.sort_by_key(|c| (c.sort, c.id.get()));
         for conn in root_conns {
             if matching_conn_ids.contains(&conn.id.get()) {

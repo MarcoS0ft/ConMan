@@ -989,11 +989,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                     .map(|d| d.label.clone())
                     .collect();
                 let tabs: Vec<(usize, String)> = (0..tab_model_op.row_count())
-                    .filter_map(|i| {
-                        tab_model_op
-                            .row_data(i)
-                            .map(|t| (i, t.title.to_string()))
-                    })
+                    .filter_map(|i| tab_model_op.row_data(i).map(|t| (i, t.title.to_string())))
                     .collect();
                 let q = ui.get_palette_query();
                 rebuild_palette_model(&pal_model, &q, &labels, &tabs);
@@ -1354,11 +1350,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                 .map(|d| d.label.clone())
                 .collect();
             let tabs: Vec<(usize, String)> = (0..tab_model_pe.row_count())
-                .filter_map(|i| {
-                    tab_model_pe
-                        .row_data(i)
-                        .map(|t| (i, t.title.to_string()))
-                })
+                .filter_map(|i| tab_model_pe.row_data(i).map(|t| (i, t.title.to_string())))
                 .collect();
             rebuild_palette_model(&pal_model, &query, &labels, &tabs);
             if let Some(ui) = weak.upgrade() {
@@ -3286,8 +3278,12 @@ fn tick(
             && item.status.as_str() != dot
         {
             // P5.3b: emit a toast when a background tab disconnects/fails.
-            if i != active && st.tabs[i].is_remote
-                && matches!(status, SessionStatus::Disconnected | SessionStatus::Failed(_))
+            if i != active
+                && st.tabs[i].is_remote
+                && matches!(
+                    status,
+                    SessionStatus::Disconnected | SessionStatus::Failed(_)
+                )
             {
                 let msg = match &status {
                     SessionStatus::Failed(r) => {
@@ -3295,7 +3291,11 @@ fn tick(
                     }
                     _ => format!("{}: disconnected", item.title.as_str()),
                 };
-                let kind: i32 = if matches!(status, SessionStatus::Failed(_)) { 3 } else { 2 };
+                let kind: i32 = if matches!(status, SessionStatus::Failed(_)) {
+                    3
+                } else {
+                    2
+                };
                 let id = {
                     let mut n = toast_next_id.borrow_mut();
                     let id = *n;
@@ -3657,9 +3657,9 @@ fn dispatch_palette_action(
         "New SSH connection" => {
             // Open the profile editor pre-set for SSH (kind index 0).
             let st = state.borrow();
-            let selected_group_idx =
-                group_name_idx(None, st.conn_tree.groups());
-            let cred_idx = cred_name_idx(None, st.keys_panel.credentials(), st.keys_panel.folders());
+            let selected_group_idx = group_name_idx(None, st.conn_tree.groups());
+            let cred_idx =
+                cred_name_idx(None, st.keys_panel.credentials(), st.keys_panel.folders());
             drop(st);
             let form = ConnProfile {
                 id: 0,
@@ -3681,9 +3681,9 @@ fn dispatch_palette_action(
         "New RDP connection" => {
             // Open the profile editor pre-set for RDP (kind index 1).
             let st = state.borrow();
-            let selected_group_idx =
-                group_name_idx(None, st.conn_tree.groups());
-            let cred_idx = cred_name_idx(None, st.keys_panel.credentials(), st.keys_panel.folders());
+            let selected_group_idx = group_name_idx(None, st.conn_tree.groups());
+            let cred_idx =
+                cred_name_idx(None, st.keys_panel.credentials(), st.keys_panel.folders());
             drop(st);
             let form = ConnProfile {
                 id: 0,
@@ -4035,7 +4035,10 @@ mod tests {
     #[test]
     fn palette_contains_quick_connect() {
         let all = initial_palette_actions();
-        assert!(all.iter().any(|a| a.label.as_str().starts_with("Quick connect")));
+        assert!(
+            all.iter()
+                .any(|a| a.label.as_str().starts_with("Quick connect"))
+        );
     }
 
     #[test]
@@ -4048,7 +4051,10 @@ mod tests {
     #[test]
     fn palette_filter_first_row_always_has_group_header() {
         let result = filter_palette_actions("split", &[], &[]);
-        assert!(!result.is_empty(), "expected at least one result for 'split'");
+        assert!(
+            !result.is_empty(),
+            "expected at least one result for 'split'"
+        );
         assert!(result[0].first_in_group);
     }
 
@@ -4077,7 +4083,10 @@ mod tests {
 
     #[test]
     fn palette_filter_includes_switch_to_tab_entries() {
-        let tabs = vec![(0usize, "web-dev-01".to_owned()), (1usize, "local".to_owned())];
+        let tabs = vec![
+            (0usize, "web-dev-01".to_owned()),
+            (1usize, "local".to_owned()),
+        ];
         let all = filter_palette_actions("", &[], &tabs);
         let switch: Vec<_> = all
             .iter()
@@ -4091,7 +4100,10 @@ mod tests {
 
     #[test]
     fn palette_filter_switch_to_tab_matches_query() {
-        let tabs = vec![(0usize, "web-dev-01".to_owned()), (1usize, "local".to_owned())];
+        let tabs = vec![
+            (0usize, "web-dev-01".to_owned()),
+            (1usize, "local".to_owned()),
+        ];
         let result = filter_palette_actions("web", &[], &tabs);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label.as_str(), "Switch to: web-dev-01");

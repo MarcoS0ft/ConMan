@@ -200,14 +200,20 @@ impl KeysPanel {
             .map(|c| c.id.get())
             .collect();
         let mut out = Vec::new();
-        let mut root_folders: Vec<&CredentialFolder> =
-            self.folders.iter().filter(|f| f.parent_id.is_none()).collect();
+        let mut root_folders: Vec<&CredentialFolder> = self
+            .folders
+            .iter()
+            .filter(|f| f.parent_id.is_none())
+            .collect();
         root_folders.sort_by_key(|f| (f.sort, f.id.get()));
         for folder in root_folders {
             self.push_folder_filtered(folder, 0, &q, &matching_cred_ids, &mut out);
         }
-        let mut root_creds: Vec<&Credential> =
-            self.credentials.iter().filter(|c| c.folder_id.is_none()).collect();
+        let mut root_creds: Vec<&Credential> = self
+            .credentials
+            .iter()
+            .filter(|c| c.folder_id.is_none())
+            .collect();
         root_creds.sort_by_key(|c| c.id.get());
         for cred in root_creds {
             if matching_cred_ids.contains(&cred.id.get()) {
