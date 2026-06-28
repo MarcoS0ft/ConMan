@@ -73,6 +73,9 @@ struct Tab {
     last_frame: Option<Image>,
     rdp_w: u16,
     rdp_h: u16,
+    /// RDP text clipboard slot: the drive thread writes remote-copied text here;
+    /// the tick loop polls it and writes to the OS clipboard (remote→local sync).
+    rdp_clipboard: Option<Arc<Mutex<Option<String>>>>,
     // Common:
     scale: f32,
     num: u32,
@@ -95,6 +98,9 @@ struct State {
     surface_h: f32,
     conn_tree: ConnectionTree,
     keys_panel: KeysPanel,
+    /// OS clipboard handle for RDP CLIPRDR bidirectional sync.
+    /// Created lazily on first use; `None` if arboard fails (e.g. no display).
+    sys_clipboard: Option<arboard::Clipboard>,
 }
 
 impl State {
@@ -463,6 +469,8 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         surface_h: 0.0,
         conn_tree,
         keys_panel,
+        // Created lazily; silently ignored if arboard fails (e.g. no display in CI).
+        sys_clipboard: arboard::Clipboard::new().ok(),
     }));
 
     {
@@ -794,6 +802,23 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     ui.on_rdp_key_down({
         let state = state.clone();
         move |text, special, mods| {
+            // Local→remote clipboard sync: intercept Ctrl+V, announce our clipboard.
+            if mods & input::MOD_CTRL != 0 && text.as_str().eq_ignore_ascii_case("v") {
+                let paste_text = state
+                    .borrow_mut()
+                    .sys_clipboard
+                    .as_mut()
+                    .and_then(|cb| cb.get_text().ok());
+                if let Some(text_to_paste) = paste_text {
+                    let st = state.borrow();
+                    if let Some(tab) = st.tabs.get(st.active) {
+                        tab.session
+                            .send_input(SessionInput::RdpPaste(text_to_paste));
+                    }
+                }
+                // Fall through: also send the Ctrl+V scancodes so the remote app triggers
+                // a clipboard request after we've announced our content.
+            }
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active) {
                 let events = input::map_rdp_key_down(text.as_str(), special, mods);
@@ -1788,6 +1813,8 @@ struct PushTabArgs {
     session: Box<dyn Session>,
     connect_info: Option<SshConnectInfo>,
     is_remote: bool,
+    /// RDP only: Arc to the drive thread's remote-clipboard slot (for CLIPRDR sync).
+    rdp_clipboard: Option<Arc<Mutex<Option<String>>>>,
     title: String,
     initial_status: &'static str,
 }
@@ -1802,6 +1829,7 @@ fn push_tab(
         session,
         connect_info,
         is_remote,
+        rdp_clipboard,
         title,
         initial_status,
     } = args;
@@ -1823,6 +1851,7 @@ fn push_tab(
         last_frame: None,
         rdp_w: 0,
         rdp_h: 0,
+        rdp_clipboard,
         cols: size.cols,
         rows: size.rows,
         scale,
@@ -1865,6 +1894,7 @@ fn open_local_tab(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>,
             session: Box::new(session),
             connect_info: None,
             is_remote: false,
+            rdp_clipboard: None,
             title,
             initial_status: "connected",
         },
@@ -1903,6 +1933,7 @@ fn open_ssh_tab(
                     session: Box::new(session),
                     connect_info: Some(ci),
                     is_remote: true,
+                    rdp_clipboard: None,
                     title,
                     initial_status: "connecting",
                 },
@@ -1945,6 +1976,8 @@ fn open_rdp_tab(
             return;
         }
     };
+    // Retain a reference to the drive thread's clipboard slot for remote→local sync.
+    let rdp_clipboard = Some(Arc::clone(&session.remote_clipboard));
     push_tab(
         state,
         tab_model,
@@ -1953,6 +1986,7 @@ fn open_rdp_tab(
             session: Box::new(session),
             connect_info: None,
             is_remote: true,
+            rdp_clipboard,
             title,
             initial_status: "connecting",
         },
@@ -2169,6 +2203,14 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
                     st.tabs[i].last_frame = Some(img);
                     st.tabs[i].rdp_w = frame.width;
                     st.tabs[i].rdp_h = frame.height;
+                }
+                // Remote→local clipboard sync: poll slot written by the drive thread.
+                if let (Some(ref arc), Some(ref mut cb)) =
+                    (st.tabs[i].rdp_clipboard.clone(), st.sys_clipboard.as_mut())
+                    && let Ok(mut slot) = arc.try_lock()
+                    && let Some(text) = slot.take()
+                {
+                    let _ = cb.set_text(text);
                 }
             }
         }
