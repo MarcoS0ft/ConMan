@@ -25,9 +25,10 @@ use cm_core::{
     GroupId, LocalSettings, RdpSettings, Secret, SshAuthMethod, SshSettings,
 };
 use cm_session::{
-    CertDecision, CertInfo, CertStore, CertVerifier, FrameUpdate, HostKeyDecision, HostKeyInfo,
-    HostKeyVerifier, KnownHosts, LocalTerminalSession, PaneGroup, PaneLayout, RdpAuthInput,
-    RdpSession, Session, SessionInput, SessionStatus, SshAuthInput, SshTerminalSession, Surface,
+    CertDecision, CertInfo, CertStore, CertVerifier, FailedSession, FrameUpdate, HostKeyDecision,
+    HostKeyInfo, HostKeyVerifier, KnownHosts, LocalTerminalSession, PaneGroup, PaneLayout,
+    RdpAuthInput, RdpSession, Session, SessionInput, SessionStatus, SshAuthInput,
+    SshTerminalSession, Surface,
 };
 use cm_storage::SettingsService;
 use slint::{ComponentHandle, Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
@@ -177,9 +178,16 @@ impl State {
 // UiHostKeyVerifier
 // ---------------------------------------------------------------------------
 
+/// Per-connection reply queue for the host-key dialog.
+///
+/// Changed from `Option<Sender>` to `VecDeque<Sender>` (carry-over fix a):
+/// concurrent SSH connects each push their own sender; accept/reject pops the
+/// front, so no sender is ever clobbered by a subsequent connection.
+type HkQueue = Arc<Mutex<std::collections::VecDeque<Sender<HostKeyDecision>>>>;
+
 struct UiHostKeyVerifier {
     weak_ui: slint::Weak<AppWindow>,
-    pending: Arc<Mutex<Option<Sender<HostKeyDecision>>>>,
+    pending: HkQueue,
     auto_accept: bool,
 }
 
@@ -189,8 +197,8 @@ impl HostKeyVerifier for UiHostKeyVerifier {
             return HostKeyDecision::Accept;
         }
         let (tx, rx) = std::sync::mpsc::channel::<HostKeyDecision>();
-        if let Ok(mut p) = self.pending.lock() {
-            *p = Some(tx);
+        if let Ok(mut q) = self.pending.lock() {
+            q.push_back(tx);
         }
         let info = info.clone();
         let weak = self.weak_ui.clone();
@@ -609,7 +617,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         refresh_group_name_list(&st, &ui);
     }
 
-    let hk_pending: Arc<Mutex<Option<Sender<HostKeyDecision>>>> = Arc::new(Mutex::new(None));
+    let hk_pending: HkQueue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let cert_pending: Arc<Mutex<Option<Sender<CertDecision>>>> = Arc::new(Mutex::new(None));
 
     open_local_tab(&state, &tab_model, &ui);
@@ -854,30 +862,38 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         let state = state.clone();
         move |_dx, dy| {
             let st = state.borrow();
-            if let Some(tab) = st.tabs.get(st.active) {
-                match tab.session.surface() {
-                    Surface::TerminalGrid(_) => {
-                        if let Some(ev) = input::map_scroll(dy, 0, 0, 0) {
-                            tab.session.send_input(SessionInput::Mouse(ev));
-                        }
-                    }
-                    Surface::Framebuffer(_) => {
-                        let w = st.surface_w;
-                        let h = st.surface_h;
-                        let rdp_w = tab.rdp_w;
-                        let rdp_h = tab.rdp_h;
-                        // Use centre of the surface as scroll position (no absolute pointer coord).
-                        let coords = input::RdpCoords {
-                            surface_w: w,
-                            surface_h: h,
-                            rdp_w,
-                            rdp_h,
-                        };
-                        let events = input::map_rdp_scroll(dy, w / 2.0, h / 2.0, &coords);
-                        if !events.is_empty() {
-                            tab.session.send_input(SessionInput::Rdp(events));
-                        }
-                    }
+            // Terminal scroll only — RDP scroll is handled by on_rdp_scroll (fix c).
+            if let Some(tab) = st.tabs.get(st.active)
+                && matches!(tab.session.surface(), Surface::TerminalGrid(_))
+                && let Some(ev) = input::map_scroll(dy, 0, 0, 0)
+            {
+                tab.session.send_input(SessionInput::Mouse(ev));
+            }
+        }
+    });
+
+    // RDP scroll with actual pointer coordinates (carry-over fix c).
+    ui.on_rdp_scroll({
+        let state = state.clone();
+        move |x, y, _dx, dy| {
+            let st = state.borrow();
+            if let Some(tab) = st.tabs.get(st.active)
+                && matches!(tab.session.surface(), Surface::Framebuffer(_))
+            {
+                let w = st.surface_w;
+                let h = st.surface_h;
+                let rdp_w = tab.rdp_w;
+                let rdp_h = tab.rdp_h;
+                let coords = input::RdpCoords {
+                    surface_w: w,
+                    surface_h: h,
+                    rdp_w,
+                    rdp_h,
+                };
+                // Use actual pointer position instead of surface centre.
+                let events = input::map_rdp_scroll(dy, x, y, &coords);
+                if !events.is_empty() {
+                    tab.session.send_input(SessionInput::Rdp(events));
                 }
             }
         }
@@ -1029,8 +1045,9 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         let pending = hk_pending.clone();
         let weak = ui.as_weak();
         move || {
-            if let Ok(mut p) = pending.lock()
-                && let Some(tx) = p.take()
+            // Pop the front sender (oldest pending request) — carry-over fix (a).
+            if let Ok(mut q) = pending.lock()
+                && let Some(tx) = q.pop_front()
             {
                 let _ = tx.send(HostKeyDecision::Accept);
             }
@@ -1044,8 +1061,9 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         let pending = hk_pending.clone();
         let weak = ui.as_weak();
         move || {
-            if let Ok(mut p) = pending.lock()
-                && let Some(tx) = p.take()
+            // Pop the front sender (oldest pending request) — carry-over fix (a).
+            if let Ok(mut q) = pending.lock()
+                && let Some(tx) = q.pop_front()
             {
                 let _ = tx.send(HostKeyDecision::Reject);
             }
@@ -1370,21 +1388,29 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     ui.on_settings_font_size_changed({
         let repo_s = repo.clone();
         let state_fs = state.clone();
+        let weak_fs = ui.as_weak();
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_font_size(v) {
                 eprintln!("conman: save font_size: {e}");
             }
             // Apply font size change to all live renderers immediately.
-            let mut st = state_fs.borrow_mut();
-            let new_px = v as f32;
-            st.font_size_px = new_px;
-            let scale = st.scale;
-            for tab in &mut st.tabs {
-                tab.renderer.set_scale(new_px, scale);
-                for ep in &mut tab.extra_panes {
-                    ep.renderer.set_scale(new_px, scale);
+            {
+                let mut st = state_fs.borrow_mut();
+                let new_px = v as f32;
+                st.font_size_px = new_px;
+                let scale = st.scale;
+                for tab in &mut st.tabs {
+                    tab.renderer.set_scale(new_px, scale);
+                    for ep in &mut tab.extra_panes {
+                        ep.renderer.set_scale(new_px, scale);
+                    }
                 }
+                // Drop borrow before calling apply_settled_resize (fix g).
+            }
+            // Commit new cell dimensions to PTY/engine for all tabs (carry-over fix g).
+            if let Some(ui) = weak_fs.upgrade() {
+                apply_settled_resize(&state_fs, &ui);
             }
         }
     });
@@ -2498,7 +2524,29 @@ fn open_ssh_tab(
             ui.set_rdp_active(false);
         }
         Err(e) => {
-            eprintln!("conman: SSH connect setup error: {e}");
+            // Carry-over fix (b): surface synchronous setup errors as a Failed
+            // tab with the error overlay, not just an eprintln!.
+            let reason = e.to_string();
+            push_tab(
+                state,
+                tab_model,
+                ui,
+                PushTabArgs {
+                    session: Box::new(FailedSession::new(reason.clone())),
+                    connect_info: None,
+                    is_remote: true,
+                    rdp_clipboard: None,
+                    title,
+                    initial_status: "error",
+                },
+            );
+            ui.set_session_identity(SharedString::from(identity));
+            ui.set_overlay_connecting(false);
+            ui.set_overlay_error(true);
+            ui.set_launchpad_open(false);
+            ui.set_error_reason(SharedString::from(reason));
+            ui.set_error_detail(SharedString::from(""));
+            ui.set_rdp_active(false);
         }
     }
 }
@@ -3091,6 +3139,8 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
         }
 
         // P5.1: Drain extra pane surfaces (pane 1+).
+        // Carry-over fix (f): collect extra panes that have Exited/Failed for collapse.
+        let mut extra_panes_to_close: Vec<usize> = Vec::new();
         for ep_idx in 0..st.tabs[i].extra_panes.len() {
             match st.tabs[i].extra_panes[ep_idx].session.surface() {
                 Surface::TerminalGrid(rx) => {
@@ -3118,6 +3168,35 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
                     // Drain but discard (RDP-in-pane is an unimplemented edge case; noted).
                     drain_latest(rx);
                 }
+            }
+            // Auto-collapse extra pane when its local shell exits/fails (fix f).
+            let ep_status = st.tabs[i].extra_panes[ep_idx].session.status();
+            if matches!(
+                ep_status,
+                SessionStatus::Exited(_) | SessionStatus::Failed(_)
+            ) {
+                extra_panes_to_close.push(ep_idx);
+            }
+        }
+        // Collapse exited extra panes (process in reverse order to keep indices valid).
+        for &ep_idx in extra_panes_to_close.iter().rev() {
+            let ep = st.tabs[i].extra_panes.remove(ep_idx);
+            ep.session.shutdown();
+            // Close the corresponding pane slot in the group tracker.
+            // pane index = ep_idx + 1 (extra_panes are panes 1+).
+            // PaneGroup::close_focused requires us to focus the pane first.
+            st.tabs[i].pane_group.set_focused(ep_idx + 1);
+            st.tabs[i].pane_group.close_focused();
+        }
+        if !extra_panes_to_close.is_empty() && i == active {
+            let new_layout = st.tabs[i].pane_group.layout();
+            let new_focused = st.tabs[i].pane_group.focused();
+            ui.set_pane_layout(layout_to_int(new_layout));
+            ui.set_active_pane(new_focused as i32);
+            // Update the tab-strip badge.
+            if let Some(mut item) = tab_model.row_data(i) {
+                item.pane_count = st.tabs[i].pane_group.count() as i32;
+                tab_model.set_row_data(i, item);
             }
         }
 
