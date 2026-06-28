@@ -41,7 +41,7 @@ component SettingRow {
 // ── SectionHeader ────────────────────────────────────────────────────────────
 component SectionHeader inherits Rectangle {
     in property <string> label;
-    height: 34px;
+    height: Theme.settings-section-header-height;
     background: Theme.color-elevated;
     HorizontalLayout {
         padding-left: Theme.space-6;
@@ -66,7 +66,7 @@ component ShortcutRow {
         spacing: Theme.space-4;
         // Key badge
         Rectangle {
-            width: 112px;
+            width: Theme.settings-shortcut-label-width;
             VerticalLayout {
                 alignment: center;
                 Rectangle {
