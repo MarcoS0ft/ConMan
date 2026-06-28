@@ -1,0 +1,16 @@
+# Workspace cargo configuration.
+#
+# Applies to every `cargo` invocation run from within the workspace (and is
+# inherited by build scripts), so contributors do not have to remember per-build
+# environment exports.
+
+[env]
+# `libghostty-vt-sys` builds the Ghostty VT engine from source via Zig. The
+# default Zig `Debug` build of Ghostty crashes at runtime on Windows
+# (STATUS_ACCESS_VIOLATION on first Terminal use; see
+# docs/devel/memos/P0.2-libghostty-vt-verdict.md). `ReleaseSafe` keeps Zig's
+# safety checks while avoiding that crash, and is harmless on Linux/macOS.
+#
+# Set here (not forced) so a plain `cargo build`/`cargo run` "just works" with no
+# manual export; a developer may still override it in their own environment.
+LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseSafe"

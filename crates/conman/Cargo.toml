@@ -23,5 +23,11 @@ slint = { version = "1.17", default-features = false, features = [
     "renderer-software",
 ] }
 
+[build-dependencies]
+# Build-graph edge so conman's build script runs AFTER the engine's native build
+# and receives its `links` metadata (DEP_GHOSTTY_VT_INCLUDE) — used by build.rs to
+# place ghostty-vt.dll next to conman.exe on Windows. Pinned to match the engine.
+libghostty-vt-sys = "=0.2.0"
+
 [lints]
 workspace = true

@@ -1,6 +1,8 @@
 # ── Rust ──────────────────────────────────────────────────────────────────
 /target/
 **/target/
+# Project-local Zig toolchain fetched by scripts/bootstrap-zig.*
+/.zig/
 # Note: Cargo.lock IS committed — ConMan ships as an application, not a library.
 
 # ── Development docs (never tracked) ────────────────────────────────────────
