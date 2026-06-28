@@ -15,6 +15,10 @@
 
 // ColorScheme is a Slint 1.17 builtin — no import needed.
 import { Palette } from "std-widgets.slint";
+// Bundle the Symbols Nerd Font Mono for cross-platform chrome icons (P5.4).
+// Slint registers this font under its internal family name "Symbols Nerd Font Mono"
+// and makes it available as Theme.font-family-icons on all platforms.
+import "../assets/fonts/SymbolsNerdFontMono-Regular.ttf";
 
 export global Theme {
   // ── Scheme flag ────────────────────────────────────────────────────────────
@@ -127,8 +131,9 @@ export global Theme {
   out property <string> font-family:       "Segoe UI";
   // Mono = the bundled Nerd Font shared with the terminal renderer (P2.3).
   out property <string> font-family-mono:  "JetBrains Mono";
-  // Win11 native icon font (Segoe Fluent Icons PUA codepoints) for chrome glyphs.
-  out property <string> font-family-icons: "Segoe Fluent Icons";
+  // Cross-platform icon font: bundled Symbols Nerd Font Mono (P5.4).
+  // Chrome glyphs use MDI / Codicon codepoints (see docs/devel/p5.4-os-gaps.md).
+  out property <string> font-family-icons: "Symbols Nerd Font Mono";
 
   // ── Component metrics — density-aware (P5.2) ──────────────────────────────
   // Direction A compact values at density==0; Cosy bumps row/control heights

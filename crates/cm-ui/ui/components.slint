@@ -2,7 +2,7 @@
 //
 // GUI_DESIGN §4 component inventory. Every widget imports the Theme global and reads
 // `Theme.*` tokens, so dark/light + accent flip everywhere at once. Chrome glyphs use
-// the Fluent icon font (Theme.font-family-icons) via a codepoint string — never SVG.
+// Theme.font-family-icons (bundled Symbols Nerd Font Mono, P5.4) via codepoint strings.
 //
 //   import { StatusDot, StatusPill, IconButton, ActivityBarButton,
 //            PrimaryButton, SecondaryButton, SegmentedControl, FormField,
@@ -61,8 +61,8 @@ export component StatusPill {
 }
 
 // ── IconButton ────────────────────────────────────────────────────────────────
-// Square hit-target rendering one Fluent icon glyph. Used for toolbar/header actions.
-//   glyph: a Segoe Fluent Icons codepoint string, e.g. "\u{E710}" (Add).
+// Square hit-target rendering one Nerd Font icon glyph. Used for toolbar/header actions.
+//   glyph: a Symbols Nerd Font Mono codepoint string, e.g. "\u{EA60}" (cod-add).
 export component IconButton {
   in property <string> glyph;
   in property <length> size: Theme.control-height;
@@ -127,7 +127,7 @@ export component IconButton {
 }
 
 // ── ActivityBarButton ───────────────────────────────────────────────────────
-// Slim left-bar panel switcher: a Fluent glyph + an accent indicator bar + subtle
+// Slim left-bar panel switcher: a Nerd Font glyph + an accent indicator bar + subtle
 // accent wash when active.
 // The accent rail is absolutely positioned (left edge) as a sibling of the centered
 // icon; Slint 1.17 does not allow setting `x` inside a layout element.
@@ -310,7 +310,7 @@ export component SegmentedControl {
 
 // ── FormField ─────────────────────────────────────────────────────────────────
 // Labeled LineEdit with optional password masking. Wraps the std-widgets LineEdit
-// so masking + the Fluent text style stay consistent (used by QuickConnectForm).
+// so masking + the text style stay consistent (used by QuickConnectForm).
 export component FormField {
   in property <string> label;
   in property <string> placeholder;
@@ -355,7 +355,7 @@ export component Card {
 // ── EmptyState ────────────────────────────────────────────────────────────────
 // Centered glyph + title + subtitle for empty lists/areas (no connections, etc.).
 export component EmptyState {
-  in property <string> glyph: "\u{EA40}";
+  in property <string> glyph: "\u{EA70}";  // cod-eye (Symbols Nerd Font Mono)
   in property <string> title: "Nothing here yet";
   in property <string> subtitle: "";
 
@@ -439,10 +439,10 @@ export component Toast inherits Rectangle {
         spacing: Theme.space-2; alignment: center;
         // Kind icon.
         Text {
-            text: kind == 1 ? "\u{E73E}"   // check
-                : kind == 2 ? "\u{E7BA}"   // warning
-                : kind == 3 ? "\u{E7BA}"   // error
-                : "\u{E946}";              // info
+            text: kind == 1 ? "\u{F012C}"   // md-check
+                : kind == 2 ? "\u{F0026}"   // md-alert
+                : kind == 3 ? "\u{F0026}"   // md-alert (error)
+                : "\u{F02FC}";              // md-information
             font-family: Theme.font-family-icons;
             font-size: Theme.icon-sm;
             color: kind == 0 ? Theme.color-accent : Theme.color-accent-text;
@@ -461,7 +461,7 @@ export component Toast inherits Rectangle {
         TouchArea {
             width: 18px; height: 18px;
             clicked => { root.dismissed(); }
-            Text { text: "\u{E711}"; font-family: Theme.font-family-icons;
+            Text { text: "\u{EA76}"; font-family: Theme.font-family-icons;  // cod-close
                 font-size: Theme.icon-sm;
                 color: kind == 0 ? Theme.color-text-secondary : Theme.color-accent-text.with-alpha(0.75);
                 horizontal-alignment: center; vertical-alignment: center;

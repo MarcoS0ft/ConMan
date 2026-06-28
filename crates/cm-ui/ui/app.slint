@@ -312,7 +312,7 @@ component Tab inherits Rectangle {
         VerticalLayout {
             alignment: center;
             IconButton {
-                glyph: "\u{E711}";
+                glyph: "\u{EA76}";
                 size: 16px;
                 glyph-size: Theme.icon-xs;
                 clicked => { root.closed(); }
@@ -367,7 +367,7 @@ component ConnectionRow inherits Rectangle {
         VerticalLayout {
             alignment: center;
             if data.is-group : Text {
-                text: data.expanded ? "\u{E70D}" : "\u{E76C}";
+                text: data.expanded ? "\u{EAB4}" : "\u{EAB6}";
                 font-family: Theme.font-family-icons;
                 font-size: Theme.icon-xs;
                 color: Theme.color-text-secondary;
@@ -413,28 +413,28 @@ component ConnectionRow inherits Rectangle {
             alignment: center;
             // ↑ / ↓ reorder within the same parent.
             IconButton {
-                glyph: "\u{E70E}";   // ChevronUp
+                glyph: "\u{EAB7}";   // ChevronUp
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 clicked => { root.move-up(); }
             }
             IconButton {
-                glyph: "\u{E70D}";   // ChevronDown
+                glyph: "\u{EAB4}";   // ChevronDown
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 clicked => { root.move-down(); }
             }
             // Group: new-child + edit; Connection: edit (pencil).
             if data.is-group : IconButton {
-                glyph: "\u{E710}";   // Add (new child)
+                glyph: "\u{EA60}";   // Add (new child)
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 clicked => { root.new-sub(); }
             }
             IconButton {
-                glyph: "\u{E70F}";   // Edit (pencil)
+                glyph: "\u{F03EB}";   // Edit (pencil)
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 clicked => { root.edit-clicked(); }
             }
             IconButton {
-                glyph: "\u{E74D}";   // Delete (trash)
+                glyph: "\u{EA81}";   // Delete (trash)
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 glyph-color: Theme.color-error;
                 clicked => { root.delete-clicked(); }
@@ -474,7 +474,7 @@ component CredTreeRow inherits Rectangle {
         VerticalLayout {
             alignment: center;
             if data.is-folder : Text {
-                text: data.expanded ? "\u{E70D}" : "\u{E76C}";
+                text: data.expanded ? "\u{EAB4}" : "\u{EAB6}";
                 font-family: Theme.font-family-icons;
                 font-size: Theme.icon-xs;
                 color: Theme.color-text-secondary;
@@ -532,17 +532,17 @@ component CredTreeRow inherits Rectangle {
             spacing: Theme.gap-hairline;
             alignment: center;
             if data.is-folder : IconButton {
-                glyph: "\u{E710}";
+                glyph: "\u{EA60}";
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 clicked => { root.new-sub(); }
             }
             if !data.is-folder : IconButton {
-                glyph: "\u{E70F}";
+                glyph: "\u{F03EB}";
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 clicked => { root.activated(); }
             }
             IconButton {
-                glyph: "\u{E74D}";
+                glyph: "\u{EA81}";
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 glyph-color: Theme.color-error;
                 clicked => { root.delete-clicked(); }
@@ -806,7 +806,7 @@ export component AppWindow inherits Window {
                     closed => { root.close-tab(idx); }
                 }
                 IconButton {
-                    glyph: "\u{E710}";
+                    glyph: "\u{EA60}";
                     clicked => { root.new-tab(); }
                 }
                 Rectangle { horizontal-stretch: 1; }
@@ -827,19 +827,19 @@ export component AppWindow inherits Window {
                     padding-bottom: Theme.space-2;
                     spacing: Theme.space-1;
                     ActivityBarButton {
-                        glyph: "\u{E968}"; active: active-panel == 0;
+                        glyph: "\u{F0317}"; active: active-panel == 0;
                         clicked => { root.select-panel(0); }
                     }
                     ActivityBarButton {
-                        glyph: "\u{E8D7}"; active: active-panel == 1;
+                        glyph: "\u{EB11}"; active: active-panel == 1;
                         clicked => { root.select-panel(1); }
                     }
                     Rectangle { vertical-stretch: 1; }
                     ActivityBarButton {
-                        glyph: "\u{E713}"; active: active-panel == 2;
+                        glyph: "\u{F0493}"; active: active-panel == 2;
                         clicked => { root.select-panel(2); }
                     }
-                    ActivityBarButton { glyph: "\u{E77B}"; }
+                    ActivityBarButton { glyph: "\u{F0849}"; }
                 }
             }
 
@@ -864,13 +864,13 @@ export component AppWindow inherits Window {
                             horizontal-stretch: 1;
                         }
                         IconButton {
-                            glyph: "\u{E8F4}";   // New folder / group
+                            glyph: "\u{EA80}";   // New folder / group
                             size: 24px; glyph-size: Theme.icon-sm;
                             tooltip: "New group";
                             clicked => { root.new-group(0); }
                         }
                         IconButton {
-                            glyph: "\u{E710}";   // Add connection
+                            glyph: "\u{EA60}";   // Add connection
                             size: 24px; glyph-size: Theme.icon-sm;
                             tooltip: "New connection";
                             clicked => { root.new-connection(0); }
@@ -881,7 +881,7 @@ export component AppWindow inherits Window {
                         padding-left: Theme.space-3; padding-right: Theme.space-3;
                         padding-bottom: Theme.space-2;
                         spacing: Theme.space-2;
-                        Text { text: "\u{E721}"; font-family: Theme.font-family-icons;
+                        Text { text: "\u{F0349}"; font-family: Theme.font-family-icons;
                             font-size: Theme.icon-sm; color: Theme.color-text-secondary;
                             vertical-alignment: center; }
                         LineEdit {
@@ -952,13 +952,13 @@ export component AppWindow inherits Window {
 
                     if connections.length == 0 && conn-filter == "" : EmptyState {
                         vertical-stretch: 1;
-                        glyph: "\u{E968}";
+                        glyph: "\u{F0317}";
                         title: "No connections yet";
                         subtitle: "Use the + button above to add your first connection.";
                     }
                     if connections.length == 0 && conn-filter != "" : EmptyState {
                         vertical-stretch: 1;
-                        glyph: "\u{E721}";
+                        glyph: "\u{F0349}";
                         title: "No matches";
                         subtitle: "No connections match your filter.";
                     }
@@ -991,13 +991,13 @@ export component AppWindow inherits Window {
                             horizontal-stretch: 1;
                         }
                         IconButton {
-                            glyph: "\u{E8F4}";   // New folder
+                            glyph: "\u{EA80}";   // New folder
                             size: 24px; glyph-size: Theme.icon-sm;
                             tooltip: "New folder";
                             clicked => { root.new-cred-folder(0); }
                         }
                         IconButton {
-                            glyph: "\u{E710}";   // New credential
+                            glyph: "\u{EA60}";   // New credential
                             size: 24px; glyph-size: Theme.icon-sm;
                             tooltip: "New credential";
                             clicked => { root.new-cred(0); }
@@ -1008,7 +1008,7 @@ export component AppWindow inherits Window {
                         padding-left: Theme.space-3; padding-right: Theme.space-3;
                         padding-bottom: Theme.space-2;
                         spacing: Theme.space-2;
-                        Text { text: "\u{E721}"; font-family: Theme.font-family-icons;
+                        Text { text: "\u{F0349}"; font-family: Theme.font-family-icons;
                             font-size: Theme.icon-sm; color: Theme.color-text-secondary;
                             vertical-alignment: center; }
                         LineEdit {
@@ -1064,13 +1064,13 @@ export component AppWindow inherits Window {
 
                     if credentials.length == 0 && cred-filter == "" : EmptyState {
                         vertical-stretch: 1;
-                        glyph: "\u{E8D7}";
+                        glyph: "\u{EB11}";
                         title: "No credentials yet";
                         subtitle: "Use the + button above to add SSH keys or passwords.";
                     }
                     if credentials.length == 0 && cred-filter != "" : EmptyState {
                         vertical-stretch: 1;
-                        glyph: "\u{E721}";
+                        glyph: "\u{F0349}";
                         title: "No matches";
                         subtitle: "No credentials match your filter.";
                     }
@@ -1216,7 +1216,7 @@ export component AppWindow inherits Window {
                         padding-left: Theme.space-4; padding-right: Theme.space-4;
                         spacing: Theme.space-3;
                         Text {
-                            text: "\u{E95A}  Broadcast on";
+                            text: "\u{EAAD}  Broadcast on";
                             color: Theme.color-accent;
                             font-size: Theme.font-sm;
                             font-family: Theme.font-family;
@@ -1234,7 +1234,7 @@ export component AppWindow inherits Window {
                         Rectangle { horizontal-stretch: 1; }
                         // Dismiss button.
                         IconButton {
-                            glyph: "\u{E711}";
+                            glyph: "\u{EA76}";
                             size: 24px; glyph-size: Theme.icon-sm;
                             clicked => { root.toggle-broadcast(); }
                         }
@@ -1269,7 +1269,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         padding-left: Theme.space-2; padding-right: Theme.space-2;
                         spacing: Theme.space-1;
-                        Text { text: "\u{E8FB}"; color: Theme.color-text-secondary; font-size: Theme.font-xs;
+                        Text { text: "\u{EAAD}"; color: Theme.color-text-secondary; font-size: Theme.font-xs;
                             font-family: Theme.font-family-mono; vertical-alignment: center; }
                         Text { text: detached-count + " detached"; color: Theme.color-text-secondary;
                             font-size: Theme.font-xs; font-family: Theme.font-family; vertical-alignment: center; }
@@ -1284,7 +1284,7 @@ export component AppWindow inherits Window {
                     background: Theme.color-broadcast-edge;
                     HorizontalLayout {
                         padding-left: Theme.space-2; padding-right: Theme.space-2;
-                        Text { text: "\u{E95A} BC"; color: Theme.color-base; font-size: Theme.font-xs;
+                        Text { text: "\u{EAAD} BC"; color: Theme.color-base; font-size: Theme.font-xs;
                             font-family: Theme.font-family-mono; font-weight: 700; vertical-alignment: center; }
                     }
                     TouchArea { clicked => { root.toggle-broadcast(); } }

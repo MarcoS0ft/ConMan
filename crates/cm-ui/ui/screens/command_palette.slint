@@ -12,7 +12,7 @@ import { StatusDot } from "../components.slint";
 import { LineEdit, ListView } from "std-widgets.slint";
 
 // One row. `category` is a group header shown when it differs from the previous row's
-// (Rust sets `first-in-group` to avoid repeats). `glyph` is an optional Fluent icon;
+// (Rust sets `first-in-group` to avoid repeats). `glyph` is an optional icon;
 // `status`/`kind` decorate CONNECT-TO rows.
 export struct PaletteAction {
     category: string,        // "CONNECT TO" | "ACTIONS" | "TABS" | "SETTINGS"
@@ -20,7 +20,7 @@ export struct PaletteAction {
     label: string,
     detail: string,          // secondary text, e.g. "ops@10.0.4.11"
     shortcut: string,        // e.g. "Ctrl ⇧ \"
-    glyph: string,           // Fluent codepoint ("" → none)
+    glyph: string,           // Nerd Font codepoint ("" → none)
     status: string,          // StatusDot state ("" → none)
     selected: bool,
 }
@@ -54,7 +54,7 @@ export component CommandPalette inherits Rectangle {
                 padding-left: Theme.space-4; padding-right: Theme.space-4;
                 spacing: Theme.space-3;
                 // Search icon — font-size uses Theme.icon-md token (was 16px literal).
-                Text { text: "\u{E721}"; font-family: Theme.font-family-icons;
+                Text { text: "\u{F0349}"; font-family: Theme.font-family-icons;
                     font-size: Theme.icon-md;
                     color: Theme.color-text-secondary; vertical-alignment: center; }   // Search
                 input := LineEdit {
