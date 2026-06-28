@@ -41,7 +41,7 @@ mod generated_ui {
 // Re-export the Slint-generated types used by the controller and by
 // cm-platform or tests.  `Theme` is internal and not re-exported here;
 // appearance is driven via the alias properties on `AppWindow` instead.
-pub use generated_ui::{AppWindow, ConnRow, CredRow, PaletteAction, TabItem};
+pub use generated_ui::{AppWindow, ConnRow, CredRow, PaletteAction, TabItem, ToastEntry};
 
 pub use controller::run;
 pub use terminal_renderer::{

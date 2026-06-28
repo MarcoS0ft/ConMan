@@ -37,7 +37,7 @@ use crate::input;
 use crate::keys::KeysPanel;
 use crate::terminal_renderer::{FontSet, TerminalRenderer, TerminalTheme};
 use crate::tree::{ConnectionTree, build_cred_name_list, cred_name_idx};
-use crate::{AppConfig, AppWindow, ConnRow, CredRow, PaletteAction, TabItem};
+use crate::{AppConfig, AppWindow, ConnRow, CredRow, PaletteAction, TabItem, ToastEntry};
 
 // Generated Slint structs for the form editors.
 use crate::generated_ui::{ConnProfile, CredFormData, GroupForm};
@@ -553,6 +553,12 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     let palette_model: Rc<VecModel<PaletteAction>> =
         Rc::new(VecModel::from(initial_palette_actions()));
     ui.set_palette_actions(ModelRc::from(palette_model.clone()));
+
+    // P5.3b: toast model.
+    let toast_model: Rc<VecModel<ToastEntry>> = Rc::new(VecModel::default());
+    ui.set_toasts(ModelRc::from(toast_model.clone()));
+    // Toast counter — gives each toast a unique id so we can remove it by id.
+    let toast_next_id: Rc<RefCell<i32>> = Rc::new(RefCell::new(0));
 
     // ── Load persisted settings (P5.2) ────────────────────────────────────
     let stored_settings = {
@@ -1561,6 +1567,18 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         }
     });
 
+    ui.on_toast_dismissed({
+        let toast_model = toast_model.clone();
+        move |id| {
+            // Find the entry with the given id and remove it.
+            let idx = (0..toast_model.row_count())
+                .find(|&i| toast_model.row_data(i).map(|e| e.id) == Some(id));
+            if let Some(i) = idx {
+                toast_model.remove(i);
+            }
+        }
+    });
+
     // ── P1.4: Connections panel CRUD ─────────────────────────────────────────
 
     ui.on_toggle_conn_row({
@@ -2240,10 +2258,12 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     {
         let state = state.clone();
         let tab_model = tab_model.clone();
+        let toast_model = toast_model.clone();
+        let toast_next_id = toast_next_id.clone();
         let weak = ui.as_weak();
         redraw.start(TimerMode::Repeated, REDRAW_INTERVAL, move || {
             if let Some(ui) = weak.upgrade() {
-                tick(&state, &tab_model, &ui);
+                tick(&state, &tab_model, &toast_model, &toast_next_id, &ui);
             }
         });
     }
@@ -3142,7 +3162,13 @@ fn update_overlays_from_status(ui: &AppWindow, tab: &Tab, status: &SessionStatus
     }
 }
 
-fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppWindow) {
+fn tick(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    toast_model: &Rc<VecModel<ToastEntry>>,
+    toast_next_id: &Rc<RefCell<i32>>,
+    ui: &AppWindow,
+) {
     let mut st = state.borrow_mut();
     let active = st.active;
     let target = st.target_px();
@@ -3259,6 +3285,29 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
         if let Some(mut item) = tab_model.row_data(i)
             && item.status.as_str() != dot
         {
+            // P5.3b: emit a toast when a background tab disconnects/fails.
+            if i != active && st.tabs[i].is_remote
+                && matches!(status, SessionStatus::Disconnected | SessionStatus::Failed(_))
+            {
+                let msg = match &status {
+                    SessionStatus::Failed(r) => {
+                        format!("{}: connection failed – {r}", item.title.as_str())
+                    }
+                    _ => format!("{}: disconnected", item.title.as_str()),
+                };
+                let kind: i32 = if matches!(status, SessionStatus::Failed(_)) { 3 } else { 2 };
+                let id = {
+                    let mut n = toast_next_id.borrow_mut();
+                    let id = *n;
+                    *n += 1;
+                    id
+                };
+                toast_model.push(ToastEntry {
+                    id,
+                    message: SharedString::from(msg),
+                    kind,
+                });
+            }
             item.status = SharedString::from(dot);
             tab_model.set_row_data(i, item);
         }

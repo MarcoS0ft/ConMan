@@ -15,7 +15,7 @@
 import { Theme } from "theme.slint";
 import {
     StatusDot, StatusPill, IconButton, ActivityBarButton,
-    PrimaryButton, SecondaryButton, EmptyState
+    PrimaryButton, SecondaryButton, EmptyState, Toast
 } from "components.slint";
 import { ListView, Palette, LineEdit } from "std-widgets.slint";
 import { Modal, QuickConnectForm, HostKeyDialog, CertDialog } from "screens/dialogs.slint";
@@ -29,6 +29,14 @@ import {
 import { CredFormData, CredEditor } from "screens/cred_editor.slint";
 
 // ── Models ────────────────────────────────────────────────────────────────
+// Toast entry for background-event notifications (P5.3b).
+// kind: 0=info · 1=success · 2=warning · 3=error
+export struct ToastEntry {
+    id:      int,
+    message: string,
+    kind:    int,
+}
+
 export struct TabItem {
     title: string,
     id: int,
@@ -606,6 +614,9 @@ export component AppWindow inherits Window {
     in-out property <string> cred-filter: "";
     callback conn-filter-changed(string);
     callback cred-filter-changed(string);
+    // P5.3b: toast notifications for background events.
+    in property <[ToastEntry]> toasts;
+    callback toast-dismissed(int);  // arg = ToastEntry.id
 
     // ── Keys panel data ───────────────────────────────────────────────
     in property <[CredRow]>  credentials;
@@ -855,11 +866,13 @@ export component AppWindow inherits Window {
                         IconButton {
                             glyph: "\u{E8F4}";   // New folder / group
                             size: 24px; glyph-size: Theme.icon-sm;
+                            tooltip: "New group";
                             clicked => { root.new-group(0); }
                         }
                         IconButton {
                             glyph: "\u{E710}";   // Add connection
                             size: 24px; glyph-size: Theme.icon-sm;
+                            tooltip: "New connection";
                             clicked => { root.new-connection(0); }
                         }
                     }
@@ -980,11 +993,13 @@ export component AppWindow inherits Window {
                         IconButton {
                             glyph: "\u{E8F4}";   // New folder
                             size: 24px; glyph-size: Theme.icon-sm;
+                            tooltip: "New folder";
                             clicked => { root.new-cred-folder(0); }
                         }
                         IconButton {
                             glyph: "\u{E710}";   // New credential
                             size: 24px; glyph-size: Theme.icon-sm;
+                            tooltip: "New credential";
                             clicked => { root.new-cred(0); }
                         }
                     }
@@ -1398,6 +1413,21 @@ export component AppWindow inherits Window {
             folder-name-list: root.folder-name-list;
             save   => { root.cred-save(); }
             cancel => { root.cred-editor-open = false; }
+        }
+    }
+
+    // ── P5.3b: Toast bar (background-event notifications) ────────────────────
+    // Positioned at the bottom-center; above all chrome but below the palette.
+    if toasts.length > 0 : VerticalLayout {
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - Theme.space-4 - Theme.status-bar-height;
+        width: 440px;
+        spacing: Theme.space-2;
+        alignment: end;
+        for t in root.toasts: Toast {
+            message: t.message;
+            kind:    t.kind;
+            dismissed => { root.toast-dismissed(t.id); }
         }
     }
 
