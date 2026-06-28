@@ -26,8 +26,8 @@ use cm_core::{
 };
 use cm_session::{
     CertDecision, CertInfo, CertStore, CertVerifier, FrameUpdate, HostKeyDecision, HostKeyInfo,
-    HostKeyVerifier, KnownHosts, LocalTerminalSession, RdpAuthInput, RdpSession, Session,
-    SessionInput, SessionStatus, SshAuthInput, SshTerminalSession, Surface,
+    HostKeyVerifier, KnownHosts, LocalTerminalSession, PaneGroup, PaneLayout, RdpAuthInput,
+    RdpSession, Session, SessionInput, SessionStatus, SshAuthInput, SshTerminalSession, Surface,
 };
 use slint::{ComponentHandle, Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
@@ -59,6 +59,37 @@ struct SshConnectInfo {
 }
 
 // ---------------------------------------------------------------------------
+// P5.1: Extra pane state (pane index 1+)
+// ---------------------------------------------------------------------------
+
+/// State for an additional (non-primary) pane within a split tab.
+struct ExtraPaneState {
+    session: Box<dyn Session>,
+    renderer: TerminalRenderer,
+    last: Option<GridSnapshot>,
+    cols: u16,
+    rows: u16,
+    scale: f32,
+    /// Logical width reported by the last `pane-resized` event for this pane.
+    surface_w: f32,
+    /// Logical height reported by the last `pane-resized` event for this pane.
+    surface_h: f32,
+}
+
+// ---------------------------------------------------------------------------
+// P5.1: Detached session entry
+// ---------------------------------------------------------------------------
+
+/// A session that has been detached from its tab but is still running.
+///
+/// The tick loop drains the session's output channel to prevent it from
+/// filling; `shutdown` is called when the session exits naturally.
+struct DetachedEntry {
+    session: Box<dyn Session>,
+    label: String,
+}
+
+// ---------------------------------------------------------------------------
 // Per-tab state
 // ---------------------------------------------------------------------------
 
@@ -83,6 +114,11 @@ struct Tab {
     connect_info: Option<SshConnectInfo>,
     /// True for any remote session (SSH or RDP) — drives the error overlay.
     is_remote: bool,
+    // P5.1: Split-pane support.
+    /// Pane layout and focus tracking.
+    pane_group: PaneGroup,
+    /// Extra panes (beyond the primary pane 0 held in `session`).
+    extra_panes: Vec<ExtraPaneState>,
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +137,8 @@ struct State {
     /// OS clipboard handle for RDP CLIPRDR bidirectional sync.
     /// Created lazily on first use; `None` if arboard fails (e.g. no display).
     sys_clipboard: Option<arboard::Clipboard>,
+    // P5.1: Detached sessions (still running; drained in tick).
+    detached: Vec<DetachedEntry>,
 }
 
 impl State {
@@ -471,6 +509,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         keys_panel,
         // Created lazily; silently ignored if arboard fails (e.g. no display in CI).
         sys_clipboard: arboard::Clipboard::new().ok(),
+        detached: Vec::new(),
     }));
 
     {
@@ -539,11 +578,105 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                 );
                 return;
             }
+
+            // ── P5.1: Ctrl+Shift shortcut layer (reserved by GUI_DESIGN §5) ──
+            // These are intercepted before forwarding to the session so they
+            // never reach the remote shell.  The terminal FocusScope passes all
+            // Ctrl+Shift events to `key-input` (only Ctrl+K is intercepted in
+            // Slint); we catch them here.
+            let ctrl_shift =
+                mods & (input::MOD_CTRL | input::MOD_SHIFT) == (input::MOD_CTRL | input::MOD_SHIFT);
+            if ctrl_shift {
+                let t = text.as_str();
+                match (special, t) {
+                    // Ctrl+Shift+\ or Ctrl+Shift+| → H-split.
+                    (0, "\\" | "|") => {
+                        do_split(&state, &tab_model_kb, &ui, PaneLayout::HSplit);
+                        return;
+                    }
+                    // Ctrl+Shift+- or Ctrl+Shift+_ → V-split.
+                    (0, "-" | "_") => {
+                        do_split(&state, &tab_model_kb, &ui, PaneLayout::VSplit);
+                        return;
+                    }
+                    // Ctrl+Shift+B → toggle broadcast.
+                    (0, "b" | "B") => {
+                        ui.set_broadcast_active(!ui.get_broadcast_active());
+                        return;
+                    }
+                    // Ctrl+Shift+Left → focus pane left.
+                    (7, _) => {
+                        let new_focus = {
+                            let mut st = state.borrow_mut();
+                            let active = st.active;
+                            if let Some(tab) = st.tabs.get_mut(active) {
+                                tab.pane_group.focus_move(-1)
+                            } else {
+                                return;
+                            }
+                        };
+                        ui.set_active_pane(new_focus as i32);
+                        return;
+                    }
+                    // Ctrl+Shift+Right → focus pane right.
+                    (8, _) => {
+                        let new_focus = {
+                            let mut st = state.borrow_mut();
+                            let active = st.active;
+                            if let Some(tab) = st.tabs.get_mut(active) {
+                                tab.pane_group.focus_move(1)
+                            } else {
+                                return;
+                            }
+                        };
+                        ui.set_active_pane(new_focus as i32);
+                        return;
+                    }
+                    // Ctrl+Shift+W → close focused pane (detach = false → shutdown).
+                    (0, "w" | "W") => {
+                        do_close_pane(&state, &tab_model_kb, &ui, false);
+                        return;
+                    }
+                    // Ctrl+Shift+D → detach session (keep session alive).
+                    (0, "d" | "D") => {
+                        do_close_pane(&state, &tab_model_kb, &ui, true);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active) {
-                // Terminal key events (RDP key events use on_rdp_key_down/up below).
-                for ev in input::map_key(text.as_str(), special, mods) {
-                    tab.session.send_input(SessionInput::Key(ev));
+                let evs: Vec<SessionInput> = input::map_key(text.as_str(), special, mods)
+                    .into_iter()
+                    .map(SessionInput::Key)
+                    .collect();
+                if evs.is_empty() {
+                    return;
+                }
+                // ── Broadcast: fan to all pane sessions ──────────────────────
+                if ui.get_broadcast_active() {
+                    // Send to extra panes first, then the primary.
+                    for ep in &tab.extra_panes {
+                        for ev in &evs {
+                            ep.session.send_input(ev.clone());
+                        }
+                    }
+                }
+                // Always send to the focused pane.
+                let focused = tab.pane_group.focused();
+                if focused == 0 {
+                    for ev in evs {
+                        tab.session.send_input(ev);
+                    }
+                } else {
+                    let ep_idx = focused - 1;
+                    if let Some(ep) = tab.extra_panes.get(ep_idx) {
+                        for ev in evs {
+                            ep.session.send_input(ev);
+                        }
+                    }
                 }
             }
         }
@@ -554,11 +687,24 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         move |button, kind, x, y, mods| {
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active) {
-                match tab.session.surface() {
+                let focused = tab.pane_group.focused();
+                // Route pointer to the focused pane's session.
+                let (session, renderer, scale): (&dyn Session, &TerminalRenderer, f32) =
+                    if focused == 0 {
+                        (tab.session.as_ref(), &tab.renderer, st.scale)
+                    } else {
+                        let ep_idx = focused - 1;
+                        if let Some(ep) = tab.extra_panes.get(ep_idx) {
+                            (ep.session.as_ref(), &ep.renderer, ep.scale)
+                        } else {
+                            (tab.session.as_ref(), &tab.renderer, st.scale)
+                        }
+                    };
+                match session.surface() {
                     Surface::TerminalGrid(_) => {
-                        let (row, col) = tab.renderer.cell_at(x * st.scale, y * st.scale);
+                        let (row, col) = renderer.cell_at(x * scale, y * scale);
                         if let Some(ev) = input::map_mouse(button, kind, row, col, mods) {
-                            tab.session.send_input(SessionInput::Mouse(ev));
+                            session.send_input(SessionInput::Mouse(ev));
                         }
                     }
                     Surface::Framebuffer(_) => {
@@ -574,7 +720,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                         };
                         let events = input::map_rdp_mouse(button, kind, x, y, &coords);
                         if !events.is_empty() {
-                            tab.session.send_input(SessionInput::Rdp(events));
+                            session.send_input(SessionInput::Rdp(events));
                         }
                     }
                 }
@@ -912,6 +1058,107 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
             }
         }
     });
+
+    // ── P5.1: Split-pane callbacks ────────────────────────────────────────────
+
+    ui.on_split_pane_h({
+        let state = state.clone();
+        let tab_model = tab_model.clone();
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                do_split(&state, &tab_model, &ui, PaneLayout::HSplit);
+            }
+        }
+    });
+
+    ui.on_split_pane_v({
+        let state = state.clone();
+        let tab_model = tab_model.clone();
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                do_split(&state, &tab_model, &ui, PaneLayout::VSplit);
+            }
+        }
+    });
+
+    ui.on_close_pane({
+        let state = state.clone();
+        let tab_model = tab_model.clone();
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                do_close_pane(&state, &tab_model, &ui, false);
+            }
+        }
+    });
+
+    ui.on_detach_session({
+        let state = state.clone();
+        let tab_model = tab_model.clone();
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                do_close_pane(&state, &tab_model, &ui, true);
+            }
+        }
+    });
+
+    ui.on_pane_focused({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |pane_idx| {
+            let mut st = state.borrow_mut();
+            let active = st.active;
+            if let Some(tab) = st.tabs.get_mut(active) {
+                tab.pane_group.set_focused(pane_idx as usize);
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_active_pane(pane_idx);
+            }
+        }
+    });
+
+    ui.on_pane_resized({
+        let state = state.clone();
+        let debounce = resize_debounce.clone();
+        let weak = ui.as_weak();
+        move |pane_idx, w, h| {
+            {
+                let mut st = state.borrow_mut();
+                let scale = st.scale;
+                if pane_idx == 0 {
+                    st.surface_w = w;
+                    st.surface_h = h;
+                    // Update scale from UI if available.
+                    if let Some(ui) = weak.upgrade() {
+                        st.scale = ui.window().scale_factor();
+                    }
+                } else {
+                    let active = st.active;
+                    if let Some(tab) = st.tabs.get_mut(active) {
+                        let pidx = pane_idx as usize - 1;
+                        if let Some(ep) = tab.extra_panes.get_mut(pidx) {
+                            ep.surface_w = w;
+                            ep.surface_h = h;
+                            ep.scale = scale;
+                        }
+                    }
+                }
+            }
+            let state = state.clone();
+            let weak2 = weak.clone();
+            debounce.start(TimerMode::SingleShot, RESIZE_DEBOUNCE, move || {
+                if let Some(ui) = weak2.upgrade() {
+                    apply_settled_resize(&state, &ui);
+                }
+            });
+        }
+    });
+
+    // ── P5.1: Reattach detached session (palette action) ─────────────────────
+    // Implemented via `dispatch_palette_action`; no dedicated callback needed.
 
     ui.on_palette_edited({
         let weak = ui.as_weak();
@@ -1802,6 +2049,39 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         ui.set_active_panel(1);
     }
 
+    // P5.1: Auto-split hook (headless screenshot tests).
+    // CONMAN_AUTOSPLIT=h|v — trigger an H- or V-split after a short delay.
+    // CONMAN_AUTOBROADCAST=1 — enable broadcast at startup.
+    if let Ok(dir) = std::env::var("CONMAN_AUTOSPLIT") {
+        let layout = if dir.trim().eq_ignore_ascii_case("v") {
+            PaneLayout::VSplit
+        } else {
+            PaneLayout::HSplit
+        };
+        let state_as = state.clone();
+        let tab_model_as = tab_model.clone();
+        let weak_as = ui.as_weak();
+        let delay = std::env::var("CONMAN_AUTOSPLIT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(600);
+        let t = Timer::default();
+        t.start(
+            TimerMode::SingleShot,
+            Duration::from_millis(delay),
+            move || {
+                if let Some(ui) = weak_as.upgrade() {
+                    do_split(&state_as, &tab_model_as, &ui, layout);
+                }
+            },
+        );
+        hooks.push(t);
+    }
+
+    if std::env::var("CONMAN_AUTOBROADCAST").as_deref() == Ok("1") {
+        ui.set_broadcast_active(true);
+    }
+
     ui.run()
 }
 
@@ -1858,6 +2138,8 @@ fn push_tab(
         num,
         connect_info,
         is_remote,
+        pane_group: PaneGroup::single(),
+        extra_panes: Vec::new(),
     });
     st.active = st.tabs.len() - 1;
     let active = st.active;
@@ -2042,6 +2324,81 @@ fn reconnect_ssh_tab(
     }
 }
 
+/// Reattach a previously detached session to a new tab.
+///
+/// The detached entry is consumed — the session is moved from `State::detached`
+/// back into the tab list.  A new `TerminalRenderer` is created for the session
+/// since the old one was discarded when the tab was closed.
+fn reattach_session(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    entry: DetachedEntry,
+) {
+    let label = entry.label.clone();
+    let session = entry.session;
+    // Use a transient renderer; the session will re-render on first tick.
+    let (scale, fonts) = {
+        let st = state.borrow();
+        (st.scale, st.fonts.clone())
+    };
+    let renderer = TerminalRenderer::with_fonts(fonts, FONT_SIZE_PX, scale, TerminalTheme::dark());
+    let status_dot = match session.status() {
+        SessionStatus::Connected => "connected",
+        SessionStatus::Connecting => "connecting",
+        _ => "disconnected",
+    };
+    let initial_status: &'static str = status_dot;
+    let is_remote = !matches!(session.surface(), Surface::TerminalGrid(_))
+        || label.starts_with("SSH ")
+        || label.starts_with("RDP ");
+    {
+        let mut st = state.borrow_mut();
+        let used: Vec<u32> = st.tabs.iter().map(|t| t.num).collect();
+        let num = lowest_free_number(&used);
+        st.tabs.push(Tab {
+            session,
+            renderer,
+            last: None,
+            last_frame: None,
+            rdp_w: 0,
+            rdp_h: 0,
+            rdp_clipboard: None,
+            cols: INITIAL_SIZE.cols,
+            rows: INITIAL_SIZE.rows,
+            scale,
+            num,
+            connect_info: None,
+            is_remote,
+            pane_group: PaneGroup::single(),
+            extra_panes: Vec::new(),
+        });
+        st.active = st.tabs.len() - 1;
+        let active = st.active;
+        drop(st);
+
+        let tab_title = format!("[r] {label}");
+        tab_model.push(TabItem {
+            title: SharedString::from(tab_title),
+            id: 0,
+            status: SharedString::from(initial_status),
+            pane_count: 1,
+        });
+        ui.set_active_tab(active as i32);
+        ui.set_pane_layout(0);
+        ui.set_active_pane(0);
+        ui.set_session_status(SharedString::from(initial_status));
+        ui.set_session_identity(SharedString::from(label.as_str()));
+        ui.set_overlay_connecting(false);
+        ui.set_overlay_error(false);
+        ui.set_launchpad_open(false);
+        ui.set_rdp_active(false);
+    }
+    // Update the detached count.
+    let count = state.borrow().detached.len();
+    ui.set_detached_count(count as i32);
+}
+
 fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
     let mut st = state.borrow_mut();
     let idx = idx.max(0) as usize;
@@ -2050,6 +2407,9 @@ fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
     }
     st.active = idx;
     ui.set_active_tab(idx as i32);
+    let pane_layout = st.tabs[idx].pane_group.layout();
+    ui.set_pane_layout(layout_to_int(pane_layout));
+    ui.set_active_pane(st.tabs[idx].pane_group.focused() as i32);
     let status = st.tabs[idx].session.status();
     let tab = &st.tabs[idx];
     update_overlays_from_status(ui, tab, &status);
@@ -2067,9 +2427,40 @@ fn close_tab(
         return;
     }
     let tab = st.tabs.remove(idx);
-    tab.session.shutdown();
-    drop(tab);
+    let label = tab_model
+        .row_data(idx)
+        .map(|t| t.title.to_string())
+        .unwrap_or_else(|| format!("tab {}", tab.num));
+    // P5.1: Detach all sessions in this tab (keep running in the background).
+    // Sessions that have already exited or failed are shut down immediately.
+    let should_detach = |s: &dyn Session| {
+        !matches!(
+            s.status(),
+            SessionStatus::Exited(_) | SessionStatus::Failed(_)
+        )
+    };
+    if should_detach(tab.session.as_ref()) {
+        st.detached.push(DetachedEntry {
+            session: tab.session,
+            label: label.clone(),
+        });
+    } else {
+        tab.session.shutdown();
+    }
+    for (i, ep) in tab.extra_panes.into_iter().enumerate() {
+        if should_detach(ep.session.as_ref()) {
+            st.detached.push(DetachedEntry {
+                session: ep.session,
+                label: format!("{} [pane {}]", label, i + 2),
+            });
+        } else {
+            ep.session.shutdown();
+        }
+    }
     tab_model.remove(idx);
+
+    // Update detached count so the palette can show "Reattach" actions.
+    ui.set_detached_count(st.detached.len() as i32);
 
     if st.tabs.is_empty() {
         drop(st);
@@ -2084,6 +2475,10 @@ fn close_tab(
     }
     let active = st.active;
     ui.set_active_tab(active as i32);
+    // Reset pane layout when switching to a single-pane tab.
+    let pane_layout = st.tabs[active].pane_group.layout();
+    ui.set_pane_layout(layout_to_int(pane_layout));
+    ui.set_active_pane(st.tabs[active].pane_group.focused() as i32);
     let status = st.tabs[active].session.status();
     update_overlays_from_status(ui, &st.tabs[active], &status);
     render_active(&mut st, ui);
@@ -2120,7 +2515,214 @@ fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {
                 tab.session.resize_px(pw, ph);
             }
         }
+        // P5.1: Resize extra panes using their own reported dimensions.
+        for ep in &mut tab.extra_panes {
+            if ep.surface_w <= 0.0 || ep.surface_h <= 0.0 {
+                continue;
+            }
+            if (ep.scale - scale).abs() > f32::EPSILON {
+                ep.renderer.set_scale(FONT_SIZE_PX, scale);
+                ep.scale = scale;
+            }
+            if matches!(ep.session.surface(), Surface::TerminalGrid(_)) {
+                let ep_size = grid_for(&ep.renderer, ep.surface_w, ep.surface_h, scale);
+                if ep_size.cols != ep.cols || ep_size.rows != ep.rows {
+                    ep.session.resize_cells(ep_size.cols, ep_size.rows);
+                    ep.cols = ep_size.cols;
+                    ep.rows = ep_size.rows;
+                }
+            }
+        }
     }
+    render_active(&mut st, ui);
+}
+
+// ---------------------------------------------------------------------------
+// P5.1: Split-pane + session-detach helpers
+// ---------------------------------------------------------------------------
+
+/// Map a [`PaneLayout`] to the integer used by the `pane-layout` Slint property.
+fn layout_to_int(layout: PaneLayout) -> i32 {
+    match layout {
+        PaneLayout::Single => 0,
+        PaneLayout::HSplit => 1,
+        PaneLayout::VSplit => 2,
+    }
+}
+
+/// Split the active tab's pane group, spawning a new local terminal in pane 1.
+fn do_split(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    layout: PaneLayout,
+) {
+    let (new_pane_idx, scale, surface_w, surface_h, fonts) = {
+        let mut st = state.borrow_mut();
+        let active = st.active;
+        let Some(tab) = st.tabs.get_mut(active) else {
+            return;
+        };
+        let Some(new_idx) = tab.pane_group.split(layout) else {
+            return; // already at max panes
+        };
+        (
+            new_idx,
+            st.scale,
+            st.surface_w,
+            st.surface_h,
+            st.fonts.clone(),
+        )
+    };
+
+    // Spawn a new local terminal for the extra pane (half the width for H-split).
+    let renderer = TerminalRenderer::with_fonts(fonts, FONT_SIZE_PX, scale, TerminalTheme::dark());
+    let pane_w = match layout {
+        PaneLayout::HSplit => (surface_w / 2.0).max(1.0),
+        PaneLayout::VSplit => surface_w,
+        PaneLayout::Single => surface_w,
+    };
+    let pane_h = match layout {
+        PaneLayout::VSplit => (surface_h / 2.0).max(1.0),
+        _ => surface_h,
+    };
+    let size = if pane_w > 0.0 && pane_h > 0.0 {
+        grid_for(&renderer, pane_w, pane_h, scale)
+    } else {
+        INITIAL_SIZE
+    };
+
+    let session = match LocalTerminalSession::spawn(&LocalSettings::default(), size) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("conman: split pane spawn failed: {e}");
+            // Roll back the pane group change.
+            let mut st = state.borrow_mut();
+            let active = st.active;
+            if let Some(tab) = st.tabs.get_mut(active) {
+                // The split already happened in pane_group; close it back.
+                let _ = tab.pane_group.close_focused();
+            }
+            return;
+        }
+    };
+
+    {
+        let mut st = state.borrow_mut();
+        let active = st.active;
+        if let Some(tab) = st.tabs.get_mut(active) {
+            let ep = ExtraPaneState {
+                session: Box::new(session),
+                renderer,
+                last: None,
+                cols: size.cols,
+                rows: size.rows,
+                scale,
+                surface_w: pane_w,
+                surface_h: pane_h,
+            };
+            // Defensive: only push when the index is contiguous (2-pane case
+            // always satisfies this; a future N-pane extension might not).
+            if tab.extra_panes.len() <= new_pane_idx {
+                tab.extra_panes.push(ep);
+            }
+        }
+    }
+
+    // Update the tab-strip badge.
+    {
+        let st = state.borrow();
+        let active = st.active;
+        if let Some(mut item) = tab_model.row_data(active) {
+            item.pane_count = st
+                .tabs
+                .get(active)
+                .map(|t| t.pane_group.count() as i32)
+                .unwrap_or(1);
+            tab_model.set_row_data(active, item);
+        }
+    }
+
+    ui.set_pane_layout(layout_to_int(layout));
+    ui.set_active_pane(new_pane_idx as i32);
+}
+
+/// Close the focused pane in the active tab.
+///
+/// If `detach` is `true`, the closed pane's session is moved to the detached
+/// list (kept running).  If `false`, the session is shut down immediately.
+fn do_close_pane(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    detach: bool,
+) {
+    let (closed_idx, new_layout, new_focused, tab_label) = {
+        let mut st = state.borrow_mut();
+        let active = st.active;
+        let Some(tab) = st.tabs.get_mut(active) else {
+            return;
+        };
+        if tab.pane_group.count() <= 1 {
+            return; // nothing to close (caller should use close_tab instead)
+        }
+        let Some(closed) = tab.pane_group.close_focused() else {
+            return;
+        };
+        let new_layout = tab.pane_group.layout();
+        let new_focused = tab.pane_group.focused();
+        let label = tab_model
+            .row_data(active)
+            .map(|t| t.title.to_string())
+            .unwrap_or_else(|| format!("tab {}", tab.num));
+        (closed, new_layout, new_focused, label)
+    };
+
+    // Remove the ExtraPaneState for the closed pane (index = closed_idx - 1
+    // since extra_panes is 0-based for pane 1+).
+    if closed_idx >= 1 {
+        let ep_idx = closed_idx - 1;
+        let mut st = state.borrow_mut();
+        let active = st.active;
+        if let Some(tab) = st.tabs.get_mut(active)
+            && ep_idx < tab.extra_panes.len()
+        {
+            let ep = tab.extra_panes.remove(ep_idx);
+            if detach
+                && !matches!(
+                    ep.session.status(),
+                    SessionStatus::Exited(_) | SessionStatus::Failed(_)
+                )
+            {
+                st.detached.push(DetachedEntry {
+                    session: ep.session,
+                    label: format!("{tab_label} [pane {}]", closed_idx + 1),
+                });
+                ui.set_detached_count(st.detached.len() as i32);
+            } else {
+                ep.session.shutdown();
+            }
+        }
+    }
+
+    // Update tab strip badge.
+    {
+        let st = state.borrow();
+        let active = st.active;
+        if let Some(mut item) = tab_model.row_data(active) {
+            item.pane_count = st
+                .tabs
+                .get(active)
+                .map(|t| t.pane_group.count() as i32)
+                .unwrap_or(1);
+            tab_model.set_row_data(active, item);
+        }
+    }
+
+    ui.set_pane_layout(layout_to_int(new_layout));
+    ui.set_active_pane(new_focused as i32);
+    // Re-render the newly focused pane.
+    let mut st = state.borrow_mut();
     render_active(&mut st, ui);
 }
 
@@ -2183,7 +2785,7 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
     let mut to_close: Vec<usize> = Vec::new();
 
     for i in 0..st.tabs.len() {
-        // Drain the latest update for this tab's surface type.
+        // Drain the latest update for this tab's primary surface.
         match st.tabs[i].session.surface() {
             Surface::TerminalGrid(rx) => {
                 if let Some(snap) = drain_latest(rx) {
@@ -2215,6 +2817,37 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
             }
         }
 
+        // P5.1: Drain extra pane surfaces (pane 1+).
+        for ep_idx in 0..st.tabs[i].extra_panes.len() {
+            match st.tabs[i].extra_panes[ep_idx].session.surface() {
+                Surface::TerminalGrid(rx) => {
+                    if let Some(snap) = drain_latest(rx) {
+                        if i == active {
+                            // ep_idx 0 = pane 1 → pane-frame-2.
+                            if ep_idx == 0 {
+                                let ep = &mut st.tabs[i].extra_panes[ep_idx];
+                                let ep_target = if ep.surface_w > 0.0 && ep.surface_h > 0.0 {
+                                    Some((
+                                        (ep.surface_w * ep.scale).round().max(1.0) as u32,
+                                        (ep.surface_h * ep.scale).round().max(1.0) as u32,
+                                    ))
+                                } else {
+                                    None
+                                };
+                                let img = render_frame_ep(ep, &snap, ep_target);
+                                ui.set_pane_frame_2(img);
+                            }
+                        }
+                        st.tabs[i].extra_panes[ep_idx].last = Some(snap);
+                    }
+                }
+                Surface::Framebuffer(rx) => {
+                    // Drain but discard (RDP-in-pane is an unimplemented edge case; noted).
+                    drain_latest(rx);
+                }
+            }
+        }
+
         let status = st.tabs[i].session.status();
         let dot = match &status {
             SessionStatus::Connecting => "connecting",
@@ -2238,10 +2871,38 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
         }
     }
 
+    // P5.1: Drain detached sessions to prevent channel saturation.
+    let mut detached_to_remove: Vec<usize> = Vec::new();
+    for (di, d) in st.detached.iter().enumerate() {
+        match d.session.surface() {
+            Surface::TerminalGrid(rx) => {
+                drain_latest(rx); // discard
+            }
+            Surface::Framebuffer(rx) => {
+                drain_latest(rx); // discard
+            }
+        }
+        if matches!(
+            d.session.status(),
+            SessionStatus::Exited(_) | SessionStatus::Failed(_)
+        ) {
+            detached_to_remove.push(di);
+        }
+    }
+    for &di in detached_to_remove.iter().rev() {
+        let d = st.detached.remove(di);
+        d.session.shutdown();
+    }
+    if !detached_to_remove.is_empty() {
+        ui.set_detached_count(st.detached.len() as i32);
+    }
+
     for &i in to_close.iter().rev() {
         let tab = st.tabs.remove(i);
         tab.session.shutdown();
-        drop(tab);
+        for ep in tab.extra_panes {
+            ep.session.shutdown();
+        }
         tab_model.remove(i);
         if i <= st.active && st.active > 0 {
             st.active -= 1;
@@ -2283,7 +2944,39 @@ fn render_active(st: &mut State, ui: &AppWindow) {
                 ui.set_rdp_active(true);
             }
         }
+        // P5.1: Render extra pane(s).
+        for (ep_idx, ep) in tab.extra_panes.iter_mut().enumerate() {
+            if ep_idx == 0 {
+                // pane 1 → pane-frame-2
+                if let Some(snap) = ep.last.clone() {
+                    let ep_target = if ep.surface_w > 0.0 && ep.surface_h > 0.0 {
+                        Some((
+                            (ep.surface_w * ep.scale).round().max(1.0) as u32,
+                            (ep.surface_h * ep.scale).round().max(1.0) as u32,
+                        ))
+                    } else {
+                        None
+                    };
+                    let img = render_frame_ep(ep, &snap, ep_target);
+                    ui.set_pane_frame_2(img);
+                }
+            }
+        }
     }
+}
+
+/// Render a frame for an [`ExtraPaneState`] (same as `render_frame` but for the
+/// extra pane's renderer + snapshot).
+fn render_frame_ep(
+    ep: &mut ExtraPaneState,
+    snap: &GridSnapshot,
+    target: Option<(u32, u32)>,
+) -> Image {
+    let buf = match target {
+        Some((w, h)) => ep.renderer.render_to(snap, w, h),
+        None => ep.renderer.render(snap),
+    };
+    Image::from_rgba8(buf)
 }
 
 /// Convert a [`FrameUpdate`] into a `slint::Image`.
@@ -2492,6 +3185,25 @@ fn dispatch_palette_action(
         // BLOCKED: Import / Export requires P1.2 (json-import-export), which has
         // not yet been merged.  No-op here; wire once P1.2 lands.
         "Import / Export\u{2026}" => {}
+        // P5.1: split/broadcast actions.
+        "Split horizontal" => do_split(state, tab_model, ui, PaneLayout::HSplit),
+        "Split vertical" => do_split(state, tab_model, ui, PaneLayout::VSplit),
+        "Close pane" => do_close_pane(state, tab_model, ui, false),
+        "Detach session" => do_close_pane(state, tab_model, ui, true),
+        "Toggle broadcast" => ui.set_broadcast_active(!ui.get_broadcast_active()),
+        // Reattach: label is "Reattach: <session-label>" — find the matching detached entry.
+        label if label.starts_with("Reattach: ") => {
+            let target_label = label.trim_start_matches("Reattach: ").to_owned();
+            let entry = {
+                let mut st = state.borrow_mut();
+                let pos = st.detached.iter().position(|d| d.label == target_label);
+                pos.map(|p| st.detached.remove(p))
+            };
+            if let Some(d) = entry {
+                // Open a new tab re-using the detached session.
+                reattach_session(state, tab_model, ui, d);
+            }
+        }
         _ => {}
     }
 }
@@ -2568,6 +3280,57 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             detail: SharedString::from("Blocked — requires P1.2 (not yet merged)"),
             shortcut: SharedString::from(""),
             glyph: SharedString::from("\u{E8B5}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        // P5.1: Split-pane + broadcast actions.
+        PaletteAction {
+            category: SharedString::from("PANES"),
+            first_in_group: true,
+            label: SharedString::from("Split horizontal"),
+            detail: SharedString::from("Side-by-side panes"),
+            shortcut: SharedString::from("Ctrl+Shift+\\"),
+            glyph: SharedString::from("\u{E740}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        PaletteAction {
+            category: SharedString::from("PANES"),
+            first_in_group: false,
+            label: SharedString::from("Split vertical"),
+            detail: SharedString::from("Stacked panes"),
+            shortcut: SharedString::from("Ctrl+Shift+-"),
+            glyph: SharedString::from("\u{E740}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        PaletteAction {
+            category: SharedString::from("PANES"),
+            first_in_group: false,
+            label: SharedString::from("Close pane"),
+            detail: SharedString::from("Close pane and shut down session"),
+            shortcut: SharedString::from("Ctrl+Shift+W"),
+            glyph: SharedString::from("\u{E711}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        PaletteAction {
+            category: SharedString::from("PANES"),
+            first_in_group: false,
+            label: SharedString::from("Detach session"),
+            detail: SharedString::from("Close pane, keep session running"),
+            shortcut: SharedString::from("Ctrl+Shift+D"),
+            glyph: SharedString::from("\u{E8FB}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        PaletteAction {
+            category: SharedString::from("PANES"),
+            first_in_group: false,
+            label: SharedString::from("Toggle broadcast"),
+            detail: SharedString::from("Fan input to all visible panes"),
+            shortcut: SharedString::from("Ctrl+Shift+B"),
+            glyph: SharedString::from("\u{E95A}"),
             status: SharedString::from(""),
             selected: false,
         },
