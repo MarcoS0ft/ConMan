@@ -319,6 +319,8 @@ component Tab inherits Rectangle {
 // the same pattern used by the Tab component's close button.
 component ConnectionRow inherits Rectangle {
     in property <ConnRow> data;
+    // P5.3b: keyboard-navigation cursor highlight (driven by parent's kb-idx).
+    in property <bool> highlighted: false;
     callback activated();       // open session tab (leaf)
     callback toggled();         // expand / collapse group
     callback edit-clicked();    // open profile / group editor
@@ -330,6 +332,7 @@ component ConnectionRow inherits Rectangle {
     height: Theme.tree-row-height;
     border-radius: Theme.radius-sm;
     background: data.selected ? Theme.color-accent-subtle
+              : root.highlighted ? Theme.color-accent-subtle.with-alpha(0.5)
               : touch.has-hover ? Theme.color-hover : transparent;
 
     // Accent rail (selected connection).
@@ -435,6 +438,8 @@ component ConnectionRow inherits Rectangle {
 // ── CredTreeRow — Keys panel tree row ─────────────────────────────────────
 component CredTreeRow inherits Rectangle {
     in property <CredRow> data;
+    // P5.3b: keyboard-navigation cursor highlight.
+    in property <bool> highlighted: false;
     callback activated();
     callback toggled();
     callback new-sub();
@@ -443,6 +448,7 @@ component CredTreeRow inherits Rectangle {
     height: Theme.tree-row-height;
     border-radius: Theme.radius-sm;
     background: data.selected ? Theme.color-accent-subtle
+              : root.highlighted ? Theme.color-accent-subtle.with-alpha(0.5)
               : touch.has-hover ? Theme.color-hover : transparent;
 
     touch := TouchArea {
@@ -874,27 +880,59 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    ListView {
+                    // P5.3b: FocusScope for keyboard navigation in the connection tree.
+                    // Clicking inside the tree area gives focus to this scope so
+                    // arrow keys navigate rows without disturbing the terminal.
+                    conn-tree-focus := FocusScope {
                         vertical-stretch: 1;
-                        for conn[idx] in connections: ConnectionRow {
-                            data: conn;
-                            activated     => { root.row-activated(idx); }
-                            toggled       => { root.toggle-conn-row(idx); }
-                            edit-clicked  => {
-                                if (conn.is-group) { root.edit-group(conn.id); }
-                                else { root.edit-conn(conn.id); }
+                        property <int> kb-idx: -1;
+                        key-pressed(e) => {
+                            if (e.text == Key.UpArrow) {
+                                self.kb-idx = max(0, self.kb-idx - 1);
+                                accept
+                            } else if (e.text == Key.DownArrow) {
+                                self.kb-idx = min(connections.length - 1, self.kb-idx + 1);
+                                accept
+                            } else if (e.text == Key.Return) {
+                                if (self.kb-idx >= 0 && self.kb-idx < connections.length) {
+                                    root.row-activated(self.kb-idx);
+                                }
+                                accept
+                            } else if (e.text == Key.Escape) {
+                                self.kb-idx = -1;
+                                accept
+                            } else {
+                                reject
                             }
-                            new-sub => { root.new-connection(conn.id); }
-                            delete-clicked => {
-                                root.delete-conn-row(conn.id, conn.is-group);
-                            }
-                            move-up => {
-                                if (conn.is-group) { root.reorder-group-row(conn.id, -1); }
-                                else { root.reorder-conn-row(conn.id, -1); }
-                            }
-                            move-down => {
-                                if (conn.is-group) { root.reorder-group-row(conn.id, 1); }
-                                else { root.reorder-conn-row(conn.id, 1); }
+                        }
+                        TouchArea {
+                            // Click anywhere in the list area to give keyboard focus.
+                            width: 100%; height: 100%;
+                            clicked => { conn-tree-focus.focus(); }
+                        }
+                        ListView {
+                            width: 100%; height: 100%;
+                            for conn[idx] in connections: ConnectionRow {
+                                data: conn;
+                                highlighted: idx == conn-tree-focus.kb-idx;
+                                activated     => { root.row-activated(idx); }
+                                toggled       => { root.toggle-conn-row(idx); }
+                                edit-clicked  => {
+                                    if (conn.is-group) { root.edit-group(conn.id); }
+                                    else { root.edit-conn(conn.id); }
+                                }
+                                new-sub => { root.new-connection(conn.id); }
+                                delete-clicked => {
+                                    root.delete-conn-row(conn.id, conn.is-group);
+                                }
+                                move-up => {
+                                    if (conn.is-group) { root.reorder-group-row(conn.id, -1); }
+                                    else { root.reorder-conn-row(conn.id, -1); }
+                                }
+                                move-down => {
+                                    if (conn.is-group) { root.reorder-group-row(conn.id, 1); }
+                                    else { root.reorder-conn-row(conn.id, 1); }
+                                }
                             }
                         }
                     }
@@ -967,15 +1005,44 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    ListView {
+                    // P5.3b: FocusScope for keyboard navigation in the keys tree.
+                    cred-tree-focus := FocusScope {
                         vertical-stretch: 1;
-                        for cred[idx] in credentials: CredTreeRow {
-                            data: cred;
-                            activated      => { root.edit-cred(cred.id); }
-                            toggled        => { root.toggle-cred-row(idx); }
-                            new-sub        => { root.new-cred(cred.id); }
-                            delete-clicked => {
-                                root.delete-cred-row(cred.id, cred.is-folder);
+                        property <int> kb-idx: -1;
+                        key-pressed(e) => {
+                            if (e.text == Key.UpArrow) {
+                                self.kb-idx = max(0, self.kb-idx - 1);
+                                accept
+                            } else if (e.text == Key.DownArrow) {
+                                self.kb-idx = min(credentials.length - 1, self.kb-idx + 1);
+                                accept
+                            } else if (e.text == Key.Return) {
+                                if (self.kb-idx >= 0 && self.kb-idx < credentials.length) {
+                                    root.edit-cred(credentials[self.kb-idx].id);
+                                }
+                                accept
+                            } else if (e.text == Key.Escape) {
+                                self.kb-idx = -1;
+                                accept
+                            } else {
+                                reject
+                            }
+                        }
+                        TouchArea {
+                            width: 100%; height: 100%;
+                            clicked => { cred-tree-focus.focus(); }
+                        }
+                        ListView {
+                            width: 100%; height: 100%;
+                            for cred[idx] in credentials: CredTreeRow {
+                                data: cred;
+                                highlighted: idx == cred-tree-focus.kb-idx;
+                                activated      => { root.edit-cred(cred.id); }
+                                toggled        => { root.toggle-cred-row(idx); }
+                                new-sub        => { root.new-cred(cred.id); }
+                                delete-clicked => {
+                                    root.delete-cred-row(cred.id, cred.is-folder);
+                                }
                             }
                         }
                     }
