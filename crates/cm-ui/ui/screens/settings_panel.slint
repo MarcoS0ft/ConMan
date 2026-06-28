@@ -160,27 +160,37 @@ export component SettingsPanel inherits Rectangle {
                 padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
                 spacing: Theme.space-4;
 
-                SettingRow { title: "Theme"; subtitle: "Follows OS by default";
-                    Rectangle { width: 218px;
-                        SegmentedControl {
-                            options: ["Dark", "Light", "System"];
-                            selected <=> root.theme-mode;
-                            changed(i) => {
-                                root.theme-changed(i);
-                                if (i == 0) { Theme.dark-mode = true; }
-                                else if (i == 1) { Theme.dark-mode = false; }
-                                else {
-                                    Theme.dark-mode = (Palette.color-scheme == ColorScheme.dark);
-                                }
+                // Theme — stacked: label above, full-width segmented control below.
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    HorizontalLayout {
+                        Text { text: "Theme"; color: Theme.color-text; font-size: Theme.font-base;
+                            font-family: Theme.font-family; font-weight: 600;
+                            horizontal-stretch: 1; }
+                        Text { text: "Follows OS by default"; color: Theme.color-text-secondary;
+                            font-size: Theme.font-sm; font-family: Theme.font-family;
+                            vertical-alignment: center; }
+                    }
+                    SegmentedControl {
+                        options: ["Dark", "Light", "System"];
+                        selected <=> root.theme-mode;
+                        changed(i) => {
+                            root.theme-changed(i);
+                            if (i == 0) { Theme.dark-mode = true; }
+                            else if (i == 1) { Theme.dark-mode = false; }
+                            else {
+                                Theme.dark-mode = (Palette.color-scheme == ColorScheme.dark);
                             }
                         }
                     }
                 }
 
+                // Accent swatches — label left, swatches right (compact enough).
                 SettingRow { title: "Accent color"; subtitle: "Falls back to OS accent";
                     HorizontalLayout {
-                        spacing: Theme.space-2; alignment: end;
+                        spacing: Theme.space-1; alignment: end;
                         // Preset swatches come from Theme.accent-presets — no hardcoded hex here.
+                        // space-1 (4px) gap ensures all 4 swatches fit within the 252px panel.
                         for c[idx] in Theme.accent-presets : Rectangle {
                             width: 24px; height: 24px; border-radius: 12px;
                             background: c;
@@ -202,15 +212,23 @@ export component SettingsPanel inherits Rectangle {
                     }
                 }
 
-                SettingRow { title: "Density"; subtitle: "Row height and padding";
-                    Rectangle { width: 158px;
-                        SegmentedControl {
-                            options: ["Compact", "Cosy"];
-                            selected <=> root.density;
-                            changed(i) => {
-                                Theme.density = i;
-                                root.density-changed(i);
-                            }
+                // Density — stacked: label above, full-width segmented control below.
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    HorizontalLayout {
+                        Text { text: "Density"; color: Theme.color-text; font-size: Theme.font-base;
+                            font-family: Theme.font-family; font-weight: 600;
+                            horizontal-stretch: 1; }
+                        Text { text: "Row height and padding"; color: Theme.color-text-secondary;
+                            font-size: Theme.font-sm; font-family: Theme.font-family;
+                            vertical-alignment: center; }
+                    }
+                    SegmentedControl {
+                        options: ["Compact", "Cosy"];
+                        selected <=> root.density;
+                        changed(i) => {
+                            Theme.density = i;
+                            root.density-changed(i);
                         }
                     }
                 }
@@ -226,11 +244,21 @@ export component SettingsPanel inherits Rectangle {
                 padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
                 spacing: Theme.space-4;
 
-                SettingRow { title: "Font size"; subtitle: "Terminal monospace size (pt)";
-                    // Simple − / value display / + stepper (no LineEdit to avoid
-                    // integer-parsing overhead; bounded 6..72).
+                // Font size — stacked layout so the stepper fits the 252px panel.
+                VerticalLayout {
+                    spacing: Theme.space-2;
                     HorizontalLayout {
-                        spacing: Theme.space-2; alignment: end;
+                        alignment: space-between;
+                        Text { text: "Font size"; color: Theme.color-text;
+                            font-size: Theme.font-base; font-family: Theme.font-family;
+                            font-weight: 600; vertical-alignment: center; }
+                        Text { text: "Terminal monospace size (pt)";
+                            color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                            font-family: Theme.font-family; vertical-alignment: center; }
+                    }
+                    // Simple − / value display / + stepper, bounded 6..72.
+                    HorizontalLayout {
+                        spacing: Theme.space-2; alignment: start;
                         Rectangle {
                             width: 28px; height: Theme.control-height;
                             border-radius: Theme.radius-sm;
@@ -334,13 +362,21 @@ export component SettingsPanel inherits Rectangle {
                 padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
                 spacing: Theme.space-4;
 
-                SettingRow { title: "On launch"; subtitle: "What to do when ConMan opens";
-                    Rectangle { width: 218px;
-                        SegmentedControl {
-                            options: ["Clean start", "Restore last"];
-                            selected <=> root.startup-behavior;
-                            changed(i) => { root.startup-behavior-changed(i); }
-                        }
+                // Startup — stacked: label above, full-width segmented control below.
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    HorizontalLayout {
+                        Text { text: "On launch"; color: Theme.color-text; font-size: Theme.font-base;
+                            font-family: Theme.font-family; font-weight: 600;
+                            horizontal-stretch: 1; }
+                        Text { text: "What to do when ConMan opens"; color: Theme.color-text-secondary;
+                            font-size: Theme.font-sm; font-family: Theme.font-family;
+                            vertical-alignment: center; }
+                    }
+                    SegmentedControl {
+                        options: ["Clean start", "Restore last"];
+                        selected <=> root.startup-behavior;
+                        changed(i) => { root.startup-behavior-changed(i); }
                     }
                 }
             }

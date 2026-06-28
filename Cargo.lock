@@ -986,6 +986,7 @@ dependencies = [
  "arboard",
  "cm-core",
  "cm-session",
+ "cm-storage",
  "dirs",
  "fontdue",
  "slint",
