@@ -721,6 +721,9 @@ export component AppWindow inherits Window {
     callback theme-changed(int);
     callback density-changed(int);
     callback accent-changed(int);
+    // P5.2 fix: restore persisted accent color at launch (called from Rust startup).
+    callback apply-accent-index(int);
+    apply-accent-index(idx) => { Theme.accent = Theme.accent-presets[idx]; }
     callback settings-font-size-changed(int);
     callback settings-shell-path-changed(string);
     callback settings-shell-args-changed(string);

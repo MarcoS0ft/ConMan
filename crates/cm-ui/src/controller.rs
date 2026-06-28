@@ -41,7 +41,8 @@ use crate::{AppConfig, AppWindow, ConnRow, CredRow, PaletteAction, TabItem};
 // Generated Slint structs for the form editors.
 use crate::generated_ui::{ConnProfile, CredFormData, GroupForm};
 
-/// Logical font size for the terminal grid.
+/// Default logical font size used in unit tests (matches `AppSettings::default().font_size`).
+#[cfg(test)]
 const FONT_SIZE_PX: f32 = 15.0;
 /// Redraw cadence (~60 Hz) for coalescing snapshots.
 const REDRAW_INTERVAL: Duration = Duration::from_millis(16);
@@ -140,6 +141,10 @@ struct State {
     sys_clipboard: Option<arboard::Clipboard>,
     // P5.1: Detached sessions (still running; drained in tick).
     detached: Vec<DetachedEntry>,
+    // P5.2: Persisted terminal font size (logical px), updated live from Settings.
+    font_size_px: f32,
+    // P5.2: Persisted default local-shell settings, updated live from Settings.
+    local_settings: LocalSettings,
 }
 
 impl State {
@@ -149,7 +154,7 @@ impl State {
         }
         let probe = TerminalRenderer::with_fonts(
             self.fonts.clone(),
-            FONT_SIZE_PX,
+            self.font_size_px,
             self.scale,
             TerminalTheme::dark(),
         );
@@ -313,12 +318,42 @@ fn trace(args: std::fmt::Arguments) {
 // Settings application helper (P5.2)
 // ---------------------------------------------------------------------------
 
+/// Build a [`LocalSettings`] from the persisted [`cm_storage::AppSettings`].
+///
+/// `shell_path` empty → `None` (OS default shell).
+/// `shell_args` non-empty → split on whitespace and pass as a vec.
+/// `shell_cwd` empty → `None` (home directory default).
+fn local_settings_from_app(s: &cm_storage::AppSettings) -> LocalSettings {
+    LocalSettings {
+        program: if s.shell_path.is_empty() {
+            None
+        } else {
+            Some(s.shell_path.clone())
+        },
+        args: if s.shell_args.is_empty() {
+            Vec::new()
+        } else {
+            s.shell_args.split_whitespace().map(String::from).collect()
+        },
+        working_dir: if s.shell_cwd.is_empty() {
+            None
+        } else {
+            Some(s.shell_cwd.clone())
+        },
+        env: Vec::new(),
+    }
+}
+
 /// Push all persisted settings into the live UI globals.
 ///
 /// Called once at startup after `AppWindow` is created.  `Theme.density` and
 /// `Theme.dark-mode` are in-out globals in Slint; the aliases on `AppWindow`
 /// (`density`, `dark-mode`) are bidirectional bindings, so writing them here
 /// updates the Theme global immediately.
+///
+/// NOTE (P1.5): In the current binary the repository is in-memory, so none of
+/// these values survive process restart.  End-to-end persistence will be
+/// observable once the disk-backed repository lands in P1.5.
 fn apply_settings_to_ui(s: &cm_storage::AppSettings, ui: &AppWindow) {
     ui.set_theme_mode(s.theme_mode);
     ui.set_density(s.density);
@@ -339,16 +374,10 @@ fn apply_settings_to_ui(s: &cm_storage::AppSettings, ui: &AppWindow) {
         _ => {} // 2 (system): leave Theme.dark-mode at its Palette-derived default
     }
 
-    // Apply saved accent preset: index 0 is the default cool-blue fallback,
-    // which is already the Theme.accent default — only write if it differs.
-    if s.accent_index > 0 {
-        // The accent-presets array is in Theme; we can't read it from Rust without
-        // a Slint getter. Instead we set only the index and rely on the Settings
-        // panel's on-open read of `accent-index` to keep the swatch in sync.
-        // The actual color is restored correctly when the user next opens Settings.
-        // If startup-accent restore is desired the preset colors are also baked into
-        // Theme.accent-presets in theme.slint (no Rust import needed).
-    }
+    // Restore persisted accent color.  `apply-accent-index` is implemented in
+    // Slint as `Theme.accent = Theme.accent-presets[idx]`, so invoking it here
+    // ensures the correct color is live immediately, not just the swatch index.
+    ui.invoke_apply_accent_index(s.accent_index);
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +596,9 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         // Created lazily; silently ignored if arboard fails (e.g. no display in CI).
         sys_clipboard: arboard::Clipboard::new().ok(),
         detached: Vec::new(),
+        // P5.2: persist terminal rendering font size and local shell defaults.
+        font_size_px: stored_settings.font_size as f32,
+        local_settings: local_settings_from_app(&stored_settings),
     }));
 
     {
@@ -1337,41 +1369,74 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
 
     ui.on_settings_font_size_changed({
         let repo_s = repo.clone();
+        let state_fs = state.clone();
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_font_size(v) {
                 eprintln!("conman: save font_size: {e}");
+            }
+            // Apply font size change to all live renderers immediately.
+            let mut st = state_fs.borrow_mut();
+            let new_px = v as f32;
+            st.font_size_px = new_px;
+            let scale = st.scale;
+            for tab in &mut st.tabs {
+                tab.renderer.set_scale(new_px, scale);
+                for ep in &mut tab.extra_panes {
+                    ep.renderer.set_scale(new_px, scale);
+                }
             }
         }
     });
 
     ui.on_settings_shell_path_changed({
         let repo_s = repo.clone();
+        let state_sp = state.clone();
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_shell_path(v.as_str()) {
                 eprintln!("conman: save shell_path: {e}");
             }
+            let mut st = state_sp.borrow_mut();
+            st.local_settings.program = if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            };
         }
     });
 
     ui.on_settings_shell_args_changed({
         let repo_s = repo.clone();
+        let state_sa = state.clone();
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_shell_args(v.as_str()) {
                 eprintln!("conman: save shell_args: {e}");
             }
+            let mut st = state_sa.borrow_mut();
+            st.local_settings.args = if v.is_empty() {
+                Vec::new()
+            } else {
+                v.split_whitespace().map(String::from).collect()
+            };
         }
     });
 
     ui.on_settings_shell_cwd_changed({
         let repo_s = repo.clone();
+        let state_sc = state.clone();
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_shell_cwd(v.as_str()) {
                 eprintln!("conman: save shell_cwd: {e}");
             }
+            let mut st = state_sc.borrow_mut();
+            st.local_settings.working_dir = if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            };
         }
     });
 
@@ -2313,8 +2378,12 @@ fn push_tab(
     } = args;
     let mut st = state.borrow_mut();
     let scale = st.scale;
-    let renderer =
-        TerminalRenderer::with_fonts(st.fonts.clone(), FONT_SIZE_PX, scale, TerminalTheme::dark());
+    let renderer = TerminalRenderer::with_fonts(
+        st.fonts.clone(),
+        st.font_size_px,
+        scale,
+        TerminalTheme::dark(),
+    );
     let size = if st.surface_w > 0.0 && st.surface_h > 0.0 {
         grid_for(&renderer, st.surface_w, st.surface_h, scale)
     } else {
@@ -2354,8 +2423,11 @@ fn push_tab(
 }
 
 fn open_local_tab(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppWindow) {
-    let size = state.borrow().current_grid();
-    let session = match LocalTerminalSession::spawn(&LocalSettings::default(), size) {
+    let (size, ls) = {
+        let st = state.borrow();
+        (st.current_grid(), st.local_settings.clone())
+    };
+    let session = match LocalTerminalSession::spawn(&ls, size) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("conman: failed to open terminal: {e}");
@@ -2536,11 +2608,11 @@ fn reattach_session(
     let label = entry.label.clone();
     let session = entry.session;
     // Use a transient renderer; the session will re-render on first tick.
-    let (scale, fonts) = {
+    let (scale, fonts, font_size_px) = {
         let st = state.borrow();
-        (st.scale, st.fonts.clone())
+        (st.scale, st.fonts.clone(), st.font_size_px)
     };
-    let renderer = TerminalRenderer::with_fonts(fonts, FONT_SIZE_PX, scale, TerminalTheme::dark());
+    let renderer = TerminalRenderer::with_fonts(fonts, font_size_px, scale, TerminalTheme::dark());
     let status_dot = match session.status() {
         SessionStatus::Connected => "connected",
         SessionStatus::Connecting => "connecting",
@@ -2685,13 +2757,14 @@ fn close_tab(
 fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {
     let mut st = state.borrow_mut();
     let scale = st.scale;
+    let font_size_px = st.font_size_px;
     let (w, h) = (st.surface_w, st.surface_h);
     if w <= 0.0 || h <= 0.0 {
         return;
     }
     for tab in &mut st.tabs {
         if (tab.scale - scale).abs() > f32::EPSILON {
-            tab.renderer.set_scale(FONT_SIZE_PX, scale);
+            tab.renderer.set_scale(font_size_px, scale);
             tab.scale = scale;
         }
         match tab.session.surface() {
@@ -2719,7 +2792,7 @@ fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {
                 continue;
             }
             if (ep.scale - scale).abs() > f32::EPSILON {
-                ep.renderer.set_scale(FONT_SIZE_PX, scale);
+                ep.renderer.set_scale(font_size_px, scale);
                 ep.scale = scale;
             }
             if matches!(ep.session.surface(), Surface::TerminalGrid(_)) {
@@ -2755,7 +2828,7 @@ fn do_split(
     ui: &AppWindow,
     layout: PaneLayout,
 ) {
-    let (new_pane_idx, scale, surface_w, surface_h, fonts) = {
+    let (new_pane_idx, scale, surface_w, surface_h, fonts, font_size_px, ls) = {
         let mut st = state.borrow_mut();
         let active = st.active;
         let Some(tab) = st.tabs.get_mut(active) else {
@@ -2770,11 +2843,13 @@ fn do_split(
             st.surface_w,
             st.surface_h,
             st.fonts.clone(),
+            st.font_size_px,
+            st.local_settings.clone(),
         )
     };
 
     // Spawn a new local terminal for the extra pane (half the width for H-split).
-    let renderer = TerminalRenderer::with_fonts(fonts, FONT_SIZE_PX, scale, TerminalTheme::dark());
+    let renderer = TerminalRenderer::with_fonts(fonts, font_size_px, scale, TerminalTheme::dark());
     let pane_w = match layout {
         PaneLayout::HSplit => (surface_w / 2.0).max(1.0),
         PaneLayout::VSplit => surface_w,
@@ -2790,7 +2865,7 @@ fn do_split(
         INITIAL_SIZE
     };
 
-    let session = match LocalTerminalSession::spawn(&LocalSettings::default(), size) {
+    let session = match LocalTerminalSession::spawn(&ls, size) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("conman: split pane spawn failed: {e}");

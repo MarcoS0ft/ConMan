@@ -5,10 +5,10 @@
 // Targets Slint 1.17 (std-widgets `Palette` available; `ColorScheme` enum is a builtin).
 //
 // Dark/light is driven by `dark-mode`. Default seeds from the OS scheme via
-// `Palette.color-scheme` (no platform code needed); `cm-platform` may override it
-// (manual setting in Settings) and inject the real OS `accent`:
-//   Theme.set_dark_mode(bool)        // optional manual override
-//   Theme.set_accent(color)          // DwmGetColorizationColor on Windows
+// `Palette.color-scheme` (no platform code needed); the Settings panel may override it.
+// Accent is set by the preset picker in Settings; persisted value is restored at launch
+// via AppWindow.invoke_apply_accent_index().
+//   Theme.dark-mode = bool           // written by Settings panel or apply_settings_to_ui
 //
 // Every other .slint imports this global; there are ZERO hardcoded colors elsewhere:
 //   import { Theme } from "theme.slint";
@@ -23,9 +23,10 @@ export global Theme {
   // to the Palette and don't write it.
   in-out property <bool> dark-mode: Palette.color-scheme == ColorScheme.dark;
 
-  // ── OS accent (injected by cm-platform; cool-blue fallback) ────────────────
-  // GUI_DESIGN: "accent follows the OS accent with a fallback". The fallback below
-  // is Direction A's cool blue. Status colors NEVER derive from this (see §status).
+  // ── Accent color (preset or restored from settings; cool-blue fallback) ──────
+  // Accent is set by the Settings panel accent picker or restored from persisted
+  // settings at launch via AppWindow.invoke_apply_accent_index().
+  // Status colors NEVER derive from this (see §status).
   in-out property <color> accent: #3b82f6;
 
   // ── Density preset (P5.2) ─────────────────────────────────────────────────
@@ -119,9 +120,7 @@ export global Theme {
   out property <length> icon-xl:    22px;  // large overlay / empty-state icons
 
   // ── Accent preset swatches (single source of truth for the Settings panel) ─
-  // GUI_DESIGN: "accent follows the OS accent with a fallback". These are the
-  // curated preset options shown in the Settings › Appearance accent picker.
-  // cm-platform can inject the real OS accent via AppWindow.accent <=> Theme.accent.
+  // Curated preset options shown in the Settings › Appearance accent picker.
   out property <[color]> accent-presets: [#3b82f6, #2dd4bf, #3fb950, #a78bfa];
 
   // Segoe UI = Windows system font (our primary platform); falls back elsewhere.
