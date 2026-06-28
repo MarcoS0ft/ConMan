@@ -523,9 +523,7 @@ struct InMemoryRepo {
 }
 
 impl ConnectionRepository for InMemoryRepo {
-    fn list_groups(&self) -> Result<Vec<Group>, RepositoryError> {
-        Ok(self.groups.lock().unwrap().clone())
-    }
+    // --- Connections ---
 
     fn list_connections(&self) -> Result<Vec<Connection>, RepositoryError> {
         Ok(self.connections.lock().unwrap().clone())
@@ -539,24 +537,6 @@ impl ConnectionRepository for InMemoryRepo {
             .iter()
             .find(|c| c.id == id)
             .cloned())
-    }
-
-    fn upsert_group(&self, group: &Group) -> Result<GroupId, RepositoryError> {
-        let mut groups = self.groups.lock().unwrap();
-        if group.id.is_unsaved() {
-            let mut next = self.next_group_id.lock().unwrap();
-            *next += 1;
-            let id = GroupId::new(*next);
-            let mut stored = group.clone();
-            stored.id = id;
-            groups.push(stored);
-            Ok(id)
-        } else if let Some(slot) = groups.iter_mut().find(|g| g.id == group.id) {
-            *slot = group.clone();
-            Ok(group.id)
-        } else {
-            Err(RepositoryError::NotFound)
-        }
     }
 
     fn upsert_connection(&self, conn: &Connection) -> Result<ConnectionId, RepositoryError> {
@@ -575,11 +555,6 @@ impl ConnectionRepository for InMemoryRepo {
         } else {
             Err(RepositoryError::NotFound)
         }
-    }
-
-    fn delete_group(&self, id: GroupId) -> Result<(), RepositoryError> {
-        self.groups.lock().unwrap().retain(|g| g.id != id);
-        Ok(())
     }
 
     fn delete_connection(&self, id: ConnectionId) -> Result<(), RepositoryError> {
@@ -603,6 +578,45 @@ impl ConnectionRepository for InMemoryRepo {
         Ok(())
     }
 
+    // --- Groups ---
+
+    fn list_groups(&self) -> Result<Vec<Group>, RepositoryError> {
+        Ok(self.groups.lock().unwrap().clone())
+    }
+
+    fn get_group(&self, id: GroupId) -> Result<Option<Group>, RepositoryError> {
+        Ok(self
+            .groups
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|g| g.id == id)
+            .cloned())
+    }
+
+    fn upsert_group(&self, group: &Group) -> Result<GroupId, RepositoryError> {
+        let mut groups = self.groups.lock().unwrap();
+        if group.id.is_unsaved() {
+            let mut next = self.next_group_id.lock().unwrap();
+            *next += 1;
+            let id = GroupId::new(*next);
+            let mut stored = group.clone();
+            stored.id = id;
+            groups.push(stored);
+            Ok(id)
+        } else if let Some(slot) = groups.iter_mut().find(|g| g.id == group.id) {
+            *slot = group.clone();
+            Ok(group.id)
+        } else {
+            Err(RepositoryError::NotFound)
+        }
+    }
+
+    fn delete_group(&self, id: GroupId) -> Result<(), RepositoryError> {
+        self.groups.lock().unwrap().retain(|g| g.id != id);
+        Ok(())
+    }
+
     fn move_group(
         &self,
         id: GroupId,
@@ -617,6 +631,82 @@ impl ConnectionRepository for InMemoryRepo {
         slot.parent_id = new_parent;
         slot.sort = new_sort;
         Ok(())
+    }
+
+    // --- Credentials (stubs — this fake does not store credentials) ---
+
+    fn list_credentials(&self) -> Result<Vec<Credential>, RepositoryError> {
+        Ok(Vec::new())
+    }
+
+    fn get_credential(&self, _id: CredentialId) -> Result<Option<Credential>, RepositoryError> {
+        Ok(None)
+    }
+
+    fn upsert_credential(&self, _cred: &Credential) -> Result<CredentialId, RepositoryError> {
+        Err(RepositoryError::Backend(
+            "not implemented in InMemoryRepo".into(),
+        ))
+    }
+
+    fn delete_credential(&self, _id: CredentialId) -> Result<(), RepositoryError> {
+        Ok(())
+    }
+
+    // --- Credential folders (stubs) ---
+
+    fn list_credential_folders(&self) -> Result<Vec<CredentialFolder>, RepositoryError> {
+        Ok(Vec::new())
+    }
+
+    fn get_credential_folder(
+        &self,
+        _id: CredentialFolderId,
+    ) -> Result<Option<CredentialFolder>, RepositoryError> {
+        Ok(None)
+    }
+
+    fn upsert_credential_folder(
+        &self,
+        _folder: &CredentialFolder,
+    ) -> Result<CredentialFolderId, RepositoryError> {
+        Err(RepositoryError::Backend(
+            "not implemented in InMemoryRepo".into(),
+        ))
+    }
+
+    fn delete_credential_folder(&self, _id: CredentialFolderId) -> Result<(), RepositoryError> {
+        Ok(())
+    }
+
+    fn move_credential_folder(
+        &self,
+        _id: CredentialFolderId,
+        _new_parent: Option<CredentialFolderId>,
+        _new_sort: i64,
+    ) -> Result<(), RepositoryError> {
+        Err(RepositoryError::NotFound)
+    }
+
+    // --- Inheritance resolution (stub) ---
+
+    fn resolve_effective_credential(
+        &self,
+        _conn_id: ConnectionId,
+    ) -> Result<Option<CredentialId>, RepositoryError> {
+        Ok(None)
+    }
+
+    // --- Settings (stubs) ---
+
+    fn get_setting(&self, _key: &str) -> Result<Option<String>, RepositoryError> {
+        Ok(None)
+    }
+
+    fn set_setting(&self, _key: &str, _value: &str) -> Result<(), RepositoryError> {
+        Err(RepositoryError::Backend(
+            "not implemented in InMemoryRepo".into(),
+        ))
     }
 }
 
