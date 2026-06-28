@@ -535,6 +535,40 @@ component CredTreeRow inherits Rectangle {
     }
 }
 
+// ── PaneSlot (P5.1) ────────────────────────────────────────────────────────
+// Wraps TerminalSurface with pane-index identity so multi-pane layouts can
+// track focus and route events per pane.  TerminalSurface internals are
+// FROZEN (P2.4); PaneSlot adds only an outer border + `pane-focused` routing.
+component PaneSlot inherits Rectangle {
+    in property <image>  frame;
+    in property <bool>   is-focused;
+    in property <int>    pane-index;
+    callback pane-focused(int);   // tell the parent which pane was clicked
+    callback key-input(string, int, int);
+    callback pointer(int, int, length, length, int);
+    callback scroll(length, length);
+    callback resized(length, length);
+    callback toggle-palette();
+
+    // Accent border on the focused pane; invisible otherwise.
+    border-width: root.is-focused ? 1.5px : 0px;
+    border-color: Theme.color-accent;
+    clip: true;
+
+    TerminalSurface {
+        width: 100%; height: 100%;
+        frame: root.frame;
+        key-input(t, s, m) => { root.key-input(t, s, m); }
+        pointer(b, k, x, y, m) => {
+            root.pane-focused(root.pane-index);
+            root.pointer(b, k, x, y, m);
+        }
+        scroll(dx, dy) => { root.scroll(dx, dy); }
+        resized(w, h)  => { root.resized(w, h); }
+        toggle-palette => { root.toggle-palette(); }
+    }
+}
+
 // ── AppWindow ──────────────────────────────────────────────────────────────
 export component AppWindow inherits Window {
     title: "ConMan";
@@ -575,6 +609,23 @@ export component AppWindow inherits Window {
     in property <string>  session-status: "disconnected";
     in property <string>  session-identity: "";
     in-out property <bool> broadcast-active: false;
+
+    // ── P5.1: Split panes ─────────────────────────────────────────────
+    // pane-layout: 0=single, 1=H-split (side by side), 2=V-split (stacked).
+    in property <int>    pane-layout: 0;
+    // Frame for the second pane (pane index 1); ignored when pane-layout==0.
+    in property <image>  pane-frame-2;
+    // Which pane is currently focused (0-based).
+    in-out property <int> active-pane: 0;
+    // Number of detached (background) sessions — shown in palette.
+    in property <int> detached-count: 0;
+    // Callbacks: split/close/focus/resize.
+    callback split-pane-h();
+    callback split-pane-v();
+    callback close-pane();
+    callback detach-session();
+    callback pane-focused(int);
+    callback pane-resized(int, length, length);
 
     // ── Command palette ───────────────────────────────────────────────
     in-out property <bool>           palette-open: false;
@@ -889,8 +940,9 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 horizontal-stretch: 1;
                 spacing: 0px;
-                // Terminal surface (P2.4; FROZEN — only shown when NOT an RDP tab).
-                if !rdp-active : TerminalSurface {
+
+                // ── Single-pane terminal (P2.4; FROZEN — pane-layout == 0, no RDP) ──
+                if !rdp-active && pane-layout == 0 : TerminalSurface {
                     vertical-stretch: 1;
                     frame: root.frame;
                     key-input(t, s, m) => { root.key-input(t, s, m); }
@@ -902,7 +954,85 @@ export component AppWindow inherits Window {
                         if (!root.palette-open) { root.palette-selected = 0; }
                     }
                 }
-                // RDP surface (P4.2; only shown when an RDP tab is active).
+
+                // ── H-split: two panes side by side (P5.1) ──────────────────────
+                if !rdp-active && pane-layout == 1 : HorizontalLayout {
+                    spacing: 0px;
+                    vertical-stretch: 1;
+                    PaneSlot {
+                        horizontal-stretch: 1; vertical-stretch: 1;
+                        frame: root.frame;
+                        is-focused: root.active-pane == 0;
+                        pane-index: 0;
+                        pane-focused(i) => { root.pane-focused(i); }
+                        key-input(t, s, m) => { root.key-input(t, s, m); }
+                        pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
+                        scroll(dx, dy) => { root.scroll(dx, dy); }
+                        resized(w, h) => { root.pane-resized(0, w, h); }
+                        toggle-palette => {
+                            root.palette-open = !root.palette-open;
+                            if (!root.palette-open) { root.palette-selected = 0; }
+                        }
+                    }
+                    // Hairline divider.
+                    Rectangle { width: 1px; vertical-stretch: 1; background: Theme.color-stroke; }
+                    PaneSlot {
+                        horizontal-stretch: 1; vertical-stretch: 1;
+                        frame: root.pane-frame-2;
+                        is-focused: root.active-pane == 1;
+                        pane-index: 1;
+                        pane-focused(i) => { root.pane-focused(i); }
+                        key-input(t, s, m) => { root.key-input(t, s, m); }
+                        pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
+                        scroll(dx, dy) => { root.scroll(dx, dy); }
+                        resized(w, h) => { root.pane-resized(1, w, h); }
+                        toggle-palette => {
+                            root.palette-open = !root.palette-open;
+                            if (!root.palette-open) { root.palette-selected = 0; }
+                        }
+                    }
+                }
+
+                // ── V-split: two panes stacked (P5.1) ───────────────────────────
+                if !rdp-active && pane-layout == 2 : VerticalLayout {
+                    spacing: 0px;
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    PaneSlot {
+                        horizontal-stretch: 1; vertical-stretch: 1;
+                        frame: root.frame;
+                        is-focused: root.active-pane == 0;
+                        pane-index: 0;
+                        pane-focused(i) => { root.pane-focused(i); }
+                        key-input(t, s, m) => { root.key-input(t, s, m); }
+                        pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
+                        scroll(dx, dy) => { root.scroll(dx, dy); }
+                        resized(w, h) => { root.pane-resized(0, w, h); }
+                        toggle-palette => {
+                            root.palette-open = !root.palette-open;
+                            if (!root.palette-open) { root.palette-selected = 0; }
+                        }
+                    }
+                    // Hairline divider.
+                    Rectangle { horizontal-stretch: 1; height: 1px; background: Theme.color-stroke; }
+                    PaneSlot {
+                        horizontal-stretch: 1; vertical-stretch: 1;
+                        frame: root.pane-frame-2;
+                        is-focused: root.active-pane == 1;
+                        pane-index: 1;
+                        pane-focused(i) => { root.pane-focused(i); }
+                        key-input(t, s, m) => { root.key-input(t, s, m); }
+                        pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
+                        scroll(dx, dy) => { root.scroll(dx, dy); }
+                        resized(w, h) => { root.pane-resized(1, w, h); }
+                        toggle-palette => {
+                            root.palette-open = !root.palette-open;
+                            if (!root.palette-open) { root.palette-selected = 0; }
+                        }
+                    }
+                }
+
+                // ── RDP surface (P4.2; only shown when an RDP tab is active) ────
                 if rdp-active : RdpSurface {
                     vertical-stretch: 1;
                     frame: root.rdp-frame;
@@ -912,6 +1042,8 @@ export component AppWindow inherits Window {
                     scroll(dx, dy)    => { root.scroll(dx, dy); }
                     resized(w, h)     => { root.surface-resized(w, h); }
                 }
+
+                // ── Broadcast bar (always visible when active; never silent) ────
                 if broadcast-active : Rectangle {
                     height: 46px;
                     background: Theme.color-elevated;
@@ -928,7 +1060,21 @@ export component AppWindow inherits Window {
                             font-weight: 600;
                             vertical-alignment: center;
                         }
+                        // Show target scope when split.
+                        if pane-layout != 0 : Text {
+                            text: "→ all panes";
+                            color: Theme.color-text-secondary;
+                            font-size: Theme.font-sm;
+                            font-family: Theme.font-family;
+                            vertical-alignment: center;
+                        }
                         Rectangle { horizontal-stretch: 1; }
+                        // Dismiss button.
+                        IconButton {
+                            glyph: "\u{E711}";
+                            size: 24px; glyph-size: 12px;
+                            clicked => { root.toggle-broadcast(); }
+                        }
                     }
                 }
             }
@@ -951,6 +1097,19 @@ export component AppWindow inherits Window {
                     }
                 }
                 Rectangle { horizontal-stretch: 1; }
+                // Broadcast indicator in the status bar (never silent).
+                if broadcast-active : Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    height: 18px;
+                    border-radius: Theme.radius-sm - 2px;
+                    background: Theme.color-broadcast-edge;
+                    HorizontalLayout {
+                        padding-left: Theme.space-2; padding-right: Theme.space-2;
+                        Text { text: "\u{E95A} BC"; color: Theme.color-base; font-size: Theme.font-xs;
+                            font-family: Theme.font-family-mono; font-weight: 700; vertical-alignment: center; }
+                    }
+                    TouchArea { clicked => { root.toggle-broadcast(); } }
+                }
                 Rectangle {
                     y: (parent.height - self.height) / 2;
                     height: 18px;
