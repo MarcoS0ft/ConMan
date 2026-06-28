@@ -26,6 +26,11 @@ use crate::{AppWindow, TabItem};
 const FONT_SIZE_PX: f32 = 15.0;
 /// Redraw cadence (~60 Hz) for coalescing snapshots and repainting the active tab.
 const REDRAW_INTERVAL: Duration = Duration::from_millis(16);
+/// Debounce window for committing a resize to the PTY/engine (B6). A live drag fires many
+/// `changed` events; we repaint immediately (B2/B3) but only push ONE `session.resize` for
+/// the settled size, so the shell gets a single SIGWINCH and its cursor tracks the final
+/// geometry — instead of an intermediate resize's redraw sticking.
+const RESIZE_DEBOUNCE: Duration = Duration::from_millis(90);
 /// Initial grid size before the surface reports its real dimensions.
 const INITIAL_SIZE: TerminalSize = TerminalSize { rows: 24, cols: 80 };
 
@@ -219,14 +224,34 @@ pub fn run() -> Result<(), slint::PlatformError> {
             }
         });
     }
-    // resize / scale change
+    // resize / scale change. Repaint immediately (B2/B3) on every event, but debounce the
+    // PTY/engine resize so only the settled geometry is committed (B6).
+    let resize_debounce = Rc::new(Timer::default());
     {
         let state = state.clone();
         let weak = ui.as_weak();
+        let debounce = resize_debounce.clone();
         ui.on_surface_resized(move |w, h| {
             if let Some(ui) = weak.upgrade() {
-                on_resize(&state, &ui, w, h);
+                // Immediate, cheap: record the new surface size + repaint the active tab's
+                // current snapshot 1:1 at the new size (no session work here).
+                let mut st = state.borrow_mut();
+                st.scale = ui.window().scale_factor();
+                st.surface_w = w;
+                st.surface_h = h;
+                trace(format_args!(
+                    "resize event  {w:.0}x{h:.0} logical (debouncing)"
+                ));
+                render_active(&mut st, &ui);
             }
+            // Debounced: (re)arm the single-shot timer; the last resize wins.
+            let state = state.clone();
+            let weak = weak.clone();
+            debounce.start(TimerMode::SingleShot, RESIZE_DEBOUNCE, move || {
+                if let Some(ui) = weak.upgrade() {
+                    apply_settled_resize(&state, &ui);
+                }
+            });
         });
     }
 
@@ -246,11 +271,15 @@ pub fn run() -> Result<(), slint::PlatformError> {
     // Optional headless test hooks (used by the xvfb screenshot gate).
     let mut hooks: Vec<Timer> = Vec::new();
     if let Ok(cmd) = std::env::var("CONMAN_AUTODRIVE") {
+        let delay = std::env::var("CONMAN_AUTODRIVE_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(800);
         let state = state.clone();
         let t = Timer::default();
         t.start(
             TimerMode::SingleShot,
-            Duration::from_millis(800),
+            Duration::from_millis(delay),
             move || {
                 let st = state.borrow();
                 if let Some(tab) = st.tabs.get(st.active) {
@@ -389,12 +418,17 @@ fn close_tab(
     render_active(&mut st, ui);
 }
 
-fn on_resize(state: &Rc<RefCell<State>>, ui: &AppWindow, w: f32, h: f32) {
-    let scale = ui.window().scale_factor();
+/// Commit the *settled* resize to every tab's PTY/engine + renderer (B6). Called from the
+/// debounce timer after a drag stops, using the current `surface_w/h/scale`, so exactly one
+/// `session.resize` is sent for the final geometry. Keeps PTY/engine/renderer/snapshot dims
+/// in lockstep, then re-renders so the cursor tracks the settled size.
+fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {
     let mut st = state.borrow_mut();
-    st.scale = scale;
-    st.surface_w = w;
-    st.surface_h = h;
+    let scale = st.scale;
+    let (w, h) = (st.surface_w, st.surface_h);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
     for tab in &mut st.tabs {
         if (tab.scale - scale).abs() > f32::EPSILON {
             tab.renderer.set_scale(FONT_SIZE_PX, scale);
@@ -405,13 +439,21 @@ fn on_resize(state: &Rc<RefCell<State>>, ui: &AppWindow, w: f32, h: f32) {
             tab.session.resize(size);
             tab.cols = size.cols;
             tab.rows = size.rows;
+            trace(format_args!(
+                "resize commit -> {}x{} cells (settled)",
+                size.cols, size.rows
+            ));
         }
     }
-    // B3: re-render the active tab's current snapshot at the new surface size *now*, in the
-    // same changed-handler turn, so the painted frame is never a stale buffer scaled to the
-    // new window (the engine's reflowed snapshot refines it on the next tick). Keeps the
-    // visible screen coherent and the cursor on its correct cell on shrink→grow.
     render_active(&mut st, ui);
+}
+
+/// Lightweight stderr tracing gated on `CONMAN_TRACE=1` (used to verify the resize-debounce
+/// collapses a storm of events into a single committed resize; no cost when unset).
+fn trace(args: std::fmt::Arguments) {
+    if std::env::var_os("CONMAN_TRACE").is_some() {
+        eprintln!("[conman] {args}");
+    }
 }
 
 fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppWindow) {

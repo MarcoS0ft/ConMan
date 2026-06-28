@@ -291,6 +291,17 @@ pub trait TerminalEngine {
     /// Encode a mouse event into bytes per the active mouse-tracking mode and
     /// format. Returns empty when no mouse mode is enabled.
     fn encode_mouse(&self, ev: &MouseEvent) -> Vec<u8>;
+
+    /// Drain any bytes the engine needs to write *back* to the PTY in reply to
+    /// host queries it processed during [`feed`](Self::feed) — e.g. a DSR
+    /// cursor-position report (`CSI 6 n`) or device attributes (`CSI c`). The
+    /// caller must forward these to the PTY. On Windows this is essential: the
+    /// ConPTY/conhost host issues `CSI 6 n` at startup and **stalls ~3 s**
+    /// waiting for the reply before emitting the shell prompt (P2.6/B7). The
+    /// default returns empty for engines that never produce replies.
+    fn take_responses(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

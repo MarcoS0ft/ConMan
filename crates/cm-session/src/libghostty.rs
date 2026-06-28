@@ -15,6 +15,9 @@
 //! `LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseSafe` to avoid a Debug-mode crash. See
 //! `docs/devel/AI_GUIDANCE.md` and the P0.2 verdict memo.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use cm_core::terminal::{
     Cell, CellAttrs, Color, CursorShape, CursorState, GridSnapshot, Key, KeyEvent, KeyModifiers,
     MouseAction, MouseButton, MouseEvent, TerminalEngine, TerminalSize,
@@ -52,6 +55,12 @@ pub enum EngineError {
 pub struct LibghosttyEngine {
     term: Terminal<'static, 'static>,
     size: TerminalSize,
+    /// Bytes the terminal wants written back to the PTY (replies to host
+    /// queries such as DSR/`CSI 6 n`). Filled by the `on_pty_write` callback
+    /// during `feed`; drained by [`take_responses`](TerminalEngine::take_responses).
+    /// Shared (`Rc`) because the callback and the engine both reference it; both
+    /// stay on the single owner thread, so `!Send` is fine.
+    responses: Rc<RefCell<Vec<u8>>>,
 }
 
 impl LibghosttyEngine {
@@ -61,13 +70,28 @@ impl LibghosttyEngine {
     /// Returns [`EngineError::Init`] if libghostty-vt cannot allocate the
     /// terminal (e.g. zero-sized grid or out of memory).
     pub fn new(size: TerminalSize) -> Result<Self, EngineError> {
-        let term = Terminal::new(Options {
+        let mut term = Terminal::new(Options {
             cols: size.cols,
             rows: size.rows,
             max_scrollback: DEFAULT_MAX_SCROLLBACK,
         })
         .map_err(|e| EngineError::Init(format!("{e:?}")))?;
-        Ok(Self { term, size })
+
+        // Capture the terminal's PTY-write replies (e.g. the DSR cursor-position
+        // report) so the session can forward them to the PTY. Required on Windows:
+        // ConPTY queries `CSI 6 n` at startup and stalls ~3 s if unanswered (B7).
+        let responses = Rc::new(RefCell::new(Vec::new()));
+        let sink = responses.clone();
+        term.on_pty_write(move |_term, data: &[u8]| {
+            sink.borrow_mut().extend_from_slice(data);
+        })
+        .map_err(|e| EngineError::Init(format!("on_pty_write: {e:?}")))?;
+
+        Ok(Self {
+            term,
+            size,
+            responses,
+        })
     }
 
     fn read_cell(&self, x: u16, y: u32) -> Cell {
@@ -203,6 +227,10 @@ impl TerminalEngine for LibghosttyEngine {
 
     fn encode_mouse(&self, ev: &MouseEvent) -> Vec<u8> {
         self.try_encode_mouse(ev).unwrap_or_default()
+    }
+
+    fn take_responses(&mut self) -> Vec<u8> {
+        std::mem::take(&mut *self.responses.borrow_mut())
     }
 }
 
@@ -391,6 +419,24 @@ mod tests {
 
     fn cell_at(snap: &GridSnapshot, row: u16, col: u16) -> &Cell {
         &snap.cells[usize::from(row) * usize::from(snap.size.cols) + usize::from(col)]
+    }
+
+    #[test]
+    fn dsr_cursor_position_report_is_answered() {
+        // B7: ConPTY/conhost sends `CSI 6 n` at startup and stalls ~3 s until the
+        // terminal replies with a cursor-position report. The engine must surface
+        // that reply via `take_responses` so the session can write it to the PTY.
+        let mut e = engine(24, 80);
+        assert!(e.take_responses().is_empty(), "no reply before any query");
+        // Move the cursor to row 3, col 5 (1-based CSI), then request CPR.
+        e.feed(b"\x1b[3;5H\x1b[6n");
+        let reply = e.take_responses();
+        assert_eq!(
+            reply, b"\x1b[3;5R",
+            "expected a CPR for the current cursor cell"
+        );
+        // Draining is one-shot.
+        assert!(e.take_responses().is_empty());
     }
 
     #[test]

@@ -119,16 +119,27 @@ impl LocalTerminalSession {
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<GridSnapshot>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), EngineError>>();
 
+        // B7 startup-latency instrumentation (gated on CONMAN_TIMING; see `timing`).
+        let start = std::time::Instant::now();
+
         let reader_tx = control_tx.clone();
         let reader_handle = thread::Builder::new()
             .name("pty-reader".to_owned())
-            .spawn(move || reader_loop(reader, &reader_tx))
+            .spawn(move || reader_loop(reader, &reader_tx, start))
             .map_err(SessionError::Thread)?;
 
         let owner_handle = thread::Builder::new()
             .name("vt-engine-owner".to_owned())
             .spawn(move || {
-                owner_loop(size, master, writer, &control_rx, &snapshot_tx, &ready_tx);
+                owner_loop(
+                    size,
+                    master,
+                    writer,
+                    &control_rx,
+                    &snapshot_tx,
+                    &ready_tx,
+                    start,
+                );
             })
             .map_err(SessionError::Thread)?;
 
@@ -259,13 +270,40 @@ fn build_command(cfg: &LocalSettings) -> CommandBuilder {
     cmd
 }
 
+/// Emit a B7 startup-timing marker on stderr when `CONMAN_TIMING` is set (no cost otherwise).
+fn timing(start: std::time::Instant, stage: &str) {
+    if std::env::var_os("CONMAN_TIMING").is_some() {
+        eprintln!(
+            "[timing] {:>8.1} ms  {stage}",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
 /// PTY reader thread: forward output chunks until EOF or error.
-fn reader_loop(mut reader: Box<dyn Read + Send>, control_tx: &Sender<Msg>) {
+fn reader_loop(
+    mut reader: Box<dyn Read + Send>,
+    control_tx: &Sender<Msg>,
+    start: std::time::Instant,
+) {
     let mut buf = [0u8; READ_BUF_LEN];
+    let mut first = true;
+    let dump_raw = std::env::var_os("CONMAN_TIMING_RAW").is_some();
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF: child exited / PTY closed
             Ok(n) => {
+                if first {
+                    timing(start, &format!("reader: first PTY read ({n} bytes)"));
+                    first = false;
+                }
+                if dump_raw {
+                    let hex: String = buf[..n.min(64)]
+                        .iter()
+                        .map(|b| format!("{b:02x} "))
+                        .collect();
+                    timing(start, &format!("reader chunk ({n} bytes): {hex}"));
+                }
                 if control_tx.send(Msg::PtyBytes(buf[..n].to_vec())).is_err() {
                     break; // owner gone
                 }
@@ -285,6 +323,7 @@ fn owner_loop(
     control_rx: &Receiver<Msg>,
     snapshot_tx: &Sender<GridSnapshot>,
     ready_tx: &Sender<Result<(), EngineError>>,
+    start: std::time::Instant,
 ) {
     let mut engine = match LibghosttyEngine::new(size) {
         Ok(engine) => {
@@ -296,12 +335,28 @@ fn owner_loop(
             return;
         }
     };
+    timing(start, "owner: engine ready");
+    let mut logged_feed = false;
+    let mut logged_nonempty = false;
 
     while let Ok(msg) = control_rx.recv() {
         match msg {
             Msg::PtyBytes(bytes) => {
+                if !logged_feed {
+                    timing(start, &format!("owner: first feed ({} bytes)", bytes.len()));
+                    logged_feed = true;
+                }
                 engine.feed(&bytes);
-                if snapshot_tx.send(engine.snapshot()).is_err() {
+                // Forward any replies the engine produced to host queries (e.g. the
+                // DSR cursor-position report). ConPTY/conhost blocks ~3 s at startup
+                // waiting for these before emitting the shell prompt (B7).
+                write_all(&mut writer, &engine.take_responses());
+                let snap = engine.snapshot();
+                if !logged_nonempty && snap.cells.iter().any(|c| !c.grapheme.is_empty()) {
+                    timing(start, "owner: first NON-EMPTY snapshot");
+                    logged_nonempty = true;
+                }
+                if snapshot_tx.send(snap).is_err() {
                     break; // consumer gone
                 }
             }
@@ -486,6 +541,187 @@ mod tests {
         assert!(
             done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
             "shutdown() hung"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod resize_storm_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn sh() -> LocalSettings {
+        LocalSettings {
+            program: Some("sh".to_owned()),
+            args: Vec::new(),
+            working_dir: None,
+            env: Vec::new(),
+        }
+    }
+
+    /// A burst of resizes with no gaps (a "resize storm") must leave the engine snapshot at
+    /// the **last** requested size — confirms the session layer is last-write-wins, so B6's
+    /// stale-size symptom is fixed at the controller (resize debouncing), not here.
+    #[test]
+    fn last_resize_in_a_storm_wins() {
+        let s = LocalTerminalSession::spawn(&sh(), TerminalSize { rows: 24, cols: 80 }).unwrap();
+        // Fire a burst with no delay between requests.
+        for (rows, cols) in [(10, 40), (40, 120), (12, 50), (30, 100)] {
+            s.resize(TerminalSize { rows, cols });
+        }
+        let final_size = TerminalSize {
+            rows: 30,
+            cols: 100,
+        };
+        // Drain snapshots for a moment; the last one must reflect the final requested size.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut last = None;
+        while Instant::now() < deadline {
+            match s.snapshots().recv_timeout(Duration::from_millis(200)) {
+                Ok(snap) => last = Some(snap.size),
+                Err(_) => break,
+            }
+        }
+        assert_eq!(
+            last,
+            Some(final_size),
+            "engine grid must settle at the last resize"
+        );
+        s.shutdown();
+    }
+}
+
+/// B7 startup-latency profiling (cross-platform: uses the OS default shell so it runs on
+/// Windows/ConPTY too). Run explicitly with `--ignored --nocapture`; set `CONMAN_TIMING=1`
+/// for the per-stage breakdown. Measures spawn → first non-empty snapshot, isolating the
+/// session/PTY layer from the GUI/render path.
+#[cfg(test)]
+mod startup_timing {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Spawn one session and return `(time spawn() returned, time-to-first-non-empty-snapshot,
+    /// the live session)`. Both durations are measured from `t0` (set at the call site so the
+    /// per-spawn cost is isolated). The session is returned alive so the caller decides when to
+    /// shut it down — keeping prior sessions alive reproduces the "pre-warm still running" case.
+    /// Build the probe shell config. Defaults to the OS shell, but `CONMAN_PROBE_PROG`
+    /// (program) + `CONMAN_PROBE_ARGS` (`;`-separated) override it, so the same timing
+    /// harness can localize the ConPTY lag across programs (e.g. interactive `cmd` vs
+    /// `cmd /c echo` vs a different shell) without code changes.
+    fn probe_settings() -> LocalSettings {
+        match std::env::var("CONMAN_PROBE_PROG") {
+            Ok(prog) if !prog.is_empty() => LocalSettings {
+                program: Some(prog),
+                args: std::env::var("CONMAN_PROBE_ARGS")
+                    .ok()
+                    .map(|a| {
+                        a.split(';')
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                working_dir: None,
+                env: Vec::new(),
+            },
+            _ => LocalSettings::default(),
+        }
+    }
+
+    fn measure_first_nonempty(
+        size: TerminalSize,
+    ) -> (Duration, Option<Duration>, LocalTerminalSession) {
+        let t0 = Instant::now();
+        let s = LocalTerminalSession::spawn(&probe_settings(), size).expect("spawn");
+        let spawned = t0.elapsed();
+        // Diagnostic poke: write to the PTY immediately after spawn to test whether conhost
+        // gates its first output flush on input/handshake activity (set CONMAN_PROBE_POKE).
+        if std::env::var_os("CONMAN_PROBE_POKE").is_some() {
+            s.paste(b"\r".to_vec());
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut first_nonempty = None;
+        while Instant::now() < deadline {
+            if let Ok(snap) = s.snapshots().recv_timeout(Duration::from_millis(250))
+                && snap.cells.iter().any(|c| !c.grapheme.is_empty())
+            {
+                first_nonempty = Some(t0.elapsed());
+                break;
+            }
+        }
+        (spawned, first_nonempty, s)
+    }
+
+    fn fmt_ms(d: Option<Duration>) -> String {
+        d.map(|d| format!("{:.1} ms", d.as_secs_f64() * 1000.0))
+            .unwrap_or_else(|| "NEVER (timed out)".to_string())
+    }
+
+    #[test]
+    #[ignore = "B7 profiling aid; run with --ignored --nocapture (optionally CONMAN_TIMING=1)"]
+    fn time_to_first_nonempty_snapshot() {
+        let size = TerminalSize {
+            rows: 30,
+            cols: 100,
+        };
+        let (spawned, first_nonempty, s) = measure_first_nonempty(size);
+        eprintln!(
+            "[B7] spawn() returned at {:.1} ms; first NON-EMPTY snapshot at {}",
+            spawned.as_secs_f64() * 1000.0,
+            fmt_ms(first_nonempty)
+        );
+        assert!(first_nonempty.is_some(), "no shell output within 15s");
+        s.shutdown();
+    }
+
+    /// B7 cold-start-vs-per-spawn determination: spawn several sessions back-to-back **in one
+    /// process**, keeping each alive, and report each one's time-to-first-non-empty-snapshot.
+    /// On Windows this localizes the ~3 s ConPTY/conhost lag:
+    /// - if only spawn #1 is slow and #2.. are fast → a **one-time cold start** (pre-warmable:
+    ///   spawn a throwaway session at app launch so the first real tab is instant);
+    /// - if every spawn is slow → a **per-spawn** conhost cost (pre-warming a single throwaway
+    ///   won't help the 2nd+ tab; see the task report for options).
+    #[test]
+    #[ignore = "B7 cold-start probe; run with --ignored --nocapture (optionally CONMAN_TIMING=1)"]
+    fn back_to_back_spawns_cold_start_vs_per_spawn() {
+        let size = TerminalSize {
+            rows: 30,
+            cols: 100,
+        };
+        const N: usize = 5;
+        let mut sessions = Vec::with_capacity(N);
+        let mut firsts = Vec::with_capacity(N);
+        for i in 0..N {
+            let (spawned, first_nonempty, s) = measure_first_nonempty(size);
+            eprintln!(
+                "[B7] spawn #{i}: spawn() returned at {:.1} ms; first NON-EMPTY snapshot at {}",
+                spawned.as_secs_f64() * 1000.0,
+                fmt_ms(first_nonempty)
+            );
+            firsts.push(first_nonempty);
+            sessions.push(s);
+        }
+        let verdict = match (firsts.first().copied().flatten(), firsts.get(1..)) {
+            (Some(first), Some(rest)) if !rest.is_empty() => {
+                let rest_max = rest
+                    .iter()
+                    .filter_map(|d| *d)
+                    .fold(Duration::ZERO, Duration::max);
+                if first.as_secs_f64() > 0.5 && rest_max.as_secs_f64() * 2.0 < first.as_secs_f64() {
+                    "COLD-START (one-time; pre-warmable)"
+                } else {
+                    "PER-SPAWN (each spawn pays the cost)"
+                }
+            }
+            _ => "INCONCLUSIVE",
+        };
+        eprintln!("[B7] verdict: {verdict}");
+        for s in sessions {
+            s.shutdown();
+        }
+        assert!(
+            firsts.iter().all(Option::is_some),
+            "some spawn produced no shell output within 15s"
         );
     }
 }
