@@ -232,6 +232,53 @@ pub trait Session: Send {
 // Terminal-specific trait (P3.x; kept for backward-compat)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// FailedSession (P5.3 carry-over fix b)
+// ---------------------------------------------------------------------------
+
+/// A sentinel [`Session`] that immediately reports `Failed`.
+///
+/// Used when a synchronous connection error prevents spawning a real session
+/// thread — the UI receives a proper tab with an error overlay rather than
+/// a silent `eprintln!` (carry-over fix b).
+///
+/// The surface channel is a permanently-closed `Receiver<GridSnapshot>`:
+/// the tick loop will drain nothing and the tab is auto-closed after the
+/// user dismisses the error overlay.
+#[derive(Debug)]
+pub struct FailedSession {
+    reason: String,
+    surface: Surface,
+}
+
+impl FailedSession {
+    /// Create a session that always reports `Failed(reason)`.
+    pub fn new(reason: impl Into<String>) -> Self {
+        let (_tx, rx) = std::sync::mpsc::channel::<GridSnapshot>();
+        // `_tx` is dropped immediately — the receiver will return `Err` on any
+        // recv call, which is exactly what a permanently-closed channel does.
+        Self {
+            reason: reason.into(),
+            surface: Surface::TerminalGrid(rx),
+        }
+    }
+}
+
+impl Session for FailedSession {
+    fn surface(&self) -> &Surface {
+        &self.surface
+    }
+
+    fn status(&self) -> SessionStatus {
+        SessionStatus::Failed(self.reason.clone())
+    }
+
+    fn shutdown(&self) {}
+    fn resize_px(&self, _width: u32, _height: u32) {}
+    fn resize_cells(&self, _cols: u16, _rows: u16) {}
+    fn send_input(&self, _input: SessionInput) {}
+}
+
 /// A live terminal session over some byte-stream transport.
 ///
 /// The handle is `Send` (it holds only channels + state); the `!Send` VT engine

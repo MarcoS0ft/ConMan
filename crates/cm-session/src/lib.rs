@@ -18,8 +18,8 @@ pub use pane::{PaneGroup, PaneLayout};
 
 mod session;
 pub use session::{
-    ExitStatus, FrameUpdate, RdpInputEvent, RdpMouseButton, Session, SessionInput, SessionStatus,
-    Surface, TerminalSession,
+    ExitStatus, FailedSession, FrameUpdate, RdpInputEvent, RdpMouseButton, Session, SessionInput,
+    SessionStatus, Surface, TerminalSession,
 };
 
 mod rdp;
