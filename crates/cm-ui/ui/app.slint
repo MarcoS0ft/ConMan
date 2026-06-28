@@ -1097,6 +1097,22 @@ export component AppWindow inherits Window {
                     }
                 }
                 Rectangle { horizontal-stretch: 1; }
+                // Detached-session badge: click to open palette filtered to "reattach".
+                if detached-count > 0 : Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    height: 18px;
+                    border-radius: Theme.radius-sm - 2px;
+                    background: Theme.color-elevated;
+                    HorizontalLayout {
+                        padding-left: Theme.space-2; padding-right: Theme.space-2;
+                        spacing: Theme.space-1;
+                        Text { text: "\u{E8FB}"; color: Theme.color-text-secondary; font-size: Theme.font-xs;
+                            font-family: Theme.font-family-mono; vertical-alignment: center; }
+                        Text { text: detached-count + " detached"; color: Theme.color-text-secondary;
+                            font-size: Theme.font-xs; font-family: Theme.font-family; vertical-alignment: center; }
+                    }
+                    TouchArea { clicked => { root.open-palette(); } }
+                }
                 // Broadcast indicator in the status bar (never silent).
                 if broadcast-active : Rectangle {
                     y: (parent.height - self.height) / 2;

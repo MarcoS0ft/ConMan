@@ -604,7 +604,35 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                         ui.set_broadcast_active(!ui.get_broadcast_active());
                         return;
                     }
-                    // Ctrl+Shift+Left → focus pane left.
+                    // Ctrl+Shift+Up → focus pane up (prev; intuitive for VSplit).
+                    (5, _) => {
+                        let new_focus = {
+                            let mut st = state.borrow_mut();
+                            let active = st.active;
+                            if let Some(tab) = st.tabs.get_mut(active) {
+                                tab.pane_group.focus_move(-1)
+                            } else {
+                                return;
+                            }
+                        };
+                        ui.set_active_pane(new_focus as i32);
+                        return;
+                    }
+                    // Ctrl+Shift+Down → focus pane down (next; intuitive for VSplit).
+                    (6, _) => {
+                        let new_focus = {
+                            let mut st = state.borrow_mut();
+                            let active = st.active;
+                            if let Some(tab) = st.tabs.get_mut(active) {
+                                tab.pane_group.focus_move(1)
+                            } else {
+                                return;
+                            }
+                        };
+                        ui.set_active_pane(new_focus as i32);
+                        return;
+                    }
+                    // Ctrl+Shift+Left → focus pane left (prev; intuitive for HSplit).
                     (7, _) => {
                         let new_focus = {
                             let mut st = state.borrow_mut();
@@ -618,7 +646,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                         ui.set_active_pane(new_focus as i32);
                         return;
                     }
-                    // Ctrl+Shift+Right → focus pane right.
+                    // Ctrl+Shift+Right → focus pane right (next; intuitive for HSplit).
                     (8, _) => {
                         let new_focus = {
                             let mut st = state.borrow_mut();
@@ -655,16 +683,21 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                 if evs.is_empty() {
                     return;
                 }
-                // ── Broadcast: fan to all pane sessions ──────────────────────
+                // ── Broadcast: fan to ALL pane sessions ──────────────────────
                 if ui.get_broadcast_active() {
-                    // Send to extra panes first, then the primary.
+                    // Send to primary + every extra pane.  The focused pane is
+                    // already covered here, so we return to avoid a double-send.
+                    for ev in &evs {
+                        tab.session.send_input(ev.clone());
+                    }
                     for ep in &tab.extra_panes {
                         for ev in &evs {
                             ep.session.send_input(ev.clone());
                         }
                     }
+                    return;
                 }
-                // Always send to the focused pane.
+                // Not broadcasting — send only to the focused pane.
                 let focused = tab.pane_group.focused();
                 if focused == 0 {
                     for ev in evs {
@@ -816,8 +849,19 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
 
     ui.on_open_palette({
         let weak = ui.as_weak();
+        let pal_model = palette_model.clone();
+        let state = state.clone();
         move || {
             if let Some(ui) = weak.upgrade() {
+                // Rebuild with current detached sessions so "Reattach: …" entries appear.
+                let labels: Vec<String> = state
+                    .borrow()
+                    .detached
+                    .iter()
+                    .map(|d| d.label.clone())
+                    .collect();
+                let q = ui.get_palette_query();
+                rebuild_palette_model(&pal_model, &q, &labels);
                 ui.set_palette_selected(0);
                 ui.set_palette_open(true);
             }
@@ -1163,8 +1207,15 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     ui.on_palette_edited({
         let weak = ui.as_weak();
         let pal_model = palette_model.clone();
+        let state = state.clone();
         move |query| {
-            rebuild_palette_model(&pal_model, &query);
+            let labels: Vec<String> = state
+                .borrow()
+                .detached
+                .iter()
+                .map(|d| d.label.clone())
+                .collect();
+            rebuild_palette_model(&pal_model, &query, &labels);
             if let Some(ui) = weak.upgrade() {
                 ui.set_palette_query(query);
                 ui.set_palette_selected(0);
@@ -3098,8 +3149,12 @@ fn resolve_cred_from_idx(
 // Command palette helpers
 // ---------------------------------------------------------------------------
 
-fn rebuild_palette_model(pal_model: &Rc<VecModel<PaletteAction>>, query: &SharedString) {
-    let filtered = filter_palette_actions(query.as_str());
+fn rebuild_palette_model(
+    pal_model: &Rc<VecModel<PaletteAction>>,
+    query: &SharedString,
+    detached_labels: &[String],
+) {
+    let filtered = filter_palette_actions(query.as_str(), detached_labels);
     while pal_model.row_count() > 0 {
         pal_model.remove(0);
     }
@@ -3149,14 +3204,26 @@ fn handle_palette_key(
                 s
             };
             let new_q = SharedString::from(new_q.as_str());
-            rebuild_palette_model(pal_model, &new_q);
+            let labels: Vec<String> = state
+                .borrow()
+                .detached
+                .iter()
+                .map(|d| d.label.clone())
+                .collect();
+            rebuild_palette_model(pal_model, &new_q, &labels);
             ui.set_palette_query(new_q);
             ui.set_palette_selected(0);
         }
         0 if mods & 0b1001 == 0 && !text.is_empty() => {
             let q = ui.get_palette_query();
             let new_q = SharedString::from(format!("{}{}", q.as_str(), text.as_str()).as_str());
-            rebuild_palette_model(pal_model, &new_q);
+            let labels: Vec<String> = state
+                .borrow()
+                .detached
+                .iter()
+                .map(|d| d.label.clone())
+                .collect();
+            rebuild_palette_model(pal_model, &new_q, &labels);
             ui.set_palette_query(new_q);
             ui.set_palette_selected(0);
         }
@@ -3337,8 +3404,21 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
     ]
 }
 
-fn filter_palette_actions(query: &str) -> Vec<PaletteAction> {
-    let all = initial_palette_actions();
+fn filter_palette_actions(query: &str, detached_labels: &[String]) -> Vec<PaletteAction> {
+    // Build the full list: static actions + one "Reattach: <label>" per detached session.
+    let mut all = initial_palette_actions();
+    for (i, label) in detached_labels.iter().enumerate() {
+        all.push(PaletteAction {
+            category: SharedString::from("SESSIONS"),
+            first_in_group: i == 0,
+            label: SharedString::from(format!("Reattach: {label}").as_str()),
+            detail: SharedString::from("Restore detached session to a new tab"),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{E8FB}"),
+            status: SharedString::from(""),
+            selected: false,
+        });
+    }
     if query.is_empty() {
         return all;
     }
@@ -3397,7 +3477,7 @@ mod tests {
 
     #[test]
     fn palette_filter_empty_query_returns_all() {
-        let all = filter_palette_actions("");
+        let all = filter_palette_actions("", &[]);
         let initial = initial_palette_actions();
         assert_eq!(all.len(), initial.len());
         for (a, b) in all.iter().zip(initial.iter()) {
@@ -3407,7 +3487,7 @@ mod tests {
 
     #[test]
     fn palette_filter_no_match_returns_empty() {
-        let result = filter_palette_actions("xyzzy_no_such_action");
+        let result = filter_palette_actions("xyzzy_no_such_action", &[]);
         assert!(result.is_empty());
     }
 
@@ -3419,24 +3499,47 @@ mod tests {
 
     #[test]
     fn palette_filter_narrows_by_label() {
-        let result = filter_palette_actions("sidebar");
+        let result = filter_palette_actions("sidebar", &[]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label.as_str(), "Toggle sidebar");
     }
 
     #[test]
     fn palette_filter_first_row_always_has_group_header() {
-        let result = filter_palette_actions("tab");
+        let result = filter_palette_actions("tab", &[]);
         assert!(!result.is_empty(), "expected at least one result for 'tab'");
         assert!(result[0].first_in_group);
     }
 
     #[test]
+    fn palette_filter_includes_reattach_entries() {
+        let labels = vec!["server1".to_owned(), "server2".to_owned()];
+        let all = filter_palette_actions("", &labels);
+        let reattach: Vec<_> = all
+            .iter()
+            .filter(|a| a.label.as_str().starts_with("Reattach: "))
+            .collect();
+        assert_eq!(reattach.len(), 2);
+        assert_eq!(reattach[0].label.as_str(), "Reattach: server1");
+        assert_eq!(reattach[0].category.as_str(), "SESSIONS");
+        assert!(reattach[0].first_in_group);
+        assert!(!reattach[1].first_in_group);
+    }
+
+    #[test]
+    fn palette_filter_reattach_matches_query() {
+        let labels = vec!["prod-server".to_owned(), "staging".to_owned()];
+        let result = filter_palette_actions("prod", &labels);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].label.as_str(), "Reattach: prod-server");
+    }
+
+    #[test]
     fn rebuild_palette_model_replaces_not_appends() {
         let model: Rc<VecModel<PaletteAction>> = Rc::new(VecModel::default());
-        rebuild_palette_model(&model, &SharedString::from(""));
+        rebuild_palette_model(&model, &SharedString::from(""), &[]);
         let first_count = model.row_count();
-        rebuild_palette_model(&model, &SharedString::from(""));
+        rebuild_palette_model(&model, &SharedString::from(""), &[]);
         assert_eq!(model.row_count(), first_count);
     }
 
