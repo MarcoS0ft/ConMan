@@ -33,5 +33,20 @@ slint = { version = "1.17", default-features = false, features = [
 # place ghostty-vt.dll next to conman.exe on Windows. Pinned to match the engine.
 libghostty-vt-sys = "=0.2.0"
 
+# ── Keyring: platform-native backend for each OS (P5.4) ──────────────────────
+# Feature unification: these add to the features keyring is compiled with.
+# cm-secrets uses keyring with no features (mock-only for tests/CI); the binary
+# opts in to the real OS backend here.  Graceful fallback: init_keyring() falls
+# back to the mock backend if the native backend returns an error (e.g. headless
+# CI with no display, broken Secret Service socket).
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6", features = ["linux-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6", features = ["windows-native"] }
+
 [lints]
 workspace = true

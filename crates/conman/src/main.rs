@@ -22,6 +22,12 @@ use cm_ui::AppConfig;
 use slint as _;
 
 fn main() -> ExitCode {
+    // Install the platform-native keyring backend before any KeyringStore is
+    // constructed.  Falls back to the in-memory mock backend if the native
+    // backend is unavailable (headless CI, missing daemon, etc.) so startup
+    // never fails due to keychain issues.
+    init_keyring();
+
     let config = match build_config() {
         Ok(c) => c,
         Err(e) => {
@@ -35,6 +41,28 @@ fn main() -> ExitCode {
             eprintln!("conman: fatal: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Install the OS-native keyring credential builder (P5.4).
+///
+/// Uses kernel keyutils on Linux (no daemon required), macOS Keychain, and
+/// Windows Credential Manager.  If the native builder is unavailable (e.g. no
+/// display in headless CI, or a missing/broken daemon) we fall back to the
+/// in-memory mock backend so the application still starts and credentials are
+/// kept for the session duration.
+fn init_keyring() {
+    #[cfg(target_os = "linux")]
+    {
+        keyring::set_default_credential_builder(keyring::keyutils::default_credential_builder());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        keyring::set_default_credential_builder(keyring::macos::default_credential_builder());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        keyring::set_default_credential_builder(keyring::windows::default_credential_builder());
     }
 }
 
