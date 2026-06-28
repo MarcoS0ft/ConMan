@@ -13,6 +13,9 @@
 //! The libghostty engine requires the zig 0.15.2 toolchain; see
 //! `docs/devel/AI_GUIDANCE.md`.
 
+mod pane;
+pub use pane::{PaneGroup, PaneLayout};
+
 mod session;
 pub use session::{
     ExitStatus, FrameUpdate, RdpInputEvent, RdpMouseButton, Session, SessionInput, SessionStatus,
