@@ -8,35 +8,71 @@ import { Theme } from "../theme.slint";
 import { PrimaryButton, SecondaryButton } from "../components.slint";
 
 // ── ConnectingOverlay ─────────────────────────────────────────────────────────
-// Spinner + "Connecting to user@host…" + a step checklist driven by Rust.
+// 8-dot orbital spinner + "Connecting to user@host…" + a step checklist driven by Rust.
 //   step: 0 resolving · 1 tcp · 2 auth  (steps below `step` show done, `step` is active)
+//
+// Spinner note: rotation-angle is only valid on Image in Slint 1.17; we use an
+// 8-dot-on-ring approach driven by a Timer-cycled integer (0-7) instead.
 export component ConnectingOverlay inherits Rectangle {
     in property <string> identity: "ops@web-prod-01";
     in property <int>    step: 2;
-    property <angle>     spin: 0deg;
+    // Spinner state: 0-7 cycles clockwise through eight orbital dot positions.
+    property <int> spin-tick: 0;
 
     background: Theme.color-terminal-bg;
 
-    // Continuous spinner.
+    // ── 8-dot orbital spinner (r=15px, 40×40 container, dots 5×5px) ──────────
+    // Positions (top-left of 5×5 dot) for N, NE, E, SE, S, SW, W, NW on a 15px radius
+    // centered at (20, 20) in the 40px container. Alpha trail: head=1.0, -1=0.65, -2=0.35,
+    // dim=0.12. Conditions are spelled out per dot to avoid needing mod() in property exprs.
     Rectangle {
         width: 40px; height: 40px;
         x: (parent.width - self.width) / 2;
         y: (parent.height / 2) - 60px;
-        rot := Rectangle {
-            width: 100%; height: 100%;
-            border-width: 3px;
-            border-radius: 20px;
-            border-color: Theme.color-accent.with-alpha(0.2);
-            // Accent arc (top) gives the rotation something visible.
-            Rectangle { width: 100%; height: 50%; y: 0px; clip: true;
-                Rectangle { width: 100%; height: 200%; border-width: 3px; border-radius: 20px;
-                    border-color: transparent; }
-            }
-            rotation-angle: root.spin;
-        }
+        // N  (0°)   center=(20, 5)
+        Rectangle { width: 5px; height: 5px; border-radius: 2.5px; x: 17px; y: 2px;
+            background: Theme.color-accent.with-alpha(
+                root.spin-tick == 0 ? 1.0 : root.spin-tick == 1 ? 0.65
+                    : root.spin-tick == 2 ? 0.35 : 0.12); }
+        // NE (45°)  center=(30.6, 9.4)
+        Rectangle { width: 5px; height: 5px; border-radius: 2.5px; x: 28px; y: 7px;
+            background: Theme.color-accent.with-alpha(
+                root.spin-tick == 1 ? 1.0 : root.spin-tick == 2 ? 0.65
+                    : root.spin-tick == 3 ? 0.35 : 0.12); }
+        // E  (90°)  center=(35, 20)
+        Rectangle { width: 5px; height: 5px; border-radius: 2.5px; x: 32px; y: 17px;
+            background: Theme.color-accent.with-alpha(
+                root.spin-tick == 2 ? 1.0 : root.spin-tick == 3 ? 0.65
+                    : root.spin-tick == 4 ? 0.35 : 0.12); }
+        // SE (135°) center=(30.6, 30.6)
+        Rectangle { width: 5px; height: 5px; border-radius: 2.5px; x: 28px; y: 28px;
+            background: Theme.color-accent.with-alpha(
+                root.spin-tick == 3 ? 1.0 : root.spin-tick == 4 ? 0.65
+                    : root.spin-tick == 5 ? 0.35 : 0.12); }
+        // S  (180°) center=(20, 35)
+        Rectangle { width: 5px; height: 5px; border-radius: 2.5px; x: 17px; y: 32px;
+            background: Theme.color-accent.with-alpha(
+                root.spin-tick == 4 ? 1.0 : root.spin-tick == 5 ? 0.65
+                    : root.spin-tick == 6 ? 0.35 : 0.12); }
+        // SW (225°) center=(9.4, 30.6)
+        Rectangle { width: 5px; height: 5px; border-radius: 2.5px; x: 7px; y: 28px;
+            background: Theme.color-accent.with-alpha(
+                root.spin-tick == 5 ? 1.0 : root.spin-tick == 6 ? 0.65
+                    : root.spin-tick == 7 ? 0.35 : 0.12); }
+        // W  (270°) center=(5, 20)
+        Rectangle { width: 5px; height: 5px; border-radius: 2.5px; x: 2px; y: 17px;
+            background: Theme.color-accent.with-alpha(
+                root.spin-tick == 6 ? 1.0 : root.spin-tick == 7 ? 0.65
+                    : root.spin-tick == 0 ? 0.35 : 0.12); }
+        // NW (315°) center=(9.4, 9.4)
+        Rectangle { width: 5px; height: 5px; border-radius: 2.5px; x: 7px; y: 7px;
+            background: Theme.color-accent.with-alpha(
+                root.spin-tick == 7 ? 1.0 : root.spin-tick == 0 ? 0.65
+                    : root.spin-tick == 1 ? 0.35 : 0.12); }
     }
-    // Drive the spinner from an animation tick.
-    Timer { interval: 16ms; running: true; triggered => { root.spin += 6deg; } }
+    // Advance the spinner head one position every 80ms (≈ 8 fps full orbit).
+    Timer { interval: 80ms; running: true;
+        triggered => { root.spin-tick = root.spin-tick >= 7 ? 0 : root.spin-tick + 1; } }
 
     VerticalLayout {
         alignment: center;

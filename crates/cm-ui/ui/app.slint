@@ -21,6 +21,11 @@ import { ListView, Palette } from "std-widgets.slint";
 import { Modal } from "screens/dialogs.slint";
 import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
 import { SettingsPanel } from "screens/settings_panel.slint";
+// Session-state overlays (connecting / error) and the launchpad (empty-tab home screen).
+// These are compiled via the imports; gated by bools on AppWindow so they're always in the
+// compile graph but only visible when needed.
+import { ConnectingOverlay, ErrorOverlay } from "screens/session_overlays.slint";
+import { Launchpad, RecentItem } from "screens/launchpad.slint";
 
 // ── Models ────────────────────────────────────────────────────────────────────
 // One tab = a pane group. `status` summarises the group (worst-of); `pane-count` drives
@@ -301,6 +306,22 @@ export component AppWindow inherits Window {
     // and resets it to 0 on each palette-edited call.
     in-out property <int>              palette-selected: 0;
 
+    // Session-state overlays (gated — default hidden; P3.2 drives these from tab state).
+    in-out property <bool>   overlay-connecting: false;
+    in-out property <bool>   overlay-error: false;
+    in-out property <bool>   launchpad-open: false;
+    in property <int>        connecting-step: 0;
+    in property <string>     error-reason: "";
+    in property <string>     error-detail: "";
+    in property <[RecentItem]> launchpad-recents;
+    in-out property <string> launchpad-query: "";
+    // Fired by ErrorOverlay Reconnect button; P3.2 re-establishes the session.
+    callback reconnect();
+    // Launchpad search / recent-item callbacks; P3.2 wires real connection data.
+    callback launchpad-edited(string);
+    callback open-recent(int);
+    callback open-group-split();
+
     // Settings (theme mode driven from the settings panel).
     in-out property <int>  theme-mode: 2;  // 0 dark · 1 light · 2 system
 
@@ -543,6 +564,34 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
+
+    // ── Session-state overlays — float above the shell, below the palette ───────
+    // ConnectingOverlay: shown while an SSH session is being established.
+    // Gated by overlay-connecting; defaults false so normally invisible.
+    if overlay-connecting : ConnectingOverlay {
+        x: 0; y: 0; width: 100%; height: 100%;
+        identity: session-identity;
+        step: connecting-step;
+    }
+    // ErrorOverlay: shown on connection failure.
+    if overlay-error : ErrorOverlay {
+        x: 0; y: 0; width: 100%; height: 100%;
+        identity: session-identity;
+        reason: error-reason;
+        detail: error-detail;
+        reconnect => { root.reconnect(); }
+        edit => { root.quick-connect(); }
+    }
+    // Launchpad: fills the session area for a tab with no live session.
+    if launchpad-open : Launchpad {
+        x: 0; y: 0; width: 100%; height: 100%;
+        recents: launchpad-recents;
+        query <=> launchpad-query;
+        edited(q) => { root.launchpad-edited(q); }
+        open-recent(i) => { root.open-recent(i); }
+        quick-connect => { root.quick-connect(); }
+        open-group-split => { root.open-group-split(); }
     }
 
     // ── Command palette overlay — LAST child so it floats above the shell ──────

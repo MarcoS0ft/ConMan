@@ -393,6 +393,20 @@ pub fn run() -> Result<(), slint::PlatformError> {
     ui.on_accent_changed(|_idx| {
         // P5: persist the accent preference.
     });
+    // reconnect: P3.2 re-establishes the session on ErrorOverlay "Reconnect" press.
+    ui.on_reconnect(|| {
+        // P3.2: re-establish the active SSH session.
+    });
+    // Launchpad callbacks: P3.2 wires real connection data; stubs for now.
+    ui.on_launchpad_edited(|_q| {
+        // P3.2: filter launchpad recents by query.
+    });
+    ui.on_open_recent(|_i| {
+        // P3.2: open the selected recent connection as a new tab.
+    });
+    ui.on_open_group_split(|| {
+        // P3.2: open a connection group as a split-pane tab.
+    });
 
     // Redraw timer: coalesce + render the active tab, reap exited tabs.
     let redraw = Timer::default();
@@ -517,6 +531,9 @@ fn open_tab(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &
         pane_count: 1,
     });
     ui.set_active_tab(active as i32);
+    // Finding 3 fix: keep the status bar in sync with the active tab.
+    ui.set_session_status(SharedString::from("connected"));
+    ui.set_session_identity(SharedString::from(format!("shell {num}")));
 }
 
 fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
@@ -526,7 +543,11 @@ fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
         return;
     }
     st.active = idx;
+    let num = st.tabs[idx].num;
     ui.set_active_tab(idx as i32);
+    // Finding 3 fix: keep the status bar in sync with the selected tab.
+    ui.set_session_status(SharedString::from("connected"));
+    ui.set_session_identity(SharedString::from(format!("shell {num}")));
     render_active(&mut st, ui);
 }
 
@@ -556,7 +577,11 @@ fn close_tab(
         st.active = st.tabs.len() - 1;
     }
     let active = st.active;
+    let num = st.tabs[active].num;
     ui.set_active_tab(active as i32);
+    // Finding 3 fix: keep the status bar in sync after the tab list shrinks.
+    ui.set_session_status(SharedString::from("connected"));
+    ui.set_session_identity(SharedString::from(format!("shell {num}")));
     render_active(&mut st, ui);
 }
 
@@ -635,7 +660,11 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
             st.active = st.tabs.len() - 1;
         }
         let active = st.active;
+        let num = st.tabs[active].num;
         ui.set_active_tab(active as i32);
+        // Finding 3 fix: keep the status bar in sync after auto-reaping exited tabs.
+        ui.set_session_status(SharedString::from("connected"));
+        ui.set_session_identity(SharedString::from(format!("shell {num}")));
         render_active(&mut st, ui);
     }
 }
