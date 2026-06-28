@@ -3,15 +3,19 @@
 //! Provides two related trait families:
 //!
 //! - **[`TerminalSession`]** — the original terminal-specific trait used by the
-//!   P3.x UI controller. Unchanged; `LocalTerminalSession` and
-//!   `SshTerminalSession` implement it. The controller continues to hold
-//!   `Box<dyn TerminalSession>` until the P4.2 migration.
+//!   P3.x UI controller. The controller continues to hold
+//!   `Box<dyn TerminalSession>` until the P4.2 migration; thereafter it will
+//!   hold `Box<dyn Session>`.
 //!
-//! - **[`Session`]** — the unified trait introduced in P4.1. Both terminal and
-//!   RDP sessions implement it. The UI controller will migrate to
-//!   `Box<dyn Session>` in P4.2.  The surface accessor returns a [`Surface`]
-//!   enum that distinguishes a terminal grid channel from an RGBA framebuffer
-//!   channel — the pattern established in ARCHITECTURE §4/§5.
+//! - **[`Session`]** — the unified trait introduced in P4.1. `RdpSession`,
+//!   `LocalTerminalSession`, and `SshTerminalSession` all implement it.  The
+//!   surface accessor returns a [`Surface`] enum that distinguishes a terminal
+//!   grid channel from an RGBA framebuffer channel (ARCHITECTURE §4/§5).
+//!
+//! Both terminal session types implement **both** traits. [`TerminalSession`] is
+//! kept intact for the P4.2 transition; callers that need terminal-specific
+//! methods (raw key/mouse/paste/resize-by-cells) use it directly; callers
+//! holding `Box<dyn Session>` use the unified lifecycle + surface interface.
 
 use std::sync::mpsc::Receiver;
 
@@ -93,10 +97,10 @@ impl std::fmt::Debug for Surface {
 
 /// Unified live-session handle (introduced in P4.1).
 ///
-/// Both terminal and RDP sessions implement this trait. The `cm-ui` controller
-/// currently holds `Box<dyn TerminalSession>`; it will migrate to
-/// `Box<dyn Session>` in P4.2 (`TerminalSession` is kept intact for that
-/// transition). Object-safe.
+/// `RdpSession`, `LocalTerminalSession`, and `SshTerminalSession` all implement
+/// this trait. The `cm-ui` controller currently holds `Box<dyn TerminalSession>`;
+/// it will migrate to `Box<dyn Session>` in P4.2 (`TerminalSession` is kept
+/// intact for that transition). Object-safe.
 pub trait Session: Send {
     /// The surface channel for this session — inspect once, keep the receiver.
     fn surface(&self) -> &Surface;
@@ -120,8 +124,8 @@ pub trait Session: Send {
 /// [`GridSnapshot`]s (out) cross threads (ARCHITECTURE §4). Object-safe so the
 /// UI can hold `Box<dyn TerminalSession>` per tab.
 ///
-/// Terminal sessions **also** implement [`Session`]; P4.2 migrates the
-/// controller to `Box<dyn Session>`.
+/// Implementors also implement [`Session`] (unified lifecycle + surface).
+/// P4.2 migrates the controller to `Box<dyn Session>`.
 pub trait TerminalSession {
     /// Stream of viewport snapshots; drain with `recv`/`try_recv`/`recv_timeout`.
     fn snapshots(&self) -> &Receiver<GridSnapshot>;

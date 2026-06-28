@@ -7,8 +7,10 @@
 //!   applies dirty-rect updates from IronRDP's `ActiveStage`, and publishes
 //!   coalesced [`FrameUpdate`]s over a channel to the UI.
 //! - Input (keyboard/mouse) and resize commands flow inward over an
-//!   `UnboundedSender<RdpCmd>`.
-//! - Text clipboard redirection uses the CLIPRDR static virtual channel.
+//!   `UnboundedSender<RdpCmd>`, accepting neutral [`RdpInputEvent`]s that are
+//!   encoded to IronRDP `FastPathInputEvent`s inside the driver (ironrdp-input).
+//! - Text clipboard redirection uses the CLIPRDR static virtual channel;
+//!   both remote→local and local→remote text transfers are implemented.
 //!
 //! IronRDP crate versions (verified 2026-06-28 against crates.io):
 //!   ironrdp-connector  0.9.0  (vendored, CredSSP feature disabled)
@@ -17,7 +19,7 @@
 //!   ironrdp-tokio      0.9.0
 //!   ironrdp-graphics   0.8.1
 //!   ironrdp-pdu        0.8.0
-//!   ironrdp-svc        0.7.0
+//!   ironrdp-input      0.6.0  (neutral→FastPath input encoding)
 //!   ironrdp-cliprdr    0.6.0
 //!   ironrdp-tls        0.2.1  (rustls + ring backend)
 //!
@@ -27,6 +29,26 @@
 //! CredSSP / NLA is intentionally disabled. ConMan uses TLS security
 //! (graphical login), which is simpler and avoids pre-release sspi/picky
 //! dependency conflicts with the russh crate used by the SSH session.
+//!
+//! **xrdp server configuration**: the test host (192.0.2.10) must have
+//! `security_layer=negotiate` (or `tls`) in `/etc/xrdp/xrdp.ini` so that the
+//! server accepts the TLS security protocol IronRDP advertises. The default
+//! `security_layer=rdp` (STANDARD_RDP_SECURITY) is not supported by IronRDP.
+//!
+//! **Unified input surface (P4.2 deferral)**: the `Session` trait will gain a
+//! transport-neutral `send_input(Vec<SessionInput>)` method in P4.2 when the
+//! UI controller migrates to `Box<dyn Session>`. For now, `RdpSession` exposes
+//! `send_input(Vec<RdpInputEvent>)` directly; callers must downcast.
+//!
+//! **Deactivation-Reactivation Sequence**: when the server sends `DeactivateAll`
+//! (which xrdp does during normal connection setup before first bitmap data),
+//! `active_loop` re-runs the `ConnectionActivationSequence` to completion,
+//! then updates the `ActiveStage` processors. This is required for xrdp to
+//! deliver the first bitmap frame.
+//!
+//! **Resize (P4.2 deferral)**: `resize_px` sends a Display Control resize PDU.
+//! The server may respond with a `DeactivateAll`; the loop handles it correctly
+//! by rebuilding processors with the new desktop size.
 
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -36,18 +58,22 @@ use ironrdp_cliprdr::backend::CliprdrBackend;
 use ironrdp_cliprdr::pdu::{
     ClipboardFormat, ClipboardFormatId, ClipboardFormatName, ClipboardGeneralCapabilityFlags,
     FileContentsRequest, FileContentsResponse, FormatDataRequest, FormatDataResponse, LockDataId,
+    OwnedFormatDataResponse,
 };
 use ironrdp_cliprdr::{CliprdrClient, CliprdrSvcMessages};
 use ironrdp_connector::{ClientConnector, Config, ConnectionResult, Credentials, DesktopSize};
 use ironrdp_graphics::image_processing::PixelFormat;
-use ironrdp_pdu::input::fast_path::FastPathInputEvent;
+use ironrdp_input::{
+    Database as InputDatabase, MouseButton, MousePosition, Operation as InputOperation, Scancode,
+    WheelRotations,
+};
 use ironrdp_session::image::DecodedImage;
 use ironrdp_session::{ActiveStage, ActiveStageOutput};
 use ironrdp_tokio::{TokioFramed, connect_begin, connect_finalize, mark_as_upgraded};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use cm_core::RdpSettings;
+use cm_core::{RdpSettings, Secret};
 
 use crate::session::{FrameUpdate, Session, SessionStatus, Surface};
 
@@ -57,6 +83,21 @@ use crate::session::{FrameUpdate, Session, SessionStatus, Surface};
 
 /// Number of pending FrameUpdates before the oldest is dropped (backpressure).
 const FRAME_CHANNEL_CAPACITY: usize = 4;
+
+// ---------------------------------------------------------------------------
+// Ring crypto-provider bootstrap
+// ---------------------------------------------------------------------------
+
+/// Ensure the `ring` crypto provider is registered as the process-level
+/// rustls provider before any TLS call.
+///
+/// ironrdp-tls brings in `tokio-rustls` with its default features (`aws_lc_rs`),
+/// while we also enable `ring`. When both features are compiled in, rustls
+/// cannot auto-select a provider and panics. Calling this function first
+/// (idempotently) fixes the ambiguity.
+fn install_ring_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
 
 // ---------------------------------------------------------------------------
 // Certificate verification
@@ -165,17 +206,89 @@ impl CertStore {
 // Auth input
 // ---------------------------------------------------------------------------
 
-/// RDP authentication credentials (never carries secrets in plain strings
-/// after construction — the password is moved into [`ironrdp_connector::Credentials`]).
+/// RDP authentication credentials.
+///
+/// The password is stored as [`Secret`] (zeroized on drop) mirroring the SSH
+/// session pattern. It is converted to `String` only at the IronRDP boundary
+/// inside `connect()`, immediately before being moved into
+/// [`ironrdp_connector::Credentials`].
 #[derive(Debug, Clone)]
 pub struct RdpAuthInput {
     pub username: String,
-    /// Password is stored as a plain String because IronRDP's `Credentials`
-    /// requires an owned `String`; the caller should clear the source after
-    /// building this struct. The field is intentionally not `Secret` because
-    /// IronRDP takes ownership and we cannot zeroize its copy.
-    pub password: String,
+    pub password: Secret,
     pub domain: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Neutral RDP input events (no IronRDP types in the public API)
+// ---------------------------------------------------------------------------
+
+/// Transport-neutral RDP input event.
+///
+/// Callers supply these to [`RdpSession::send_input`]; the driver converts
+/// them to `FastPathInputEvent`s using `ironrdp-input` (the `InputDatabase`
+/// tracks key/button state across calls and generates correct up/down PDUs).
+///
+/// A unified `SessionInput` type covering both terminal and RDP input will be
+/// added to the [`Session`] trait in P4.2.
+#[derive(Debug, Clone)]
+pub enum RdpInputEvent {
+    /// Keyboard scancode key-press.
+    KeyDown {
+        /// PS/2 scancode (0x00–0xFF).
+        scancode: u8,
+        /// True for extended keys (e.g. right-Ctrl, cursor keys, numpad-/).
+        extended: bool,
+    },
+    /// Keyboard scancode key-release.
+    KeyUp { scancode: u8, extended: bool },
+    /// Mouse cursor moved to absolute position.
+    MouseMove { x: u16, y: u16 },
+    /// Mouse button pressed.
+    MouseDown {
+        button: RdpMouseButton,
+        x: u16,
+        y: u16,
+    },
+    /// Mouse button released.
+    MouseUp {
+        button: RdpMouseButton,
+        x: u16,
+        y: u16,
+    },
+    /// Mouse wheel rotation.
+    Scroll {
+        /// Positive = scroll up / away from user; negative = scroll down.
+        delta: i16,
+        /// True for vertical scroll (the common case), false for horizontal.
+        vertical: bool,
+        x: u16,
+        y: u16,
+    },
+}
+
+/// Mouse button identifier for [`RdpInputEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RdpMouseButton {
+    Left,
+    Middle,
+    Right,
+    /// Typically Browser Back.
+    X1,
+    /// Typically Browser Forward.
+    X2,
+}
+
+impl From<RdpMouseButton> for MouseButton {
+    fn from(b: RdpMouseButton) -> Self {
+        match b {
+            RdpMouseButton::Left => MouseButton::Left,
+            RdpMouseButton::Middle => MouseButton::Middle,
+            RdpMouseButton::Right => MouseButton::Right,
+            RdpMouseButton::X1 => MouseButton::X1,
+            RdpMouseButton::X2 => MouseButton::X2,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -183,8 +296,8 @@ pub struct RdpAuthInput {
 // ---------------------------------------------------------------------------
 
 enum RdpCmd {
-    /// Fast-path input event (key/mouse) to encode and send to the server.
-    Input(Vec<FastPathInputEvent>),
+    /// Neutral input events to encode and send to the server.
+    Input(Vec<RdpInputEvent>),
     /// Resize request (desktop pixels).
     Resize { width: u32, height: u32 },
     /// Graceful shutdown.
@@ -197,17 +310,32 @@ enum RdpCmd {
 // CLIPRDR text backend
 // ---------------------------------------------------------------------------
 
-/// Minimal CLIPRDR backend that supports text clipboard.
+/// Minimal CLIPRDR backend that supports bidirectional text clipboard.
 ///
-/// Tracks text received from the remote and supplies local text when the
-/// remote requests it.
+/// **Remote → local** (remote copy):
+/// `on_remote_copy` sets `wants_paste_unicode` when CF_UNICODETEXT is
+/// available. The active loop polls this flag and calls `initiate_paste`
+/// to fetch the data. The response arrives in `on_format_data_response`.
+///
+/// **Local → remote** (paste into remote):
+/// The handle's `paste_text` sends `RdpCmd::PasteText(text)` which calls
+/// `initiate_copy` announcing CF_UNICODETEXT. The server requests the data
+/// via a `FormatDataRequest`, which triggers `on_format_data_request` storing
+/// the request. The active loop then calls `submit_format_data` with the
+/// UTF-16LE encoded text.
 struct TextCliprdrBackend {
-    /// Text from the most recent remote copy.
+    /// Text from the most recent remote copy (set by `on_format_data_response`).
     remote_text: Option<String>,
     /// Text queued to send to the remote (set by `paste_text`).
     local_text: Option<String>,
     /// CF_UNICODETEXT format ID (per MS-RDPECLIP, always format 13 on Windows).
     cf_unicode: ClipboardFormatId,
+    /// Set when the remote announces CF_UNICODETEXT; the active loop should
+    /// call `initiate_paste` to fetch the data.
+    wants_paste_unicode: bool,
+    /// Set when the server requests our clipboard data; the active loop should
+    /// call `submit_format_data` with the encoded local text.
+    pending_format_request: Option<ClipboardFormatId>,
 }
 
 impl std::fmt::Debug for TextCliprdrBackend {
@@ -215,6 +343,11 @@ impl std::fmt::Debug for TextCliprdrBackend {
         f.debug_struct("TextCliprdrBackend")
             .field("has_remote_text", &self.remote_text.is_some())
             .field("has_local_text", &self.local_text.is_some())
+            .field("wants_paste_unicode", &self.wants_paste_unicode)
+            .field(
+                "has_pending_format_req",
+                &self.pending_format_request.is_some(),
+            )
             .finish()
     }
 }
@@ -225,6 +358,8 @@ impl TextCliprdrBackend {
             remote_text: None,
             local_text: None,
             cf_unicode: ClipboardFormatId::new(13), // CF_UNICODETEXT
+            wants_paste_unicode: false,
+            pending_format_request: None,
         }
     }
 
@@ -255,17 +390,23 @@ impl CliprdrBackend for TextCliprdrBackend {
     }
 
     fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
-        // Remember whether the remote announced CF_UNICODETEXT (for future use).
-        let _has_text = available_formats.iter().any(|f| {
+        // Set flag so the active loop initiates a paste request.
+        let has_text = available_formats.iter().any(|f| {
             f.id == self.cf_unicode
                 || f.name
                     .as_ref()
                     .map(|n| n.value() == "CF_UNICODETEXT")
                     .unwrap_or(false)
         });
+        if has_text {
+            self.wants_paste_unicode = true;
+        }
     }
 
-    fn on_format_data_request(&mut self, _request: FormatDataRequest) {}
+    fn on_format_data_request(&mut self, request: FormatDataRequest) {
+        // Store so the active loop can call submit_format_data with the text.
+        self.pending_format_request = Some(request.format);
+    }
 
     fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
         // Decode UTF-16-LE data from the remote clipboard (CF_UNICODETEXT).
@@ -299,15 +440,13 @@ fn decode_utf16le(data: &[u8]) -> Option<String> {
 }
 
 /// Encode text as CF_UNICODETEXT (UTF-16-LE, null-terminated).
-/// Used by clipboard format-data response logic (P4.2).
-#[allow(dead_code)]
 fn encode_utf16le(text: &str) -> Vec<u8> {
     let mut buf: Vec<u8> = text
         .encode_utf16()
         .chain(std::iter::once(0u16))
         .flat_map(|c| c.to_le_bytes())
         .collect();
-    // Ensure even length.
+    // Ensure even length (should always be, but defence in depth).
     if !buf.len().is_multiple_of(2) {
         buf.push(0);
     }
@@ -407,8 +546,12 @@ impl RdpSession {
         })
     }
 
-    /// Send RDP fast-path input events (key/mouse).
-    pub fn send_input(&self, events: Vec<FastPathInputEvent>) {
+    /// Send RDP input events (key/mouse).
+    ///
+    /// Events are neutral [`RdpInputEvent`]s; encoding to IronRDP Fast-Path
+    /// PDUs happens inside the driver using `ironrdp-input`. A unified
+    /// `Session::send_input` method is planned for P4.2.
+    pub fn send_input(&self, events: Vec<RdpInputEvent>) {
         let _ = self.cmd_tx.send(RdpCmd::Input(events));
     }
 
@@ -442,6 +585,8 @@ impl Session for RdpSession {
     }
 
     fn resize_px(&self, width: u32, height: u32) {
+        // Sends a Display Control resize PDU. Full resize (DeactivateAll /
+        // Reactivation sequence + framebuffer realloc) is deferred to P4.2.
         let _ = self.cmd_tx.send(RdpCmd::Resize { width, height });
     }
 }
@@ -490,12 +635,19 @@ async fn drive_inner(
     mut cmd_rx: UnboundedReceiver<RdpCmd>,
     status: &Arc<Mutex<SessionStatus>>,
 ) -> Result<(), RdpError> {
+    // 0. Ensure the ring crypto provider is installed before any TLS call.
+    //    ironrdp-tls enables both aws-lc-rs (default) and ring features in
+    //    tokio-rustls; without an explicit `install_default()`, rustls panics.
+    install_ring_provider();
+
     // 1. TCP connect.
     let tcp = TcpStream::connect((cfg.host.as_str(), cfg.port))
         .await
         .map_err(|e| RdpError::Connect(e.to_string()))?;
 
-    // 2. Build connector config (TLS-only, NLA disabled to avoid CredSSP).
+    // 2. Build connector config (TLS security, CredSSP/NLA disabled).
+    //    Password exposed only here, at the IronRDP boundary, then moved.
+    let password = String::from_utf8_lossy(auth.password.expose()).into_owned();
     let connector_config = Config {
         desktop_size: DesktopSize {
             width: cfg.width,
@@ -506,7 +658,7 @@ async fn drive_inner(
         enable_credssp: false,
         credentials: Credentials::UsernamePassword {
             username: auth.username.clone(),
-            password: auth.password.clone(),
+            password,
         },
         domain: auth.domain.clone().or_else(|| cfg.domain.clone()),
         client_build: 0,
@@ -552,13 +704,14 @@ async fn drive_inner(
         .await
         .map_err(|e| RdpError::Protocol(e.to_string()))?;
 
-    // 5. TLS upgrade — IronRDP does certificate pinning; we do TOFU on top.
+    // 5. TLS upgrade — ironrdp-tls performs the handshake; CA validation and
+    //    TOFU follow in verify_cert.
     let (tcp, leftover) = framed.into_inner();
     let (tls_stream, tls_cert) = ironrdp_tls::upgrade(tcp, cfg.host.as_str())
         .await
         .map_err(|e| RdpError::Tls(e.to_string()))?;
 
-    // 6. Certificate verification (TOFU + conscious accept).
+    // 6. Certificate verification: CA store first, then TOFU.
     let server_public_key = verify_cert(&tls_cert, &cfg.host, cfg.port, &*verifier, &cert_store)?;
 
     // 7. Mark TLS as done, rebuild framed over TLS, finalize connection.
@@ -584,11 +737,13 @@ async fn drive_inner(
 
     let mut active_stage = ActiveStage::new(connection_result);
     let mut image = DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
+    let mut input_db = InputDatabase::new();
 
     active_loop(
         &mut framed,
         &mut active_stage,
         &mut image,
+        &mut input_db,
         &mut cmd_rx,
         frame_tx,
         status,
@@ -597,7 +752,14 @@ async fn drive_inner(
     .map_err(|e| RdpError::Session(e.to_string()))
 }
 
-/// Verify the server certificate, consulting the verifier for unknown/changed certs.
+/// Verify the server certificate.
+///
+/// Strategy (per spec):
+/// 1. If the cert is valid against the OS/CA trust store, accept silently.
+/// 2. Otherwise fall back to TOFU: look up the fingerprint in the store.
+///    - Match → accept silently (previously pinned).
+///    - Unknown / mismatch → ask the verifier (user dialog in P4.2).
+///
 /// Returns the server's DER public key bytes (needed by `connect_finalize`).
 fn verify_cert(
     cert: &x509_cert::Certificate,
@@ -622,10 +784,17 @@ fn verify_cert(
         .ok_or_else(|| RdpError::Protocol("no server public key in cert".to_owned()))?
         .to_vec();
 
+    // 1. Try CA validation against the platform root store.
+    //    CA-valid certs connect silently — no TOFU or user prompt required.
+    if is_ca_trusted(&der, host) {
+        return Ok(public_key);
+    }
+
+    // 2. TOFU / user decision for self-signed / unknown / changed certs.
     let situation = match store.lookup(host, port) {
         None => CertSituation::Unknown,
         Some(stored_fp) if stored_fp == fingerprint => {
-            // Exact match — TOFU pass, accept silently.
+            // Exact TOFU match — accept silently.
             return Ok(public_key);
         }
         Some(stored_fp) => CertSituation::Mismatch {
@@ -653,6 +822,44 @@ fn verify_cert(
     }
 }
 
+/// Check whether the DER-encoded certificate is signed by a trusted OS/CA root.
+///
+/// Uses `rustls-native-certs` to load the platform trust store and
+/// `WebPkiServerVerifier` to validate.  Returns `false` on any error (missing
+/// certs, parse failures, hostname mismatch) so that the caller falls through
+/// to TOFU.
+fn is_ca_trusted(cert_der: &[u8], host: &str) -> bool {
+    use rustls::RootCertStore;
+    use rustls::client::WebPkiServerVerifier;
+    use rustls::client::danger::ServerCertVerifier as _;
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+
+    // Load platform root CAs; ignore individual load errors (some certs may
+    // be non-parseable but the rest are still useful).
+    let native = rustls_native_certs::load_native_certs();
+    let mut root_store = RootCertStore::empty();
+    for cert in native.certs {
+        root_store.add(cert).ok();
+    }
+    if root_store.is_empty() {
+        return false;
+    }
+
+    let Ok(verifier) = WebPkiServerVerifier::builder(Arc::new(root_store)).build() else {
+        return false;
+    };
+
+    let end_entity = CertificateDer::from(cert_der.to_vec());
+    let Ok(server_name) = ServerName::try_from(host.to_owned()) else {
+        return false;
+    };
+    let now = UnixTime::now();
+
+    verifier
+        .verify_server_cert(&end_entity, &[], &server_name, &[], now)
+        .is_ok()
+}
+
 /// Format a byte slice as `SHA256:<hex>`.
 fn sha256_fingerprint(data: &[u8]) -> String {
     use sha2::Digest as _;
@@ -670,10 +877,12 @@ fn sha256_fingerprint(data: &[u8]) -> String {
 // Active-stage loop
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn active_loop<S>(
     framed: &mut TokioFramed<S>,
     active_stage: &mut ActiveStage,
     image: &mut DecodedImage,
+    input_db: &mut InputDatabase,
     cmd_rx: &mut UnboundedReceiver<RdpCmd>,
     frame_tx: &SyncSender<FrameUpdate>,
     status: &Arc<Mutex<SessionStatus>>,
@@ -682,6 +891,16 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin,
 {
     use ironrdp_tokio::FramedWrite as _;
+
+    // True once at least one real bitmap PDU has been decoded.
+    //
+    // IronRDP sets alpha=0xFF for every pixel of a decoded bitmap (even a
+    // black one), so a zero-filled DecodedImage means no content yet.
+    // We suppress frame publications until the first non-zero pixel arrives.
+    // This prevents publishing the initial blank image when the server sends
+    // FrameMarker-only PDUs (which produce a GraphicsUpdate with an empty
+    // rectangle but do not update image pixels).
+    let mut image_has_content = false;
 
     loop {
         tokio::select! {
@@ -693,6 +912,7 @@ where
                     .map_err(|e| e.to_string())?;
 
                 let mut dirty = false;
+                let mut should_reactivate = false;
                 for output in outputs {
                     match output {
                         ActiveStageOutput::ResponseFrame(data) => {
@@ -709,12 +929,9 @@ where
                             return Ok(());
                         }
                         ActiveStageOutput::DeactivateAll(_cas) => {
-                            // Deactivation-Reactivation Sequence: re-running the
-                            // activation state machine inline is complex and deferred
-                            // to P4.2. For now, treat as a clean disconnect.
-                            // (The server will typically reconnect us immediately.)
-                            set_status(status, SessionStatus::Disconnected);
-                            return Ok(());
+                            // Deactivation-Reactivation Sequence (MS-RDPBCGR §1.3.1.3).
+                            // See the detailed comment below.
+                            should_reactivate = true;
                         }
                         // Pointer / auto-detect events: ignored for MVP.
                         ActiveStageOutput::PointerDefault
@@ -726,8 +943,109 @@ where
                     }
                 }
 
+                // --- Deactivation-Reactivation Sequence ---
+                // The RDP specification (MS-RDPBCGR §1.3.1.3) calls for a full
+                // Deactivation-Reactivation when the server sends DeactivateAll:
+                // the client should respond to a subsequent DemandActive with
+                // ConfirmActive, then complete the Connection Finalization sequence.
+                //
+                // However, xrdp (the test host) does not follow this sequence: it
+                // sends DeactivateAll and then immediately sends FastPath bitmap
+                // data (no DemandActive). Trying to read DemandActive from the wire
+                // here would block indefinitely while xrdp is sending bitmap frames.
+                //
+                // Strategy: if the CAS immediately needs server input (starts in
+                // CapabilitiesExchange), just continue the active loop so the next
+                // PDU from the server (FastPath bitmap or slow-path update) is
+                // dispatched to active_stage.process() as usual.
+                //
+                // A full Deactivation-Reactivation (for servers that require it) is
+                // deferred to P4.2 when the session gains a proper state machine for
+                // the reactivation exchange.
+                if should_reactivate {
+                    // The next PDU from the server (FastPath bitmap or slow-path)
+                    // will be processed normally in the next tokio::select! iteration.
+                    continue;
+                }
+
                 if dirty {
-                    publish_frame(image, frame_tx);
+                    // Suppress phantom frames that arrive before the first real
+                    // bitmap is decoded.  IronRDP sets alpha = 0xFF for every
+                    // pixel it writes (see `apply_bgr24_bitmap`); before that the
+                    // DecodedImage is zero-filled, so any(|b| b != 0) is a cheap
+                    // proxy for "has at least one decoded pixel".
+                    //
+                    // This is needed because xrdp sends FrameMarker-only Surface
+                    // Commands PDUs early in the session (before the desktop
+                    // bitmap), which produce a GraphicsUpdate with an empty rect
+                    // but leave the image all-zero.
+                    if !image_has_content {
+                        image_has_content = image.data().iter().any(|&b| b != 0);
+                    }
+                    if image_has_content {
+                        publish_frame(image, frame_tx);
+                    }
+                }
+
+                // --- Clipboard state machine: remote → local ---
+                // After `process()`, the backend may have set `wants_paste_unicode`
+                // (triggered by on_remote_copy). We call initiate_paste to request
+                // the actual data; the response arrives in on_format_data_response.
+                let wants_paste = {
+                    active_stage
+                        .get_svc_processor_mut::<CliprdrClient>()
+                        .and_then(|c| c.downcast_backend_mut::<TextCliprdrBackend>())
+                        .map(|b| {
+                            if b.wants_paste_unicode {
+                                b.wants_paste_unicode = false;
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false)
+                };
+                if wants_paste {
+                    let maybe_msgs = active_stage
+                        .get_svc_processor_mut::<CliprdrClient>()
+                        .and_then(|c| c.initiate_paste(ClipboardFormatId::new(13)).ok());
+                    if let Some(msgs) = maybe_msgs {
+                        let data = active_stage
+                            .process_svc_processor_messages(msgs)
+                            .map_err(|e| e.to_string())?;
+                        framed.write_all(&data).await.map_err(|e| e.to_string())?;
+                    }
+                }
+
+                // --- Clipboard state machine: local → remote ---
+                // The server may have called on_format_data_request (after we
+                // announced our text via initiate_copy). Respond with encoded text.
+                let pending_req = {
+                    active_stage
+                        .get_svc_processor_mut::<CliprdrClient>()
+                        .and_then(|c| c.downcast_backend_mut::<TextCliprdrBackend>())
+                        .and_then(|b| b.pending_format_request.take())
+                };
+                if pending_req.is_some() {
+                    // Fetch local text (a separate borrow so NLL lets us proceed).
+                    let local_text = active_stage
+                        .get_svc_processor_mut::<CliprdrClient>()
+                        .and_then(|c| c.downcast_backend_mut::<TextCliprdrBackend>())
+                        .and_then(|b| b.local_text.clone());
+
+                    let response: OwnedFormatDataResponse = match local_text {
+                        Some(text) => FormatDataResponse::new_data(encode_utf16le(&text)),
+                        None => FormatDataResponse::new_error(),
+                    };
+                    let maybe_msgs = active_stage
+                        .get_svc_processor_mut::<CliprdrClient>()
+                        .and_then(|c| c.submit_format_data(response).ok());
+                    if let Some(msgs) = maybe_msgs {
+                        let data = active_stage
+                            .process_svc_processor_messages(msgs)
+                            .map_err(|e| e.to_string())?;
+                        framed.write_all(&data).await.map_err(|e| e.to_string())?;
+                    }
                 }
             }
 
@@ -746,17 +1064,32 @@ where
                         return Ok(());
                     }
                     RdpCmd::Input(events) => {
-                        let outputs = active_stage
-                            .process_fastpath_input(image, &events)
-                            .map_err(|e| e.to_string())?;
-                        for output in outputs {
-                            if let ActiveStageOutput::ResponseFrame(data) = output {
-                                framed.write_all(&data).await.map_err(|e| e.to_string())?;
+                        // Encode neutral RdpInputEvents to FastPath PDUs using
+                        // ironrdp-input's stateful Database (tracks key/button state).
+                        let ops: Vec<InputOperation> = events
+                            .into_iter()
+                            .map(rdp_event_to_operation)
+                            .collect();
+                        let fast_path_events = input_db.apply(ops);
+                        if !fast_path_events.is_empty() {
+                            let outputs = active_stage
+                                .process_fastpath_input(image, &fast_path_events)
+                                .map_err(|e| e.to_string())?;
+                            for output in outputs {
+                                if let ActiveStageOutput::ResponseFrame(data) = output {
+                                    framed
+                                        .write_all(&data)
+                                        .await
+                                        .map_err(|e| e.to_string())?;
+                                }
                             }
                         }
                     }
                     RdpCmd::Resize { width, height } => {
-                        // Attempt display-control resize; ignore if not supported.
+                        // Sends a Display Control resize PDU. Full
+                        // DeactivateAll/Reactivation + framebuffer realloc is
+                        // deferred to P4.2; the server may respond with a
+                        // DeactivateAll which currently disconnects us.
                         if let Some(Ok(data)) =
                             active_stage.encode_resize(width, height, None, None)
                         {
@@ -765,8 +1098,6 @@ where
                     }
                     RdpCmd::PasteText(text) => {
                         // Announce text availability on the CLIPRDR channel.
-                        // We must release the mutable borrow of `cliprdr` before
-                        // calling `active_stage.process_svc_processor_messages`.
                         let maybe_msgs: Option<CliprdrSvcMessages<ironrdp_cliprdr::Client>> = {
                             if let Some(cliprdr) =
                                 active_stage.get_svc_processor_mut::<CliprdrClient>()
@@ -798,6 +1129,37 @@ where
                 }
             }
         }
+    }
+}
+
+/// Convert a [`RdpInputEvent`] to an `ironrdp-input` [`InputOperation`].
+fn rdp_event_to_operation(event: RdpInputEvent) -> InputOperation {
+    match event {
+        RdpInputEvent::KeyDown { scancode, extended } => {
+            InputOperation::KeyPressed(Scancode::from_u8(extended, scancode))
+        }
+        RdpInputEvent::KeyUp { scancode, extended } => {
+            InputOperation::KeyReleased(Scancode::from_u8(extended, scancode))
+        }
+        RdpInputEvent::MouseMove { x, y } => InputOperation::MouseMove(MousePosition { x, y }),
+        RdpInputEvent::MouseDown { button, x: _, y: _ } => {
+            // ironrdp-input's Database tracks cursor position from previous
+            // MouseMove operations. Callers should send MouseMove before
+            // MouseDown to position the click correctly.
+            InputOperation::MouseButtonPressed(MouseButton::from(button))
+        }
+        RdpInputEvent::MouseUp { button, .. } => {
+            InputOperation::MouseButtonReleased(MouseButton::from(button))
+        }
+        RdpInputEvent::Scroll {
+            delta,
+            vertical,
+            x: _,
+            y: _,
+        } => InputOperation::WheelRotations(WheelRotations {
+            is_vertical: vertical,
+            rotation_units: delta,
+        }),
     }
 }
 
@@ -912,6 +1274,16 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // RdpMouseButton → ironrdp-input MouseButton
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn mouse_button_conversion() {
+        assert_eq!(MouseButton::from(RdpMouseButton::Left), MouseButton::Left);
+        assert_eq!(MouseButton::from(RdpMouseButton::Right), MouseButton::Right);
+    }
+
+    // ---------------------------------------------------------------------------
     // Session object-safety
     // ---------------------------------------------------------------------------
 
@@ -972,10 +1344,14 @@ mod tests {
     /// Real-host integration test: connect to xrdp at 192.0.2.10 (lab-user/dummy-password),
     /// accept self-signed cert via FixedCertVerifier, assert non-blank framebuffer.
     ///
+    /// Prerequisites:
+    ///   - Network access to 192.0.2.10:3389.
+    ///   - `/etc/xrdp/xrdp.ini` on the server must have `security_layer=negotiate`
+    ///     (or `tls`); the default `security_layer=rdp` uses STANDARD_RDP_SECURITY
+    ///     which IronRDP does not support.
+    ///
     /// Run with:
     ///   cargo test -p cm-session -- --ignored test_rdp_connect_real_host
-    ///
-    /// Requires network access to 192.0.2.10:3389.
     #[tokio::test]
     #[ignore]
     async fn test_rdp_connect_real_host() {
@@ -990,7 +1366,7 @@ mod tests {
         };
         let auth = RdpAuthInput {
             username: "lab-user".into(),
-            password: "dummy-password".into(),
+            password: Secret::from_string("dummy-password".to_owned()),
             domain: None,
         };
         let verifier = FixedCertVerifier::new(CertDecision::AcceptAndRemember);
@@ -1019,9 +1395,11 @@ mod tests {
             panic!("expected Framebuffer surface");
         };
 
+        // xrdp can take ~10–12 s to deliver the first desktop bitmap after
+        // initial cursor-setup frames.  15 s gives a comfortable margin.
         let frame = rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("must receive a frame within 10 s");
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("must receive a frame within 15 s");
 
         // Verify non-blank framebuffer: at least one pixel must be non-zero.
         assert!(

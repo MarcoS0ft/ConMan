@@ -29,7 +29,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::engine_owner::{Msg, Transport, run_engine_owner};
 use crate::libghostty::EngineError;
-use crate::session::{ExitStatus, SessionStatus, TerminalSession};
+use crate::session::{ExitStatus, Session, SessionStatus, Surface, TerminalSession};
 use cm_core::SshSettings;
 
 /// Terminal type advertised to the remote in the PTY request.
@@ -325,10 +325,13 @@ impl Transport for SshTransport {
 
 /// A live SSH terminal session. `Send`; the `!Send` engine is confined to its
 /// owner thread.
+///
+/// Implements both [`TerminalSession`] and [`Session`] (unified P4.1 trait).
 #[derive(Debug)]
 pub struct SshTerminalSession {
     control_tx: Sender<Msg>,
-    snapshot_rx: Receiver<GridSnapshot>,
+    /// Unified surface — always `Surface::TerminalGrid(_)` for this type.
+    surface: Surface,
     status: Arc<Mutex<SessionStatus>>,
     owner_handle: Mutex<Option<JoinHandle<()>>>,
     driver_handle: Mutex<Option<JoinHandle<()>>>,
@@ -418,7 +421,7 @@ impl SshTerminalSession {
 
         Ok(Self {
             control_tx,
-            snapshot_rx,
+            surface: Surface::TerminalGrid(snapshot_rx),
             status,
             owner_handle: Mutex::new(Some(owner_handle)),
             driver_handle: Mutex::new(Some(driver_handle)),
@@ -428,7 +431,10 @@ impl SshTerminalSession {
 
 impl TerminalSession for SshTerminalSession {
     fn snapshots(&self) -> &Receiver<GridSnapshot> {
-        &self.snapshot_rx
+        match &self.surface {
+            Surface::TerminalGrid(rx) => rx,
+            _ => unreachable!("SshTerminalSession always has TerminalGrid surface"),
+        }
     }
 
     fn send_key(&self, ev: KeyEvent) {
@@ -482,6 +488,34 @@ impl Drop for SshTerminalSession {
             return;
         }
         let _ = self.control_tx.send(Msg::Shutdown);
+    }
+}
+
+/// Unified [`Session`] implementation for [`SshTerminalSession`].
+///
+/// `surface()` returns `Surface::TerminalGrid`; `status()` and `shutdown()`
+/// delegate to the `TerminalSession` impl; `resize_px()` approximates cell
+/// dimensions from pixel dimensions (8×16 font size; precise resize happens
+/// via `TerminalSession::resize()` in the UI layer, P4.2).
+impl Session for SshTerminalSession {
+    fn surface(&self) -> &Surface {
+        &self.surface
+    }
+
+    fn status(&self) -> SessionStatus {
+        <Self as TerminalSession>::status(self)
+    }
+
+    fn shutdown(&self) {
+        <Self as TerminalSession>::shutdown(self);
+    }
+
+    fn resize_px(&self, width: u32, height: u32) {
+        // Approximate 8×16 cell size. The UI layer drives precise resize via
+        // TerminalSession::resize() with real font metrics (P4.2).
+        let cols = u16::try_from(width / 8).unwrap_or(u16::MAX).max(2);
+        let rows = u16::try_from(height / 16).unwrap_or(u16::MAX).max(1);
+        <Self as TerminalSession>::resize(self, TerminalSize { cols, rows });
     }
 }
 

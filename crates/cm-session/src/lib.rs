@@ -4,10 +4,11 @@
 //!
 //! 1. **Terminal sessions** — local PTY shell ([`LocalTerminalSession`]) and
 //!    SSH shell ([`SshTerminalSession`]). Both implement [`TerminalSession`]
-//!    and [`Session`] (ARCHITECTURE §4, P3.x). Gated on `engine-libghostty`.
+//!    and [`Session`] (ARCHITECTURE §4, P3.x / P4.1). Gated on
+//!    `engine-libghostty`.
 //!
 //! 2. **RDP session** — [`RdpSession`] driven by IronRDP over tokio. Implements
-//!    [`Session`] only (Framebuffer surface, P4.1). Always available.
+//!    [`Session`] (Framebuffer surface, P4.1). Always available.
 //!
 //! The libghostty engine requires the zig 0.15.2 toolchain; see
 //! `docs/devel/AI_GUIDANCE.md`.
