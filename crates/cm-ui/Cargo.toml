@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 cm-core = { path = "../cm-core" }
+cm-storage = { path = "../cm-storage" }
 # The local terminal session (PTY + libghostty engine, on its own threads). Brings in the
 # zig-built engine via its default `engine-libghostty` feature.
 cm-session = { path = "../cm-session" }

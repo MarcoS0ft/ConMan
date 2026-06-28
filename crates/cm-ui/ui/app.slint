@@ -677,10 +677,19 @@ export component AppWindow inherits Window {
     callback cert-accept();
     callback cert-reject();
 
-    // ── Appearance ────────────────────────────────────────────────────
+    // ── Appearance (P5.2: full settings exposed here) ────────────────
     in-out property <int>   theme-mode: 2;
-    in-out property <bool>  dark-mode <=> Theme.dark-mode;
-    in-out property <color> accent    <=> Theme.accent;
+    in-out property <int>   density    <=> Theme.density;
+    in-out property <int>   accent-index: 0;
+    in-out property <bool>  dark-mode  <=> Theme.dark-mode;
+    in-out property <color> accent     <=> Theme.accent;
+    // Terminal defaults
+    in-out property <int>    settings-font-size: 13;
+    in-out property <string> settings-shell-path: "";
+    in-out property <string> settings-shell-args: "";
+    in-out property <string> settings-shell-cwd: "";
+    // Startup behavior: 0 = clean start, 1 = restore last session
+    in-out property <int>    startup-behavior: 0;
 
     // ── P1.4: Profile editor modal ───────────────────────────────────
     in-out property <bool>        profile-editor-open: false;
@@ -710,7 +719,13 @@ export component AppWindow inherits Window {
     callback palette-edited(string);
     callback palette-activated(int);
     callback theme-changed(int);
+    callback density-changed(int);
     callback accent-changed(int);
+    callback settings-font-size-changed(int);
+    callback settings-shell-path-changed(string);
+    callback settings-shell-args-changed(string);
+    callback settings-shell-cwd-changed(string);
+    callback startup-behavior-changed(int);
 
     // P1.4 — Connections panel CRUD.
     callback toggle-conn-row(int);       // idx → expand/collapse group
@@ -923,16 +938,26 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // ── Settings panel ─────────────────────────────────
+                // ── Settings panel (P5.2) ──────────────────────────
                 if active-panel == 2 : SettingsPanel {
-                    theme-mode <=> root.theme-mode;
-                    theme-changed(i) => {
-                        root.theme-changed(i);
-                        if (i == 0) { Theme.dark-mode = true; }
-                        else if (i == 1) { Theme.dark-mode = false; }
-                        else { Theme.dark-mode = (Palette.color-scheme == ColorScheme.dark); }
-                    }
-                    accent-changed(i) => { root.accent-changed(i); }
+                    theme-mode          <=> root.theme-mode;
+                    density             <=> root.density;
+                    accent-index        <=> root.accent-index;
+                    font-size           <=> root.settings-font-size;
+                    shell-path          <=> root.settings-shell-path;
+                    shell-args          <=> root.settings-shell-args;
+                    shell-cwd           <=> root.settings-shell-cwd;
+                    startup-behavior    <=> root.startup-behavior;
+                    // theme-changed is also handled inside SettingsPanel (live recolor);
+                    // the callback here persists the choice to the DB.
+                    theme-changed(i)    => { root.theme-changed(i); }
+                    density-changed(i)  => { root.density-changed(i); }
+                    accent-changed(i)   => { root.accent-changed(i); }
+                    font-size-changed(v)         => { root.settings-font-size-changed(v); }
+                    shell-path-changed(v)        => { root.settings-shell-path-changed(v); }
+                    shell-args-changed(v)        => { root.settings-shell-args-changed(v); }
+                    shell-cwd-changed(v)         => { root.settings-shell-cwd-changed(v); }
+                    startup-behavior-changed(v)  => { root.startup-behavior-changed(v); }
                 }
             }
 

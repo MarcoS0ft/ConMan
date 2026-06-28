@@ -14,6 +14,7 @@ mod error;
 pub mod json_io;
 pub mod migrations;
 pub mod repository;
+pub mod settings;
 
 pub use error::StorageError;
 pub use json_io::{
@@ -21,3 +22,4 @@ pub use json_io::{
     ImportStats, export, export_to_json, import, import_from_json,
 };
 pub use repository::SqliteRepository;
+pub use settings::{AppSettings, SettingsService};

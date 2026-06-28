@@ -1,16 +1,27 @@
-// ConMan — Settings panel (the "Settings" activity-bar panel; minimal Appearance group
-// for the P2.8 foundation — full settings + shortcut remap land in P5). Flipping the
-// theme segmented control writes Theme.dark-mode and recolors everything live.
+// ConMan — Settings panel (P5.2: full settings + theming).
+//
+// Sections:
+//   • Appearance — Theme (dark/light/system), Accent, Density (Compact/Cosy)
+//   • Terminal   — Default font size, default local shell + args + cwd
+//   • Startup    — Open last session on launch vs clean start
+//   • Shortcuts  — Reserved Ctrl⇧ map (display-only; remap is a later task)
+//
+// All controls are token-driven (zero hardcoded colors). Changes are forwarded
+// via callbacks; the Rust controller persists them to the settings(key,value)
+// table and applies them live.
 //
 //   import { SettingsPanel } from "screens/settings_panel.slint";
 
 import { Theme } from "../theme.slint";
 import { SegmentedControl } from "../components.slint";
+import { LineEdit, Palette } from "std-widgets.slint";
 
-// One labeled settings row: title + subtitle on the left, a control on the right.
+// ── SettingRow ───────────────────────────────────────────────────────────────
+// One labeled row: title + optional subtitle on the left; a control slot on the right.
 component SettingRow {
     in property <string> title;
     in property <string> subtitle;
+    min-height: Theme.control-height + Theme.space-4;
     HorizontalLayout {
         spacing: Theme.space-4;
         VerticalLayout {
@@ -18,94 +29,364 @@ component SettingRow {
             horizontal-stretch: 1;
             Text { text: title; color: Theme.color-text; font-size: Theme.font-base;
                 font-family: Theme.font-family; font-weight: 600; }
-            Text { text: subtitle; color: Theme.color-text-secondary; font-size: Theme.font-sm;
-                font-family: Theme.font-family; }
+            if subtitle != "" : Text {
+                text: subtitle; color: Theme.color-text-secondary;
+                font-size: Theme.font-sm; font-family: Theme.font-family;
+            }
         }
         @children
     }
 }
 
+// ── SectionHeader ────────────────────────────────────────────────────────────
+component SectionHeader inherits Rectangle {
+    in property <string> label;
+    height: 34px;
+    background: Theme.color-elevated;
+    HorizontalLayout {
+        padding-left: Theme.space-6;
+        Text {
+            text: label;
+            color: Theme.color-text-disabled;
+            font-size: Theme.font-xs; font-family: Theme.font-family;
+            font-weight: 700; letter-spacing: 0.7px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// ── ShortcutRow ──────────────────────────────────────────────────────────────
+// One row in the keymap display table.
+component ShortcutRow {
+    in property <string> keys;
+    in property <string> action;
+    height: Theme.tree-row-height + 2px;
+    HorizontalLayout {
+        padding-left: Theme.space-6; padding-right: Theme.space-6;
+        spacing: Theme.space-4;
+        // Key badge
+        Rectangle {
+            width: 112px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    height: 17px;
+                    border-radius: Theme.radius-xs;
+                    background: Theme.color-elevated;
+                    border-width: 1px; border-color: Theme.color-stroke;
+                    HorizontalLayout {
+                        padding-left: Theme.space-2; padding-right: Theme.space-2;
+                        Text {
+                            text: keys;
+                            color: Theme.color-text-secondary;
+                            font-size: Theme.font-xs;
+                            font-family: Theme.font-family-mono;
+                            font-weight: 600; vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+        Text {
+            text: action;
+            color: Theme.color-text-secondary;
+            font-size: Theme.font-base; font-family: Theme.font-family;
+            vertical-alignment: center; horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+}
+
+// ── SettingsPanel ─────────────────────────────────────────────────────────────
 export component SettingsPanel inherits Rectangle {
-    // 0 dark · 1 light · 2 system. 1 density-cosy toggle reserved for P5.
-    in-out property <int> theme-mode: 2;
-    in-out property <int> density: 0;   // 0 compact · 1 cosy
-    // Accent-index tracks the selected preset swatch (0-based into Theme.accent-presets).
-    // Accent colors are defined in Theme.accent-presets — NOT hardcoded here.
-    in-out property <int> accent-index: 0;
-    callback theme-changed(int);
-    callback accent-changed(int);   // idx into Theme.accent-presets
+    // ── Appearance ─────────────────────────────────────────────────────────
+    // 0 dark · 1 light · 2 system (Palette.color-scheme driven)
+    in-out property <int>  theme-mode: 2;
+    // 0 compact · 1 cosy — writes Theme.density live
+    in-out property <int>  density: 0;
+    // index into Theme.accent-presets (0-based)
+    in-out property <int>  accent-index: 0;
+
+    // ── Terminal defaults ───────────────────────────────────────────────────
+    // Terminal font size (pt). Default 13.
+    in-out property <int>  font-size: 13;
+    // Default local shell executable path (empty = OS default: $SHELL / cmd.exe).
+    in-out property <string> shell-path: "";
+    // Extra arguments passed to the shell (space-separated).
+    in-out property <string> shell-args: "";
+    // Working directory for new local sessions (empty = home dir).
+    in-out property <string> shell-cwd: "";
+
+    // ── Startup ────────────────────────────────────────────────────────────
+    // 0 = clean start, 1 = restore last session
+    in-out property <int>  startup-behavior: 0;
+
+    // ── Callbacks ──────────────────────────────────────────────────────────
+    callback theme-changed(int);           // 0 dark · 1 light · 2 system
+    callback density-changed(int);         // 0 compact · 1 cosy
+    callback accent-changed(int);          // idx into Theme.accent-presets
+    callback font-size-changed(int);
+    callback shell-path-changed(string);
+    callback shell-args-changed(string);
+    callback shell-cwd-changed(string);
+    callback startup-behavior-changed(int);
 
     background: Theme.color-base;
 
     VerticalLayout {
-        // Header.
+        // ── Panel header ────────────────────────────────────────────────
         Rectangle {
             height: 56px;
+            background: Theme.color-elevated;
             HorizontalLayout {
                 padding-left: Theme.space-6; padding-right: Theme.space-6;
-                Text { text: "Appearance"; color: Theme.color-text; font-size: Theme.font-lg;
-                    font-family: Theme.font-family; font-weight: 700; vertical-alignment: center; }
+                Text { text: "Settings"; color: Theme.color-text; font-size: Theme.font-lg;
+                    font-family: Theme.font-family; font-weight: 700;
+                    vertical-alignment: center; }
             }
         }
         Rectangle { height: 1px; background: Theme.color-stroke; }
 
         VerticalLayout {
-            padding: Theme.space-6;
-            spacing: Theme.space-6;
+            vertical-stretch: 1;
+            padding-bottom: Theme.space-4;
 
-            SettingRow { title: "Theme"; subtitle: "Follows OS by default";
-                Rectangle { width: 230px;
-                    SegmentedControl {
-                        options: ["Dark", "Light", "System"];
-                        selected <=> root.theme-mode;
-                        changed(i) => { root.theme-changed(i); }
+            // ════ APPEARANCE ════════════════════════════════════════════
+            SectionHeader { label: "APPEARANCE"; }
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+
+            VerticalLayout {
+                padding-left: Theme.space-6; padding-right: Theme.space-6;
+                padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
+                spacing: Theme.space-4;
+
+                SettingRow { title: "Theme"; subtitle: "Follows OS by default";
+                    Rectangle { width: 218px;
+                        SegmentedControl {
+                            options: ["Dark", "Light", "System"];
+                            selected <=> root.theme-mode;
+                            changed(i) => {
+                                root.theme-changed(i);
+                                if (i == 0) { Theme.dark-mode = true; }
+                                else if (i == 1) { Theme.dark-mode = false; }
+                                else {
+                                    Theme.dark-mode = (Palette.color-scheme == ColorScheme.dark);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                SettingRow { title: "Accent color"; subtitle: "Falls back to OS accent";
+                    HorizontalLayout {
+                        spacing: Theme.space-2; alignment: end;
+                        // Preset swatches come from Theme.accent-presets — no hardcoded hex here.
+                        for c[idx] in Theme.accent-presets : Rectangle {
+                            width: 24px; height: 24px; border-radius: 12px;
+                            background: c;
+                            border-width: idx == root.accent-index ? 2px : 0px;
+                            border-color: Theme.color-base;
+                            // Selected ring (inner outline in swatch color).
+                            Rectangle {
+                                width: 100%; height: 100%; border-radius: 12px;
+                                border-width: idx == root.accent-index ? 2px : 0px;
+                                border-color: c;
+                            }
+                            TouchArea { clicked => {
+                                root.accent-index = idx;
+                                // Live recolor — writes directly to the Theme global.
+                                Theme.accent = Theme.accent-presets[idx];
+                                root.accent-changed(idx);
+                            } }
+                        }
+                    }
+                }
+
+                SettingRow { title: "Density"; subtitle: "Row height and padding";
+                    Rectangle { width: 158px;
+                        SegmentedControl {
+                            options: ["Compact", "Cosy"];
+                            selected <=> root.density;
+                            changed(i) => {
+                                Theme.density = i;
+                                root.density-changed(i);
+                            }
+                        }
                     }
                 }
             }
 
-            SettingRow { title: "Accent"; subtitle: "Falls back to OS accent";
+            // ════ TERMINAL ══════════════════════════════════════════════
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+            SectionHeader { label: "TERMINAL"; }
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+
+            VerticalLayout {
+                padding-left: Theme.space-6; padding-right: Theme.space-6;
+                padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
+                spacing: Theme.space-4;
+
+                SettingRow { title: "Font size"; subtitle: "Terminal monospace size (pt)";
+                    // Simple − / value display / + stepper (no LineEdit to avoid
+                    // integer-parsing overhead; bounded 6..72).
+                    HorizontalLayout {
+                        spacing: Theme.space-2; alignment: end;
+                        Rectangle {
+                            width: 28px; height: Theme.control-height;
+                            border-radius: Theme.radius-sm;
+                            background: dec-ta.has-hover ? Theme.color-hover : Theme.color-card;
+                            border-width: 1px; border-color: Theme.color-stroke;
+                            Text { text: "−"; color: Theme.color-text; font-size: Theme.font-lg;
+                                font-family: Theme.font-family; horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: parent.width; height: parent.height; }
+                            dec-ta := TouchArea { clicked => {
+                                if (root.font-size > 6) {
+                                    root.font-size -= 1;
+                                    root.font-size-changed(root.font-size);
+                                }
+                            } }
+                        }
+                        Rectangle {
+                            width: 38px; height: Theme.control-height;
+                            border-radius: Theme.radius-sm; background: Theme.color-card;
+                            border-width: 1px; border-color: Theme.color-stroke;
+                            Text { text: root.font-size; color: Theme.color-text;
+                                font-size: Theme.font-base; font-family: Theme.font-family-mono;
+                                horizontal-alignment: center; vertical-alignment: center;
+                                width: parent.width; height: parent.height; }
+                        }
+                        Rectangle {
+                            width: 28px; height: Theme.control-height;
+                            border-radius: Theme.radius-sm;
+                            background: inc-ta.has-hover ? Theme.color-hover : Theme.color-card;
+                            border-width: 1px; border-color: Theme.color-stroke;
+                            Text { text: "+"; color: Theme.color-text; font-size: Theme.font-lg;
+                                font-family: Theme.font-family; horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: parent.width; height: parent.height; }
+                            inc-ta := TouchArea { clicked => {
+                                if (root.font-size < 72) {
+                                    root.font-size += 1;
+                                    root.font-size-changed(root.font-size);
+                                }
+                            } }
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    Text { text: "Default shell"; color: Theme.color-text;
+                        font-size: Theme.font-base; font-family: Theme.font-family;
+                        font-weight: 600; }
+                    Text { text: "Executable path — empty uses $SHELL or cmd.exe";
+                        color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                        font-family: Theme.font-family; }
+                    LineEdit {
+                        text <=> root.shell-path;
+                        placeholder-text: "/bin/bash";
+                        font-size: Theme.font-base;
+                        accepted(t) => { root.shell-path-changed(t); }
+                        edited(t)   => { root.shell-path = t; root.shell-path-changed(t); }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    Text { text: "Shell arguments"; color: Theme.color-text;
+                        font-size: Theme.font-base; font-family: Theme.font-family;
+                        font-weight: 600; }
+                    LineEdit {
+                        text <=> root.shell-args;
+                        placeholder-text: "--login";
+                        font-size: Theme.font-base;
+                        accepted(t) => { root.shell-args-changed(t); }
+                        edited(t)   => { root.shell-args = t; root.shell-args-changed(t); }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    Text { text: "Working directory"; color: Theme.color-text;
+                        font-size: Theme.font-base; font-family: Theme.font-family;
+                        font-weight: 600; }
+                    Text { text: "Empty defaults to the user home directory";
+                        color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                        font-family: Theme.font-family; }
+                    LineEdit {
+                        text <=> root.shell-cwd;
+                        placeholder-text: "~";
+                        font-size: Theme.font-base;
+                        accepted(t) => { root.shell-cwd-changed(t); }
+                        edited(t)   => { root.shell-cwd = t; root.shell-cwd-changed(t); }
+                    }
+                }
+            }
+
+            // ════ STARTUP ═══════════════════════════════════════════════
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+            SectionHeader { label: "STARTUP"; }
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+
+            VerticalLayout {
+                padding-left: Theme.space-6; padding-right: Theme.space-6;
+                padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
+                spacing: Theme.space-4;
+
+                SettingRow { title: "On launch"; subtitle: "What to do when ConMan opens";
+                    Rectangle { width: 218px;
+                        SegmentedControl {
+                            options: ["Clean start", "Restore last"];
+                            selected <=> root.startup-behavior;
+                            changed(i) => { root.startup-behavior-changed(i); }
+                        }
+                    }
+                }
+            }
+
+            // ════ KEYBOARD SHORTCUTS ════════════════════════════════════
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+            SectionHeader { label: "KEYBOARD SHORTCUTS"; }
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+
+            // Sub-header: Ctrl⇧ reserved app layer
+            Rectangle {
+                height: 24px;
                 HorizontalLayout {
-                    spacing: Theme.space-3;
-                    alignment: end;
-                    // Preset colors come from Theme.accent-presets (zero hardcoded hex here).
-                    for c[idx] in Theme.accent-presets : Rectangle {
-                        width: 26px; height: 26px; border-radius: 13px;
-                        background: c;
-                        border-width: idx == accent-index ? 2px : 0px;
-                        border-color: Theme.color-base;
-                        // Selected ring.
-                        Rectangle { width: 100%; height: 100%; border-radius: 13px;
-                            border-width: idx == accent-index ? 2px : 0px; border-color: c; }
-                        TouchArea { clicked => {
-                            root.accent-index = idx;
-                            // Write directly to the Theme global so the accent updates
-                            // everywhere immediately (GUI_DESIGN §6 — zero hardcoded colors).
-                            Theme.accent = Theme.accent-presets[idx];
-                            root.accent-changed(idx);
-                        } }
+                    padding-left: Theme.space-6;
+                    Text {
+                        text: "Ctrl ⇧  —  app layer (never forwarded to the terminal)";
+                        color: Theme.color-text-disabled; font-size: Theme.font-xs;
+                        font-family: Theme.font-family; font-weight: 600;
+                        vertical-alignment: center;
                     }
                 }
             }
 
-            SettingRow { title: "Density"; subtitle: "Row height & padding";
-                Rectangle { width: 170px;
-                    SegmentedControl { options: ["Compact", "Cosy"]; selected <=> root.density; }
-                }
-            }
+            ShortcutRow { keys: "Ctrl ⇧ \\";   action: "Split pane horizontally"; }
+            ShortcutRow { keys: "Ctrl ⇧ −";    action: "Split pane vertically"; }
+            ShortcutRow { keys: "Ctrl ⇧ W";    action: "Close focused pane"; }
+            ShortcutRow { keys: "Ctrl ⇧ D";    action: "Detach session (keep alive)"; }
+            ShortcutRow { keys: "Ctrl ⇧ B";    action: "Toggle broadcast to all panes"; }
+            ShortcutRow { keys: "Ctrl ⇧ ←/→";  action: "Focus prev / next pane (H-split)"; }
+            ShortcutRow { keys: "Ctrl ⇧ ↑/↓";  action: "Focus prev / next pane (V-split)"; }
 
-            SettingRow { title: "Terminal font"; subtitle: "Bundled Nerd Font";
-                Rectangle { width: 230px; height: Theme.control-height;
-                    border-radius: Theme.radius-sm; background: Theme.color-card;
-                    border-width: 1px; border-color: Theme.color-stroke;
-                    HorizontalLayout { padding-left: Theme.space-3; padding-right: Theme.space-3;
-                        Text { text: "JetBrains Mono NF"; color: Theme.color-text;
-                            font-size: Theme.font-base; font-family: Theme.font-family-mono;
-                            vertical-alignment: center; horizontal-stretch: 1; }
-                        Text { text: "\u{E70D}"; font-family: Theme.font-family-icons; font-size: Theme.font-sm;
-                            color: Theme.color-text-secondary; vertical-alignment: center; }
+            // Sub-header: global shortcuts
+            Rectangle {
+                height: 24px;
+                HorizontalLayout {
+                    padding-left: Theme.space-6;
+                    Text {
+                        text: "Global  —  work from any focus";
+                        color: Theme.color-text-disabled; font-size: Theme.font-xs;
+                        font-family: Theme.font-family; font-weight: 600;
+                        vertical-alignment: center;
                     }
                 }
             }
+
+            ShortcutRow { keys: "Ctrl K"; action: "Open command palette"; }
 
             Rectangle { vertical-stretch: 1; }
         }

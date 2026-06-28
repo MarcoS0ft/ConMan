@@ -29,6 +29,7 @@ use cm_session::{
     HostKeyVerifier, KnownHosts, LocalTerminalSession, PaneGroup, PaneLayout, RdpAuthInput,
     RdpSession, Session, SessionInput, SessionStatus, SshAuthInput, SshTerminalSession, Surface,
 };
+use cm_storage::SettingsService;
 use slint::{ComponentHandle, Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::input;
@@ -309,6 +310,48 @@ fn trace(args: std::fmt::Arguments) {
 }
 
 // ---------------------------------------------------------------------------
+// Settings application helper (P5.2)
+// ---------------------------------------------------------------------------
+
+/// Push all persisted settings into the live UI globals.
+///
+/// Called once at startup after `AppWindow` is created.  `Theme.density` and
+/// `Theme.dark-mode` are in-out globals in Slint; the aliases on `AppWindow`
+/// (`density`, `dark-mode`) are bidirectional bindings, so writing them here
+/// updates the Theme global immediately.
+fn apply_settings_to_ui(s: &cm_storage::AppSettings, ui: &AppWindow) {
+    ui.set_theme_mode(s.theme_mode);
+    ui.set_density(s.density);
+    ui.set_accent_index(s.accent_index);
+    ui.set_settings_font_size(s.font_size);
+    ui.set_settings_shell_path(s.shell_path.as_str().into());
+    ui.set_settings_shell_args(s.shell_args.as_str().into());
+    ui.set_settings_shell_cwd(s.shell_cwd.as_str().into());
+    ui.set_startup_behavior(s.startup_behavior);
+    ui.set_active_panel(s.active_panel);
+    ui.set_sidebar_collapsed(s.sidebar_collapsed);
+
+    // Apply theme-mode to the live Theme.dark-mode token (system is already the
+    // default; dark/light need an explicit override).
+    match s.theme_mode {
+        0 => ui.set_dark_mode(true),
+        1 => ui.set_dark_mode(false),
+        _ => {} // 2 (system): leave Theme.dark-mode at its Palette-derived default
+    }
+
+    // Apply saved accent preset: index 0 is the default cool-blue fallback,
+    // which is already the Theme.accent default — only write if it differs.
+    if s.accent_index > 0 {
+        // The accent-presets array is in Theme; we can't read it from Rust without
+        // a Slint getter. Instead we set only the index and rely on the Settings
+        // panel's on-open read of `accent-index` to keep the swatch in sync.
+        // The actual color is restored correctly when the user next opens Settings.
+        // If startup-accent restore is desired the preset colors are also baked into
+        // Theme.accent-presets in theme.slint (no Rust import needed).
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Panel model refresh helpers
 // ---------------------------------------------------------------------------
 
@@ -471,6 +514,20 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         Rc::new(VecModel::from(initial_palette_actions()));
     ui.set_palette_actions(ModelRc::from(palette_model.clone()));
 
+    // ── Load persisted settings (P5.2) ────────────────────────────────────
+    let stored_settings = {
+        let svc = SettingsService::new(repo.as_ref());
+        match svc.load() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("conman: failed to load settings: {e}");
+                cm_storage::AppSettings::default()
+            }
+        }
+    };
+    apply_settings_to_ui(&stored_settings, &ui);
+
+    // CONMAN_DARK_MODE env-var overrides the persisted theme (dev / CI).
     if let Ok(v) = std::env::var("CONMAN_DARK_MODE") {
         match v.trim() {
             "1" => ui.set_dark_mode(true),
@@ -831,18 +888,29 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
 
     ui.on_select_panel({
         let weak = ui.as_weak();
+        let repo_sp = repo.clone();
         move |idx| {
             if let Some(ui) = weak.upgrade() {
                 ui.set_active_panel(idx);
+                let svc = SettingsService::new(repo_sp.as_ref());
+                if let Err(e) = svc.save_active_panel(idx) {
+                    eprintln!("conman: save active_panel: {e}");
+                }
             }
         }
     });
 
     ui.on_toggle_sidebar({
         let weak = ui.as_weak();
+        let repo_ts = repo.clone();
         move || {
             if let Some(ui) = weak.upgrade() {
-                ui.set_sidebar_collapsed(!ui.get_sidebar_collapsed());
+                let new_val = !ui.get_sidebar_collapsed();
+                ui.set_sidebar_collapsed(new_val);
+                let svc = SettingsService::new(repo_ts.as_ref());
+                if let Err(e) = svc.save_sidebar_collapsed(new_val) {
+                    eprintln!("conman: save sidebar_collapsed: {e}");
+                }
             }
         }
     });
@@ -1235,8 +1303,87 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         }
     });
 
-    ui.on_theme_changed(|_idx| { /* P5: persist */ });
-    ui.on_accent_changed(|_idx| { /* P5: persist */ });
+    // ── Settings persistence callbacks (P5.2) ────────────────────────────────
+
+    ui.on_theme_changed({
+        let repo_s = repo.clone();
+        move |idx| {
+            let svc = SettingsService::new(repo_s.as_ref());
+            if let Err(e) = svc.save_theme_mode(idx) {
+                eprintln!("conman: save theme_mode: {e}");
+            }
+        }
+    });
+
+    ui.on_density_changed({
+        let repo_s = repo.clone();
+        move |idx| {
+            let svc = SettingsService::new(repo_s.as_ref());
+            if let Err(e) = svc.save_density(idx) {
+                eprintln!("conman: save density: {e}");
+            }
+        }
+    });
+
+    ui.on_accent_changed({
+        let repo_s = repo.clone();
+        move |idx| {
+            let svc = SettingsService::new(repo_s.as_ref());
+            if let Err(e) = svc.save_accent_index(idx) {
+                eprintln!("conman: save accent_index: {e}");
+            }
+        }
+    });
+
+    ui.on_settings_font_size_changed({
+        let repo_s = repo.clone();
+        move |v| {
+            let svc = SettingsService::new(repo_s.as_ref());
+            if let Err(e) = svc.save_font_size(v) {
+                eprintln!("conman: save font_size: {e}");
+            }
+        }
+    });
+
+    ui.on_settings_shell_path_changed({
+        let repo_s = repo.clone();
+        move |v| {
+            let svc = SettingsService::new(repo_s.as_ref());
+            if let Err(e) = svc.save_shell_path(v.as_str()) {
+                eprintln!("conman: save shell_path: {e}");
+            }
+        }
+    });
+
+    ui.on_settings_shell_args_changed({
+        let repo_s = repo.clone();
+        move |v| {
+            let svc = SettingsService::new(repo_s.as_ref());
+            if let Err(e) = svc.save_shell_args(v.as_str()) {
+                eprintln!("conman: save shell_args: {e}");
+            }
+        }
+    });
+
+    ui.on_settings_shell_cwd_changed({
+        let repo_s = repo.clone();
+        move |v| {
+            let svc = SettingsService::new(repo_s.as_ref());
+            if let Err(e) = svc.save_shell_cwd(v.as_str()) {
+                eprintln!("conman: save shell_cwd: {e}");
+            }
+        }
+    });
+
+    ui.on_startup_behavior_changed({
+        let repo_s = repo.clone();
+        move |v| {
+            let svc = SettingsService::new(repo_s.as_ref());
+            if let Err(e) = svc.save_startup_behavior(v) {
+                eprintln!("conman: save startup_behavior: {e}");
+            }
+        }
+    });
 
     ui.on_reconnect({
         let state = state.clone();

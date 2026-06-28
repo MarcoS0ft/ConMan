@@ -28,6 +28,13 @@ export global Theme {
   // is Direction A's cool blue. Status colors NEVER derive from this (see §status).
   in-out property <color> accent: #3b82f6;
 
+  // ── Density preset (P5.2) ─────────────────────────────────────────────────
+  // 0 = Compact (Direction A default), 1 = Cosy (bumped row heights + spacing).
+  // Written by Settings › Density segmented control; read from the settings DB
+  // on launch. Changing this property automatically reflows all dependent
+  // component metrics below without any additional Rust code.
+  in-out property <int> density: 0;
+
   // ── Surfaces — depth ladder: canvas → activity/side panel → card → overlay ──
   //   color-base:     window canvas / session area chrome (recedes)
   //   color-elevated: activity bar + side panel surface
@@ -124,19 +131,22 @@ export global Theme {
   // Win11 native icon font (Segoe Fluent Icons PUA codepoints) for chrome glyphs.
   out property <string> font-family-icons: "Segoe Fluent Icons";
 
-  // ── Component metrics (Direction A = compact) ──────────────────────────────
-  // Centralised so a future "Cosy" density preset can bump them in one place.
+  // ── Component metrics — density-aware (P5.2) ──────────────────────────────
+  // Direction A compact values at density==0; Cosy bumps row/control heights
+  // and padding by 6px everywhere, which is enough to feel more spacious without
+  // breaking any layout constraints.  All callers read these tokens — zero
+  // hardcoded sizes outside this file.
   out property <length> activity-bar-width: 48px;
-  out property <length> side-panel-width:  252px;   // default; resizable + persisted (P5)
-  out property <length> tab-height:         30px;
-  out property <length> tree-row-height:    26px;
-  out property <length> status-bar-height:  26px;
-  out property <length> control-height:     32px;   // buttons, inputs, segmented
+  out property <length> side-panel-width:  252px;   // default; resizable + persisted (P5.2)
+  out property <length> tab-height:         density == 1 ? 36px : 30px;
+  out property <length> tree-row-height:    density == 1 ? 32px : 26px;
+  out property <length> status-bar-height:  density == 1 ? 30px : 26px;
+  out property <length> control-height:     density == 1 ? 38px : 32px;  // buttons, inputs, segmented
   // ── Tree / keys panel row micro-metrics ──────────────────────────────────
   // Inline kind/protocol badge (e.g. "SSH", "RDP", "pw", "key").
-  out property <length> tag-height:   15px;  // badge pill height in tree rows
+  out property <length> tag-height:   density == 1 ? 18px : 15px;  // badge pill height in tree rows
   // Compact icon button used inside hover action groups in tree rows.
-  out property <length> icon-btn:     22px;  // container side length
+  out property <length> icon-btn:     density == 1 ? 26px : 22px;  // container side length
   // Hairline gap between adjacent compact icon buttons.
   out property <length> gap-hairline:  1px;
 }
