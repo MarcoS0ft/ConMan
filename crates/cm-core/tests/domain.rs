@@ -18,6 +18,7 @@ fn rdp_settings() -> ConnectionSettings {
         port: RdpSettings::DEFAULT_PORT,
         domain: Some("CORP".to_string()),
         username: Some("alice".to_string()),
+        ..RdpSettings::default()
     })
 }
 

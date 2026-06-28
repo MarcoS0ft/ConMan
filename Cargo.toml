@@ -26,3 +26,15 @@ unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# P4.1: Resolve pre-release crypto dep conflicts between russh 0.61.x and
+# ironrdp-connector 0.9.0 (which depends on picky/sspi with conflicting pinned
+# pre-release crypto crates).
+#
+# Solution: vendor ironrdp-connector 0.9.0 and make its picky/sspi/url deps
+# OPTIONAL behind a `credssp` feature. Since ConMan uses TLS-only auth
+# (enable_credssp: false), CredSSP is never exercised and picky/sspi are
+# never compiled, eliminating the conflict entirely.
+[patch.crates-io]
+ironrdp-connector = { path = "vendor/ironrdp-connector" }
+ironrdp-async = { path = "vendor/ironrdp-async" }

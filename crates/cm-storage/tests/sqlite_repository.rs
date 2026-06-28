@@ -55,6 +55,7 @@ fn mk_rdp_conn(name: &str, group_id: Option<GroupId>, cred: Option<CredentialId>
             port: RdpSettings::DEFAULT_PORT,
             domain: None,
             username: Some("admin".to_string()),
+            ..RdpSettings::default()
         }),
         cred,
         0,

@@ -12,13 +12,13 @@ publish.workspace = true
 # LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseSafe.
 default = ["engine-libghostty"]
 # The libghostty engine + the terminal sessions that drive it (local PTY + SSH).
-# portable-pty/russh/tokio/dirs are tied in here so a zig-free
-# `--no-default-features` build stays minimal.
+# portable-pty/russh are tied in here so a zig-free `--no-default-features`
+# build stays minimal. tokio and dirs are unconditional since P4.1 RDP always
+# needs them.
 engine-libghostty = [
     "dep:libghostty-vt",
     "dep:portable-pty",
     "dep:russh",
-    "dep:tokio",
     "dep:dirs",
 ]
 # Future pure-Rust fallback engine (alacritty_terminal) — not implemented yet.
@@ -39,6 +39,28 @@ russh = { version = "0.61", optional = true, default-features = false, features 
     "rsa",
     "flate2",
 ] }
+dirs = { version = "6", optional = true }
+# P4.1: IronRDP pure-Rust RDP client (versions verified 2026-06-28 against crates.io).
+# ironrdp-connector 0.9, ironrdp-session 0.10, ironrdp-tokio 0.9, ironrdp-graphics 0.8.1,
+# ironrdp-input 0.6, ironrdp-pdu 0.8, ironrdp-svc 0.7, ironrdp-cliprdr 0.6.
+# TLS uses rustls with ring backend to avoid aws-lc-rs / NASM requirement (P3.1 lesson).
+ironrdp-connector = "0.9"
+ironrdp-core = "0.2"
+ironrdp-session = "0.10"
+ironrdp-tokio = "0.9"
+ironrdp-graphics = "0.8"
+ironrdp-input = "0.6"
+ironrdp-pdu = "0.8"
+ironrdp-svc = "0.7"
+ironrdp-cliprdr = "0.6"
+ironrdp-tls = { version = "0.2", features = ["rustls"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+x509-cert = "0.2"
+# SHA-256 fingerprinting for TOFU certificate verification (P4.1).
+sha2 = "0.10"
+# tokio is unconditional (P4.1 RDP always needs it; SSH also uses it when
+# engine-libghostty is on).
 tokio = { version = "1", features = [
     "rt",
     "net",
@@ -46,8 +68,11 @@ tokio = { version = "1", features = [
     "sync",
     "time",
     "macros",
-], optional = true }
-dirs = { version = "6", optional = true }
+] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
+serde_json = "1"
 
 [lints]
 workspace = true

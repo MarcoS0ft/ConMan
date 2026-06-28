@@ -1,17 +1,25 @@
 //! `cm-session` — session orchestration for ConMan.
 //!
-//! Provides terminal sessions behind the shared [`TerminalSession`] abstraction:
-//! a local PTY shell ([`LocalTerminalSession`]) and an SSH shell
-//! ([`SshTerminalSession`]). Both drive the **same** `!Send` VT engine from a
-//! dedicated owner thread; only bytes and owned snapshots cross channels
-//! (ARCHITECTURE §4).
+//! Provides two session families:
 //!
-//! The engine + sessions are behind the `engine-libghostty` feature (default
-//! on). Building it requires the zig 0.15.2 toolchain; see
+//! 1. **Terminal sessions** — local PTY shell ([`LocalTerminalSession`]) and
+//!    SSH shell ([`SshTerminalSession`]). Both implement [`TerminalSession`]
+//!    and [`Session`] (ARCHITECTURE §4, P3.x). Gated on `engine-libghostty`.
+//!
+//! 2. **RDP session** — [`RdpSession`] driven by IronRDP over tokio. Implements
+//!    [`Session`] only (Framebuffer surface, P4.1). Always available.
+//!
+//! The libghostty engine requires the zig 0.15.2 toolchain; see
 //! `docs/devel/AI_GUIDANCE.md`.
 
 mod session;
-pub use session::{ExitStatus, SessionStatus, TerminalSession};
+pub use session::{ExitStatus, FrameUpdate, Session, SessionStatus, Surface, TerminalSession};
+
+mod rdp;
+pub use rdp::{
+    CertDecision, CertInfo, CertSituation, CertStore, CertVerifier, FixedCertVerifier,
+    KnownCertSource, RdpAuthInput, RdpError, RdpSession,
+};
 
 #[cfg(feature = "engine-libghostty")]
 mod engine_owner;
