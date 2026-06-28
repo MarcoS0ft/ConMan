@@ -10,6 +10,9 @@ cm-core = { path = "../cm-core" }
 # rusqlite with bundled SQLite — approved dep (P1.1 spec).
 # "bundled" links the SQLite amalgamation; no system SQLite dependency.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# serde is already a workspace dep (via cm-core); made direct here so
+# json_io can use the derive macros on its own public types.
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 

@@ -858,6 +858,7 @@ version = "0.0.0"
 dependencies = [
  "cm-core",
  "rusqlite",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
 ]
