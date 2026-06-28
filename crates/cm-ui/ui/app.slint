@@ -159,7 +159,8 @@ component RdpSurface inherits Rectangle {
     // key-up: fired on key-released (key-up PDU to RDP).
     callback key-up(string /* text */, int /* special */, int /* mods */);
     callback pointer(int /* button */, int /* kind */, length /* x */, length /* y */, int /* mods */);
-    callback scroll(length /* dx */, length /* dy */);
+    // rdp-scroll: passes actual pointer position (carry-over fix c).
+    callback rdp-scroll(length /* x */, length /* y */, length /* dx */, length /* dy */);
     callback resized(length /* w */, length /* h */);
 
     pure function mods(c: bool, a: bool, s: bool, m: bool) -> int {
@@ -246,7 +247,8 @@ component RdpSurface inherits Rectangle {
                     root.mods(e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta));
             }
             scroll-event(e) => {
-                root.scroll(e.delta-x, e.delta-y);
+                // Pass actual pointer position (carry-over fix c: was surface centre).
+                root.rdp-scroll(rdp-ta.mouse-x, rdp-ta.mouse-y, e.delta-x, e.delta-y);
                 accept
             }
         }
@@ -755,6 +757,8 @@ export component AppWindow inherits Window {
     callback pointer(int, int, length, length, int);
     callback scroll(length, length);
     callback surface-resized(length, length);
+    // RDP scroll with actual pointer coordinates (carry-over fix c).
+    callback rdp-scroll(length /* x */, length /* y */, length /* dx */, length /* dy */);
 
     // RDP surface key events (P4.2) — separate from terminal because RDP needs
     // both key-down and key-up PDUs (key-released fires key-up).
@@ -839,12 +843,12 @@ export component AppWindow inherits Window {
                         }
                         IconButton {
                             glyph: "\u{E8F4}";   // New folder / group
-                            size: 24px; glyph-size: 12px;
+                            size: 24px; glyph-size: Theme.icon-sm;
                             clicked => { root.new-group(0); }
                         }
                         IconButton {
                             glyph: "\u{E710}";   // Add connection
-                            size: 24px; glyph-size: 12px;
+                            size: 24px; glyph-size: Theme.icon-sm;
                             clicked => { root.new-connection(0); }
                         }
                     }
@@ -910,12 +914,12 @@ export component AppWindow inherits Window {
                         }
                         IconButton {
                             glyph: "\u{E8F4}";   // New folder
-                            size: 24px; glyph-size: 12px;
+                            size: 24px; glyph-size: Theme.icon-sm;
                             clicked => { root.new-cred-folder(0); }
                         }
                         IconButton {
                             glyph: "\u{E710}";   // New credential
-                            size: 24px; glyph-size: 12px;
+                            size: 24px; glyph-size: Theme.icon-sm;
                             clicked => { root.new-cred(0); }
                         }
                     }
@@ -1067,7 +1071,7 @@ export component AppWindow inherits Window {
                     key-down(t, s, m) => { root.rdp-key-down(t, s, m); }
                     key-up(t, s, m)   => { root.rdp-key-up(t, s, m); }
                     pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
-                    scroll(dx, dy)    => { root.scroll(dx, dy); }
+                    rdp-scroll(x, y, dx, dy) => { root.rdp-scroll(x, y, dx, dy); }
                     resized(w, h)     => { root.surface-resized(w, h); }
                 }
 
@@ -1100,7 +1104,7 @@ export component AppWindow inherits Window {
                         // Dismiss button.
                         IconButton {
                             glyph: "\u{E711}";
-                            size: 24px; glyph-size: 12px;
+                            size: 24px; glyph-size: Theme.icon-sm;
                             clicked => { root.toggle-broadcast(); }
                         }
                     }
