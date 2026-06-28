@@ -9,8 +9,8 @@
 use std::collections::HashSet;
 
 use cm_core::{
-    ConnectionRepository, Credential, CredentialFolder, CredentialFolderId, CredentialId,
-    CredentialKind, RepositoryError,
+    ConnectionRepository, Credential, CredentialFolder, CredentialId, CredentialKind,
+    RepositoryError,
 };
 use slint::SharedString;
 
@@ -235,17 +235,6 @@ impl KeysPanel {
             out.push(SharedString::from(f.name.as_str()));
         }
         out
-    }
-
-    /// Next sort value for a new credential in a folder.
-    pub fn next_sort_in_folder(&self, folder_id: Option<CredentialFolderId>) -> i64 {
-        self.credentials
-            .iter()
-            .filter(|c| c.folder_id == folder_id)
-            .map(|c| c.id.get())
-            .max()
-            .map(|m| m + 1)
-            .unwrap_or(0)
     }
 }
 

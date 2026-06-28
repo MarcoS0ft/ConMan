@@ -23,6 +23,7 @@ import { ComboBox } from "std-widgets.slint";
 // `selected-cred-idx`  index into AppWindow.cred-name-list; 0 = "Inherit"
 // `effective-cred-name`  resolved credential name (may come from a group)
 // `effective-inherited`  true when the effective cred comes from a group
+// `selected-group-idx`  index into AppWindow.group-name-list; 0 = "Root (no group)"
 export struct ConnProfile {
     id: int,
     name: string,
@@ -35,26 +36,35 @@ export struct ConnProfile {
     selected-cred-idx: int,
     effective-cred-name: string,
     effective-inherited: bool,
+    selected-group-idx: int,
 }
 
 // ── GroupForm ──────────────────────────────────────────────────────────────
 // Data bag for the group editor.  `default-cred-idx` is an index into
 // AppWindow.cred-name-list (0 = "No default / inherit from parent").
+// `selected-parent-idx` is an index into AppWindow.group-name-list;
+// 0 = "Root (no parent)".
 export struct GroupForm {
     id: int,
     name: string,
     parent-id: int,
     default-cred-idx: int,
+    selected-parent-idx: int,
 }
 
 // ── ProfileEditor ──────────────────────────────────────────────────────────
-// Mounted inside a Modal.  Rust sets `form` + `cred-name-list` before opening.
+// Mounted inside a Modal.  Rust sets `form` + `cred-name-list` + `group-name-list`
+// before opening.
 export component ProfileEditor {
     in-out property <ConnProfile> form;
     // Flat list of credential names for the ComboBox.
     // cred-name-list[0] is always "Inherit from group"; the rest map 1-to-1
     // to persisted credentials (Rust maintains this list in sync with the DB).
     in property <[string]> cred-name-list;
+    // Flat list of group names for the group picker.
+    // group-name-list[0] is always "Root (no group)"; the rest are group names
+    // in sort order.  form.selected-group-idx indexes into this list.
+    in property <[string]> group-name-list;
     callback save();
     callback cancel();
 
@@ -76,6 +86,22 @@ export component ProfileEditor {
             label: "Name";
             placeholder: "Connection name";
             text <=> root.form.name;
+        }
+
+        // ── Group (move between groups) ───────────────────────────────
+        if root.group-name-list.length > 0 : VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: "Group";
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-sm;
+                font-family: Theme.font-family;
+                font-weight: 600;
+            }
+            ComboBox {
+                model: root.group-name-list;
+                current-index <=> root.form.selected-group-idx;
+            }
         }
 
         // ── Kind ──────────────────────────────────────────────────────
@@ -192,10 +218,14 @@ export component ProfileEditor {
 }
 
 // ── GroupEditor ────────────────────────────────────────────────────────────
-// Lets the user rename a group and pick its default credential.
+// Lets the user rename a group, pick its default credential, and move it to a
+// different parent group.
 export component GroupEditor {
     in-out property <GroupForm> form;
     in property <[string]> cred-name-list;
+    // Flat list of group names for the parent picker.
+    // group-name-list[0] = "Root (no parent)"; the rest are sorted group names.
+    in property <[string]> group-name-list;
     callback save();
     callback cancel();
 
@@ -215,6 +245,22 @@ export component GroupEditor {
             label: "Name";
             placeholder: "Group name";
             text <=> root.form.name;
+        }
+
+        // ── Parent group (move between groups) ────────────────────────
+        if root.group-name-list.length > 0 : VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: "Parent Group";
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-sm;
+                font-family: Theme.font-family;
+                font-weight: 600;
+            }
+            ComboBox {
+                model: root.group-name-list;
+                current-index <=> root.form.selected-parent-idx;
+            }
         }
 
         VerticalLayout {

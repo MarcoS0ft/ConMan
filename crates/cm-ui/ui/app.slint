@@ -208,6 +208,8 @@ component ConnectionRow inherits Rectangle {
     callback edit-clicked();    // open profile / group editor
     callback new-sub();         // new child item under this group
     callback delete-clicked();
+    callback move-up();         // reorder: move one step up within same parent
+    callback move-down();       // reorder: move one step down within same parent
 
     height: Theme.tree-row-height;
     border-radius: Theme.radius-sm;
@@ -282,18 +284,30 @@ component ConnectionRow inherits Rectangle {
         if touch.has-hover : HorizontalLayout {
             spacing: 1px;
             alignment: center;
+            // ↑ / ↓ reorder within the same parent.
+            IconButton {
+                glyph: "\u{E70E}";   // ChevronUp
+                size: 22px; glyph-size: 10px;
+                clicked => { root.move-up(); }
+            }
+            IconButton {
+                glyph: "\u{E70D}";   // ChevronDown
+                size: 22px; glyph-size: 10px;
+                clicked => { root.move-down(); }
+            }
+            // Group: new-child + edit; Connection: edit (pencil).
             if data.is-group : IconButton {
-                glyph: "\u{E710}";
+                glyph: "\u{E710}";   // Add (new child)
                 size: 22px; glyph-size: 10px;
                 clicked => { root.new-sub(); }
             }
-            if !data.is-group : IconButton {
-                glyph: "\u{E70F}";
+            IconButton {
+                glyph: "\u{E70F}";   // Edit (pencil)
                 size: 22px; glyph-size: 10px;
                 clicked => { root.edit-clicked(); }
             }
             IconButton {
-                glyph: "\u{E74D}";
+                glyph: "\u{E74D}";   // Delete (trash)
                 size: 22px; glyph-size: 10px;
                 glyph-color: Theme.color-error;
                 clicked => { root.delete-clicked(); }
@@ -432,6 +446,9 @@ export component AppWindow inherits Window {
     in property <[string]>   cred-name-list;
     // Flat folder name list for the credential editor's folder picker.
     in property <[string]>   folder-name-list;
+    // Flat list of group names for the group/parent pickers in editors.
+    // Index 0 = "Root (no group)"; 1.. = group names in sort order.
+    in property <[string]>   group-name-list;
 
     // ── Status bar / broadcast ────────────────────────────────────────
     in property <string>  session-status: "disconnected";
@@ -520,6 +537,11 @@ export component AppWindow inherits Window {
     callback edit-conn(int);             // connection id → profile editor
     callback edit-group(int);            // group id → group editor
     callback delete-conn-row(int, bool); // id, is_group
+    // P1.4 — Reorder (up/down within the same parent) + move-between-groups.
+    // Reorder is wired from hover ↑/↓ buttons; move-between-groups is exposed
+    // via the group/parent-group ComboBoxes in the profile and group editors.
+    callback reorder-conn-row(int, int);  // conn_id, direction (-1=up, +1=down)
+    callback reorder-group-row(int, int); // group_id, direction
 
     // P1.4 — Keys panel CRUD.
     callback toggle-cred-row(int);        // idx → expand/collapse folder
@@ -635,6 +657,14 @@ export component AppWindow inherits Window {
                             new-sub => { root.new-connection(conn.id); }
                             delete-clicked => {
                                 root.delete-conn-row(conn.id, conn.is-group);
+                            }
+                            move-up => {
+                                if (conn.is-group) { root.reorder-group-row(conn.id, -1); }
+                                else { root.reorder-conn-row(conn.id, -1); }
+                            }
+                            move-down => {
+                                if (conn.is-group) { root.reorder-group-row(conn.id, 1); }
+                                else { root.reorder-conn-row(conn.id, 1); }
                             }
                         }
                     }
@@ -855,6 +885,7 @@ export component AppWindow inherits Window {
         ProfileEditor {
             form <=> root.profile-form;
             cred-name-list: root.cred-name-list;
+            group-name-list: root.group-name-list;
             save   => { root.profile-save(); }
             cancel => { root.profile-editor-open = false; }
         }
@@ -867,6 +898,7 @@ export component AppWindow inherits Window {
         GroupEditor {
             form <=> root.group-form;
             cred-name-list: root.cred-name-list;
+            group-name-list: root.group-name-list;
             save   => { root.group-save(); }
             cancel => { root.group-editor-open = false; }
         }

@@ -367,16 +367,7 @@ pub fn cred_name_idx(
     folders: &[cm_core::CredentialFolder],
 ) -> i32 {
     let Some(id) = cred_id else { return 0 };
-    let list = build_cred_name_list(credentials, folders, "");
-    // list[0] is the sentinel; skip it.
-    for (i, cred) in credentials.iter().enumerate() {
-        if cred.id == id {
-            // i is 0-based into `credentials`; offset +1 for the sentinel.
-            let _ = list; // silence unused; the loop below is the real lookup.
-            let _ = i;
-        }
-    }
-    // Recompute the index by looking for the credential name in the list.
+    // Look up the credential's display name, then find it in the ordered list.
     let Some(cred) = credentials.iter().find(|c| c.id == id) else {
         return 0;
     };

@@ -242,6 +242,54 @@ fn refresh_cred_name_list(state: &State, ui: &AppWindow) {
     ui.set_folder_name_list(ModelRc::from(fm));
 }
 
+/// Build the flat group name list for the group/parent pickers in editors.
+///
+/// Index 0 = "Root (no group)"; subsequent entries are group names in
+/// `(sort, id)` order — matching [`ConnectionTree::flat`]'s root iteration.
+fn build_group_name_list(groups: &[Group]) -> Vec<SharedString> {
+    let mut out = vec![SharedString::from("Root (no group)")];
+    let mut sorted: Vec<&Group> = groups.iter().collect();
+    sorted.sort_by_key(|g| (g.sort, g.id.get()));
+    for g in sorted {
+        out.push(SharedString::from(g.name.as_str()));
+    }
+    out
+}
+
+/// Rebuild and push the group name list to the UI.
+fn refresh_group_name_list(state: &State, ui: &AppWindow) {
+    let list = build_group_name_list(state.conn_tree.groups());
+    let model: Rc<VecModel<SharedString>> = Rc::new(VecModel::from(list));
+    ui.set_group_name_list(ModelRc::from(model));
+}
+
+/// Map a 1-based dropdown index back to the corresponding [`GroupId`].
+///
+/// Index 0 (the "Root" sentinel) returns `None`.  An out-of-bounds index also
+/// returns `None` (safe degradation to root).
+fn group_id_from_name_idx(idx: i32, groups: &[Group]) -> Option<GroupId> {
+    if idx <= 0 {
+        return None;
+    }
+    let mut sorted: Vec<&Group> = groups.iter().collect();
+    sorted.sort_by_key(|g| (g.sort, g.id.get()));
+    sorted.get((idx - 1) as usize).map(|g| g.id)
+}
+
+/// Find the 1-based dropdown index for a given [`GroupId`] in the name list.
+///
+/// Returns 0 (the "Root" sentinel) when `group_id` is `None` or not found.
+fn group_name_idx(group_id: Option<GroupId>, groups: &[Group]) -> i32 {
+    let Some(gid) = group_id else { return 0 };
+    let mut sorted: Vec<&Group> = groups.iter().collect();
+    sorted.sort_by_key(|g| (g.sort, g.id.get()));
+    sorted
+        .iter()
+        .position(|g| g.id == gid)
+        .map(|i| i as i32 + 1)
+        .unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
@@ -313,6 +361,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         refresh_conn_model(&st, &conn_model);
         refresh_cred_model(&st, &cred_model);
         refresh_cred_name_list(&st, &ui);
+        refresh_group_name_list(&st, &ui);
     }
 
     let hk_pending: Arc<Mutex<Option<Sender<HostKeyDecision>>>> = Arc::new(Mutex::new(None));
@@ -433,6 +482,13 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     }
 
     // ── Shell / panel callbacks ───────────────────────────────────────────────
+    //
+    // UNVERIFIED: Persist panel state (active_panel + sidebar_collapsed/width)
+    // via a settings facility.  No settings store exists in the merged waves
+    // (P1.0–P3.2); persisting theme choices is deferred to P5.2
+    // (settings-theming).  Panel state persistence is similarly deferred to
+    // P5.2 and will be implemented there once the settings infrastructure
+    // lands.  Until then, state resets to defaults on restart.
 
     ui.on_select_panel({
         let weak = ui.as_weak();
@@ -661,6 +717,12 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         move |group_id| {
             let Some(ui) = weak.upgrade() else { return };
             let st = state.borrow();
+            let gid = if group_id == 0 {
+                None
+            } else {
+                Some(GroupId::new(group_id as i64))
+            };
+            let selected_group_idx = group_name_idx(gid, st.conn_tree.groups());
             let form = ConnProfile {
                 id: 0,
                 name: SharedString::from("New Connection"),
@@ -673,6 +735,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                 selected_cred_idx: 0,
                 effective_cred_name: SharedString::from(""),
                 effective_inherited: false,
+                selected_group_idx,
             };
             drop(st);
             ui.set_profile_form(form);
@@ -681,15 +744,25 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     });
 
     ui.on_new_group({
+        let state = state.clone();
         let weak = ui.as_weak();
         move |parent_id| {
             let Some(ui) = weak.upgrade() else { return };
+            let st = state.borrow();
+            let pid = if parent_id == 0 {
+                None
+            } else {
+                Some(GroupId::new(parent_id as i64))
+            };
+            let selected_parent_idx = group_name_idx(pid, st.conn_tree.groups());
             let form = GroupForm {
                 id: 0,
                 name: SharedString::from("New Group"),
                 parent_id,
                 default_cred_idx: 0,
+                selected_parent_idx,
             };
+            drop(st);
             ui.set_group_form(form);
             ui.set_group_editor_open(true);
         }
@@ -713,6 +786,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
             let (eff_cred_id, inherited) =
                 KeysPanel::resolve_effective(conn.credential, conn.group_id, st.conn_tree.groups());
             let eff_name = KeysPanel::cred_display_name(eff_cred_id, st.keys_panel.credentials());
+            let selected_group_idx = group_name_idx(conn.group_id, st.conn_tree.groups());
             let form = ConnProfile {
                 id: conn_id,
                 name: SharedString::from(conn.name.as_str()),
@@ -725,6 +799,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                 selected_cred_idx: cred_sel_idx,
                 effective_cred_name: SharedString::from(eff_name.as_str()),
                 effective_inherited: inherited,
+                selected_group_idx,
             };
             drop(st);
             ui.set_profile_form(form);
@@ -746,11 +821,13 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                 st.keys_panel.credentials(),
                 st.keys_panel.folders(),
             );
+            let selected_parent_idx = group_name_idx(group.parent_id, st.conn_tree.groups());
             let form = GroupForm {
                 id: group_id,
                 name: SharedString::from(group.name.as_str()),
                 parent_id: group.parent_id.map(|g| g.get() as i32).unwrap_or(0),
                 default_cred_idx,
+                selected_parent_idx,
             };
             drop(st);
             ui.set_group_form(form);
@@ -788,10 +865,12 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let form = ui.get_profile_form();
-            let group_id = if form.group_id == 0 {
-                None
-            } else {
-                Some(GroupId::new(form.group_id as i64))
+            // Resolve group_id from the dropdown index (selected-group-idx).
+            // Falls back to the raw form.group_id when the index is out-of-range
+            // (e.g. on an older saved form with no group list loaded yet).
+            let group_id = {
+                let st = state.borrow();
+                group_id_from_name_idx(form.selected_group_idx, st.conn_tree.groups())
             };
             let cred_id = {
                 let st = state.borrow();
@@ -849,6 +928,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                 eprintln!("conman: reload after save failed: {e}");
             }
             refresh_conn_model(&st, &conn_model);
+            refresh_group_name_list(&st, &ui);
         }
     });
 
@@ -860,10 +940,13 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let form = ui.get_group_form();
-            let parent_id = if form.parent_id == 0 {
-                None
-            } else {
-                Some(GroupId::new(form.parent_id as i64))
+            // Resolve parent_id from the dropdown index (selected-parent-idx).
+            // Prevent a group from being its own parent (would create a cycle).
+            let parent_id = {
+                let st = state.borrow();
+                let resolved =
+                    group_id_from_name_idx(form.selected_parent_idx, st.conn_tree.groups());
+                resolved.filter(|&gid| form.id == 0 || gid != GroupId::new(form.id as i64))
             };
             let default_credential = {
                 let st = state.borrow();
@@ -901,6 +984,147 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                 eprintln!("conman: reload after group save failed: {e}");
             }
             refresh_conn_model(&st, &conn_model);
+            refresh_group_name_list(&st, &ui);
+        }
+    });
+
+    // ── P1.4: Reorder / move-between-groups ──────────────────────────────────
+
+    ui.on_reorder_conn_row({
+        let state = state.clone();
+        let conn_model = conn_model.clone();
+        let repo_rcr = repo.clone();
+        move |conn_id, direction| {
+            let mut st = state.borrow_mut();
+            let Some(conn) = st.conn_tree.conn_by_id(conn_id as i64).cloned() else {
+                return;
+            };
+            let group_id = conn.group_id;
+            // Collect siblings (same parent) sorted by (sort, id).
+            let mut siblings: Vec<Connection> = st
+                .conn_tree
+                .connections()
+                .iter()
+                .filter(|c| c.group_id == group_id)
+                .cloned()
+                .collect();
+            siblings.sort_by_key(|c| (c.sort, c.id.get()));
+            let Some(pos) = siblings.iter().position(|c| c.id == conn.id) else {
+                return;
+            };
+            let target_pos = if direction < 0 {
+                if pos == 0 {
+                    return;
+                }
+                pos - 1
+            } else {
+                if pos + 1 >= siblings.len() {
+                    return;
+                }
+                pos + 1
+            };
+            // Swap sort values between the two siblings.
+            let sort_a = siblings[pos].sort;
+            let sort_b = siblings[target_pos].sort;
+            let mut a = siblings[pos].clone();
+            let mut b = siblings[target_pos].clone();
+            if sort_a == sort_b {
+                // Equal sorts: nudge them apart without touching the other sibling.
+                if direction < 0 {
+                    a.sort = sort_a.saturating_sub(1);
+                } else {
+                    a.sort = sort_a.saturating_add(1);
+                }
+                if let Err(e) = repo_rcr.upsert_connection(&a) {
+                    eprintln!("conman: reorder conn (nudge) failed: {e}");
+                    return;
+                }
+            } else {
+                a.sort = sort_b;
+                b.sort = sort_a;
+                if let Err(e) = repo_rcr.upsert_connection(&b) {
+                    eprintln!("conman: reorder conn (swap target) failed: {e}");
+                    return;
+                }
+                if let Err(e) = repo_rcr.upsert_connection(&a) {
+                    eprintln!("conman: reorder conn (swap source) failed: {e}");
+                    return;
+                }
+            }
+            if let Err(e) = st.conn_tree.reload(repo_rcr.as_ref()) {
+                eprintln!("conman: reload after reorder failed: {e}");
+            }
+            refresh_conn_model(&st, &conn_model);
+        }
+    });
+
+    ui.on_reorder_group_row({
+        let state = state.clone();
+        let conn_model = conn_model.clone();
+        let repo_rgr = repo.clone();
+        let weak_rgr = ui.as_weak();
+        move |group_id, direction| {
+            let mut st = state.borrow_mut();
+            let Some(grp) = st.conn_tree.group_by_id(group_id as i64).cloned() else {
+                return;
+            };
+            let parent_id = grp.parent_id;
+            // Collect sibling groups (same parent) sorted by (sort, id).
+            let mut siblings: Vec<Group> = st
+                .conn_tree
+                .groups()
+                .iter()
+                .filter(|g| g.parent_id == parent_id)
+                .cloned()
+                .collect();
+            siblings.sort_by_key(|g| (g.sort, g.id.get()));
+            let Some(pos) = siblings.iter().position(|g| g.id == grp.id) else {
+                return;
+            };
+            let target_pos = if direction < 0 {
+                if pos == 0 {
+                    return;
+                }
+                pos - 1
+            } else {
+                if pos + 1 >= siblings.len() {
+                    return;
+                }
+                pos + 1
+            };
+            let sort_a = siblings[pos].sort;
+            let sort_b = siblings[target_pos].sort;
+            let mut a = siblings[pos].clone();
+            let mut b = siblings[target_pos].clone();
+            if sort_a == sort_b {
+                if direction < 0 {
+                    a.sort = sort_a.saturating_sub(1);
+                } else {
+                    a.sort = sort_a.saturating_add(1);
+                }
+                if let Err(e) = repo_rgr.upsert_group(&a) {
+                    eprintln!("conman: reorder group (nudge) failed: {e}");
+                    return;
+                }
+            } else {
+                a.sort = sort_b;
+                b.sort = sort_a;
+                if let Err(e) = repo_rgr.upsert_group(&b) {
+                    eprintln!("conman: reorder group (swap target) failed: {e}");
+                    return;
+                }
+                if let Err(e) = repo_rgr.upsert_group(&a) {
+                    eprintln!("conman: reorder group (swap source) failed: {e}");
+                    return;
+                }
+            }
+            if let Err(e) = st.conn_tree.reload(repo_rgr.as_ref()) {
+                eprintln!("conman: reload after group reorder failed: {e}");
+            }
+            refresh_conn_model(&st, &conn_model);
+            if let Some(ui) = weak_rgr.upgrade() {
+                refresh_group_name_list(&st, &ui);
+            }
         }
     });
 
@@ -1660,14 +1884,32 @@ fn resolve_cred_from_idx(
     if idx <= 0 {
         return None;
     }
-    let list = build_cred_name_list(credentials, folders, "Inherit from group");
-    let name = list.get(idx as usize)?;
-    let bare = name
-        .as_str()
-        .split('/')
-        .next_back()
-        .unwrap_or(name.as_str());
-    credentials.iter().find(|c| c.name == bare).map(|c| c.id)
+    // Build the same ordered credential sequence that build_cred_name_list
+    // produces and index directly by position (idx-1, because index 0 is the
+    // "Inherit" sentinel).  This avoids the name-collision bug that arose from
+    // splitting on '/' and doing a first-match lookup.
+    let mut ordered: Vec<CredentialId> = Vec::new();
+    // Root credentials first (no folder), sorted by name.
+    let mut root_creds: Vec<&Credential> = credentials
+        .iter()
+        .filter(|c| c.folder_id.is_none())
+        .collect();
+    root_creds.sort_by_key(|c| c.name.as_str());
+    for c in root_creds {
+        ordered.push(c.id);
+    }
+    // Credentials in each folder, in the same folder iteration order and name-sorted.
+    for folder in folders {
+        let mut folder_creds: Vec<&Credential> = credentials
+            .iter()
+            .filter(|c| c.folder_id == Some(folder.id))
+            .collect();
+        folder_creds.sort_by_key(|c| c.name.as_str());
+        for c in folder_creds {
+            ordered.push(c.id);
+        }
+    }
+    ordered.get((idx - 1) as usize).copied()
 }
 
 // ---------------------------------------------------------------------------
@@ -1758,6 +2000,9 @@ fn dispatch_palette_action(
         "Focus Connections" => ui.set_active_panel(0),
         "Focus Keys" => ui.set_active_panel(1),
         "Focus Settings" => ui.set_active_panel(2),
+        // BLOCKED: Import / Export requires P1.2 (json-import-export), which has
+        // not yet been merged.  No-op here; wire once P1.2 lands.
+        "Import / Export\u{2026}" => {}
         _ => {}
     }
 }
@@ -1821,6 +2066,19 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             detail: SharedString::from(""),
             shortcut: SharedString::from(""),
             glyph: SharedString::from("\u{E713}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        // BLOCKED: Import / Export requires P1.2 (json-import-export), which
+        // has not yet landed.  This entry is present so the affordance appears
+        // in the palette; it is a no-op until P1.2 is merged and wired here.
+        PaletteAction {
+            category: SharedString::from("DATA"),
+            first_in_group: true,
+            label: SharedString::from("Import / Export\u{2026}"),
+            detail: SharedString::from("Blocked — requires P1.2 (not yet merged)"),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{E8B5}"),
             status: SharedString::from(""),
             selected: false,
         },
@@ -2054,6 +2312,7 @@ mod tests {
             selected_cred_idx: 0,
             effective_cred_name: SharedString::from(""),
             effective_inherited: false,
+            selected_group_idx: 0,
         };
         let settings = settings_from_form(&form);
         assert!(
@@ -2062,6 +2321,151 @@ mod tests {
                 ConnectionSettings::Ssh(SshSettings { port: 2222, .. })
             ),
             "SSH settings port should be 2222"
+        );
+    }
+
+    // ── resolve_cred_from_idx ─────────────────────────────────────────────
+
+    fn make_cred(id: i64, folder_id: Option<i64>, name: &str) -> Credential {
+        use cm_core::{CredentialFolderId, CredentialId, CredentialKind};
+        Credential {
+            id: CredentialId::new(id),
+            name: name.to_owned(),
+            kind: CredentialKind::Password,
+            folder_id: folder_id.map(CredentialFolderId::new),
+            username: None,
+        }
+    }
+
+    fn make_folder(id: i64, name: &str) -> CredentialFolder {
+        use cm_core::CredentialFolderId;
+        CredentialFolder {
+            id: CredentialFolderId::new(id),
+            parent_id: None,
+            name: name.to_owned(),
+            sort: 0,
+        }
+    }
+
+    #[test]
+    fn resolve_cred_idx_zero_returns_none() {
+        let creds = vec![make_cred(1, None, "alpha")];
+        assert!(resolve_cred_from_idx(0, &creds, &[]).is_none());
+    }
+
+    #[test]
+    fn resolve_cred_idx_negative_returns_none() {
+        let creds = vec![make_cred(1, None, "alpha")];
+        assert!(resolve_cred_from_idx(-1, &creds, &[]).is_none());
+    }
+
+    #[test]
+    fn resolve_cred_idx_position_based_not_name_match() {
+        // Two creds with the same bare name but in different folders.
+        // Idx 1 = root "ops" (alphabetically first among root creds).
+        // Idx 2 = "folder/ops" (would be a false match under old name-split logic).
+        let creds = vec![make_cred(10, None, "ops"), make_cred(20, Some(99), "ops")];
+        let folders = vec![make_folder(99, "folder")];
+        let id1 = resolve_cred_from_idx(1, &creds, &folders);
+        let id2 = resolve_cred_from_idx(2, &creds, &folders);
+        use cm_core::CredentialId;
+        assert_eq!(
+            id1,
+            Some(CredentialId::new(10)),
+            "idx 1 must be root ops (id 10)"
+        );
+        assert_eq!(
+            id2,
+            Some(CredentialId::new(20)),
+            "idx 2 must be folder ops (id 20)"
+        );
+        // Old name-split logic would return id 10 for both (first-match on "ops").
+        assert_ne!(id1, id2, "position-based lookup must distinguish them");
+    }
+
+    #[test]
+    fn resolve_cred_idx_out_of_bounds_returns_none() {
+        let creds = vec![make_cred(1, None, "only")];
+        assert!(resolve_cred_from_idx(99, &creds, &[]).is_none());
+    }
+
+    // ── group name list helpers ───────────────────────────────────────────
+
+    fn make_group(id: i64, sort: i64, name: &str) -> Group {
+        Group {
+            id: GroupId::new(id),
+            parent_id: None,
+            name: name.to_owned(),
+            sort,
+            default_credential: None,
+        }
+    }
+
+    #[test]
+    fn group_name_list_sentinel_is_root() {
+        let list = build_group_name_list(&[]);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].as_str(), "Root (no group)");
+    }
+
+    #[test]
+    fn group_name_list_sorted_by_sort_then_id() {
+        let groups = vec![
+            make_group(3, 1, "C"),
+            make_group(1, 0, "A"),
+            make_group(2, 0, "B"),
+        ];
+        let list = build_group_name_list(&groups);
+        // sentinel + A(sort=0,id=1) + B(sort=0,id=2) + C(sort=1,id=3)
+        assert_eq!(list.len(), 4);
+        assert_eq!(list[1].as_str(), "A");
+        assert_eq!(list[2].as_str(), "B");
+        assert_eq!(list[3].as_str(), "C");
+    }
+
+    #[test]
+    fn group_id_from_name_idx_zero_is_root() {
+        let groups = vec![make_group(1, 0, "G1")];
+        assert!(group_id_from_name_idx(0, &groups).is_none());
+    }
+
+    #[test]
+    fn group_id_from_name_idx_one_is_first_sorted_group() {
+        let groups = vec![make_group(7, 0, "G7"), make_group(1, 0, "G1")];
+        // G1 sort=0,id=1 comes first; G7 sort=0,id=7 comes second.
+        let id = group_id_from_name_idx(1, &groups).expect("should resolve");
+        assert_eq!(id, GroupId::new(1));
+    }
+
+    #[test]
+    fn group_name_idx_round_trips() {
+        let groups = vec![make_group(5, 0, "Five"), make_group(2, 0, "Two")];
+        // sorted: Two(id=2), Five(id=5) → indices 1, 2
+        let idx_two = group_name_idx(Some(GroupId::new(2)), &groups);
+        let idx_five = group_name_idx(Some(GroupId::new(5)), &groups);
+        assert_eq!(idx_two, 1);
+        assert_eq!(idx_five, 2);
+        // Round-trip: idx → id → idx.
+        let recovered = group_id_from_name_idx(idx_two, &groups).expect("should resolve");
+        assert_eq!(recovered, GroupId::new(2));
+    }
+
+    #[test]
+    fn group_name_idx_none_returns_zero() {
+        let groups = vec![make_group(1, 0, "G")];
+        assert_eq!(group_name_idx(None, &groups), 0);
+    }
+
+    #[test]
+    fn palette_contains_import_export_blocked_action() {
+        let all = initial_palette_actions();
+        let entry = all
+            .iter()
+            .find(|a| a.label.as_str().contains("Import"))
+            .expect("Import/Export palette entry must exist");
+        assert!(
+            entry.detail.as_str().contains("P1.2"),
+            "detail must call out P1.2 as the dependency"
         );
     }
 }
