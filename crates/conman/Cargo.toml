@@ -14,6 +14,7 @@ cm-ui = { path = "../cm-ui" }
 cm-core = { path = "../cm-core" }
 cm-storage = { path = "../cm-storage" }
 cm-secrets = { path = "../cm-secrets" }
+cm-platform = { path = "../cm-platform" }
 # The composition root selects the real Slint backend + renderers. femtovg is the GPU path
 # chosen in P0.3; the software renderer is the `SLINT_BACKEND=software` fallback for
 # headless/CI. Feature unification enables these on the single shared `slint` build for the

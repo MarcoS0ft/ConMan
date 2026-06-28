@@ -4,14 +4,16 @@
 
 //! `conman` — the application binary and composition root.
 //!
-//! P1.4 upgrade: this binary now constructs the real SQLite repository
-//! (`cm-storage`) and OS keychain store (`cm-secrets`), seeds demo data on a
-//! fresh in-memory database, and injects everything via [`cm_ui::AppConfig`].
+//! P1.5: opens a **file-backed** SQLite database whose path is resolved by
+//! `cm-platform::app_db_path()`.  On the very first launch (empty DB) a small
+//! demo dataset is seeded; subsequent launches open and migrate the existing
+//! DB without touching the user's data.
 
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use cm_core::ConnectionRepository as _;
+use cm_platform::app_db_path;
 use cm_secrets::KeyringStore;
 use cm_storage::SqliteRepository;
 use cm_ui::AppConfig;
@@ -38,13 +40,23 @@ fn main() -> ExitCode {
 
 /// Build the [`AppConfig`] that the UI controller receives.
 ///
-/// Uses an in-memory SQLite database and seeds representative demo data so the
-/// Connections + Keys panels show a populated tree immediately. A future task
-/// (P1.5) will persist to the user's application-data directory.
+/// Opens (or creates) the file-backed SQLite DB at the OS data-dir path
+/// returned by `cm-platform`.  On an empty / brand-new DB a small demo
+/// dataset is seeded once; existing DBs are opened as-is (migrations run
+/// automatically on open).
 fn build_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
+    // ── Resolve DB path ────────────────────────────────────────────────────
+    let db_path = app_db_path()?;
+
     // ── Repository (SQLite) ────────────────────────────────────────────────
-    let repo = SqliteRepository::open_in_memory()?;
-    seed_demo_data(&repo)?;
+    let repo = SqliteRepository::open(&db_path)?;
+
+    // Seed demo data only when the database is brand-new (no groups exist).
+    let groups = repo.list_groups()?;
+    if groups.is_empty() {
+        seed_demo_data(&repo)?;
+    }
+
     let repo: Arc<dyn cm_core::ConnectionRepository> = Arc::new(repo);
 
     // ── Credential store (OS keychain) ─────────────────────────────────────
