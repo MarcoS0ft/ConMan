@@ -511,4 +511,191 @@ mod tests {
         );
         assert!(map_scroll(0.0, 0, 0, 0).is_none());
     }
+
+    // ── RdpCoords::map ────────────────────────────────────────────────────────
+
+    #[test]
+    fn rdp_coords_map_scales_correctly() {
+        let c = RdpCoords {
+            surface_w: 1280.0,
+            surface_h: 720.0,
+            rdp_w: 1920,
+            rdp_h: 1080,
+        };
+        // Centre of surface → centre of RDP desktop.
+        let (rx, ry) = c.map(640.0, 360.0).unwrap();
+        assert_eq!(rx, 960);
+        assert_eq!(ry, 540);
+    }
+
+    #[test]
+    fn rdp_coords_map_zero_surface_returns_none() {
+        // Zero-dim surface → None.
+        let c = RdpCoords {
+            surface_w: 0.0,
+            surface_h: 720.0,
+            rdp_w: 1920,
+            rdp_h: 1080,
+        };
+        assert!(c.map(0.0, 0.0).is_none());
+
+        let c2 = RdpCoords {
+            surface_w: 1280.0,
+            surface_h: 0.0,
+            rdp_w: 1920,
+            rdp_h: 1080,
+        };
+        assert!(c2.map(0.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn rdp_coords_map_zero_rdp_returns_none() {
+        let c = RdpCoords {
+            surface_w: 1280.0,
+            surface_h: 720.0,
+            rdp_w: 0,
+            rdp_h: 1080,
+        };
+        assert!(c.map(100.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn rdp_coords_map_clamps_to_rdp_bounds() {
+        let c = RdpCoords {
+            surface_w: 100.0,
+            surface_h: 100.0,
+            rdp_w: 200,
+            rdp_h: 200,
+        };
+        // Coordinates beyond the surface edge should clamp to rdp_w/h - 1.
+        let (rx, ry) = c.map(200.0, 200.0).unwrap();
+        assert_eq!(rx, 199);
+        assert_eq!(ry, 199);
+        // Negative — clamps to 0.
+        let (rx, ry) = c.map(-50.0, -50.0).unwrap();
+        assert_eq!(rx, 0);
+        assert_eq!(ry, 0);
+    }
+
+    // ── map_rdp_mouse ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn map_rdp_mouse_left_down_emits_move_then_down() {
+        let c = RdpCoords {
+            surface_w: 100.0,
+            surface_h: 100.0,
+            rdp_w: 100,
+            rdp_h: 100,
+        };
+        let evs = map_rdp_mouse(1, 1, 50.0, 50.0, &c);
+        assert_eq!(evs.len(), 2);
+        assert!(matches!(evs[0], RdpInputEvent::MouseMove { x: 50, y: 50 }));
+        assert!(matches!(
+            evs[1],
+            RdpInputEvent::MouseDown {
+                button: RdpMouseButton::Left,
+                x: 50,
+                y: 50
+            }
+        ));
+    }
+
+    #[test]
+    fn map_rdp_mouse_move_only_emits_move() {
+        let c = RdpCoords {
+            surface_w: 100.0,
+            surface_h: 100.0,
+            rdp_w: 100,
+            rdp_h: 100,
+        };
+        // button=0 (no button), kind=3 (move)
+        let evs = map_rdp_mouse(0, 3, 25.0, 75.0, &c);
+        assert_eq!(evs.len(), 1);
+        assert!(matches!(evs[0], RdpInputEvent::MouseMove { .. }));
+    }
+
+    #[test]
+    fn map_rdp_mouse_zero_dim_returns_empty() {
+        let c = RdpCoords {
+            surface_w: 0.0,
+            surface_h: 100.0,
+            rdp_w: 100,
+            rdp_h: 100,
+        };
+        assert!(map_rdp_mouse(1, 1, 50.0, 50.0, &c).is_empty());
+    }
+
+    // ── map_rdp_scroll ────────────────────────────────────────────────────────
+
+    #[test]
+    fn map_rdp_scroll_positive_dy_is_vertical_positive_delta() {
+        let c = RdpCoords {
+            surface_w: 100.0,
+            surface_h: 100.0,
+            rdp_w: 100,
+            rdp_h: 100,
+        };
+        let evs = map_rdp_scroll(10.0, 50.0, 50.0, &c);
+        assert_eq!(evs.len(), 1);
+        let RdpInputEvent::Scroll {
+            delta,
+            vertical,
+            x,
+            y,
+        } = evs[0]
+        else {
+            panic!("expected Scroll event");
+        };
+        assert!(vertical);
+        assert!(delta > 0, "positive dy should produce positive delta");
+        assert_eq!(x, 50);
+        assert_eq!(y, 50);
+    }
+
+    #[test]
+    fn map_rdp_scroll_zero_dy_returns_empty() {
+        let c = RdpCoords {
+            surface_w: 100.0,
+            surface_h: 100.0,
+            rdp_w: 100,
+            rdp_h: 100,
+        };
+        assert!(map_rdp_scroll(0.0, 50.0, 50.0, &c).is_empty());
+    }
+
+    #[test]
+    fn map_rdp_scroll_zero_dim_returns_empty() {
+        let c = RdpCoords {
+            surface_w: 0.0,
+            surface_h: 0.0,
+            rdp_w: 100,
+            rdp_h: 100,
+        };
+        assert!(map_rdp_scroll(5.0, 0.0, 0.0, &c).is_empty());
+    }
+
+    #[test]
+    fn map_rdp_scroll_clamps_large_delta() {
+        let c = RdpCoords {
+            surface_w: 100.0,
+            surface_h: 100.0,
+            rdp_w: 100,
+            rdp_h: 100,
+        };
+        // Very large dy should be clamped to ±3600.
+        let evs = map_rdp_scroll(10000.0, 50.0, 50.0, &c);
+        let RdpInputEvent::Scroll { delta, .. } = evs[0] else {
+            panic!("expected Scroll event");
+        };
+        assert_eq!(delta, 3600, "large positive dy should clamp to 3600");
+
+        let evs_neg = map_rdp_scroll(-10000.0, 50.0, 50.0, &c);
+        let RdpInputEvent::Scroll {
+            delta: delta_neg, ..
+        } = evs_neg[0]
+        else {
+            panic!("expected Scroll event");
+        };
+        assert_eq!(delta_neg, -3600, "large negative dy should clamp to -3600");
+    }
 }
