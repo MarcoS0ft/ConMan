@@ -18,6 +18,7 @@
 //! fallback exists for the P2.4 user-font-picker case.
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use cm_core::{CellAttrs, Color, CursorShape, GridSnapshot, TerminalSize};
 use fontdue::{Font, FontSettings};
@@ -138,6 +139,52 @@ impl TerminalTheme {
     }
 }
 
+/// Parsed bundled font faces (regular/bold/italic/bold-italic + symbols fallback).
+///
+/// Parsing the ~12 MB of bundled TTFs is the dominant cost of building a renderer, so the
+/// faces are parsed **once** and shared across all tabs via an [`Arc`] (B4). The glyph
+/// *atlas* (rasterized bitmaps) stays per-renderer because it is keyed by physical pixel
+/// size, but the expensive face parse is amortized.
+pub struct FontSet {
+    // [regular, bold, italic, bold-italic]
+    base: [Font; 4],
+    symbols: Font,
+}
+
+impl std::fmt::Debug for FontSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FontSet").finish_non_exhaustive()
+    }
+}
+
+impl FontSet {
+    fn parse(faces: [&[u8]; 4], symbols: &[u8]) -> Self {
+        let load = |bytes: &[u8]| {
+            Font::from_bytes(bytes, FontSettings::default())
+                .expect("bundled font must parse (compile-time invariant)")
+        };
+        Self {
+            base: faces.map(load),
+            symbols: load(symbols),
+        }
+    }
+
+    /// The compiled-in bundled fonts, parsed once and shared process-wide. Cheap after the
+    /// first call (clones an `Arc`).
+    #[must_use]
+    pub fn bundled() -> Arc<FontSet> {
+        static BUNDLED: OnceLock<Arc<FontSet>> = OnceLock::new();
+        BUNDLED
+            .get_or_init(|| {
+                Arc::new(FontSet::parse(
+                    [FONT_REGULAR, FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC],
+                    FONT_SYMBOLS,
+                ))
+            })
+            .clone()
+    }
+}
+
 // A rasterized glyph: coverage bitmap plus its placement metrics.
 struct GlyphBitmap {
     w: usize,
@@ -149,9 +196,7 @@ struct GlyphBitmap {
 
 /// Software glyph-atlas terminal renderer. See module docs.
 pub struct TerminalRenderer {
-    // [regular, bold, italic, bold-italic]
-    base: [Font; 4],
-    symbols: Font,
+    fonts: Arc<FontSet>,
     font_size_px: f32,
     scale_factor: f32,
     metrics: CellMetrics,
@@ -184,30 +229,30 @@ fn style_index(attrs: CellAttrs) -> u8 {
 }
 
 impl TerminalRenderer {
-    /// Build a renderer from the bundled fonts at the given logical font size and display
-    /// scale factor. Rasterization happens at physical pixels = `font_size_px *
-    /// scale_factor`.
-    ///
-    /// # Panics
-    /// Panics only if a *bundled* font fails to parse — a build-time invariant (the fonts
-    /// are compiled in via `include_bytes!`), not an input/runtime condition.
+    /// Build a renderer from the (shared) bundled fonts at the given logical font size and
+    /// display scale factor. Rasterization happens at physical pixels = `font_size_px *
+    /// scale_factor`. Convenience wrapper over [`with_fonts`](Self::with_fonts) using the
+    /// shared bundled face set.
     #[must_use]
     pub fn new(font_size_px: f32, scale_factor: f32, theme: TerminalTheme) -> Self {
-        let load = |bytes: &[u8]| {
-            Font::from_bytes(bytes, FontSettings::default())
-                .expect("bundled font must parse (compile-time invariant)")
-        };
-        let base = [
-            load(FONT_REGULAR),
-            load(FONT_BOLD),
-            load(FONT_ITALIC),
-            load(FONT_BOLD_ITALIC),
-        ];
-        let symbols = load(FONT_SYMBOLS);
-        let metrics = Self::compute_metrics(&base[0], font_size_px * scale_factor);
+        Self::with_fonts(FontSet::bundled(), font_size_px, scale_factor, theme)
+    }
+
+    /// Build a renderer over an explicit, shared [`FontSet`] (B4: lets every tab reuse the
+    /// same parsed faces instead of re-parsing ~12 MB of TTFs per tab).
+    #[must_use]
+    pub fn with_fonts(
+        fonts: Arc<FontSet>,
+        font_size_px: f32,
+        scale_factor: f32,
+        theme: TerminalTheme,
+    ) -> Self {
+        let metrics = Self::compute_metrics(
+            &fonts.base[0],
+            Self::physical_px(font_size_px, scale_factor),
+        );
         Self {
-            base,
-            symbols,
+            fonts,
             font_size_px,
             scale_factor,
             metrics,
@@ -276,8 +321,10 @@ impl TerminalRenderer {
     pub fn set_scale(&mut self, font_size_px: f32, scale_factor: f32) {
         self.font_size_px = font_size_px;
         self.scale_factor = scale_factor;
-        self.metrics =
-            Self::compute_metrics(&self.base[0], Self::physical_px(font_size_px, scale_factor));
+        self.metrics = Self::compute_metrics(
+            &self.fonts.base[0],
+            Self::physical_px(font_size_px, scale_factor),
+        );
         self.cache.clear();
     }
 
@@ -285,9 +332,9 @@ impl TerminalRenderer {
     /// does not affect coverage, so this checks the regular base.
     #[must_use]
     pub fn glyph_source(&self, ch: char) -> GlyphSource {
-        if self.base[0].lookup_glyph_index(ch) != 0 {
+        if self.fonts.base[0].lookup_glyph_index(ch) != 0 {
             GlyphSource::Base
-        } else if self.symbols.lookup_glyph_index(ch) != 0 {
+        } else if self.fonts.symbols.lookup_glyph_index(ch) != 0 {
             GlyphSource::Fallback
         } else {
             GlyphSource::Missing
@@ -300,12 +347,12 @@ impl TerminalRenderer {
         if !self.cache.contains_key(&key) {
             let px = Self::physical_px(self.font_size_px, self.scale_factor);
             // Fallback chain: prefer the styled base; fall back to symbols for coverage.
-            let font = if self.base[style as usize].lookup_glyph_index(ch) != 0 {
-                &self.base[style as usize]
-            } else if self.symbols.lookup_glyph_index(ch) != 0 {
-                &self.symbols
+            let font = if self.fonts.base[style as usize].lookup_glyph_index(ch) != 0 {
+                &self.fonts.base[style as usize]
+            } else if self.fonts.symbols.lookup_glyph_index(ch) != 0 {
+                &self.fonts.symbols
             } else {
-                &self.base[style as usize]
+                &self.fonts.base[style as usize]
             };
             let (m, cov) = font.rasterize(ch, px);
             self.cache.insert(
@@ -323,13 +370,37 @@ impl TerminalRenderer {
     }
 
     /// Rasterize a snapshot into a fresh RGBA pixel buffer of exactly
-    /// [`pixel_size`](Self::pixel_size)`(snap.size)`.
+    /// [`pixel_size`](Self::pixel_size)`(snap.size)` (the grid's natural size).
     pub fn render(&mut self, snap: &GridSnapshot) -> SharedPixelBuffer<Rgba8Pixel> {
-        self.last_size = snap.size;
         let (w, h) = self.pixel_size(snap.size);
-        let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(w.max(1), h.max(1));
-        let stride = buf.width() as usize * 4;
+        self.render_to(snap, w, h)
+    }
+
+    /// Rasterize a snapshot into a buffer of an **exact** target physical size (B2).
+    ///
+    /// The grid is drawn at a constant cell size at the top-left; the sub-cell remainder
+    /// (right/bottom strip that doesn't hold a full cell) is padded with the terminal
+    /// background **inside the buffer**, and cells beyond `target` are clipped. Sizing the
+    /// buffer to the surface means it is displayed 1:1 with no `image-fit` stretching — so
+    /// resizing changes the cell *count*, not the glyph size. Pass the surface's physical
+    /// pixel size (logical × scale_factor).
+    pub fn render_to(
+        &mut self,
+        snap: &GridSnapshot,
+        target_w: u32,
+        target_h: u32,
+    ) -> SharedPixelBuffer<Rgba8Pixel> {
+        self.last_size = snap.size;
+        let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(target_w.max(1), target_h.max(1));
+        let w = buf.width();
+        let h = buf.height();
+        let stride = w as usize * 4;
         let bytes = buf.make_mut_bytes();
+
+        // Pad the whole buffer with the terminal background first; cells overpaint their
+        // own bg, leaving any sub-cell remainder as a clean bg margin (never scaled text).
+        let bg = self.theme.bg;
+        fill_rect(bytes, stride, 0, 0, w as usize, h as usize, bg);
 
         let cols = usize::from(snap.size.cols);
         let rows = usize::from(snap.size.rows);
@@ -442,14 +513,14 @@ impl TerminalRenderer {
 
 // ── Pixel helpers ───────────────────────────────────────────────────────────────────
 fn fill_rect(bytes: &mut [u8], stride: usize, x: usize, y: usize, w: usize, h: usize, c: Rgb) {
+    let width_px = stride / 4;
     let max_y = bytes.len() / stride;
+    // Clip to the buffer in both axes so a cell straddling the right/bottom edge cannot
+    // bleed into the next row or past the end of the buffer.
     for py in y..(y + h).min(max_y) {
         let row = py * stride;
-        for px in x..x + w {
+        for px in x..(x + w).min(width_px) {
             let i = row + px * 4;
-            if i + 3 >= bytes.len() {
-                break;
-            }
             bytes[i] = c.0;
             bytes[i + 1] = c.1;
             bytes[i + 2] = c.2;
@@ -655,13 +726,21 @@ mod tests {
 
     #[test]
     fn fallback_chain_resolves_via_symbols() {
-        // Deterministically exercise the base->symbols fallback branch: swap in a base that
-        // lacks ASCII (the symbols font) and the JBM regular as the "symbols" fallback. With
-        // the default fonts the patched base covers everything, so this is the only way to
-        // hit the fallback path in a unit test (documented finding).
-        let mut r = TerminalRenderer::new(16.0, 1.0, TerminalTheme::dark());
-        r.base[0] = Font::from_bytes(FONT_SYMBOLS, FontSettings::default()).unwrap();
-        r.symbols = Font::from_bytes(FONT_REGULAR, FontSettings::default()).unwrap();
+        // Deterministically exercise the base->symbols fallback branch: build a FontSet
+        // whose base lacks ASCII (the symbols font) with the JBM regular as the "symbols"
+        // fallback. With the default fonts the patched base covers everything, so this is
+        // the only way to hit the fallback path in a unit test (documented finding).
+        let parse = |b: &[u8]| Font::from_bytes(b, FontSettings::default()).unwrap();
+        let fonts = Arc::new(FontSet {
+            base: [
+                parse(FONT_SYMBOLS),
+                parse(FONT_SYMBOLS),
+                parse(FONT_SYMBOLS),
+                parse(FONT_SYMBOLS),
+            ],
+            symbols: parse(FONT_REGULAR),
+        });
+        let mut r = TerminalRenderer::with_fonts(fonts, 16.0, 1.0, TerminalTheme::dark());
         assert_eq!(r.glyph_source('A'), GlyphSource::Fallback);
         let bg = Color::Rgb { r: 0, g: 0, b: 0 };
         let fg = Color::Rgb {
@@ -822,5 +901,87 @@ mod tests {
     fn renderer_buffer_is_send() {
         const fn assert_send<T: Send>() {}
         assert_send::<SharedPixelBuffer<Rgba8Pixel>>();
+    }
+
+    #[test]
+    fn render_to_has_exact_target_size_and_bg_padding() {
+        // B2: the buffer is the requested physical size, not a grid multiple, and the
+        // sub-cell remainder is terminal background (constant cell size, never scaled).
+        let mut r = TerminalRenderer::new(16.0, 1.0, TerminalTheme::dark());
+        let m = r.cell_metrics();
+        let cols = 5u16;
+        let rows = 3u16;
+        // Target deliberately larger than the grid, with a non-cell-multiple remainder.
+        let target_w = m.cell_w * u32::from(cols) + 7;
+        let target_h = m.cell_h * u32::from(rows) + 5;
+        let cells = vec![Cell::default(); usize::from(cols) * usize::from(rows)];
+        let buf = r.render_to(&snap(rows, cols, cells, blank_cursor()), target_w, target_h);
+        assert_eq!((buf.width(), buf.height()), (target_w, target_h));
+        // A pixel in the right padding strip (beyond the grid) is the terminal bg.
+        let bg = TerminalTheme::dark().bg;
+        assert_eq!(px_at(&buf, target_w - 1, 0), bg);
+        assert_eq!(px_at(&buf, 0, target_h - 1), bg);
+    }
+
+    #[test]
+    fn render_to_smaller_than_grid_clips_without_panic() {
+        // Shrinking the surface below the grid must clip cleanly (no out-of-bounds / bleed).
+        let mut r = TerminalRenderer::new(16.0, 1.0, TerminalTheme::dark());
+        let m = r.cell_metrics();
+        let cells = vec![
+            mk(
+                "X",
+                Color::Rgb { r: 255, g: 0, b: 0 },
+                Color::Default,
+                CellAttrs::empty(),
+                1,
+            );
+            80 * 24
+        ];
+        // Target smaller than one full row/col of the 80x24 grid.
+        let buf = r.render_to(
+            &snap(24, 80, cells, blank_cursor()),
+            m.cell_w + 3,
+            m.cell_h + 3,
+        );
+        assert_eq!((buf.width(), buf.height()), (m.cell_w + 3, m.cell_h + 3));
+    }
+
+    #[test]
+    fn fonts_are_shared_across_renderers() {
+        // B4: the bundled face set is parsed once and shared (same Arc allocation).
+        let a = FontSet::bundled();
+        let b = FontSet::bundled();
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    /// B4 profiling aid (run with `--ignored --nocapture`): old per-tab cost was parsing
+    /// the 5 bundled faces from scratch; new per-tab cost is `with_fonts` over a shared Arc.
+    #[test]
+    #[ignore = "profiling aid; run explicitly with --ignored --nocapture"]
+    fn b4_profile_font_parse_vs_shared() {
+        use std::time::Instant;
+        let n = 8;
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = FontSet::parse(
+                [FONT_REGULAR, FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC],
+                FONT_SYMBOLS,
+            );
+        }
+        let parse_each = t.elapsed() / n;
+
+        let shared = FontSet::bundled();
+        let m = 200;
+        let t2 = Instant::now();
+        for _ in 0..m {
+            let _ = TerminalRenderer::with_fonts(shared.clone(), 15.0, 1.0, TerminalTheme::dark());
+        }
+        let shared_each = t2.elapsed() / m;
+
+        eprintln!(
+            "B4 per-tab renderer cost: OLD (parse 5 faces) = {parse_each:?}; \
+             NEW (with_fonts, shared) = {shared_each:?}"
+        );
     }
 }

@@ -9,6 +9,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
@@ -18,7 +19,7 @@ use cm_session::LocalTerminalSession;
 use slint::{ComponentHandle, Image, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::input;
-use crate::terminal_renderer::{TerminalRenderer, TerminalTheme};
+use crate::terminal_renderer::{FontSet, TerminalRenderer, TerminalTheme};
 use crate::{AppWindow, TabItem};
 
 /// Logical font size for the terminal grid.
@@ -32,18 +33,21 @@ const INITIAL_SIZE: TerminalSize = TerminalSize { rows: 24, cols: 80 };
 struct Tab {
     session: LocalTerminalSession,
     renderer: TerminalRenderer,
-    /// Most recent snapshot (rendered on tab switch without waiting for new output).
+    /// Most recent snapshot (rendered on tab switch / resize without waiting for output).
     last: Option<GridSnapshot>,
     cols: u16,
     rows: u16,
     scale: f32,
+    /// Displayed tab number (reused from the free set on close; see `lowest_free_number`).
+    num: u32,
 }
 
 /// All UI-thread mutable state.
 struct State {
     tabs: Vec<Tab>,
     active: usize,
-    next_id: i32,
+    /// Shared parsed font faces — reused by every tab's renderer (B4).
+    fonts: Arc<FontSet>,
     /// Current display scale factor.
     scale: f32,
     /// Current surface size in logical px.
@@ -57,10 +61,48 @@ impl State {
         if self.surface_w <= 0.0 || self.surface_h <= 0.0 {
             return INITIAL_SIZE;
         }
-        // Derive from a throwaway metric at the current scale (cell size is scale-derived).
-        let probe = TerminalRenderer::new(FONT_SIZE_PX, self.scale, TerminalTheme::dark());
+        // Cheap now: with_fonts reuses the shared faces, so this just computes metrics.
+        let probe = TerminalRenderer::with_fonts(
+            self.fonts.clone(),
+            FONT_SIZE_PX,
+            self.scale,
+            TerminalTheme::dark(),
+        );
         grid_for(&probe, self.surface_w, self.surface_h, self.scale)
     }
+
+    /// Active tab's surface target in physical px, or `None` before the surface is laid out
+    /// (fall back to the grid's natural size).
+    fn target_px(&self) -> Option<(u32, u32)> {
+        if self.surface_w > 0.0 && self.surface_h > 0.0 {
+            Some((
+                (self.surface_w * self.scale).round().max(1.0) as u32,
+                (self.surface_h * self.scale).round().max(1.0) as u32,
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+/// Render `snap` for `tab` into a `frame` Image at the surface target size (B2: exact
+/// physical px, bg-padded, 1:1) — or the grid's natural size before the surface is sized.
+fn render_frame(tab: &mut Tab, snap: &GridSnapshot, target: Option<(u32, u32)>) -> Image {
+    let buf = match target {
+        Some((w, h)) => tab.renderer.render_to(snap, w, h),
+        None => tab.renderer.render(snap),
+    };
+    Image::from_rgba8(buf)
+}
+
+/// Lowest unused positive tab number among the currently open tabs (B5: reuse-lowest, so
+/// closing #2 of 1,2,3 then opening a new tab yields "2", not an ever-growing counter).
+fn lowest_free_number(used: &[u32]) -> u32 {
+    let mut n = 1;
+    while used.contains(&n) {
+        n += 1;
+    }
+    n
 }
 
 /// Cells that fit a logical surface at a given scale, using the renderer's cell metrics.
@@ -99,7 +141,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let state = Rc::new(RefCell::new(State {
         tabs: Vec::new(),
         active: 0,
-        next_id: 1,
+        fonts: FontSet::bundled(),
         scale,
         surface_w: 0.0,
         surface_h: 0.0,
@@ -227,6 +269,33 @@ pub fn run() -> Result<(), slint::PlatformError> {
         );
         hooks.push(t);
     }
+    // Optional scripted resizes for the headless resize screenshots (B2/B3):
+    // CONMAN_AUTORESIZE="1800:520x360;2600:1100x720" => at 1800ms set the window to
+    // 520x360 physical px, at 2600ms to 1100x720.
+    if let Ok(script) = std::env::var("CONMAN_AUTORESIZE") {
+        for step in script.split(';').filter(|s| !s.is_empty()) {
+            if let Some((ms, dims)) = step.split_once(':')
+                && let (Ok(ms), Some((w, h))) = (
+                    ms.parse::<u64>(),
+                    dims.split_once('x')
+                        .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))),
+                )
+            {
+                let weak = ui.as_weak();
+                let t = Timer::default();
+                t.start(
+                    TimerMode::SingleShot,
+                    Duration::from_millis(ms),
+                    move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.window().set_size(slint::PhysicalSize::new(w, h));
+                        }
+                    },
+                );
+                hooks.push(t);
+            }
+        }
+    }
     if let Some(ms) = std::env::var("CONMAN_AUTOQUIT_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -253,9 +322,12 @@ fn open_tab(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &
     };
     let mut st = state.borrow_mut();
     let scale = st.scale;
-    let renderer = TerminalRenderer::new(FONT_SIZE_PX, scale, TerminalTheme::dark());
-    let id = st.next_id;
-    st.next_id += 1;
+    // B4: reuse the shared parsed faces instead of re-parsing ~12 MB of TTFs per tab.
+    let renderer =
+        TerminalRenderer::with_fonts(st.fonts.clone(), FONT_SIZE_PX, scale, TerminalTheme::dark());
+    // B5: number from the current set (lowest free), not a monotonic counter.
+    let used: Vec<u32> = st.tabs.iter().map(|t| t.num).collect();
+    let num = lowest_free_number(&used);
     st.tabs.push(Tab {
         session,
         renderer,
@@ -263,14 +335,15 @@ fn open_tab(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &
         cols: size.cols,
         rows: size.rows,
         scale,
+        num,
     });
     st.active = st.tabs.len() - 1;
     let active = st.active;
     drop(st);
 
     tab_model.push(TabItem {
-        title: SharedString::from(format!("shell {id}")),
-        id,
+        title: SharedString::from(format!("shell {num}")),
+        id: num as i32,
     });
     ui.set_active_tab(active as i32);
 }
@@ -334,18 +407,24 @@ fn on_resize(state: &Rc<RefCell<State>>, ui: &AppWindow, w: f32, h: f32) {
             tab.rows = size.rows;
         }
     }
+    // B3: re-render the active tab's current snapshot at the new surface size *now*, in the
+    // same changed-handler turn, so the painted frame is never a stale buffer scaled to the
+    // new window (the engine's reflowed snapshot refines it on the next tick). Keeps the
+    // visible screen coherent and the cursor on its correct cell on shrink→grow.
+    render_active(&mut st, ui);
 }
 
 fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppWindow) {
     let mut st = state.borrow_mut();
     let active = st.active;
+    let target = st.target_px();
     let mut exited = Vec::new();
 
     for i in 0..st.tabs.len() {
         if let Some(snap) = drain_latest(st.tabs[i].session.snapshots()) {
             if i == active {
-                let buf = st.tabs[i].renderer.render(&snap);
-                ui.set_frame(Image::from_rgba8(buf));
+                let img = render_frame(&mut st.tabs[i], &snap, target);
+                ui.set_frame(img);
             }
             st.tabs[i].last = Some(snap);
         }
@@ -381,11 +460,12 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
 /// / close so the surface updates immediately, without waiting for new output).
 fn render_active(st: &mut State, ui: &AppWindow) {
     let active = st.active;
+    let target = st.target_px();
     if let Some(tab) = st.tabs.get_mut(active)
         && let Some(snap) = tab.last.clone()
     {
-        let buf = tab.renderer.render(&snap);
-        ui.set_frame(Image::from_rgba8(buf));
+        let img = render_frame(tab, &snap, target);
+        ui.set_frame(img);
     }
 }
 
@@ -403,6 +483,20 @@ mod tests {
         tx.send(3).unwrap();
         assert_eq!(drain_latest(&rx), Some(3));
         assert_eq!(drain_latest(&rx), None);
+    }
+
+    #[test]
+    fn lowest_free_number_reuses_gaps() {
+        // Fresh set starts at 1.
+        assert_eq!(lowest_free_number(&[]), 1);
+        // 1,2,3 open -> next is 4.
+        assert_eq!(lowest_free_number(&[1, 2, 3]), 4);
+        // Close #2 (used = 1,3) -> reuse 2, not 4.
+        assert_eq!(lowest_free_number(&[1, 3]), 2);
+        // Order independent.
+        assert_eq!(lowest_free_number(&[3, 1]), 2);
+        // Close the first -> reuse 1.
+        assert_eq!(lowest_free_number(&[2, 3]), 1);
     }
 
     #[test]

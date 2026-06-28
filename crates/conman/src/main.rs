@@ -1,3 +1,7 @@
+// B1: run as a Windows GUI app in release (no allocated console window behind the GUI).
+// Debug keeps the console so `eprintln!` diagnostics remain visible during development.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! `conman` — the application binary and composition root.
 //!
 //! Selects the concrete Slint backend (via the `slint` feature set in `Cargo.toml`) and

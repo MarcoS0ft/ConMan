@@ -26,4 +26,6 @@ mod generated_ui {
 pub use generated_ui::{AppWindow, TabItem};
 
 pub use controller::run;
-pub use terminal_renderer::{CellMetrics, GlyphSource, Rgb, TerminalRenderer, TerminalTheme};
+pub use terminal_renderer::{
+    CellMetrics, FontSet, GlyphSource, Rgb, TerminalRenderer, TerminalTheme,
+};
