@@ -146,6 +146,9 @@ struct State {
     font_size_px: f32,
     // P5.2: Persisted default local-shell settings, updated live from Settings.
     local_settings: LocalSettings,
+    // P5.3b: Current filter text for the connection tree and keys tree.
+    conn_filter: String,
+    cred_filter: String,
 }
 
 impl State {
@@ -393,7 +396,7 @@ fn apply_settings_to_ui(s: &cm_storage::AppSettings, ui: &AppWindow) {
 // ---------------------------------------------------------------------------
 
 fn refresh_conn_model(state: &State, conn_model: &Rc<VecModel<ConnRow>>) {
-    let flat = state.conn_tree.flat();
+    let flat = state.conn_tree.flat_filtered(&state.conn_filter);
     while conn_model.row_count() > 0 {
         conn_model.remove(0);
     }
@@ -403,7 +406,7 @@ fn refresh_conn_model(state: &State, conn_model: &Rc<VecModel<ConnRow>>) {
 }
 
 fn refresh_cred_model(state: &State, cred_model: &Rc<VecModel<CredRow>>) {
-    let flat = state.keys_panel.flat();
+    let flat = state.keys_panel.flat_filtered(&state.cred_filter);
     while cred_model.row_count() > 0 {
         cred_model.remove(0);
     }
@@ -607,6 +610,9 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         // P5.2: persist terminal rendering font size and local shell defaults.
         font_size_px: stored_settings.font_size as f32,
         local_settings: local_settings_from_app(&stored_settings),
+        // P5.3b: search/filter boxes start empty.
+        conn_filter: String::new(),
+        cred_filter: String::new(),
     }));
 
     {
@@ -1532,6 +1538,28 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     ui.on_launchpad_edited(|_q| {});
     ui.on_open_recent(|_i| {});
     ui.on_open_group_split(|| {});
+
+    // ── P5.3b: Search/filter for connection tree and keys tree ───────────────
+
+    ui.on_conn_filter_changed({
+        let state = state.clone();
+        let conn_model = conn_model.clone();
+        move |q| {
+            let mut st = state.borrow_mut();
+            st.conn_filter = q.to_string();
+            refresh_conn_model(&st, &conn_model);
+        }
+    });
+
+    ui.on_cred_filter_changed({
+        let state = state.clone();
+        let cred_model = cred_model.clone();
+        move |q| {
+            let mut st = state.borrow_mut();
+            st.cred_filter = q.to_string();
+            refresh_cred_model(&st, &cred_model);
+        }
+    });
 
     // ── P1.4: Connections panel CRUD ─────────────────────────────────────────
 

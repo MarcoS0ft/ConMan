@@ -173,6 +173,121 @@ impl KeysPanel {
         }
     }
 
+    /// Returns a flat list filtered by `query` (case-insensitive substring
+    /// match on label, kind, or username). Folders shown only when they or a
+    /// descendant matches. When `query` is empty, delegates to [`flat`][Self::flat].
+    pub fn flat_filtered(&self, query: &str) -> Vec<CredRow> {
+        if query.is_empty() {
+            return self.flat();
+        }
+        let q = query.to_lowercase();
+        let matching_cred_ids: std::collections::HashSet<i64> = self
+            .credentials
+            .iter()
+            .filter(|c| {
+                let kind_str = match c.kind {
+                    CredentialKind::Password => "password",
+                    CredentialKind::SshKey => "ssh key",
+                    CredentialKind::SshKeyWithPassphrase => "ssh key+pp",
+                };
+                c.name.to_lowercase().contains(&q)
+                    || kind_str.contains(&q)
+                    || c.username
+                        .as_deref()
+                        .map(|u| u.to_lowercase().contains(&q))
+                        .unwrap_or(false)
+            })
+            .map(|c| c.id.get())
+            .collect();
+        let mut out = Vec::new();
+        let mut root_folders: Vec<&CredentialFolder> =
+            self.folders.iter().filter(|f| f.parent_id.is_none()).collect();
+        root_folders.sort_by_key(|f| (f.sort, f.id.get()));
+        for folder in root_folders {
+            self.push_folder_filtered(folder, 0, &q, &matching_cred_ids, &mut out);
+        }
+        let mut root_creds: Vec<&Credential> =
+            self.credentials.iter().filter(|c| c.folder_id.is_none()).collect();
+        root_creds.sort_by_key(|c| c.id.get());
+        for cred in root_creds {
+            if matching_cred_ids.contains(&cred.id.get()) {
+                out.push(self.make_cred_row(cred, 0));
+            }
+        }
+        out
+    }
+
+    fn folder_has_match(
+        &self,
+        folder: &CredentialFolder,
+        q: &str,
+        matching_cred_ids: &std::collections::HashSet<i64>,
+        depth: usize,
+    ) -> bool {
+        if depth >= MAX_DEPTH {
+            return false;
+        }
+        if folder.name.to_lowercase().contains(q) {
+            return true;
+        }
+        if self
+            .credentials
+            .iter()
+            .filter(|c| c.folder_id == Some(folder.id))
+            .any(|c| matching_cred_ids.contains(&c.id.get()))
+        {
+            return true;
+        }
+        self.folders
+            .iter()
+            .filter(|f| f.parent_id == Some(folder.id))
+            .any(|sf| self.folder_has_match(sf, q, matching_cred_ids, depth + 1))
+    }
+
+    fn push_folder_filtered(
+        &self,
+        folder: &CredentialFolder,
+        depth: usize,
+        q: &str,
+        matching_cred_ids: &std::collections::HashSet<i64>,
+        out: &mut Vec<CredRow>,
+    ) {
+        if depth >= MAX_DEPTH {
+            return;
+        }
+        if !self.folder_has_match(folder, q, matching_cred_ids, 0) {
+            return;
+        }
+        out.push(CredRow {
+            id: folder.id.get() as i32,
+            label: SharedString::from(folder.name.as_str()),
+            kind: SharedString::from(""),
+            username: SharedString::from(""),
+            is_folder: true,
+            expanded: true,
+            selected: false,
+            depth: depth as i32,
+        });
+        let mut sub_folders: Vec<&CredentialFolder> = self
+            .folders
+            .iter()
+            .filter(|f| f.parent_id == Some(folder.id))
+            .collect();
+        sub_folders.sort_by_key(|f| (f.sort, f.id.get()));
+        for sf in sub_folders {
+            self.push_folder_filtered(sf, depth + 1, q, matching_cred_ids, out);
+        }
+        let mut folder_creds: Vec<&Credential> = self
+            .credentials
+            .iter()
+            .filter(|c| c.folder_id == Some(folder.id) && matching_cred_ids.contains(&c.id.get()))
+            .collect();
+        folder_creds.sort_by_key(|c| c.id.get());
+        for cred in folder_creds {
+            out.push(self.make_cred_row(cred, depth + 1));
+        }
+    }
+
     pub fn folders(&self) -> &[CredentialFolder] {
         &self.folders
     }

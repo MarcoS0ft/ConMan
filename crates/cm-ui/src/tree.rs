@@ -191,6 +191,125 @@ impl ConnectionTree {
         }
     }
 
+    /// Returns a flat list filtered by `query` (case-insensitive substring
+    /// match on label, host, or kind). Groups are shown only when they have at
+    /// least one matching descendant; expand/collapse state is ignored.
+    /// When `query` is empty this is equivalent to [`flat`][Self::flat].
+    pub fn flat_filtered(&self, query: &str) -> Vec<ConnRow> {
+        if query.is_empty() {
+            return self.flat();
+        }
+        let q = query.to_lowercase();
+        // Collect all matching connection ids.
+        let matching_conn_ids: std::collections::HashSet<i64> = self
+            .connections
+            .iter()
+            .filter(|c| {
+                let (host, kind) = conn_host_kind(&c.settings);
+                c.name.to_lowercase().contains(&q)
+                    || host.to_lowercase().contains(&q)
+                    || kind.to_lowercase().contains(&q)
+            })
+            .map(|c| c.id.get())
+            .collect();
+        // Collect groups whose name matches OR that contain a matching connection
+        // (including nested).  We traverse from root → leaf so we can mark
+        // ancestors.
+        let mut out = Vec::new();
+        let mut root_groups: Vec<&Group> =
+            self.groups.iter().filter(|g| g.parent_id.is_none()).collect();
+        root_groups.sort_by_key(|g| (g.sort, g.id.get()));
+        for group in root_groups {
+            self.push_group_filtered(group, 0, &q, &matching_conn_ids, &mut out);
+        }
+        // Root-level connections.
+        let mut root_conns: Vec<&Connection> =
+            self.connections.iter().filter(|c| c.group_id.is_none()).collect();
+        root_conns.sort_by_key(|c| (c.sort, c.id.get()));
+        for conn in root_conns {
+            if matching_conn_ids.contains(&conn.id.get()) {
+                out.push(self.make_conn_row(conn, 0));
+            }
+        }
+        out
+    }
+
+    /// Returns `true` when `group` or any descendant has a name/host/kind
+    /// matching `q` or has a connection id in `matching_conn_ids`.
+    fn group_has_match(
+        &self,
+        group: &Group,
+        q: &str,
+        matching_conn_ids: &std::collections::HashSet<i64>,
+        depth: usize,
+    ) -> bool {
+        if depth >= MAX_DEPTH {
+            return false;
+        }
+        if group.name.to_lowercase().contains(q) {
+            return true;
+        }
+        if self
+            .connections
+            .iter()
+            .filter(|c| c.group_id == Some(group.id))
+            .any(|c| matching_conn_ids.contains(&c.id.get()))
+        {
+            return true;
+        }
+        self.groups
+            .iter()
+            .filter(|g| g.parent_id == Some(group.id))
+            .any(|sg| self.group_has_match(sg, q, matching_conn_ids, depth + 1))
+    }
+
+    fn push_group_filtered(
+        &self,
+        group: &Group,
+        depth: usize,
+        q: &str,
+        matching_conn_ids: &std::collections::HashSet<i64>,
+        out: &mut Vec<ConnRow>,
+    ) {
+        if depth >= MAX_DEPTH {
+            return;
+        }
+        if !self.group_has_match(group, q, matching_conn_ids, 0) {
+            return;
+        }
+        out.push(ConnRow {
+            id: group.id.get() as i32,
+            label: SharedString::from(group.name.as_str()),
+            host: SharedString::from(""),
+            kind: SharedString::from(""),
+            status: SharedString::from(""),
+            is_group: true,
+            expanded: true, // always show children when filtering
+            selected: false,
+            depth: depth as i32,
+        });
+        // Sub-groups.
+        let mut sub_groups: Vec<&Group> = self
+            .groups
+            .iter()
+            .filter(|g| g.parent_id == Some(group.id))
+            .collect();
+        sub_groups.sort_by_key(|g| (g.sort, g.id.get()));
+        for sg in sub_groups {
+            self.push_group_filtered(sg, depth + 1, q, matching_conn_ids, out);
+        }
+        // Connections in this group.
+        let mut group_conns: Vec<&Connection> = self
+            .connections
+            .iter()
+            .filter(|c| c.group_id == Some(group.id) && matching_conn_ids.contains(&c.id.get()))
+            .collect();
+        group_conns.sort_by_key(|c| (c.sort, c.id.get()));
+        for conn in group_conns {
+            out.push(self.make_conn_row(conn, depth + 1));
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Row-lookup helpers used by the controller
     // -----------------------------------------------------------------------
