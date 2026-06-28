@@ -23,7 +23,10 @@ pub mod terminal_renderer;
 mod generated_ui {
     slint::include_modules!();
 }
-pub use generated_ui::{AppWindow, TabItem};
+// Re-export the Slint-generated types used by the controller and potentially by
+// cm-platform (for Theme injection) or tests.
+// Note: Theme is a Slint `global` — Rust callers access it via `Theme::get(&window)`.
+pub use generated_ui::{AppWindow, ConnRow, PaletteAction, TabItem};
 
 pub use controller::run;
 pub use terminal_renderer::{

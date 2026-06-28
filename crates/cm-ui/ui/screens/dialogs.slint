@@ -1,0 +1,220 @@
+// ConMan — Modal base + feature dialogs (GUI_DESIGN §4).
+//   Modal            — scrim + centered card; Esc cancels (wire at the window level).
+//   QuickConnectForm — host/port/username + auth SegmentedControl + conditional secret (P3.2).
+//   HostKeyDialog    — TOFU accept (unknown) and the loud mismatch warning (P3.1 policy).
+//
+//   import { Modal, QuickConnectForm, HostKeyDialog } from "screens/dialogs.slint";
+
+import { Theme } from "../theme.slint";
+import { PrimaryButton, SecondaryButton, SegmentedControl, FormField, StatusDot } from "../components.slint";
+
+// ── Modal ───────────────────────────────────────────────────────────────────
+// Full-window scrim that centers its @children (a Card). Mount as the LAST child of
+// the window so it floats above the shell. Esc → dismissed() is wired by the parent.
+export component Modal inherits Rectangle {
+    in property <bool> open: false;
+    callback dismissed();
+
+    visible: open;
+    width: 100%;
+    height: 100%;
+    background: Theme.color-scrim;
+
+    // Click-out to dismiss (clicks on the card are absorbed by its own TouchArea).
+    TouchArea { clicked => { root.dismissed(); } }
+
+    HorizontalLayout {
+        alignment: center;
+        VerticalLayout {
+            alignment: center;
+            @children
+        }
+    }
+}
+
+// ── QuickConnectForm ──────────────────────────────────────────────────────────
+// Spawns an SshTerminalSession into a tab. Secrets are held in memory only and never
+// logged. auth-method: 0 Public key · 1 Password · 2 Agent (conditional field below).
+export component QuickConnectForm inherits Rectangle {
+    in-out property <string> host;
+    in-out property <string> port: "22";
+    in-out property <string> username;
+    in-out property <int>    auth-method: 0;
+    in-out property <string> secret;        // password OR key path (per auth-method)
+    in-out property <string> passphrase;
+    callback connect();
+    callback cancel();
+
+    width: 520px;
+    background: Theme.color-overlay;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.color-stroke;
+
+    // Absorb clicks so the Modal scrim behind doesn't dismiss on inner clicks.
+    TouchArea {}
+
+    VerticalLayout {
+        padding: Theme.space-6;
+        spacing: Theme.space-4;
+
+        // Title.
+        HorizontalLayout {
+            Text {
+                text: "New SSH connection";
+                color: Theme.color-text;
+                font-size: Theme.font-lg;
+                font-family: Theme.font-family;
+                font-weight: 700;
+                horizontal-stretch: 1;
+            }
+        }
+
+        // Host + port.
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            VerticalLayout { horizontal-stretch: 1;
+                FormField { label: "HOST"; placeholder: "web-prod-01.lab"; text <=> root.host; }
+            }
+            Rectangle { width: 100px;
+                FormField { label: "PORT"; placeholder: "22"; text <=> root.port; }
+            }
+        }
+
+        FormField { label: "USERNAME"; placeholder: "ops"; text <=> root.username; }
+
+        // Auth method.
+        VerticalLayout {
+            spacing: Theme.space-2;
+            Text { text: "AUTH METHOD"; color: Theme.color-text-secondary;
+                font-size: Theme.font-sm; font-family: Theme.font-family; font-weight: 600; }
+            SegmentedControl {
+                options: ["Public key", "Password", "Agent"];
+                selected <=> root.auth-method;
+            }
+        }
+
+        // Conditional secret field.
+        if auth-method == 0 : FormField { label: "PRIVATE KEY"; placeholder: "~/.ssh/id_ed25519"; text <=> root.secret; }
+        if auth-method == 0 : FormField { label: "PASSPHRASE"; placeholder: ""; password: true; text <=> root.passphrase; }
+        if auth-method == 1 : FormField { label: "PASSWORD"; placeholder: ""; password: true; text <=> root.secret; }
+        if auth-method == 2 : Text {
+            text: "Uses the running SSH agent. No secret stored.";
+            color: Theme.color-text-secondary;
+            font-size: Theme.font-sm;
+            font-family: Theme.font-family;
+        }
+
+        // Footer.
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            Rectangle { horizontal-stretch: 1; }
+            SecondaryButton { text: "Cancel"; clicked => { root.cancel(); } }
+            PrimaryButton { text: "Connect"; clicked => { root.connect(); } }
+        }
+    }
+}
+
+// ── HostKeyDialog ─────────────────────────────────────────────────────────────
+// Realizes the P3.1 HostKeyVerifier decision. mismatch=false → unknown-host TOFU
+// (Reject / Accept & continue). mismatch=true → loud warning showing stored-vs-presented
+// fingerprints (Reject default / Accept & replace, destructive). "Accept & replace"
+// updates ConMan's own known-hosts ONLY — never ~/.ssh/known_hosts.
+export component HostKeyDialog inherits Rectangle {
+    in property <bool>   mismatch: false;
+    in property <string> host: "web-prod-01:22";
+    in property <string> key-type: "ssh-ed25519 · 256-bit";
+    in property <string> fingerprint: "SHA256 aRq9…Kf2P pXc8";
+    in property <string> stored-fingerprint: "SHA256 aRq9…Kf2P pXc8";
+    callback reject();
+    callback accept();    // accept (unknown) OR accept & replace (mismatch)
+
+    width: mismatch ? 500px : 480px;
+    background: Theme.color-base;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: mismatch ? Theme.color-error.with-alpha(0.4) : Theme.color-stroke;
+
+    TouchArea {}
+
+    VerticalLayout {
+        spacing: 0px;
+
+        // Loud banner (mismatch only).
+        if mismatch : Rectangle {
+            background: Theme.color-error.with-alpha(0.13);
+            border-color: Theme.color-error.with-alpha(0.25);
+            border-width: 0px;
+            HorizontalLayout {
+                padding: Theme.space-3;
+                padding-left: Theme.space-6;
+                spacing: Theme.space-3;
+                Text { text: "\u{E7BA}"; font-family: Theme.font-family-icons; font-size: 18px;
+                    color: Theme.color-error; vertical-alignment: center; }   // Warning
+                Text {
+                    text: "HOST KEY CHANGED — possible attack";
+                    color: Theme.color-error;
+                    font-size: Theme.font-base;
+                    font-family: Theme.font-family;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        VerticalLayout {
+            padding: Theme.space-6;
+            spacing: Theme.space-4;
+
+            if !mismatch : Text {
+                text: "Unknown host key";
+                color: Theme.color-text; font-size: Theme.font-lg;
+                font-family: Theme.font-family; font-weight: 700;
+            }
+
+            Text {
+                text: mismatch
+                    ? "The key presented by " + host + " does not match the key ConMan has stored. This can mean the server was rebuilt — or that someone is intercepting your connection. Do not continue unless you know why it changed."
+                    : "The authenticity of " + host + " can't be established. Verify the fingerprint out-of-band before you trust it.";
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-base;
+                font-family: Theme.font-family;
+                wrap: word-wrap;
+            }
+
+            // Fingerprint block.
+            Rectangle {
+                background: Theme.color-card;
+                border-radius: Theme.radius-md;
+                border-width: 1px;
+                border-color: Theme.color-stroke;
+                VerticalLayout {
+                    padding: Theme.space-3;
+                    spacing: Theme.space-2;
+                    if mismatch : Text { text: "STORED · ConMan known-hosts"; color: Theme.color-text-secondary;
+                        font-size: 10px; font-family: Theme.font-family; font-weight: 600; }
+                    if mismatch : Text { text: stored-fingerprint; color: Theme.color-connected;
+                        font-size: Theme.font-mono; font-family: Theme.font-family-mono; }
+                    Text { text: mismatch ? "PRESENTED NOW" : key-type; color: Theme.color-text-secondary;
+                        font-size: mismatch ? 10px : Theme.font-mono;
+                        font-family: mismatch ? Theme.font-family : Theme.font-family-mono;
+                        font-weight: mismatch ? 600 : 400; }
+                    Text { text: fingerprint;
+                        color: mismatch ? Theme.color-error : Theme.color-accent;
+                        font-size: Theme.font-mono; font-family: Theme.font-family-mono; }
+                }
+            }
+
+            // Actions.
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                Rectangle { horizontal-stretch: 1; }
+                // Mismatch: Reject is primary/default. Unknown: Reject is secondary.
+                if mismatch : PrimaryButton { text: "Reject"; clicked => { root.reject(); } }
+                if !mismatch : SecondaryButton { text: "Reject"; clicked => { root.reject(); } }
+                if mismatch : PrimaryButton { text: "Accept & replace"; destructive: true; clicked => { root.accept(); } }
+                if !mismatch : PrimaryButton { text: "Accept & continue"; clicked => { root.accept(); } }
+            }
+        }
+    }
+}

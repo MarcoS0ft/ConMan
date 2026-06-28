@@ -1,0 +1,107 @@
+// ConMan — Command palette (GUI_DESIGN §5; Ctrl-K). Centered overlay over a scrim with a
+// fuzzy-filterable action list. Mount inside a Modal (screens/dialogs.slint) so click-out
+// and Esc dismiss work. Rust supplies the already-filtered, already-grouped `actions`.
+//
+//   import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
+
+import { Theme } from "../theme.slint";
+import { StatusDot } from "../components.slint";
+import { LineEdit, ListView } from "std-widgets.slint";
+
+// One row. `category` is a group header shown when it differs from the previous row's
+// (Rust sets `first-in-group` to avoid repeats). `glyph` is an optional Fluent icon;
+// `status`/`kind` decorate CONNECT-TO rows.
+export struct PaletteAction {
+    category: string,        // "CONNECT TO" | "ACTIONS" | "TABS" | "SETTINGS"
+    first-in-group: bool,
+    label: string,
+    detail: string,          // secondary text, e.g. "ops@10.0.4.11"
+    shortcut: string,        // e.g. "Ctrl ⇧ \"
+    glyph: string,           // Fluent codepoint ("" → none)
+    status: string,          // StatusDot state ("" → none)
+    selected: bool,
+}
+
+export component CommandPalette inherits Rectangle {
+    in-out property <string>          query;
+    in property <[PaletteAction]>     actions;
+    callback edited(string);
+    callback activated(int);
+
+    width: 620px;
+    background: Theme.color-overlay;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.color-stroke;
+
+    TouchArea {}   // absorb clicks
+
+    VerticalLayout {
+        spacing: 0px;
+
+        // Query row.
+        Rectangle {
+            height: 52px;
+            border-color: Theme.color-stroke;
+            HorizontalLayout {
+                padding-left: Theme.space-4; padding-right: Theme.space-4;
+                spacing: Theme.space-3;
+                Text { text: "\u{E721}"; font-family: Theme.font-family-icons; font-size: 16px;
+                    color: Theme.color-text-secondary; vertical-alignment: center; }   // Search
+                input := LineEdit {
+                    placeholder-text: "Type a host, action, or setting…";
+                    text <=> root.query;
+                    font-size: Theme.font-lg;
+                    edited(t) => { root.edited(t); }
+                }
+            }
+        }
+        // Hairline divider.
+        Rectangle { height: 1px; background: Theme.color-stroke; }
+
+        // Results.
+        ListView {
+            height: 300px;
+            for act[idx] in actions: VerticalLayout {
+                // Group header (only on the first row of a group).
+                if act.first-in-group : Text {
+                    text: act.category;
+                    color: Theme.color-text-disabled;
+                    font-size: 10px;
+                    font-family: Theme.font-family;
+                    font-weight: 700;
+                    letter-spacing: 0.6px;
+                }
+                Rectangle {
+                    height: 38px;
+                    border-radius: Theme.radius-sm;
+                    background: act.selected ? Theme.color-accent-subtle
+                              : row-touch.has-hover ? Theme.color-hover : transparent;
+                    HorizontalLayout {
+                        padding-left: Theme.space-3; padding-right: Theme.space-3;
+                        spacing: Theme.space-3;
+                        // Leading glyph or status dot.
+                        VerticalLayout { alignment: center;
+                            if act.status != "" : StatusDot { state: act.status; }
+                            if act.status == "" && act.glyph != "" : Text { text: act.glyph;
+                                font-family: Theme.font-family-icons; font-size: 14px;
+                                color: Theme.color-text-secondary; }
+                        }
+                        VerticalLayout { alignment: center; horizontal-stretch: 1;
+                            Text { text: act.label; color: Theme.color-text;
+                                font-size: Theme.font-base; font-family: Theme.font-family;
+                                overflow: elide; }
+                        }
+                        if act.detail != "" : VerticalLayout { alignment: center;
+                            Text { text: act.detail; color: Theme.color-text-secondary;
+                                font-size: Theme.font-sm; font-family: Theme.font-family-mono; } }
+                        if act.shortcut != "" : VerticalLayout { alignment: center;
+                            Text { text: act.shortcut; color: Theme.color-text-secondary;
+                                font-size: 10px; font-family: Theme.font-family-mono; font-weight: 700; } }
+                    }
+                    row-touch := TouchArea { clicked => { root.activated(idx); } }
+                }
+            }
+        }
+    }
+}

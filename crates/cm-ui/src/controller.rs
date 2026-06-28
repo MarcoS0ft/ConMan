@@ -18,11 +18,11 @@ use cm_core::terminal::{GridSnapshot, Key, KeyEvent, KeyModifiers, TerminalSize}
 // `TerminalSession` brings the session methods (send_key/resize/snapshots/shutdown)
 // into scope; P3.2 will switch this controller to `Box<dyn TerminalSession>`.
 use cm_session::{LocalTerminalSession, TerminalSession};
-use slint::{ComponentHandle, Image, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::input;
 use crate::terminal_renderer::{FontSet, TerminalRenderer, TerminalTheme};
-use crate::{AppWindow, TabItem};
+use crate::{AppWindow, ConnRow, PaletteAction, TabItem};
 
 /// Logical font size for the terminal grid.
 const FONT_SIZE_PX: f32 = 15.0;
@@ -145,6 +145,29 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let tab_model: Rc<VecModel<TabItem>> = Rc::new(VecModel::default());
     ui.set_tabs(ModelRc::from(tab_model.clone()));
 
+    // ── Seed sample connections so the shell is demoable end-to-end (P1 replaces with real) ──
+    let conn_model: Rc<VecModel<ConnRow>> = Rc::new(VecModel::from(sample_connections()));
+    ui.set_connections(ModelRc::from(conn_model.clone()));
+
+    // ── Seed command palette with real shell actions ──────────────────────────────────────
+    let palette_model: Rc<VecModel<PaletteAction>> =
+        Rc::new(VecModel::from(initial_palette_actions()));
+    ui.set_palette_actions(ModelRc::from(palette_model.clone()));
+
+    // ── CONMAN_DARK_MODE env var: force dark (1) or light (0) for screenshots / tests ──
+    // Normal operation: leave dark-mode at its default (seeds from Palette/OS scheme).
+    // CONMAN_OPEN_PALETTE=1: open the palette overlay at startup (screenshot fixture).
+    if let Ok(v) = std::env::var("CONMAN_DARK_MODE") {
+        match v.trim() {
+            "1" => ui.set_dark_mode(true),
+            "0" => ui.set_dark_mode(false),
+            _ => {}
+        }
+    }
+    if std::env::var("CONMAN_OPEN_PALETTE").as_deref() == Ok("1") {
+        ui.set_palette_open(true);
+    }
+
     let state = Rc::new(RefCell::new(State {
         tabs: Vec::new(),
         active: 0,
@@ -256,6 +279,99 @@ pub fn run() -> Result<(), slint::PlatformError> {
             });
         });
     }
+
+    // ── New shell callbacks (P2.8) ──────────────────────────────────────────────
+    // select-panel: update active-panel (Slint property write); no Rust state needed.
+    ui.on_select_panel({
+        let weak = ui.as_weak();
+        move |idx| {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_active_panel(idx);
+            }
+        }
+    });
+    // toggle-sidebar: flip the collapsed bool.
+    ui.on_toggle_sidebar({
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_sidebar_collapsed(!ui.get_sidebar_collapsed());
+            }
+        }
+    });
+    // open-palette: reveal the command palette overlay.
+    ui.on_open_palette({
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_palette_open(true);
+            }
+        }
+    });
+    // quick-connect: P3.2 wires this; for now show the palette.
+    ui.on_quick_connect({
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_palette_open(true);
+            }
+        }
+    });
+    // row-activated: open a local terminal tab for the sample tree row (P1 replaces with real).
+    {
+        let state = state.clone();
+        let tab_model = tab_model.clone();
+        let weak = ui.as_weak();
+        ui.on_row_activated(move |_idx| {
+            if let Some(ui) = weak.upgrade() {
+                open_tab(&state, &tab_model, &ui);
+            }
+        });
+    }
+    // toggle-broadcast: flip the armed flag (behaviour is a follow-on task).
+    ui.on_toggle_broadcast({
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_broadcast_active(!ui.get_broadcast_active());
+            }
+        }
+    });
+    // palette-edited: Rust filters + re-populates the actions model.
+    ui.on_palette_edited({
+        let weak = ui.as_weak();
+        let pal_model = palette_model.clone();
+        move |query| {
+            let filtered = filter_palette_actions(&query);
+            // Rebuild the model in-place.
+            while pal_model.row_count() > 0 {
+                pal_model.remove(0);
+            }
+            for a in filtered {
+                pal_model.push(a);
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_palette_query(query);
+            }
+        }
+    });
+    // palette-activated: dispatch a palette action by index.
+    {
+        let state = state.clone();
+        let tab_model = tab_model.clone();
+        let pal_model_dispatch = palette_model.clone();
+        let weak = ui.as_weak();
+        ui.on_palette_activated(move |idx| {
+            if let Some(ui) = weak.upgrade() {
+                dispatch_palette_action(&state, &tab_model, &pal_model_dispatch, &ui, idx as usize);
+            }
+        });
+    }
+    // theme-changed: Settings panel calls this after writing Theme.dark-mode itself.
+    // We just persist the choice here (P5 adds persistence; for now a no-op is fine).
+    ui.on_theme_changed(|_idx| {
+        // P5: persist the preference.
+    });
 
     // Redraw timer: coalesce + render the active tab, reap exited tabs.
     let redraw = Timer::default();
@@ -375,6 +491,9 @@ fn open_tab(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &
     tab_model.push(TabItem {
         title: SharedString::from(format!("shell {num}")),
         id: num as i32,
+        // status: "connected" once the PTY is running (local tabs are always "connected").
+        status: SharedString::from("connected"),
+        pane_count: 1,
     });
     ui.set_active_tab(active as i32);
 }
@@ -513,6 +632,152 @@ fn render_active(st: &mut State, ui: &AppWindow) {
     }
 }
 
+// ── P2.8 helpers ─────────────────────────────────────────────────────────────
+
+/// Sample connection tree for demo / smoke-testing the shell.
+/// P1 replaces this with real data from `cm-storage`.
+fn sample_connections() -> Vec<ConnRow> {
+    vec![
+        ConnRow {
+            id: 1,
+            label: SharedString::from("Lab"),
+            host: SharedString::from(""),
+            kind: SharedString::from(""),
+            status: SharedString::from(""),
+            is_group: true,
+            expanded: true,
+            selected: false,
+        },
+        ConnRow {
+            id: 2,
+            label: SharedString::from("web-dev-01"),
+            host: SharedString::from("ops@10.0.1.11"),
+            kind: SharedString::from("SSH"),
+            status: SharedString::from("connected"),
+            is_group: false,
+            expanded: false,
+            selected: false,
+        },
+        ConnRow {
+            id: 3,
+            label: SharedString::from("db-dev"),
+            host: SharedString::from("admin@10.0.1.22"),
+            kind: SharedString::from("SSH"),
+            status: SharedString::from("disconnected"),
+            is_group: false,
+            expanded: false,
+            selected: false,
+        },
+        ConnRow {
+            id: 4,
+            label: SharedString::from("Prod"),
+            host: SharedString::from(""),
+            kind: SharedString::from(""),
+            status: SharedString::from(""),
+            is_group: true,
+            expanded: true,
+            selected: false,
+        },
+        ConnRow {
+            id: 5,
+            label: SharedString::from("web-prod-01"),
+            host: SharedString::from("ops@10.0.4.11"),
+            kind: SharedString::from("SSH"),
+            status: SharedString::from("disconnected"),
+            is_group: false,
+            expanded: false,
+            selected: false,
+        },
+    ]
+}
+
+/// Initial palette actions (real actions for new-tab, toggle sidebar, focus panel).
+/// P3.2 adds quick-connect items; the query filter narrows this list.
+fn initial_palette_actions() -> Vec<PaletteAction> {
+    vec![
+        PaletteAction {
+            category: SharedString::from("ACTIONS"),
+            first_in_group: true,
+            label: SharedString::from("New local tab"),
+            detail: SharedString::from(""),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{E710}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        PaletteAction {
+            category: SharedString::from("ACTIONS"),
+            first_in_group: false,
+            label: SharedString::from("Toggle sidebar"),
+            detail: SharedString::from(""),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{E700}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        PaletteAction {
+            category: SharedString::from("ACTIONS"),
+            first_in_group: false,
+            label: SharedString::from("Focus Connections"),
+            detail: SharedString::from(""),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{E968}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        PaletteAction {
+            category: SharedString::from("ACTIONS"),
+            first_in_group: false,
+            label: SharedString::from("Focus Settings"),
+            detail: SharedString::from(""),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{E713}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+    ]
+}
+
+/// Filter the palette actions by query (simple case-insensitive substring).
+fn filter_palette_actions(query: &str) -> Vec<PaletteAction> {
+    let all = initial_palette_actions();
+    if query.is_empty() {
+        return all;
+    }
+    let q = query.to_lowercase();
+    let mut first_in_group = true;
+    all.into_iter()
+        .filter(|a| a.label.to_lowercase().contains(&q))
+        .map(|mut a| {
+            a.first_in_group = first_in_group;
+            first_in_group = false;
+            a
+        })
+        .collect()
+}
+
+/// Dispatch a palette action by its index in the current filtered list.
+fn dispatch_palette_action(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    palette_model: &Rc<VecModel<PaletteAction>>,
+    ui: &AppWindow,
+    idx: usize,
+) {
+    // Look up the action by index from our own VecModel (same as the Slint side).
+    if idx >= palette_model.row_count() {
+        return;
+    }
+    let action = palette_model.row_data(idx).unwrap_or_default();
+    match action.label.as_str() {
+        "New local tab" => open_tab(state, tab_model, ui),
+        "Toggle sidebar" => ui.set_sidebar_collapsed(!ui.get_sidebar_collapsed()),
+        "Focus Connections" => ui.set_active_panel(0),
+        "Focus Settings" => ui.set_active_panel(2),
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,5 +818,67 @@ mod tests {
         // Never zero, even for a tiny surface.
         let tiny = grid_for(&r, 1.0, 1.0, 1.0);
         assert!(tiny.cols >= 1 && tiny.rows >= 1);
+    }
+
+    // ── P2.8 component logic tests ────────────────────────────────────────────
+
+    /// `filter_palette_actions` with an empty query returns all initial actions.
+    #[test]
+    fn palette_filter_empty_query_returns_all() {
+        let all = filter_palette_actions("");
+        let initial = initial_palette_actions();
+        assert_eq!(all.len(), initial.len());
+        // All labels should match the initial set.
+        for (a, b) in all.iter().zip(initial.iter()) {
+            assert_eq!(a.label, b.label);
+        }
+    }
+
+    /// A query that matches nothing returns an empty list.
+    #[test]
+    fn palette_filter_no_match_returns_empty() {
+        let result = filter_palette_actions("xyzzy_no_such_action");
+        assert!(result.is_empty());
+    }
+
+    /// A matching query returns only the actions whose label contains the substring.
+    #[test]
+    fn palette_filter_narrows_by_label() {
+        let result = filter_palette_actions("sidebar");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].label.as_str(), "Toggle sidebar");
+    }
+
+    /// The first result always has `first_in_group = true` (group header re-set on filter).
+    #[test]
+    fn palette_filter_first_row_always_has_group_header() {
+        let result = filter_palette_actions("tab");
+        assert!(!result.is_empty(), "expected at least one result for 'tab'");
+        assert!(result[0].first_in_group);
+    }
+
+    /// `sample_connections` produces at least one group and one leaf.
+    #[test]
+    fn sample_connections_has_groups_and_leaves() {
+        let conns = sample_connections();
+        assert!(
+            conns.iter().any(|c| c.is_group),
+            "expected at least one group"
+        );
+        assert!(
+            conns.iter().any(|c| !c.is_group),
+            "expected at least one leaf"
+        );
+    }
+
+    /// All leaf connections have a non-empty `kind` (SSH/RDP/LOCAL).
+    #[test]
+    fn sample_connections_leaves_have_kind() {
+        let conns = sample_connections();
+        for c in &conns {
+            if !c.is_group {
+                assert!(!c.kind.is_empty(), "leaf '{}' has no kind", c.label);
+            }
+        }
     }
 }

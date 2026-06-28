@@ -1,0 +1,95 @@
+// ConMan — Launchpad (the productive "empty / new tab" state; GUI_DESIGN §5 + the
+// Direction A pressure-test). Fills the session area when a tab has no live session:
+// search-to-connect, recents, and group shortcuts instead of a blank screen.
+//
+//   import { Launchpad, RecentItem } from "screens/launchpad.slint";
+
+import { Theme } from "../theme.slint";
+import { PrimaryButton, SecondaryButton, StatusDot } from "../components.slint";
+import { LineEdit } from "std-widgets.slint";
+
+export struct RecentItem {
+    id: int,
+    name: string,
+    meta: string,     // "2m ago" etc.
+    kind: string,     // "SSH" | "RDP" | "LOCAL"
+    status: string,
+}
+
+export component Launchpad inherits Rectangle {
+    in property <string>        greeting: "Welcome back, ops";
+    in property <[RecentItem]>  recents;
+    in-out property <string>    query;
+    callback edited(string);
+    callback open-recent(int);
+    callback quick-connect();
+    callback open-group-split();
+
+    background: Theme.color-terminal-bg;
+
+    VerticalLayout {
+        padding: Theme.space-6;
+        spacing: Theme.space-4;
+
+        Text { text: greeting; color: Theme.color-text; font-size: Theme.font-xl;
+            font-family: Theme.font-family; font-weight: 700; }
+        Text { text: "Jump back in, or start something new."; color: Theme.color-text-secondary;
+            font-size: Theme.font-base; font-family: Theme.font-family; }
+
+        // Search-to-connect.
+        Rectangle {
+            height: 40px;
+            background: Theme.color-card;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Theme.color-stroke;
+            HorizontalLayout {
+                padding-left: Theme.space-3; padding-right: Theme.space-3;
+                spacing: Theme.space-2;
+                Text { text: "\u{E721}"; font-family: Theme.font-family-icons; font-size: 15px;
+                    color: Theme.color-text-secondary; vertical-alignment: center; }
+                LineEdit { placeholder-text: "Search a host, or type  ssh user@host  to connect…";
+                    text <=> root.query; font-size: Theme.font-base;
+                    edited(t) => { root.edited(t); } }
+            }
+        }
+
+        Text { text: "RECENT"; color: Theme.color-text-disabled; font-size: 10px;
+            font-family: Theme.font-family; font-weight: 700; letter-spacing: 0.6px; }
+
+        // Recents grid (2 columns).
+        for item[idx] in recents : Rectangle {
+            height: 50px;
+            background: Theme.color-card;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Theme.color-stroke;
+            HorizontalLayout {
+                padding-left: Theme.space-3; padding-right: Theme.space-3;
+                spacing: Theme.space-3;
+                VerticalLayout { alignment: center; StatusDot { state: item.status; diameter: 8px; } }
+                VerticalLayout { alignment: center; horizontal-stretch: 1;
+                    Text { text: item.name; color: Theme.color-text; font-size: Theme.font-base;
+                        font-family: Theme.font-family; font-weight: 600; }
+                    Text { text: item.meta; color: Theme.color-text-secondary; font-size: 10px;
+                        font-family: Theme.font-family-mono; }
+                }
+                VerticalLayout { alignment: center;
+                    Rectangle { height: 16px; border-radius: 3px; background: Theme.color-hover;
+                        HorizontalLayout { padding-left: 5px; padding-right: 5px;
+                            Text { text: item.kind; color: Theme.color-text-secondary; font-size: 9px;
+                                font-family: Theme.font-family-mono; font-weight: 600; vertical-alignment: center; } } }
+                }
+            }
+            TouchArea { clicked => { root.open-recent(idx); } }
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            PrimaryButton { text: "Quick connect"; clicked => { root.quick-connect(); } }
+            SecondaryButton { text: "Open Production in split"; clicked => { root.open-group-split(); } }
+        }
+    }
+}
