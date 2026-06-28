@@ -22,7 +22,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::engine_owner::{Msg, Transport, run_engine_owner, timing};
 use crate::libghostty::EngineError;
-use crate::session::{ExitStatus, SessionStatus, TerminalSession};
+use crate::session::{ExitStatus, Session, SessionStatus, Surface, TerminalSession};
 
 /// Read buffer size for the PTY reader thread.
 const READ_BUF_LEN: usize = 8192;
@@ -72,10 +72,13 @@ impl Transport for PtyTransport {
 ///
 /// `Send` (it holds only channels, join handles, and the child); the `!Send`
 /// engine stays confined to the owner thread.
+///
+/// Implements both [`TerminalSession`] and [`Session`] (unified P4.1 trait).
 #[derive(Debug)]
 pub struct LocalTerminalSession {
     control_tx: Sender<Msg>,
-    snapshot_rx: Receiver<GridSnapshot>,
+    /// Unified surface — always `Surface::TerminalGrid(_)` for this type.
+    surface: Surface,
     owner_handle: Mutex<Option<JoinHandle<()>>>,
     reader_handle: Mutex<Option<JoinHandle<()>>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
@@ -139,7 +142,7 @@ impl LocalTerminalSession {
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 control_tx,
-                snapshot_rx,
+                surface: Surface::TerminalGrid(snapshot_rx),
                 owner_handle: Mutex::new(Some(owner_handle)),
                 reader_handle: Mutex::new(Some(reader_handle)),
                 child: Mutex::new(child),
@@ -177,7 +180,10 @@ impl LocalTerminalSession {
 
 impl TerminalSession for LocalTerminalSession {
     fn snapshots(&self) -> &Receiver<GridSnapshot> {
-        &self.snapshot_rx
+        match &self.surface {
+            Surface::TerminalGrid(rx) => rx,
+            _ => unreachable!("LocalTerminalSession always has TerminalGrid surface"),
+        }
     }
 
     fn send_key(&self, ev: KeyEvent) {
@@ -240,6 +246,35 @@ impl Drop for LocalTerminalSession {
             let _ = child.kill();
         }
         let _ = self.control_tx.send(Msg::Shutdown);
+    }
+}
+
+/// Unified [`Session`] implementation for [`LocalTerminalSession`].
+///
+/// `surface()` returns `Surface::TerminalGrid`; `status()` and `shutdown()`
+/// delegate to the `TerminalSession` impl; `resize_px()` converts pixel
+/// dimensions to cell dimensions using an approximate 8×16 font size (the
+/// UI layer drives precise resize via `TerminalSession::resize()` with real
+/// font metrics in P4.2).
+impl Session for LocalTerminalSession {
+    fn surface(&self) -> &Surface {
+        &self.surface
+    }
+
+    fn status(&self) -> SessionStatus {
+        <Self as TerminalSession>::status(self)
+    }
+
+    fn shutdown(&self) {
+        <Self as TerminalSession>::shutdown(self);
+    }
+
+    fn resize_px(&self, width: u32, height: u32) {
+        // Approximate 8×16 cell size. The UI layer drives precise resize via
+        // TerminalSession::resize() with real font metrics (P4.2).
+        let cols = u16::try_from(width / 8).unwrap_or(u16::MAX).max(2);
+        let rows = u16::try_from(height / 16).unwrap_or(u16::MAX).max(1);
+        <Self as TerminalSession>::resize(self, TerminalSize { cols, rows });
     }
 }
 
@@ -365,7 +400,7 @@ mod tests {
             wait_for_text(&session, "HELLO_PTY", Duration::from_secs(5)),
             "expected shell output in the grid"
         );
-        session.shutdown();
+        TerminalSession::shutdown(&session);
     }
 
     #[test]
@@ -383,7 +418,7 @@ mod tests {
             wait_for_text(&session, "MARK42", Duration::from_secs(5)),
             "expected the shell to execute the typed command"
         );
-        session.shutdown();
+        TerminalSession::shutdown(&session);
     }
 
     #[test]
@@ -413,7 +448,7 @@ mod tests {
             }
         }
         assert_eq!(seen, Some(new_size), "snapshot should reflect the new size");
-        session.shutdown();
+        TerminalSession::shutdown(&session);
     }
 
     #[test]
@@ -440,7 +475,7 @@ mod tests {
                 code: 0
             })
         );
-        session.shutdown();
+        TerminalSession::shutdown(&session);
     }
 
     #[test]
@@ -450,7 +485,7 @@ mod tests {
 
         let (done_tx, done_rx) = mpsc::channel::<()>();
         thread::spawn(move || {
-            session.shutdown();
+            TerminalSession::shutdown(&session);
             let _ = done_tx.send(());
         });
         assert!(
@@ -499,7 +534,7 @@ mod resize_storm_tests {
             Some(final_size),
             "engine grid must settle at the last resize"
         );
-        s.shutdown();
+        TerminalSession::shutdown(&s);
     }
 }
 
@@ -572,7 +607,7 @@ mod startup_timing {
             fmt_ms(first_nonempty)
         );
         assert!(first_nonempty.is_some(), "no shell output within 15s");
-        s.shutdown();
+        TerminalSession::shutdown(&s);
     }
 
     #[test]
@@ -611,7 +646,7 @@ mod startup_timing {
         };
         eprintln!("[B7] verdict: {verdict}");
         for s in sessions {
-            s.shutdown();
+            TerminalSession::shutdown(&s);
         }
         assert!(
             firsts.iter().all(Option::is_some),
