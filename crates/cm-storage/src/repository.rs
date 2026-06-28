@@ -878,3 +878,98 @@ fn would_create_folder_cycle(
 
     Ok(true)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a group + connection + credential + setting to a file-backed DB,
+    /// drop the repository, reopen the same file, and assert all data is still
+    /// present.
+    #[test]
+    fn file_backed_persistence_round_trip() {
+        use cm_core::{
+            Connection, ConnectionId, ConnectionKind, ConnectionSettings, Credential, CredentialId,
+            CredentialKind, Group, GroupId, SshAuthMethod, SshSettings,
+        };
+
+        let dir = tempfile::tempdir().expect("tmp dir");
+        let db_path = dir.path().join("test.sqlite");
+
+        let now: i64 = 1_700_000_000;
+
+        // ── First open: write data ─────────────────────────────────────────
+        {
+            let repo = SqliteRepository::open(&db_path).expect("open");
+
+            let gid = repo
+                .upsert_group(&Group {
+                    id: GroupId::UNSAVED,
+                    parent_id: None,
+                    name: "persist-group".to_owned(),
+                    sort: 0,
+                    default_credential: None,
+                })
+                .expect("upsert group");
+
+            let cred_id = repo
+                .upsert_credential(&Credential {
+                    id: CredentialId::UNSAVED,
+                    folder_id: None,
+                    name: "persist-cred".to_owned(),
+                    kind: CredentialKind::Password,
+                    username: Some("alice".to_owned()),
+                })
+                .expect("upsert credential");
+
+            let conn = Connection::new(
+                ConnectionId::UNSAVED,
+                Some(gid),
+                "persist-conn".to_owned(),
+                ConnectionKind::Ssh,
+                ConnectionSettings::Ssh(SshSettings {
+                    host: "10.0.0.1".to_owned(),
+                    port: 22,
+                    username: "alice".to_owned(),
+                    auth_method: SshAuthMethod::Password,
+                }),
+                Some(cred_id),
+                0,
+                now,
+                now,
+            )
+            .expect("build connection");
+            repo.upsert_connection(&conn).expect("upsert connection");
+
+            repo.set_setting("persist-key", "persist-value")
+                .expect("set setting");
+        } // repo dropped here — connection closed
+
+        // ── Second open: verify data survives ─────────────────────────────
+        {
+            let repo = SqliteRepository::open(&db_path).expect("reopen");
+
+            let groups = repo.list_groups().expect("list groups");
+            assert_eq!(groups.len(), 1, "group count");
+            assert_eq!(groups[0].name, "persist-group");
+
+            let conns = repo.list_connections().expect("list connections");
+            assert_eq!(conns.len(), 1, "connection count");
+            assert_eq!(conns[0].name, "persist-conn");
+
+            let creds = repo.list_credentials().expect("list credentials");
+            assert_eq!(creds.len(), 1, "credential count");
+            assert_eq!(creds[0].name, "persist-cred");
+
+            let val = repo
+                .get_setting("persist-key")
+                .expect("get setting")
+                .expect("setting present");
+            assert_eq!(val, "persist-value");
+        }
+    }
+}

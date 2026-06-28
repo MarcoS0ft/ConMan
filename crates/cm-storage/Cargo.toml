@@ -16,5 +16,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
+[dev-dependencies]
+# Provides NamedTempFile / TempDir for the file-backed persistence test.
+tempfile = "3"
+
 [lints]
 workspace = true
