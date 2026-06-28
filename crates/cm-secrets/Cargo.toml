@@ -5,5 +5,14 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[dependencies]
+cm-core = { path = "../cm-core" }
+# keyring 3.x — the mock backend is always compiled in (no feature flag needed).
+# On Linux without `linux-native` / `sync-secret-service` / `async-secret-service`
+# features, keyring automatically falls back to the mock backend, which is what we
+# want for CI.  For production use on Linux, the binary should enable the appropriate
+# feature and call `keyring::set_default_credential_builder` as needed.
+keyring = { version = "3.6" }
+
 [lints]
 workspace = true
