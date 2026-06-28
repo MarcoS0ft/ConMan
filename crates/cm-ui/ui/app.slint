@@ -18,7 +18,7 @@ import { StatusDot, StatusPill, IconButton, ActivityBarButton, PrimaryButton, Em
 // Palette is needed to read Palette.color-scheme in the theme-changed callback.
 import { ListView, Palette } from "std-widgets.slint";
 // Screen overlays — mounted as last children of AppWindow so they float above the shell.
-import { Modal } from "screens/dialogs.slint";
+import { Modal, QuickConnectForm, HostKeyDialog } from "screens/dialogs.slint";
 import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
 import { SettingsPanel } from "screens/settings_panel.slint";
 // Session-state overlays (connecting / error) and the launchpad (empty-tab home screen).
@@ -322,6 +322,32 @@ export component AppWindow inherits Window {
     callback open-recent(int);
     callback open-group-split();
 
+    // ── Quick-connect form (P3.2) ─────────────────────────────────────────────
+    // Modal over the shell; Rust opens it via quick-connect(); data read back in qc-connect().
+    // auth-method: 0 Public key · 1 Password · 2 Agent (must match SegmentedControl order).
+    in-out property <bool>   quick-connect-open: false;
+    in-out property <string> qc-host: "";
+    in-out property <string> qc-port: "22";
+    in-out property <string> qc-username: "";
+    in-out property <int>    qc-auth-method: 1;   // default: Password
+    in-out property <string> qc-secret: "";        // password text OR key-file path
+    in-out property <string> qc-passphrase: "";    // key-file passphrase
+    // Fired by the form's Connect button; Rust reads the above props and spawns the session.
+    callback qc-connect();
+
+    // ── Host-key dialog (P3.2 / P3.1 policy) ─────────────────────────────────
+    // Blocked-connect path: Rust's UiHostKeyVerifier opens this via invoke_from_event_loop,
+    // then blocks on a channel waiting for host-key-accept() or host-key-reject() to fire.
+    // Do NOT dismiss by clicking the scrim — user must make an explicit choice.
+    in-out property <bool>   host-key-open: false;
+    in property <bool>       host-key-mismatch: false;
+    in property <string>     host-key-host: "";
+    in property <string>     host-key-type: "";
+    in property <string>     host-key-fingerprint: "";
+    in property <string>     host-key-stored-fp: "";
+    callback host-key-accept();
+    callback host-key-reject();
+
     // Settings (theme mode driven from the settings panel).
     in-out property <int>  theme-mode: 2;  // 0 dark · 1 light · 2 system
 
@@ -592,6 +618,41 @@ export component AppWindow inherits Window {
         open-recent(i) => { root.open-recent(i); }
         quick-connect => { root.quick-connect(); }
         open-group-split => { root.open-group-split(); }
+    }
+
+    // ── Quick-connect form modal (P3.2) — above session overlays ────────────────
+    // Esc / click-out dismisses (no connection started). Secrets in qc-secret /
+    // qc-passphrase are cleared by Rust after reading them in the qc-connect callback.
+    Modal {
+        open: root.quick-connect-open;
+        dismissed => { root.quick-connect-open = false; }
+        QuickConnectForm {
+            host <=> root.qc-host;
+            port <=> root.qc-port;
+            username <=> root.qc-username;
+            auth-method <=> root.qc-auth-method;
+            secret <=> root.qc-secret;
+            passphrase <=> root.qc-passphrase;
+            connect => { root.qc-connect(); }
+            cancel  => { root.quick-connect-open = false; }
+        }
+    }
+
+    // ── Host-key dialog modal (P3.2 / P3.1 policy) ───────────────────────────
+    // Blocks the SSH driver's tokio thread (via a back-channel) until the user decides.
+    // Do NOT wire dismissed → close: the user must choose Accept or Reject explicitly.
+    Modal {
+        open: root.host-key-open;
+        dismissed => {}   // security: no click-out dismiss; explicit choice required
+        HostKeyDialog {
+            mismatch:          root.host-key-mismatch;
+            host:              root.host-key-host;
+            key-type:          root.host-key-type;
+            fingerprint:       root.host-key-fingerprint;
+            stored-fingerprint: root.host-key-stored-fp;
+            reject => { root.host-key-reject(); }
+            accept => { root.host-key-accept(); }
+        }
     }
 
     // ── Command palette overlay — LAST child so it floats above the shell ──────
