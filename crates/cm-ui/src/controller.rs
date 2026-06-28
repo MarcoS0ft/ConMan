@@ -3759,7 +3759,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("Quick connect\u{2026}"),
             detail: SharedString::from("SSH quick-connect form"),
             shortcut: SharedString::from(""),
-            glyph: SharedString::from("\u{E8B1}"),
+            glyph: SharedString::from("\u{EB2D}"), // cod-plug
             status: SharedString::from(""),
             selected: false,
         },
@@ -3769,7 +3769,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("New local tab"),
             detail: SharedString::from(""),
             shortcut: SharedString::from(""),
-            glyph: SharedString::from("\u{E710}"),
+            glyph: SharedString::from("\u{EA60}"), // cod-add
             status: SharedString::from(""),
             selected: false,
         },
@@ -3779,7 +3779,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("New SSH connection"),
             detail: SharedString::from("Save a new SSH profile"),
             shortcut: SharedString::from(""),
-            glyph: SharedString::from("\u{E968}"),
+            glyph: SharedString::from("\u{F0317}"), // md-lan
             status: SharedString::from(""),
             selected: false,
         },
@@ -3789,7 +3789,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("New RDP connection"),
             detail: SharedString::from("Save a new RDP profile"),
             shortcut: SharedString::from(""),
-            glyph: SharedString::from("\u{E8B0}"),
+            glyph: SharedString::from("\u{EA7A}"), // cod-vm
             status: SharedString::from(""),
             selected: false,
         },
@@ -3799,7 +3799,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("Close current tab"),
             detail: SharedString::from(""),
             shortcut: SharedString::from(""),
-            glyph: SharedString::from("\u{E8BB}"),
+            glyph: SharedString::from("\u{EA76}"), // cod-close
             status: SharedString::from(""),
             selected: false,
         },
@@ -3809,7 +3809,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("Toggle sidebar"),
             detail: SharedString::from(""),
             shortcut: SharedString::from(""),
-            glyph: SharedString::from("\u{E700}"),
+            glyph: SharedString::from("\u{EB6A}"), // cod-three_bars
             status: SharedString::from(""),
             selected: false,
         },
@@ -3819,7 +3819,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("Focus Connections"),
             detail: SharedString::from(""),
             shortcut: SharedString::from(""),
-            glyph: SharedString::from("\u{E968}"),
+            glyph: SharedString::from("\u{F0317}"), // md-lan
             status: SharedString::from(""),
             selected: false,
         },
@@ -3829,7 +3829,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("Focus Keys"),
             detail: SharedString::from(""),
             shortcut: SharedString::from(""),
-            glyph: SharedString::from("\u{E8D7}"),
+            glyph: SharedString::from("\u{EB11}"), // cod-key
             status: SharedString::from(""),
             selected: false,
         },
@@ -3839,7 +3839,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("Open Settings"),
             detail: SharedString::from(""),
             shortcut: SharedString::from(""),
-            glyph: SharedString::from("\u{E713}"),
+            glyph: SharedString::from("\u{F0493}"), // md-cog
             status: SharedString::from(""),
             selected: false,
         },
@@ -3851,7 +3851,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("Import / Export\u{2026}"),
             detail: SharedString::from("Blocked — requires P1.2 (not yet merged)"),
             shortcut: SharedString::from(""),
-            glyph: SharedString::from("\u{E8B5}"),
+            glyph: SharedString::from("\u{EBAC}"), // cod-export
             status: SharedString::from(""),
             selected: false,
         },
@@ -3862,7 +3862,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("Split horizontal"),
             detail: SharedString::from("Side-by-side panes"),
             shortcut: SharedString::from("Ctrl+Shift+\\"),
-            glyph: SharedString::from("\u{E740}"),
+            glyph: SharedString::from("\u{EB56}"), // cod-split_horizontal
             status: SharedString::from(""),
             selected: false,
         },
@@ -3872,7 +3872,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("Split vertical"),
             detail: SharedString::from("Stacked panes"),
             shortcut: SharedString::from("Ctrl+Shift+-"),
-            glyph: SharedString::from("\u{E740}"),
+            glyph: SharedString::from("\u{EB57}"), // cod-split_vertical
             status: SharedString::from(""),
             selected: false,
         },
@@ -3882,7 +3882,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("Close pane"),
             detail: SharedString::from("Close pane and shut down session"),
             shortcut: SharedString::from("Ctrl+Shift+W"),
-            glyph: SharedString::from("\u{E711}"),
+            glyph: SharedString::from("\u{EA76}"), // cod-close
             status: SharedString::from(""),
             selected: false,
         },
@@ -3892,7 +3892,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("Detach session"),
             detail: SharedString::from("Close pane, keep session running"),
             shortcut: SharedString::from("Ctrl+Shift+D"),
-            glyph: SharedString::from("\u{E8FB}"),
+            glyph: SharedString::from("\u{EAD0}"), // cod-debug_disconnect
             status: SharedString::from(""),
             selected: false,
         },
@@ -3902,7 +3902,7 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
             label: SharedString::from("Toggle broadcast"),
             detail: SharedString::from("Fan input to all visible panes"),
             shortcut: SharedString::from("Ctrl+Shift+B"),
-            glyph: SharedString::from("\u{E95A}"),
+            glyph: SharedString::from("\u{EAAD}"), // cod-broadcast
             status: SharedString::from(""),
             selected: false,
         },
@@ -3924,7 +3924,7 @@ fn filter_palette_actions(
             label: SharedString::from(format!("Switch to: {title}").as_str()),
             detail: SharedString::from(format!("tab {}", tab_idx + 1).as_str()),
             shortcut: SharedString::from(""),
-            glyph: SharedString::from("\u{E8A7}"),
+            glyph: SharedString::from("\u{EBCB}"), // cod-arrow_swap
             status: SharedString::from(""),
             selected: false,
         });
@@ -3937,7 +3937,7 @@ fn filter_palette_actions(
             label: SharedString::from(format!("Reattach: {label}").as_str()),
             detail: SharedString::from("Restore detached session to a new tab"),
             shortcut: SharedString::from(""),
-            glyph: SharedString::from("\u{E8FB}"),
+            glyph: SharedString::from("\u{EB3A}"), // cod-remote
             status: SharedString::from(""),
             selected: false,
         });
