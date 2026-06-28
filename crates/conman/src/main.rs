@@ -15,7 +15,7 @@ use std::sync::Arc;
 use cm_core::ConnectionRepository as _;
 use cm_platform::app_db_path;
 use cm_secrets::KeyringStore;
-use cm_storage::SqliteRepository;
+use cm_storage::{SettingsService, SqliteRepository};
 use cm_ui::AppConfig;
 
 // Pull the backend/renderer features into the shared `slint` build.
@@ -51,10 +51,16 @@ fn build_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     // ── Repository (SQLite) ────────────────────────────────────────────────
     let repo = SqliteRepository::open(&db_path)?;
 
-    // Seed demo data only when the database is brand-new (no groups exist).
-    let groups = repo.list_groups()?;
-    if groups.is_empty() {
-        seed_demo_data(&repo)?;
+    // Seed demo data only on the very first launch, gated on a persisted flag.
+    // Using list_groups().is_empty() would re-seed if the user deletes all groups
+    // (CONVENTIONS §P1.5 carry-over fix (i)).
+    {
+        let svc = SettingsService::new(&repo);
+        let already_seeded = svc.load_first_run_seeded()?;
+        if !already_seeded {
+            seed_demo_data(&repo)?;
+            svc.save_first_run_seeded()?;
+        }
     }
 
     let repo: Arc<dyn cm_core::ConnectionRepository> = Arc::new(repo);

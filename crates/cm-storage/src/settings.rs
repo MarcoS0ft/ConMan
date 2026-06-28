@@ -37,6 +37,10 @@ pub const KEY_STARTUP_BEHAVIOR: &str = "ui.startup_behavior";
 pub const KEY_ACTIVE_PANEL: &str = "ui.active_panel";
 /// Sidebar collapsed: "0" visible, "1" collapsed.
 pub const KEY_SIDEBAR_COLLAPSED: &str = "ui.sidebar_collapsed";
+/// First-run demo data seeded: "1" = already seeded, absent / "0" = not yet.
+/// Gating on this setting (rather than `list_groups().is_empty()`) prevents
+/// re-seeding when the user intentionally deletes all groups (CONVENTIONS §P1.5).
+pub const KEY_FIRST_RUN_SEEDED: &str = "app.first_run_seeded";
 
 // ---------------------------------------------------------------------------
 // AppSettings — the loaded settings snapshot
@@ -181,6 +185,18 @@ impl<'a> SettingsService<'a> {
     pub fn save_sidebar_collapsed(&self, v: bool) -> Result<(), RepositoryError> {
         self.repo
             .set_setting(KEY_SIDEBAR_COLLAPSED, if v { "1" } else { "0" })
+    }
+
+    /// Read whether first-run demo data has been seeded.
+    ///
+    /// Returns `false` when the key is absent (pre-existing DB) or unparseable.
+    pub fn load_first_run_seeded(&self) -> Result<bool, RepositoryError> {
+        self.read_bool(KEY_FIRST_RUN_SEEDED, false)
+    }
+
+    /// Mark first-run demo data as seeded (persists "1").
+    pub fn save_first_run_seeded(&self) -> Result<(), RepositoryError> {
+        self.repo.set_setting(KEY_FIRST_RUN_SEEDED, "1")
     }
 
     // ── private helpers ────────────────────────────────────────────────────
