@@ -14,8 +14,9 @@
 
 import { Theme } from "theme.slint";
 import { StatusDot, StatusPill, IconButton, ActivityBarButton, PrimaryButton, EmptyState } from "components.slint";
-// ListView is exported from std-widgets in Slint 1.17 (via common/listview.slint).
-import { ListView } from "std-widgets.slint";
+// ListView + Palette are exported from std-widgets in Slint 1.17.
+// Palette is needed to read Palette.color-scheme in the theme-changed callback.
+import { ListView, Palette } from "std-widgets.slint";
 // Screen overlays — mounted as last children of AppWindow so they float above the shell.
 import { Modal } from "screens/dialogs.slint";
 import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
@@ -58,6 +59,10 @@ component TerminalSurface inherits Rectangle {
     callback pointer(int, int, length, length, int);
     callback scroll(length, length);
     callback resized(length, length);
+    // Fired for Ctrl-K / Ctrl-Shift-K (GUI_DESIGN §5 / §8 reserved Ctrl-Shift layer).
+    // The Rust controller opens/closes the palette in response instead of forwarding the
+    // key to the terminal session. Not a toggle here — AppWindow decides open vs. close.
+    callback toggle-palette();
 
     pure function mods(c: bool, a: bool, s: bool, m: bool) -> int {
         (c ? 1 : 0) + (a ? 2 : 0) + (s ? 4 : 0) + (m ? 8 : 0)
@@ -72,24 +77,32 @@ component TerminalSurface inherits Rectangle {
         height: 100%;
 
         key-pressed(e) => {
-            root.key-input(
-                e.text,
-                (e.text == Key.Return) ? 1
-                    : (e.text == Key.Tab) ? 2
-                    : (e.text == Key.Backspace) ? 3
-                    : (e.text == Key.Escape) ? 4
-                    : (e.text == Key.UpArrow) ? 5
-                    : (e.text == Key.DownArrow) ? 6
-                    : (e.text == Key.LeftArrow) ? 7
-                    : (e.text == Key.RightArrow) ? 8
-                    : (e.text == Key.Home) ? 9
-                    : (e.text == Key.End) ? 10
-                    : (e.text == Key.PageUp) ? 11
-                    : (e.text == Key.PageDown) ? 12
-                    : (e.text == Key.Delete) ? 14
-                    : 0,
-                root.mods(e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta));
-            accept
+            // ── Ctrl-K / Ctrl-Shift-K → command palette (GUI_DESIGN §5 / §8) ──────
+            // Intercepted BEFORE forwarding to the terminal so the shell never sees it.
+            // e.text is "k" for plain Ctrl-K and "K" for Ctrl-Shift-K.
+            if (e.modifiers.control && (e.text == "k" || e.text == "K")) {
+                root.toggle-palette();
+                accept
+            } else {
+                root.key-input(
+                    e.text,
+                    (e.text == Key.Return) ? 1
+                        : (e.text == Key.Tab) ? 2
+                        : (e.text == Key.Backspace) ? 3
+                        : (e.text == Key.Escape) ? 4
+                        : (e.text == Key.UpArrow) ? 5
+                        : (e.text == Key.DownArrow) ? 6
+                        : (e.text == Key.LeftArrow) ? 7
+                        : (e.text == Key.RightArrow) ? 8
+                        : (e.text == Key.Home) ? 9
+                        : (e.text == Key.End) ? 10
+                        : (e.text == Key.PageUp) ? 11
+                        : (e.text == Key.PageDown) ? 12
+                        : (e.text == Key.Delete) ? 14
+                        : 0,
+                    root.mods(e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta));
+                accept
+            }
         }
 
         Image {
@@ -164,7 +177,8 @@ component Tab inherits Rectangle {
                 Text {
                     text: "⊟ " + root.pane-count;
                     color: Theme.color-accent;
-                    font-size: 9px;
+                    // Split-badge chip text — Theme.font-xxs token (was 9px literal).
+                    font-size: Theme.font-xxs;
                     font-family: Theme.font-family-mono;
                     vertical-alignment: center;
                 }
@@ -175,7 +189,7 @@ component Tab inherits Rectangle {
             IconButton {
                 glyph: "\u{E711}";    // Cancel / close
                 size: 16px;
-                glyph-size: 10px;
+                glyph-size: Theme.icon-xs;
                 clicked => { root.closed(); }
             }
         }
@@ -212,7 +226,8 @@ component ConnectionRow inherits Rectangle {
             if data.is-group : Text {
                 text: data.expanded ? "\u{E70D}" : "\u{E76C}";   // ChevronDown / ChevronRight
                 font-family: Theme.font-family-icons;
-                font-size: 10px;
+                // Chevron glyph — Theme.icon-xs token (was 10px literal).
+                font-size: Theme.icon-xs;
                 color: Theme.color-text-secondary;
             }
             if !data.is-group : StatusDot { state: data.status; diameter: 6px; }
@@ -240,7 +255,8 @@ component ConnectionRow inherits Rectangle {
                     Text {
                         text: data.kind;
                         color: Theme.color-text-secondary;
-                        font-size: 9px;
+                        // Protocol chip text — Theme.font-xxs token (was 9px literal).
+                        font-size: Theme.font-xxs;
                         font-family: Theme.font-family-mono;
                         font-weight: 600;
                         vertical-alignment: center;
@@ -280,16 +296,21 @@ export component AppWindow inherits Window {
     in-out property <bool>             palette-open: false;
     in-out property <string>           palette-query: "";
     in property <[PaletteAction]>      palette-actions;
+    // Keyboard-selection index within the palette's filtered result list.
+    // Rust increments/decrements this on Up/Down (via on_key_input when palette is open)
+    // and resets it to 0 on each palette-edited call.
+    in-out property <int>              palette-selected: 0;
 
     // Settings (theme mode driven from the settings panel).
     in-out property <int>  theme-mode: 2;  // 0 dark · 1 light · 2 system
 
-    // Direct dark-mode accessor — two-way binding to Theme.dark-mode.
-    // Slint 1.17 does not expose the Theme global as a public Rust type; this property
-    // is the bridge so `cm-platform` (or test fixtures) can set the scheme from Rust:
-    //   ui.set_dark_mode(true)  // force dark
-    //   ui.set_dark_mode(false) // force light
-    in-out property <bool> dark-mode <=> Theme.dark-mode;
+    // Appearance bridge properties — two-way aliases to Theme globals so Rust (cm-platform
+    // or test fixtures) can inject OS-level values without touching Theme directly.
+    //   ui.set_dark_mode(true)   // force dark
+    //   ui.set_dark_mode(false)  // force light
+    //   ui.set_accent(Color::…)  // inject OS accent (e.g. DwmGetColorizationColor)
+    in-out property <bool>  dark-mode <=> Theme.dark-mode;
+    in-out property <color> accent    <=> Theme.accent;
 
     // Shell callbacks.
     callback select-tab(int);
@@ -304,6 +325,7 @@ export component AppWindow inherits Window {
     callback palette-edited(string);
     callback palette-activated(int);
     callback theme-changed(int);
+    callback accent-changed(int);   // fired when a preset swatch is picked; idx into Theme.accent-presets
 
     // TerminalSurface passthrough (UNCHANGED from P2.4).
     callback key-input(string, int, int);
@@ -427,10 +449,18 @@ export component AppWindow inherits Window {
                     theme-mode <=> root.theme-mode;
                     theme-changed(i) => {
                         root.theme-changed(i);
-                        // 0 dark · 1 light · 2 system → drive Theme.dark-mode
+                        // 0 dark · 1 light · 2 system → drive Theme.dark-mode.
+                        // Once a manual write occurs the property's Palette binding is
+                        // permanently broken in Slint (assignment replaces a binding).
+                        // For mode 2 we re-apply the current OS value so at least the
+                        // "System" pick is not a silent no-op. A proper reactive fix
+                        // (flags-based approach in Theme global) is deferred to P5.
                         if (i == 0) { Theme.dark-mode = true; }
                         else if (i == 1) { Theme.dark-mode = false; }
-                        // 2 = system: let Theme seed from Palette (don't write dark-mode).
+                        else { Theme.dark-mode = (Palette.color-scheme == ColorScheme.dark); }
+                    }
+                    accent-changed(i) => {
+                        root.accent-changed(i);
                     }
                 }
             }
@@ -446,6 +476,12 @@ export component AppWindow inherits Window {
                     pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
                     scroll(dx, dy) => { root.scroll(dx, dy); }
                     resized(w, h) => { root.surface-resized(w, h); }
+                    // Ctrl-K / Ctrl-Shift-K toggles the command palette (Finding 1 fix).
+                    // TerminalSurface intercepts it before the terminal session sees it.
+                    toggle-palette => {
+                        root.palette-open = !root.palette-open;
+                        if (!root.palette-open) { root.palette-selected = 0; }
+                    }
                 }
                 // Broadcast bar (only while armed). Input handling lives in the
                 // BroadcastBar screen component; this is the docked affordance.
@@ -497,7 +533,8 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         padding-left: Theme.space-2; padding-right: Theme.space-2;
                         spacing: Theme.space-1;
-                        Text { text: "Ctrl K"; color: Theme.color-accent; font-size: 10px;
+                        // Keyboard hint — Theme.font-xs token (was 10px literal).
+                        Text { text: "Ctrl K"; color: Theme.color-accent; font-size: Theme.font-xs;
                             font-family: Theme.font-family-mono; font-weight: 700; vertical-alignment: center; }
                         Text { text: "Palette"; color: Theme.color-accent; font-size: Theme.font-sm;
                             font-family: Theme.font-family; vertical-alignment: center; }
@@ -509,20 +546,29 @@ export component AppWindow inherits Window {
     }
 
     // ── Command palette overlay — LAST child so it floats above the shell ──────
-    // The Modal provides the scrim + click-out dismiss. The FocusScope inside the
-    // palette catches Esc. Ctrl-K is handled at the window level in Rust (toggle).
+    // The Modal provides the scrim + click-out dismiss. Dismiss also resets selection.
+    // Ctrl-K / Ctrl-Shift-K is intercepted in TerminalSurface.fs.key-pressed (above);
+    // the `toggle-palette` callback on TerminalSurface flips `palette-open` here.
+    // Typing while the palette is open is routed through Rust's on_key_input, which
+    // updates palette-query and palette-selected without the LineEdit needing focus.
     palette-modal := Modal {
         open: root.palette-open;
-        dismissed => { root.palette-open = false; }
+        dismissed => {
+            root.palette-open = false;
+            root.palette-selected = 0;
+        }
 
         CommandPalette {
             query <=> root.palette-query;
             actions: root.palette-actions;
+            // Keyboard selection index driven by Rust on Up/Down keys.
+            selected-index <=> root.palette-selected;
             edited(q) => {
                 root.palette-edited(q);
             }
             activated(idx) => {
                 root.palette-open = false;
+                root.palette-selected = 0;
                 root.palette-activated(idx);
             }
         }

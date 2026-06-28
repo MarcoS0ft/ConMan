@@ -92,12 +92,29 @@ export global Theme {
   out property <length> radius-pill: 100px;
 
   // ── Font sizes ─────────────────────────────────────────────────────────────
+  out property <length> font-xxs:  9px;    // badge / chip text (×N split, protocol chip)
+  out property <length> font-xs:   10px;   // hints, group-header labels, shortcut badges
   out property <length> font-sm:   11px;   // captions, group headers (often +letter-spacing)
   out property <length> font-base: 13px;   // body / row text
   out property <length> font-lg:   15px;   // dialog titles, panel headers
   out property <length> font-xl:   19px;   // launchpad greeting
   out property <length> font-2xl:  25px;
   out property <length> font-mono: 12.5px; // terminal, fingerprints, host strings
+
+  // ── Icon / glyph sizes (Fluent codepoints rendered as Text) ──────────────
+  out property <length> icon-xs:    10px;  // chevrons and small inline glyphs
+  out property <length> icon-sm:    12px;  // step-state glyphs in session overlays
+  out property <length> icon-action:14px;  // command-palette action item glyph
+  out property <length> icon-md:    16px;  // standard chrome icon (IconButton glyph default)
+  out property <length> icon-bar:   17px;  // activity-bar panel icons
+  out property <length> icon-alert: 18px;  // alert / warning banner icon
+  out property <length> icon-xl:    22px;  // large overlay / empty-state icons
+
+  // ── Accent preset swatches (single source of truth for the Settings panel) ─
+  // GUI_DESIGN: "accent follows the OS accent with a fallback". These are the
+  // curated preset options shown in the Settings › Appearance accent picker.
+  // cm-platform can inject the real OS accent via AppWindow.accent <=> Theme.accent.
+  out property <[color]> accent-presets: [#3b82f6, #2dd4bf, #3fb950, #a78bfa];
 
   // Segoe UI = Windows system font (our primary platform); falls back elsewhere.
   out property <string> font-family:       "Segoe UI";

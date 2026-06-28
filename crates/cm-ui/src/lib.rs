@@ -23,9 +23,11 @@ pub mod terminal_renderer;
 mod generated_ui {
     slint::include_modules!();
 }
-// Re-export the Slint-generated types used by the controller and potentially by
-// cm-platform (for Theme injection) or tests.
-// Note: Theme is a Slint `global` — Rust callers access it via `Theme::get(&window)`.
+// Re-export the Slint-generated types used by the controller and by cm-platform or tests.
+// Note: `Theme` is an internal Slint global and is NOT re-exported from this crate.
+// `cm-platform` drives appearance via the alias properties on `AppWindow` (see app.slint):
+//   ui.set_dark_mode(bool)    // force or restore OS-following dark/light scheme
+//   ui.set_accent(Color)      // inject OS accent (e.g. from DwmGetColorizationColor)
 pub use generated_ui::{AppWindow, ConnRow, PaletteAction, TabItem};
 
 pub use controller::run;

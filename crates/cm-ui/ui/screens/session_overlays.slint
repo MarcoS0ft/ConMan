@@ -57,7 +57,8 @@ export component ConnectingOverlay inherits Rectangle {
             Text {
                 text: i < root.step ? "\u{E73E}" : (i == root.step ? "\u{E712}" : "\u{E73C}");  // done / active / pending
                 font-family: Theme.font-family-icons;
-                font-size: 12px;
+                // Step-state glyph — Theme.icon-sm token (was 12px literal).
+                font-size: Theme.icon-sm;
                 color: i < root.step ? Theme.color-connected
                      : i == root.step ? Theme.color-accent : Theme.color-text-disabled;
                 vertical-alignment: center;
@@ -90,7 +91,9 @@ export component ErrorOverlay inherits Rectangle {
                 width: 46px; height: 46px;
                 border-radius: Theme.radius-md;
                 background: Theme.color-error.with-alpha(0.13);
-                Text { text: "\u{E7BA}"; font-family: Theme.font-family-icons; font-size: 22px;
+                // Error icon — Theme.icon-xl token (was 22px literal).
+                Text { text: "\u{E7BA}"; font-family: Theme.font-family-icons;
+                    font-size: Theme.icon-xl;
                     color: Theme.color-error; horizontal-alignment: center; vertical-alignment: center;
                     width: parent.width; height: parent.height; }
             }

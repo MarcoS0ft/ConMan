@@ -46,7 +46,9 @@ export component Launchpad inherits Rectangle {
             HorizontalLayout {
                 padding-left: Theme.space-3; padding-right: Theme.space-3;
                 spacing: Theme.space-2;
-                Text { text: "\u{E721}"; font-family: Theme.font-family-icons; font-size: 15px;
+                // Search glyph — Theme.font-lg is 15px, matching the icon size here.
+                Text { text: "\u{E721}"; font-family: Theme.font-family-icons;
+                    font-size: Theme.font-lg;
                     color: Theme.color-text-secondary; vertical-alignment: center; }
                 LineEdit { placeholder-text: "Search a host, or type  ssh user@host  to connect…";
                     text <=> root.query; font-size: Theme.font-base;
@@ -54,7 +56,8 @@ export component Launchpad inherits Rectangle {
             }
         }
 
-        Text { text: "RECENT"; color: Theme.color-text-disabled; font-size: 10px;
+        // Group header — Theme.font-xs token (was 10px literal).
+        Text { text: "RECENT"; color: Theme.color-text-disabled; font-size: Theme.font-xs;
             font-family: Theme.font-family; font-weight: 700; letter-spacing: 0.6px; }
 
         // Recents grid (2 columns).
@@ -71,13 +74,17 @@ export component Launchpad inherits Rectangle {
                 VerticalLayout { alignment: center; horizontal-stretch: 1;
                     Text { text: item.name; color: Theme.color-text; font-size: Theme.font-base;
                         font-family: Theme.font-family; font-weight: 600; }
-                    Text { text: item.meta; color: Theme.color-text-secondary; font-size: 10px;
+                    // Item meta (time ago, etc.) — Theme.font-xs token (was 10px literal).
+                    Text { text: item.meta; color: Theme.color-text-secondary;
+                        font-size: Theme.font-xs;
                         font-family: Theme.font-family-mono; }
                 }
                 VerticalLayout { alignment: center;
                     Rectangle { height: 16px; border-radius: 3px; background: Theme.color-hover;
                         HorizontalLayout { padding-left: 5px; padding-right: 5px;
-                            Text { text: item.kind; color: Theme.color-text-secondary; font-size: 9px;
+                            // Protocol chip — Theme.font-xxs token (was 9px literal).
+                            Text { text: item.kind; color: Theme.color-text-secondary;
+                                font-size: Theme.font-xxs;
                                 font-family: Theme.font-family-mono; font-weight: 600; vertical-alignment: center; } } }
                 }
             }

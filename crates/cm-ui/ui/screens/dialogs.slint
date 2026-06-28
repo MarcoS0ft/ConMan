@@ -149,7 +149,9 @@ export component HostKeyDialog inherits Rectangle {
                 padding: Theme.space-3;
                 padding-left: Theme.space-6;
                 spacing: Theme.space-3;
-                Text { text: "\u{E7BA}"; font-family: Theme.font-family-icons; font-size: 18px;
+                // Alert/warning banner icon — Theme.icon-alert token (was 18px literal).
+                Text { text: "\u{E7BA}"; font-family: Theme.font-family-icons;
+                    font-size: Theme.icon-alert;
                     color: Theme.color-error; vertical-alignment: center; }   // Warning
                 Text {
                     text: "HOST KEY CHANGED — possible attack";
@@ -191,12 +193,14 @@ export component HostKeyDialog inherits Rectangle {
                 VerticalLayout {
                     padding: Theme.space-3;
                     spacing: Theme.space-2;
+                    // Fingerprint label — Theme.font-xs token (was 10px literal).
                     if mismatch : Text { text: "STORED · ConMan known-hosts"; color: Theme.color-text-secondary;
-                        font-size: 10px; font-family: Theme.font-family; font-weight: 600; }
+                        font-size: Theme.font-xs; font-family: Theme.font-family; font-weight: 600; }
                     if mismatch : Text { text: stored-fingerprint; color: Theme.color-connected;
                         font-size: Theme.font-mono; font-family: Theme.font-family-mono; }
+                    // "PRESENTED NOW" label — Theme.font-xs token (was 10px literal).
                     Text { text: mismatch ? "PRESENTED NOW" : key-type; color: Theme.color-text-secondary;
-                        font-size: mismatch ? 10px : Theme.font-mono;
+                        font-size: mismatch ? Theme.font-xs : Theme.font-mono;
                         font-family: mismatch ? Theme.font-family : Theme.font-family-mono;
                         font-weight: mismatch ? 600 : 400; }
                     Text { text: fingerprint;

@@ -29,11 +29,11 @@ export component SettingsPanel inherits Rectangle {
     // 0 dark · 1 light · 2 system. 1 density-cosy toggle reserved for P5.
     in-out property <int> theme-mode: 2;
     in-out property <int> density: 0;   // 0 compact · 1 cosy
-    // 4–5 curated accent options + the OS accent (last). Wire select to Theme.set_accent.
-    in property <[color]> accent-options: [#3b82f6, #2dd4bf, #3fb950, #a78bfa];
+    // Accent-index tracks the selected preset swatch (0-based into Theme.accent-presets).
+    // Accent colors are defined in Theme.accent-presets — NOT hardcoded here.
     in-out property <int> accent-index: 0;
     callback theme-changed(int);
-    callback accent-changed(int);
+    callback accent-changed(int);   // idx into Theme.accent-presets
 
     background: Theme.color-base;
 
@@ -67,7 +67,8 @@ export component SettingsPanel inherits Rectangle {
                 HorizontalLayout {
                     spacing: Theme.space-3;
                     alignment: end;
-                    for c[idx] in accent-options : Rectangle {
+                    // Preset colors come from Theme.accent-presets (zero hardcoded hex here).
+                    for c[idx] in Theme.accent-presets : Rectangle {
                         width: 26px; height: 26px; border-radius: 13px;
                         background: c;
                         border-width: idx == accent-index ? 2px : 0px;
@@ -75,7 +76,13 @@ export component SettingsPanel inherits Rectangle {
                         // Selected ring.
                         Rectangle { width: 100%; height: 100%; border-radius: 13px;
                             border-width: idx == accent-index ? 2px : 0px; border-color: c; }
-                        TouchArea { clicked => { root.accent-index = idx; root.accent-changed(idx); } }
+                        TouchArea { clicked => {
+                            root.accent-index = idx;
+                            // Write directly to the Theme global so the accent updates
+                            // everywhere immediately (GUI_DESIGN §6 — zero hardcoded colors).
+                            Theme.accent = Theme.accent-presets[idx];
+                            root.accent-changed(idx);
+                        } }
                     }
                 }
             }

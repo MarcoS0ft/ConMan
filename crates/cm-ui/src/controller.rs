@@ -211,10 +211,31 @@ pub fn run() -> Result<(), slint::PlatformError> {
             }
         });
     }
-    // keyboard
+    // keyboard — when the command palette is open, route keys to palette navigation
+    // rather than the terminal. This gives fully keyboard-operable palette without
+    // requiring the user to click the search field (GUI_DESIGN §5 keyboard-first).
     {
         let state = state.clone();
+        let pal_model_kb = palette_model.clone();
+        let tab_model_kb = tab_model.clone();
+        let weak_kb = ui.as_weak();
         ui.on_key_input(move |text, special, mods| {
+            let Some(ui) = weak_kb.upgrade() else {
+                return;
+            };
+            if ui.get_palette_open() {
+                handle_palette_key(
+                    &ui,
+                    &state,
+                    &tab_model_kb,
+                    &pal_model_kb,
+                    text,
+                    special,
+                    mods,
+                );
+                return;
+            }
+            // Normal terminal key forwarding.
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active) {
                 for ev in input::map_key(text.as_str(), special, mods) {
@@ -299,11 +320,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
             }
         }
     });
-    // open-palette: reveal the command palette overlay.
+    // open-palette: reveal the command palette overlay; reset selection to first item.
     ui.on_open_palette({
         let weak = ui.as_weak();
         move || {
             if let Some(ui) = weak.upgrade() {
+                ui.set_palette_selected(0);
                 ui.set_palette_open(true);
             }
         }
@@ -337,21 +359,16 @@ pub fn run() -> Result<(), slint::PlatformError> {
             }
         }
     });
-    // palette-edited: Rust filters + re-populates the actions model.
+    // palette-edited: Rust filters + re-populates the actions model, then resets
+    // the keyboard selection to the first item.
     ui.on_palette_edited({
         let weak = ui.as_weak();
         let pal_model = palette_model.clone();
         move |query| {
-            let filtered = filter_palette_actions(&query);
-            // Rebuild the model in-place.
-            while pal_model.row_count() > 0 {
-                pal_model.remove(0);
-            }
-            for a in filtered {
-                pal_model.push(a);
-            }
+            rebuild_palette_model(&pal_model, &query);
             if let Some(ui) = weak.upgrade() {
                 ui.set_palette_query(query);
+                ui.set_palette_selected(0);
             }
         }
     });
@@ -367,10 +384,14 @@ pub fn run() -> Result<(), slint::PlatformError> {
             }
         });
     }
-    // theme-changed: Settings panel calls this after writing Theme.dark-mode itself.
-    // We just persist the choice here (P5 adds persistence; for now a no-op is fine).
+    // theme-changed: Settings panel writes Theme.dark-mode via the Slint callback chain;
+    // we just persist the choice here (P5 adds persistence).
     ui.on_theme_changed(|_idx| {
         // P5: persist the preference.
+    });
+    // accent-changed: Settings panel writes Theme.accent directly; we track for persistence.
+    ui.on_accent_changed(|_idx| {
+        // P5: persist the accent preference.
     });
 
     // Redraw timer: coalesce + render the active tab, reap exited tabs.
@@ -634,6 +655,91 @@ fn render_active(st: &mut State, ui: &AppWindow) {
 
 // ── P2.8 helpers ─────────────────────────────────────────────────────────────
 
+/// Rebuild the palette model in-place from `query` (clears, filters, re-pushes).
+/// Extracted so both `on_palette_edited` and `handle_palette_key` can call it.
+fn rebuild_palette_model(pal_model: &Rc<VecModel<PaletteAction>>, query: &SharedString) {
+    let filtered = filter_palette_actions(query.as_str());
+    while pal_model.row_count() > 0 {
+        pal_model.remove(0);
+    }
+    for a in filtered {
+        pal_model.push(a);
+    }
+}
+
+/// Route a key event to the command palette when it is open.
+///
+/// Key routing (GUI_DESIGN §5 keyboard-first):
+/// - `special=4` Escape  → close palette, reset selection.
+/// - `special=5` Up      → move selection one row up (clamped at 0).
+/// - `special=6` Down    → move selection one row down (clamped at last row).
+/// - `special=1` Enter   → dispatch selected action, close palette.
+/// - `special=3` Backspace (no Ctrl) → remove last UTF-8 char from query, re-filter.
+/// - `special=0` (plain char, no Ctrl/Meta) → append char to query, re-filter.
+fn handle_palette_key(
+    ui: &AppWindow,
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    pal_model: &Rc<VecModel<PaletteAction>>,
+    text: SharedString,
+    special: i32,
+    mods: i32,
+) {
+    match special {
+        4 => {
+            // Escape: close and reset.
+            ui.set_palette_open(false);
+            ui.set_palette_selected(0);
+        }
+        5 => {
+            // Up: move selection back, clamp at 0.
+            let cur = ui.get_palette_selected();
+            if cur > 0 {
+                ui.set_palette_selected(cur - 1);
+            }
+        }
+        6 => {
+            // Down: move selection forward, clamp at last row.
+            let cur = ui.get_palette_selected();
+            let max = (pal_model.row_count() as i32).saturating_sub(1);
+            if cur < max {
+                ui.set_palette_selected(cur + 1);
+            }
+        }
+        1 => {
+            // Enter: dispatch the currently selected action.
+            let idx = ui.get_palette_selected() as usize;
+            ui.set_palette_open(false);
+            ui.set_palette_selected(0);
+            dispatch_palette_action(state, tab_model, pal_model, ui, idx);
+        }
+        3 if mods & 0b1001 == 0 => {
+            // Backspace (no Ctrl, no Meta): remove last UTF-8 char from query.
+            let q = ui.get_palette_query();
+            let new_q: String = {
+                let mut s = q.as_str().to_owned();
+                s.pop();
+                s
+            };
+            let new_q = SharedString::from(new_q.as_str());
+            rebuild_palette_model(pal_model, &new_q);
+            ui.set_palette_query(new_q);
+            ui.set_palette_selected(0);
+        }
+        0 if mods & 0b1001 == 0 && !text.is_empty() => {
+            // Plain character (no Ctrl, no Meta): append to query and re-filter.
+            let q = ui.get_palette_query();
+            let new_q = SharedString::from(format!("{}{}", q.as_str(), text.as_str()).as_str());
+            rebuild_palette_model(pal_model, &new_q);
+            ui.set_palette_query(new_q);
+            ui.set_palette_selected(0);
+        }
+        _ => {
+            // Other special keys (Tab, arrows, etc.) — swallow silently while palette open.
+        }
+    }
+}
+
 /// Sample connection tree for demo / smoke-testing the shell.
 /// P1 replaces this with real data from `cm-storage`.
 fn sample_connections() -> Vec<ConnRow> {
@@ -880,5 +986,54 @@ mod tests {
                 assert!(!c.kind.is_empty(), "leaf '{}' has no kind", c.label);
             }
         }
+    }
+
+    // ── P2.8 keyboard-dispatch tests ─────────────────────────────────────────
+
+    /// `rebuild_palette_model` with an empty query fills the model with all actions.
+    #[test]
+    fn rebuild_palette_model_empty_query_fills_all() {
+        let model: Rc<VecModel<PaletteAction>> = Rc::new(VecModel::default());
+        rebuild_palette_model(&model, &SharedString::from(""));
+        let all = initial_palette_actions();
+        assert_eq!(model.row_count(), all.len());
+    }
+
+    /// `rebuild_palette_model` with a matching query narrows correctly.
+    #[test]
+    fn rebuild_palette_model_narrows_by_query() {
+        let model: Rc<VecModel<PaletteAction>> = Rc::new(VecModel::default());
+        // Seed with all actions first.
+        rebuild_palette_model(&model, &SharedString::from(""));
+        let total = model.row_count();
+        // Now narrow to "sidebar".
+        rebuild_palette_model(&model, &SharedString::from("sidebar"));
+        assert_eq!(model.row_count(), 1);
+        assert!(model.row_count() < total);
+    }
+
+    /// `rebuild_palette_model` replaces the model content on each call (no accumulation).
+    #[test]
+    fn rebuild_palette_model_replaces_not_appends() {
+        let model: Rc<VecModel<PaletteAction>> = Rc::new(VecModel::default());
+        rebuild_palette_model(&model, &SharedString::from(""));
+        let first_count = model.row_count();
+        // Call again with same query: count must be the same, not doubled.
+        rebuild_palette_model(&model, &SharedString::from(""));
+        assert_eq!(model.row_count(), first_count);
+    }
+
+    /// Mods bitmask: control=1, meta=8; palette key handler ignores chars with those
+    /// modifiers set (only plain chars without Ctrl/Meta should update the query).
+    #[test]
+    fn handle_palette_key_mod_bitmask_plain_is_zero() {
+        // Verify the bitmask used in handle_palette_key matches the modifier encoding
+        // (1=Ctrl, 2=Alt, 4=Shift, 8=Meta); plain char has mods=0 so 0 & 0b1001 == 0.
+        let plain: i32 = 0;
+        let ctrl: i32 = 1;
+        let meta: i32 = 8;
+        assert_eq!(plain & 0b1001, 0, "plain has no ctrl/meta bits");
+        assert_ne!(ctrl & 0b1001, 0, "ctrl bit should be set");
+        assert_ne!(meta & 0b1001, 0, "meta bit should be set");
     }
 }

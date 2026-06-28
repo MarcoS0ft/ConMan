@@ -133,7 +133,8 @@ export component ActivityBarButton {
       Text {
         text: root.glyph;
         font-family: Theme.font-family-icons;
-        font-size: 17px;
+        // Activity-bar icon — Theme.icon-bar token (was 17px literal).
+        font-size: Theme.icon-bar;
         color: root.active ? Theme.color-accent : Theme.color-text-secondary;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -345,7 +346,8 @@ export component EmptyState {
         Text {
           text: root.glyph;
           font-family: Theme.font-family-icons;
-          font-size: 22px;
+          // Empty-state icon — Theme.icon-xl token (was 22px literal).
+          font-size: Theme.icon-xl;
           color: Theme.color-text-disabled;
           horizontal-alignment: center;
           vertical-alignment: center;
