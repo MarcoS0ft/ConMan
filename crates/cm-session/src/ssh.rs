@@ -63,7 +63,10 @@ pub enum SshError {
 
 /// MVP inline authentication input (until `cm-secrets`/profile storage lands in P1).
 /// Secrets are [`Secret`] (zeroizing) and never logged.
-#[derive(Debug)]
+///
+/// `Clone` is derived so the controller can store a copy for reconnect.
+/// `Secret::clone` produces a fresh zeroized-on-drop copy — no hygiene regression.
+#[derive(Debug, Clone)]
 pub enum SshAuthInput {
     /// Password authentication.
     Password(Secret),
