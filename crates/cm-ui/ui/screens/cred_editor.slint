@@ -1,0 +1,142 @@
+// P1.4 — Credential editor modal.
+//
+// Allows creating and editing a Credential (name, kind, username) and storing
+// the secret via the OS keychain (P1.3).  The `secret` / `passphrase` fields
+// are TRANSIENT — Rust MUST clear them immediately after reading them in the
+// `cred-save` callback (see CONVENTIONS secrets hygiene).
+//
+// Mounted inside a Modal in app.slint.
+
+import { Theme } from "../theme.slint";
+import {
+    FormField, PrimaryButton, SecondaryButton, SegmentedControl
+} from "../components.slint";
+import { ComboBox } from "std-widgets.slint";
+
+// ── CredFormData ───────────────────────────────────────────────────────────
+// Data bag for the credential editor.
+//
+// `kind`  0 = Password · 1 = SSH Key · 2 = SSH Key + Passphrase
+// `folder-id`  0 = root (no folder)
+// `secret`     TRANSIENT — cleared by Rust after cred-save fires
+// `passphrase` TRANSIENT — cleared by Rust after cred-save fires
+export struct CredFormData {
+    id: int,
+    name: string,
+    kind: int,
+    username: string,
+    folder-id: int,
+    secret: string,
+    passphrase: string,
+}
+
+// ── CredEditor ─────────────────────────────────────────────────────────────
+export component CredEditor {
+    in-out property <CredFormData> form;
+    // Flat folder name list for the folder combo box.
+    // Index 0 is "Root (no folder)"; subsequent entries are folder paths.
+    in property <[string]> folder-name-list;
+    callback save();
+    callback cancel();
+
+    VerticalLayout {
+        padding: Theme.space-6;
+        spacing: Theme.space-5;
+
+        // ── Title ─────────────────────────────────────────────────────
+        Text {
+            text: root.form.id == 0 ? "New Credential" : "Edit Credential";
+            color: Theme.color-text;
+            font-size: Theme.font-lg;
+            font-family: Theme.font-family;
+            font-weight: 700;
+        }
+
+        // ── Name ──────────────────────────────────────────────────────
+        FormField {
+            label: "Name";
+            placeholder: "e.g. ops@prod, deploy key";
+            text <=> root.form.name;
+        }
+
+        // ── Kind ──────────────────────────────────────────────────────
+        VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: "Type";
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-sm;
+                font-family: Theme.font-family;
+                font-weight: 600;
+            }
+            SegmentedControl {
+                options: ["Password", "SSH Key", "SSH Key+PP"];
+                selected <=> root.form.kind;
+            }
+        }
+
+        // ── Username ──────────────────────────────────────────────────
+        FormField {
+            label: "Username";
+            placeholder: "login username (optional)";
+            text <=> root.form.username;
+        }
+
+        // ── Secret (Password kind: password field) ───────────────────
+        if root.form.kind == 0 : FormField {
+            label: "Password";
+            placeholder: "••••••••";
+            password: true;
+            text <=> root.form.secret;
+        }
+
+        // ── SSH Key path ──────────────────────────────────────────────
+        if root.form.kind == 1 || root.form.kind == 2 : FormField {
+            label: "Private Key Path";
+            placeholder: "~/.ssh/id_ed25519";
+            text <=> root.form.secret;
+        }
+
+        // ── Passphrase (SSH Key+PP kind) ─────────────────────────────
+        if root.form.kind == 2 : FormField {
+            label: "Passphrase";
+            placeholder: "key passphrase (optional)";
+            password: true;
+            text <=> root.form.passphrase;
+        }
+
+        // ── Folder ───────────────────────────────────────────────────
+        if root.folder-name-list.length > 1 : VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: "Folder";
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-sm;
+                font-family: Theme.font-family;
+                font-weight: 600;
+            }
+            ComboBox {
+                model: root.folder-name-list;
+                // form.folder-id is the actual DB id; the combo index is
+                // looked up by Rust before opening the editor.
+                current-index: 0;
+            }
+        }
+
+        // ── Actions ───────────────────────────────────────────────────
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            alignment: end;
+            padding-top: Theme.space-2;
+            SecondaryButton {
+                text: "Cancel";
+                clicked => { root.cancel(); }
+            }
+            PrimaryButton {
+                text: "Save";
+                enabled: root.form.name != "";
+                clicked => { root.save(); }
+            }
+        }
+    }
+}

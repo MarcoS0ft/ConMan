@@ -908,6 +908,9 @@ dependencies = [
 name = "conman"
 version = "0.0.0"
 dependencies = [
+ "cm-core",
+ "cm-secrets",
+ "cm-storage",
  "cm-ui",
  "libghostty-vt-sys",
  "slint",
