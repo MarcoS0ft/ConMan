@@ -4,31 +4,25 @@
 //! Two threads back each session:
 //! - **PTY reader** — blocking-reads the PTY master and forwards `Vec<u8>`
 //!   chunks to the owner thread; exits on EOF (child exit) or error.
-//! - **engine owner** — owns the `!Send` [`LibghosttyEngine`] for its whole
-//!   life, plus the PTY writer and master handle. It drains a single control
-//!   channel: feeds PTY bytes into the engine and publishes a fresh
-//!   [`GridSnapshot`]; encodes key/mouse input and writes it to the PTY; writes
-//!   pastes; resizes both the PTY and the engine; and stops on `Shutdown`.
+//! - **engine owner** — the shared [`run_engine_owner`] loop owning the `!Send`
+//!   [`LibghosttyEngine`]; here the [`Transport`] is the PTY writer + master.
 //!
 //! Only **bytes** and the owned **`GridSnapshot`** cross thread boundaries —
 //! the engine itself never moves. Local PTY I/O is blocking, so plain OS
 //! threads are used (tokio is reserved for the network transports in P3/P4).
-//!
-//! This module is gated on the `engine-libghostty` feature: the session is
-//! concrete over [`LibghosttyEngine`]. A cross-protocol `SessionProvider`
-//! trait is intentionally **not** introduced here — it is generalized in P3
-//! once SSH provides a second data point.
 
 use std::io::{Read, Write};
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalEngine, TerminalSize};
+use cm_core::LocalSettings;
+use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalSize};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-use crate::libghostty::{EngineError, LibghosttyEngine};
-use cm_core::LocalSettings;
+use crate::engine_owner::{Msg, Transport, run_engine_owner, timing};
+use crate::libghostty::EngineError;
+use crate::session::{ExitStatus, SessionStatus, TerminalSession};
 
 /// Read buffer size for the PTY reader thread.
 const READ_BUF_LEN: usize = 8192;
@@ -53,22 +47,25 @@ pub enum SessionError {
     EngineStartup,
 }
 
-/// The exit status of the session's shell process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExitStatus {
-    pub success: bool,
-    pub code: u32,
+/// PTY-backed [`Transport`]: encoded input/responses go to the master writer; a
+/// resize calls the PTY `set_size`.
+struct PtyTransport {
+    writer: Box<dyn Write + Send>,
+    master: Box<dyn MasterPty + Send>,
 }
 
-/// Control messages sent to the engine-owner thread. Only `Vec<u8>` byte
-/// payloads and small value types cross the channel — never the engine.
-enum Msg {
-    PtyBytes(Vec<u8>),
-    Key(KeyEvent),
-    Mouse(MouseEvent),
-    Paste(Vec<u8>),
-    Resize(TerminalSize),
-    Shutdown,
+impl Transport for PtyTransport {
+    fn write(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let _ = self.writer.write_all(bytes);
+        let _ = self.writer.flush();
+    }
+
+    fn resize(&mut self, size: TerminalSize) {
+        let _ = self.master.resize(to_pty_size(size));
+    }
 }
 
 /// A live local shell session: a spawned PTY child plus its byte-pump threads.
@@ -79,8 +76,8 @@ enum Msg {
 pub struct LocalTerminalSession {
     control_tx: Sender<Msg>,
     snapshot_rx: Receiver<GridSnapshot>,
-    owner_handle: Option<JoinHandle<()>>,
-    reader_handle: Option<JoinHandle<()>>,
+    owner_handle: Mutex<Option<JoinHandle<()>>>,
+    reader_handle: Mutex<Option<JoinHandle<()>>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
 }
 
@@ -113,13 +110,16 @@ impl LocalTerminalSession {
             .master
             .take_writer()
             .map_err(|e| SessionError::OpenPty(e.to_string()))?;
-        let master = pair.master;
+        let transport = PtyTransport {
+            writer,
+            master: pair.master,
+        };
 
         let (control_tx, control_rx) = mpsc::channel::<Msg>();
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<GridSnapshot>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), EngineError>>();
 
-        // B7 startup-latency instrumentation (gated on CONMAN_TIMING; see `timing`).
+        // B7 startup-latency instrumentation (gated on CONMAN_TIMING).
         let start = std::time::Instant::now();
 
         let reader_tx = control_tx.clone();
@@ -131,15 +131,7 @@ impl LocalTerminalSession {
         let owner_handle = thread::Builder::new()
             .name("vt-engine-owner".to_owned())
             .spawn(move || {
-                owner_loop(
-                    size,
-                    master,
-                    writer,
-                    &control_rx,
-                    &snapshot_tx,
-                    &ready_tx,
-                    start,
-                );
+                run_engine_owner(size, transport, &control_rx, &snapshot_tx, &ready_tx, start);
             })
             .map_err(SessionError::Thread)?;
 
@@ -148,12 +140,11 @@ impl LocalTerminalSession {
             Ok(Ok(())) => Ok(Self {
                 control_tx,
                 snapshot_rx,
-                owner_handle: Some(owner_handle),
-                reader_handle: Some(reader_handle),
+                owner_handle: Mutex::new(Some(owner_handle)),
+                reader_handle: Mutex::new(Some(reader_handle)),
                 child: Mutex::new(child),
             }),
             Ok(Err(engine_err)) => {
-                // Engine init failed: tear down the child and both threads.
                 let _ = child.kill();
                 let _ = reader_handle.join();
                 let _ = owner_handle.join();
@@ -170,35 +161,6 @@ impl LocalTerminalSession {
         }
     }
 
-    /// The stream of viewport snapshots produced as PTY output is processed.
-    /// Drain it with `recv`/`recv_timeout`/`try_recv`.
-    #[must_use]
-    pub fn snapshots(&self) -> &Receiver<GridSnapshot> {
-        &self.snapshot_rx
-    }
-
-    /// Encode a key event and write it to the PTY. Dropped if the session has
-    /// shut down.
-    pub fn send_key(&self, ev: KeyEvent) {
-        let _ = self.control_tx.send(Msg::Key(ev));
-    }
-
-    /// Encode a mouse event and write it to the PTY (subject to the terminal's
-    /// active mouse mode). Dropped if the session has shut down.
-    pub fn send_mouse(&self, ev: MouseEvent) {
-        let _ = self.control_tx.send(Msg::Mouse(ev));
-    }
-
-    /// Write raw pasted bytes to the PTY.
-    pub fn paste(&self, bytes: Vec<u8>) {
-        let _ = self.control_tx.send(Msg::Paste(bytes));
-    }
-
-    /// Resize the PTY and the engine grid to `size`.
-    pub fn resize(&self, size: TerminalSize) {
-        let _ = self.control_tx.send(Msg::Resize(size));
-    }
-
     /// The shell's exit status, or `None` while it is still running.
     #[must_use]
     pub fn exit_status(&self) -> Option<ExitStatus> {
@@ -211,18 +173,48 @@ impl LocalTerminalSession {
             _ => None,
         }
     }
+}
+
+impl TerminalSession for LocalTerminalSession {
+    fn snapshots(&self) -> &Receiver<GridSnapshot> {
+        &self.snapshot_rx
+    }
+
+    fn send_key(&self, ev: KeyEvent) {
+        let _ = self.control_tx.send(Msg::Key(ev));
+    }
+
+    fn send_mouse(&self, ev: MouseEvent) {
+        let _ = self.control_tx.send(Msg::Mouse(ev));
+    }
+
+    fn paste(&self, bytes: Vec<u8>) {
+        let _ = self.control_tx.send(Msg::Paste(bytes));
+    }
+
+    fn resize(&self, size: TerminalSize) {
+        let _ = self.control_tx.send(Msg::Resize(size));
+    }
+
+    fn status(&self) -> SessionStatus {
+        match self.exit_status() {
+            Some(status) => SessionStatus::Exited(status),
+            None => SessionStatus::Connected,
+        }
+    }
 
     /// Signal shutdown, kill the child if still running, and join both threads.
-    pub fn shutdown(mut self) {
+    /// Idempotent: a second call is a no-op (handles already taken).
+    fn shutdown(&self) {
         // Killing the child closes the PTY, unblocking the reader's read().
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
         }
         let _ = self.control_tx.send(Msg::Shutdown);
-        if let Some(h) = self.owner_handle.take() {
+        if let Some(h) = self.owner_handle.lock().ok().and_then(|mut g| g.take()) {
             let _ = h.join();
         }
-        if let Some(h) = self.reader_handle.take() {
+        if let Some(h) = self.reader_handle.lock().ok().and_then(|mut g| g.take()) {
             let _ = h.join();
         }
         if let Ok(mut child) = self.child.lock() {
@@ -236,8 +228,13 @@ impl Drop for LocalTerminalSession {
         // Best-effort cleanup for a session dropped without `shutdown()`: kill
         // the child and signal the owner so the threads terminate. Threads are
         // detached (not joined) to avoid blocking in `drop`.
-        if self.owner_handle.is_none() && self.reader_handle.is_none() {
-            return; // already shut down cleanly
+        let already_done = self
+            .owner_handle
+            .lock()
+            .map(|g| g.is_none())
+            .unwrap_or(true);
+        if already_done {
+            return;
         }
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
@@ -270,16 +267,6 @@ fn build_command(cfg: &LocalSettings) -> CommandBuilder {
     cmd
 }
 
-/// Emit a B7 startup-timing marker on stderr when `CONMAN_TIMING` is set (no cost otherwise).
-fn timing(start: std::time::Instant, stage: &str) {
-    if std::env::var_os("CONMAN_TIMING").is_some() {
-        eprintln!(
-            "[timing] {:>8.1} ms  {stage}",
-            start.elapsed().as_secs_f64() * 1000.0
-        );
-    }
-}
-
 /// PTY reader thread: forward output chunks until EOF or error.
 fn reader_loop(
     mut reader: Box<dyn Read + Send>,
@@ -304,7 +291,7 @@ fn reader_loop(
                         .collect();
                     timing(start, &format!("reader chunk ({n} bytes): {hex}"));
                 }
-                if control_tx.send(Msg::PtyBytes(buf[..n].to_vec())).is_err() {
+                if control_tx.send(Msg::Bytes(buf[..n].to_vec())).is_err() {
                     break; // owner gone
                 }
             }
@@ -312,74 +299,6 @@ fn reader_loop(
             Err(_) => break, // PTY closed or read error
         }
     }
-}
-
-/// Engine-owner thread: owns the `!Send` engine, the PTY writer, and the master
-/// handle; processes control messages and publishes snapshots.
-fn owner_loop(
-    size: TerminalSize,
-    master: Box<dyn MasterPty + Send>,
-    mut writer: Box<dyn Write + Send>,
-    control_rx: &Receiver<Msg>,
-    snapshot_tx: &Sender<GridSnapshot>,
-    ready_tx: &Sender<Result<(), EngineError>>,
-    start: std::time::Instant,
-) {
-    let mut engine = match LibghosttyEngine::new(size) {
-        Ok(engine) => {
-            let _ = ready_tx.send(Ok(()));
-            engine
-        }
-        Err(e) => {
-            let _ = ready_tx.send(Err(e));
-            return;
-        }
-    };
-    timing(start, "owner: engine ready");
-    let mut logged_feed = false;
-    let mut logged_nonempty = false;
-
-    while let Ok(msg) = control_rx.recv() {
-        match msg {
-            Msg::PtyBytes(bytes) => {
-                if !logged_feed {
-                    timing(start, &format!("owner: first feed ({} bytes)", bytes.len()));
-                    logged_feed = true;
-                }
-                engine.feed(&bytes);
-                // Forward any replies the engine produced to host queries (e.g. the
-                // DSR cursor-position report). ConPTY/conhost blocks ~3 s at startup
-                // waiting for these before emitting the shell prompt (B7).
-                write_all(&mut writer, &engine.take_responses());
-                let snap = engine.snapshot();
-                if !logged_nonempty && snap.cells.iter().any(|c| !c.grapheme.is_empty()) {
-                    timing(start, "owner: first NON-EMPTY snapshot");
-                    logged_nonempty = true;
-                }
-                if snapshot_tx.send(snap).is_err() {
-                    break; // consumer gone
-                }
-            }
-            Msg::Key(ev) => write_all(&mut writer, &engine.encode_key(&ev)),
-            Msg::Mouse(ev) => write_all(&mut writer, &engine.encode_mouse(&ev)),
-            Msg::Paste(bytes) => write_all(&mut writer, &bytes),
-            Msg::Resize(new_size) => {
-                let _ = master.resize(to_pty_size(new_size));
-                engine.resize(new_size);
-                let _ = snapshot_tx.send(engine.snapshot());
-            }
-            Msg::Shutdown => break,
-        }
-    }
-    // engine, writer, and master are dropped here, closing the master end.
-}
-
-fn write_all(writer: &mut Box<dyn Write + Send>, bytes: &[u8]) {
-    if bytes.is_empty() {
-        return;
-    }
-    let _ = writer.write_all(bytes);
-    let _ = writer.flush();
 }
 
 #[cfg(all(test, unix))]
@@ -451,7 +370,6 @@ mod tests {
 
     #[test]
     fn key_enter_round_trips_to_shell() {
-        // Interactive shell reading from the PTY.
         let session = LocalTerminalSession::spawn(&sh(&[]), TerminalSize { rows: 24, cols: 80 })
             .expect("spawn");
         // Type a command whose OUTPUT differs from the echoed input, so a match
@@ -472,7 +390,6 @@ mod tests {
     fn resize_changes_snapshot_dimensions() {
         let session = LocalTerminalSession::spawn(&sh(&[]), TerminalSize { rows: 24, cols: 80 })
             .expect("spawn");
-        // Produce an initial snapshot so the stream is flowing.
         session.paste(b"printf 'READY\\n'\n".to_vec());
         assert!(wait_for_text(&session, "READY", Duration::from_secs(5)));
 
@@ -482,7 +399,6 @@ mod tests {
         };
         session.resize(new_size);
 
-        // The resize publishes a snapshot at the new dimensions.
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut seen = None;
         while Instant::now() < deadline {
@@ -529,7 +445,6 @@ mod tests {
 
     #[test]
     fn shutdown_does_not_hang() {
-        // A shell that never exits on its own; shutdown must kill + join it.
         let session = LocalTerminalSession::spawn(&sh(&[]), TerminalSize { rows: 24, cols: 80 })
             .expect("spawn");
 
@@ -559,13 +474,11 @@ mod resize_storm_tests {
         }
     }
 
-    /// A burst of resizes with no gaps (a "resize storm") must leave the engine snapshot at
-    /// the **last** requested size — confirms the session layer is last-write-wins, so B6's
-    /// stale-size symptom is fixed at the controller (resize debouncing), not here.
+    /// A burst of resizes with no gaps must leave the engine snapshot at the **last**
+    /// requested size — confirms the session layer is last-write-wins.
     #[test]
     fn last_resize_in_a_storm_wins() {
         let s = LocalTerminalSession::spawn(&sh(), TerminalSize { rows: 24, cols: 80 }).unwrap();
-        // Fire a burst with no delay between requests.
         for (rows, cols) in [(10, 40), (40, 120), (12, 50), (30, 100)] {
             s.resize(TerminalSize { rows, cols });
         }
@@ -573,7 +486,6 @@ mod resize_storm_tests {
             rows: 30,
             cols: 100,
         };
-        // Drain snapshots for a moment; the last one must reflect the final requested size.
         let deadline = Instant::now() + Duration::from_secs(3);
         let mut last = None;
         while Instant::now() < deadline {
@@ -591,23 +503,14 @@ mod resize_storm_tests {
     }
 }
 
-/// B7 startup-latency profiling (cross-platform: uses the OS default shell so it runs on
-/// Windows/ConPTY too). Run explicitly with `--ignored --nocapture`; set `CONMAN_TIMING=1`
-/// for the per-stage breakdown. Measures spawn → first non-empty snapshot, isolating the
-/// session/PTY layer from the GUI/render path.
+/// B7 startup-latency profiling (cross-platform; uses the OS default shell). Run with
+/// `--ignored --nocapture` (optionally `CONMAN_TIMING=1`). Measures spawn → first
+/// non-empty snapshot, isolating the session/PTY layer from the GUI/render path.
 #[cfg(test)]
 mod startup_timing {
     use super::*;
     use std::time::{Duration, Instant};
 
-    /// Spawn one session and return `(time spawn() returned, time-to-first-non-empty-snapshot,
-    /// the live session)`. Both durations are measured from `t0` (set at the call site so the
-    /// per-spawn cost is isolated). The session is returned alive so the caller decides when to
-    /// shut it down — keeping prior sessions alive reproduces the "pre-warm still running" case.
-    /// Build the probe shell config. Defaults to the OS shell, but `CONMAN_PROBE_PROG`
-    /// (program) + `CONMAN_PROBE_ARGS` (`;`-separated) override it, so the same timing
-    /// harness can localize the ConPTY lag across programs (e.g. interactive `cmd` vs
-    /// `cmd /c echo` vs a different shell) without code changes.
     fn probe_settings() -> LocalSettings {
         match std::env::var("CONMAN_PROBE_PROG") {
             Ok(prog) if !prog.is_empty() => LocalSettings {
@@ -634,8 +537,6 @@ mod startup_timing {
         let t0 = Instant::now();
         let s = LocalTerminalSession::spawn(&probe_settings(), size).expect("spawn");
         let spawned = t0.elapsed();
-        // Diagnostic poke: write to the PTY immediately after spawn to test whether conhost
-        // gates its first output flush on input/handshake activity (set CONMAN_PROBE_POKE).
         if std::env::var_os("CONMAN_PROBE_POKE").is_some() {
             s.paste(b"\r".to_vec());
         }
@@ -674,13 +575,6 @@ mod startup_timing {
         s.shutdown();
     }
 
-    /// B7 cold-start-vs-per-spawn determination: spawn several sessions back-to-back **in one
-    /// process**, keeping each alive, and report each one's time-to-first-non-empty-snapshot.
-    /// On Windows this localizes the ~3 s ConPTY/conhost lag:
-    /// - if only spawn #1 is slow and #2.. are fast → a **one-time cold start** (pre-warmable:
-    ///   spawn a throwaway session at app launch so the first real tab is instant);
-    /// - if every spawn is slow → a **per-spawn** conhost cost (pre-warming a single throwaway
-    ///   won't help the 2nd+ tab; see the task report for options).
     #[test]
     #[ignore = "B7 cold-start probe; run with --ignored --nocapture (optionally CONMAN_TIMING=1)"]
     fn back_to_back_spawns_cold_start_vs_per_spawn() {

@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use cm_core::LocalSettings;
 use cm_core::terminal::{GridSnapshot, Key, KeyEvent, KeyModifiers, TerminalSize};
-use cm_session::LocalTerminalSession;
+// `TerminalSession` brings the session methods (send_key/resize/snapshots/shutdown)
+// into scope; P3.2 will switch this controller to `Box<dyn TerminalSession>`.
+use cm_session::{LocalTerminalSession, TerminalSession};
 use slint::{ComponentHandle, Image, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::input;

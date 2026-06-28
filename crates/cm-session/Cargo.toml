@@ -11,9 +11,16 @@ publish.workspace = true
 # docs/devel/AI_GUIDANCE.md); on Windows debug builds, also
 # LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseSafe.
 default = ["engine-libghostty"]
-# The libghostty engine + the local PTY session that drives it. portable-pty is
-# tied in here so a zig-free `--no-default-features` build stays minimal.
-engine-libghostty = ["dep:libghostty-vt", "dep:portable-pty"]
+# The libghostty engine + the terminal sessions that drive it (local PTY + SSH).
+# portable-pty/russh/tokio/dirs are tied in here so a zig-free
+# `--no-default-features` build stays minimal.
+engine-libghostty = [
+    "dep:libghostty-vt",
+    "dep:portable-pty",
+    "dep:russh",
+    "dep:tokio",
+    "dep:dirs",
+]
 # Future pure-Rust fallback engine (alacritty_terminal) — not implemented yet.
 # Exists so a zig-free build is possible once the fallback lands.
 engine-alacritty = []
@@ -24,6 +31,23 @@ thiserror = "2"
 # Pinned to the exact versions validated in the P0.2 spike.
 libghostty-vt = { version = "=0.2.0", optional = true }
 portable-pty = { version = "0.9.0", optional = true }
+# SSH transport (P3.1). russh 0.61 re-exports keys/agent/known_hosts via `russh::keys`.
+# Use the `ring` crypto backend (not the default `aws-lc-rs`, which needs NASM + a C
+# build that fails on MSVC); keep `rsa` (RSA keys) and `flate2` (compression).
+russh = { version = "0.61", optional = true, default-features = false, features = [
+    "ring",
+    "rsa",
+    "flate2",
+] }
+tokio = { version = "1", features = [
+    "rt",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "macros",
+], optional = true }
+dirs = { version = "6", optional = true }
 
 [lints]
 workspace = true
