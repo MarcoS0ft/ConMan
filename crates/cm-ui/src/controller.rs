@@ -25,8 +25,9 @@ use cm_core::{
     GroupId, LocalSettings, RdpSettings, Secret, SshAuthMethod, SshSettings,
 };
 use cm_session::{
-    HostKeyDecision, HostKeyInfo, HostKeyVerifier, KnownHosts, LocalTerminalSession, SessionStatus,
-    SshAuthInput, SshTerminalSession, TerminalSession,
+    CertDecision, CertInfo, CertStore, CertVerifier, FrameUpdate, HostKeyDecision, HostKeyInfo,
+    HostKeyVerifier, KnownHosts, LocalTerminalSession, RdpAuthInput, RdpSession, Session,
+    SessionInput, SessionStatus, SshAuthInput, SshTerminalSession, Surface,
 };
 use slint::{ComponentHandle, Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
@@ -62,14 +63,23 @@ struct SshConnectInfo {
 // ---------------------------------------------------------------------------
 
 struct Tab {
-    session: Box<dyn TerminalSession>,
+    session: Box<dyn Session>,
+    // Terminal tabs:
     renderer: TerminalRenderer,
     last: Option<GridSnapshot>,
     cols: u16,
     rows: u16,
+    // RDP tabs (0 / None when terminal):
+    last_frame: Option<Image>,
+    rdp_w: u16,
+    rdp_h: u16,
+    // Common:
     scale: f32,
     num: u32,
+    /// Present for remote sessions (SSH + RDP) — enables error overlay + SSH reconnect.
     connect_info: Option<SshConnectInfo>,
+    /// True for any remote session (SSH or RDP) — drives the error overlay.
+    is_remote: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +167,48 @@ impl HostKeyVerifier for UiHostKeyVerifier {
             ui.set_host_key_open(true);
         });
         rx.recv().unwrap_or(HostKeyDecision::Reject)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UiCertVerifier (P4.2)
+// ---------------------------------------------------------------------------
+
+/// Shows the cert-accept dialog (P4.2 slint UI) and blocks the RDP connection
+/// thread until the user accepts or rejects.
+struct UiCertVerifier {
+    weak_ui: slint::Weak<AppWindow>,
+    pending: Arc<Mutex<Option<Sender<CertDecision>>>>,
+}
+
+impl CertVerifier for UiCertVerifier {
+    fn decide(&self, info: &CertInfo) -> CertDecision {
+        let (tx, rx) = std::sync::mpsc::channel::<CertDecision>();
+        if let Ok(mut p) = self.pending.lock() {
+            *p = Some(tx);
+        }
+        let info = info.clone();
+        let weak = self.weak_ui.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mismatch = matches!(info.situation, cm_session::CertSituation::Mismatch { .. });
+            let stored_fp = if let cm_session::CertSituation::Mismatch {
+                ref stored_fingerprint,
+                ..
+            } = info.situation
+            {
+                stored_fingerprint.clone()
+            } else {
+                String::new()
+            };
+            ui.set_cert_dialog_mismatch(mismatch);
+            ui.set_cert_dialog_host(format!("{}:{}", info.host, info.port).into());
+            ui.set_cert_dialog_subject(info.subject.clone().into());
+            ui.set_cert_dialog_fingerprint(info.fingerprint.clone().into());
+            ui.set_cert_dialog_stored_fp(stored_fp.into());
+            ui.set_cert_dialog_open(true);
+        });
+        rx.recv().unwrap_or(CertDecision::Reject)
     }
 }
 
@@ -414,6 +466,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     }
 
     let hk_pending: Arc<Mutex<Option<Sender<HostKeyDecision>>>> = Arc::new(Mutex::new(None));
+    let cert_pending: Arc<Mutex<Option<Sender<CertDecision>>>> = Arc::new(Mutex::new(None));
 
     open_local_tab(&state, &tab_model, &ui);
 
@@ -472,8 +525,9 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
             }
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active) {
+                // Terminal key events (RDP key events use on_rdp_key_down/up below).
                 for ev in input::map_key(text.as_str(), special, mods) {
-                    tab.session.send_key(ev);
+                    tab.session.send_input(SessionInput::Key(ev));
                 }
             }
         }
@@ -484,9 +538,29 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         move |button, kind, x, y, mods| {
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active) {
-                let (row, col) = tab.renderer.cell_at(x * st.scale, y * st.scale);
-                if let Some(ev) = input::map_mouse(button, kind, row, col, mods) {
-                    tab.session.send_mouse(ev);
+                match tab.session.surface() {
+                    Surface::TerminalGrid(_) => {
+                        let (row, col) = tab.renderer.cell_at(x * st.scale, y * st.scale);
+                        if let Some(ev) = input::map_mouse(button, kind, row, col, mods) {
+                            tab.session.send_input(SessionInput::Mouse(ev));
+                        }
+                    }
+                    Surface::Framebuffer(_) => {
+                        let w = st.surface_w;
+                        let h = st.surface_h;
+                        let rdp_w = tab.rdp_w;
+                        let rdp_h = tab.rdp_h;
+                        let coords = input::RdpCoords {
+                            surface_w: w,
+                            surface_h: h,
+                            rdp_w,
+                            rdp_h,
+                        };
+                        let events = input::map_rdp_mouse(button, kind, x, y, &coords);
+                        if !events.is_empty() {
+                            tab.session.send_input(SessionInput::Rdp(events));
+                        }
+                    }
                 }
             }
         }
@@ -496,10 +570,31 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         let state = state.clone();
         move |_dx, dy| {
             let st = state.borrow();
-            if let Some(tab) = st.tabs.get(st.active)
-                && let Some(ev) = input::map_scroll(dy, 0, 0, 0)
-            {
-                tab.session.send_mouse(ev);
+            if let Some(tab) = st.tabs.get(st.active) {
+                match tab.session.surface() {
+                    Surface::TerminalGrid(_) => {
+                        if let Some(ev) = input::map_scroll(dy, 0, 0, 0) {
+                            tab.session.send_input(SessionInput::Mouse(ev));
+                        }
+                    }
+                    Surface::Framebuffer(_) => {
+                        let w = st.surface_w;
+                        let h = st.surface_h;
+                        let rdp_w = tab.rdp_w;
+                        let rdp_h = tab.rdp_h;
+                        // Use centre of the surface as scroll position (no absolute pointer coord).
+                        let coords = input::RdpCoords {
+                            surface_w: w,
+                            surface_h: h,
+                            rdp_w,
+                            rdp_h,
+                        };
+                        let events = input::map_rdp_scroll(dy, w / 2.0, h / 2.0, &coords);
+                        if !events.is_empty() {
+                            tab.session.send_input(SessionInput::Rdp(events));
+                        }
+                    }
+                }
             }
         }
     });
@@ -654,13 +749,121 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         }
     });
 
+    // ── RDP cert dialog callbacks (P4.2) ─────────────────────────────────────
+
+    ui.on_cert_accept({
+        let pending = cert_pending.clone();
+        let weak = ui.as_weak();
+        move || {
+            if let Ok(mut p) = pending.lock()
+                && let Some(tx) = p.take()
+            {
+                let _ = tx.send(CertDecision::AcceptAndRemember);
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_cert_dialog_open(false);
+            }
+        }
+    });
+
+    ui.on_cert_reject({
+        let pending = cert_pending.clone();
+        let weak = ui.as_weak();
+        move || {
+            if let Ok(mut p) = pending.lock()
+                && let Some(tx) = p.take()
+            {
+                let _ = tx.send(CertDecision::Reject);
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_cert_dialog_open(false);
+            }
+        }
+    });
+
+    // ── RDP key events (P4.2) ────────────────────────────────────────────────
+
+    ui.on_rdp_key_down({
+        let state = state.clone();
+        move |text, special, mods| {
+            let st = state.borrow();
+            if let Some(tab) = st.tabs.get(st.active) {
+                let events = input::map_rdp_key_down(text.as_str(), special, mods);
+                if !events.is_empty() {
+                    tab.session.send_input(SessionInput::Rdp(events));
+                }
+            }
+        }
+    });
+
+    ui.on_rdp_key_up({
+        let state = state.clone();
+        move |text, special, mods| {
+            let st = state.borrow();
+            if let Some(tab) = st.tabs.get(st.active) {
+                let events = input::map_rdp_key_up(text.as_str(), special, mods);
+                if !events.is_empty() {
+                    tab.session.send_input(SessionInput::Rdp(events));
+                }
+            }
+        }
+    });
+
     ui.on_row_activated({
         let state = state.clone();
         let tab_model = tab_model.clone();
+        let cert_pending = cert_pending.clone();
+        let hk_pending = hk_pending.clone();
         let weak = ui.as_weak();
-        move |_idx| {
-            if let Some(ui) = weak.upgrade() {
+        move |idx| {
+            let Some(ui) = weak.upgrade() else { return };
+            let row = {
+                let st = state.borrow();
+                st.conn_tree.flat().get(idx as usize).cloned()
+            };
+            let Some(row) = row else { return };
+            if row.is_group {
+                return; // groups are toggled by on_toggle_conn_row
+            }
+            // Look up the connection by id.
+            let conn = {
+                let st = state.borrow();
+                st.conn_tree
+                    .connections()
+                    .iter()
+                    .find(|c| c.id.get() as i32 == row.id)
+                    .cloned()
+            };
+            let Some(conn) = conn else {
                 open_local_tab(&state, &tab_model, &ui);
+                return;
+            };
+            match conn.settings {
+                ConnectionSettings::Local(_) => open_local_tab(&state, &tab_model, &ui),
+                ConnectionSettings::Ssh(s) => {
+                    let auth = SshAuthInput::Password(Secret::from_string(String::new()));
+                    let auto_accept =
+                        std::env::var("CONMAN_SSH_AUTO_ACCEPT_KEYS").as_deref() == Ok("1");
+                    let verifier = Arc::new(UiHostKeyVerifier {
+                        weak_ui: weak.clone(),
+                        pending: hk_pending.clone(),
+                        auto_accept,
+                    });
+                    open_ssh_tab(&state, &tab_model, &ui, s, auth, verifier);
+                }
+                ConnectionSettings::Rdp(s) => {
+                    let verifier = Arc::new(UiCertVerifier {
+                        weak_ui: weak.clone(),
+                        pending: cert_pending.clone(),
+                    });
+                    // Use username from settings; password from keychain is out of scope.
+                    let auth = RdpAuthInput {
+                        username: s.username.clone().unwrap_or_default(),
+                        password: cm_core::Secret::from_string(String::new()),
+                        domain: None,
+                    };
+                    open_rdp_tab(&state, &tab_model, &ui, s, auth, verifier);
+                }
             }
         }
     });
@@ -1475,15 +1678,15 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
                 let st = state.borrow();
                 if let Some(tab) = st.tabs.get(st.active) {
                     for ch in cmd.chars() {
-                        tab.session.send_key(KeyEvent {
+                        tab.session.send_input(SessionInput::Key(KeyEvent {
                             key: Key::Char(ch),
                             mods: KeyModifiers::default(),
-                        });
+                        }));
                     }
-                    tab.session.send_key(KeyEvent {
+                    tab.session.send_input(SessionInput::Key(KeyEvent {
                         key: Key::Enter,
                         mods: KeyModifiers::default(),
-                    });
+                    }));
                 }
             },
         );
@@ -1537,15 +1740,27 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
 // Tab management
 // ---------------------------------------------------------------------------
 
+struct PushTabArgs {
+    session: Box<dyn Session>,
+    connect_info: Option<SshConnectInfo>,
+    is_remote: bool,
+    title: String,
+    initial_status: &'static str,
+}
+
 fn push_tab(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,
     ui: &AppWindow,
-    session: Box<dyn TerminalSession>,
-    connect_info: Option<SshConnectInfo>,
-    title: String,
-    initial_status: &str,
+    args: PushTabArgs,
 ) {
+    let PushTabArgs {
+        session,
+        connect_info,
+        is_remote,
+        title,
+        initial_status,
+    } = args;
     let mut st = state.borrow_mut();
     let scale = st.scale;
     let renderer =
@@ -1561,11 +1776,15 @@ fn push_tab(
         session,
         renderer,
         last: None,
+        last_frame: None,
+        rdp_w: 0,
+        rdp_h: 0,
         cols: size.cols,
         rows: size.rows,
         scale,
         num,
         connect_info,
+        is_remote,
     });
     st.active = st.tabs.len() - 1;
     let active = st.active;
@@ -1598,15 +1817,19 @@ fn open_local_tab(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>,
         state,
         tab_model,
         ui,
-        Box::new(session),
-        None,
-        title,
-        "connected",
+        PushTabArgs {
+            session: Box::new(session),
+            connect_info: None,
+            is_remote: false,
+            title,
+            initial_status: "connected",
+        },
     );
     ui.set_session_identity(SharedString::from(identity));
     ui.set_overlay_connecting(false);
     ui.set_overlay_error(false);
     ui.set_launchpad_open(false);
+    ui.set_rdp_active(false);
 }
 
 fn open_ssh_tab(
@@ -1632,21 +1855,70 @@ fn open_ssh_tab(
                 state,
                 tab_model,
                 ui,
-                Box::new(session),
-                Some(ci),
-                title,
-                "connecting",
+                PushTabArgs {
+                    session: Box::new(session),
+                    connect_info: Some(ci),
+                    is_remote: true,
+                    title,
+                    initial_status: "connecting",
+                },
             );
             ui.set_session_identity(SharedString::from(identity));
             ui.set_overlay_connecting(true);
             ui.set_overlay_error(false);
             ui.set_launchpad_open(false);
             ui.set_connecting_step(0);
+            ui.set_rdp_active(false);
         }
         Err(e) => {
             eprintln!("conman: SSH connect setup error: {e}");
         }
     }
+}
+
+fn open_rdp_tab(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    settings: RdpSettings,
+    auth: RdpAuthInput,
+    verifier: Arc<dyn CertVerifier>,
+) {
+    let title = format!("RDP {}", settings.host);
+    let identity = format!("{}@{}:{}", auth.username, settings.host, settings.port);
+    // Use a persistent cert store in the OS app-data dir so accepted certs survive restarts.
+    let cert_store = {
+        let path = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("conman")
+            .join("cert_trust.json");
+        CertStore::new_persistent(path)
+    };
+    let session = match RdpSession::connect(&settings, auth, verifier, cert_store) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("conman: RDP connect error: {e}");
+            return;
+        }
+    };
+    push_tab(
+        state,
+        tab_model,
+        ui,
+        PushTabArgs {
+            session: Box::new(session),
+            connect_info: None,
+            is_remote: true,
+            title,
+            initial_status: "connecting",
+        },
+    );
+    ui.set_session_identity(SharedString::from(identity));
+    ui.set_overlay_connecting(true);
+    ui.set_overlay_error(false);
+    ui.set_launchpad_open(false);
+    ui.set_connecting_step(0);
+    ui.set_rdp_active(true);
 }
 
 fn reconnect_ssh_tab(
@@ -1751,15 +2023,24 @@ fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {
             tab.renderer.set_scale(FONT_SIZE_PX, scale);
             tab.scale = scale;
         }
-        let size = grid_for(&tab.renderer, w, h, scale);
-        if size.cols != tab.cols || size.rows != tab.rows {
-            tab.session.resize(size);
-            tab.cols = size.cols;
-            tab.rows = size.rows;
-            trace(format_args!(
-                "resize commit -> {}x{} cells (settled)",
-                size.cols, size.rows
-            ));
+        match tab.session.surface() {
+            Surface::TerminalGrid(_) => {
+                let size = grid_for(&tab.renderer, w, h, scale);
+                if size.cols != tab.cols || size.rows != tab.rows {
+                    tab.session.resize_cells(size.cols, size.rows);
+                    tab.cols = size.cols;
+                    tab.rows = size.rows;
+                    trace(format_args!(
+                        "resize commit -> {}x{} cells (settled)",
+                        size.cols, size.rows
+                    ));
+                }
+            }
+            Surface::Framebuffer(_) => {
+                let pw = (w * scale).round().max(1.0) as u32;
+                let ph = (h * scale).round().max(1.0) as u32;
+                tab.session.resize_px(pw, ph);
+            }
         }
     }
     render_active(&mut st, ui);
@@ -1781,7 +2062,7 @@ fn update_overlays_from_status(ui: &AppWindow, tab: &Tab, status: &SessionStatus
             ui.set_session_status(SharedString::from("connected"));
         }
         SessionStatus::Failed(reason) => {
-            if tab.connect_info.is_some() {
+            if tab.is_remote {
                 ui.set_overlay_connecting(false);
                 ui.set_overlay_error(true);
                 ui.set_launchpad_open(false);
@@ -1791,7 +2072,7 @@ fn update_overlays_from_status(ui: &AppWindow, tab: &Tab, status: &SessionStatus
             ui.set_session_status(SharedString::from("error"));
         }
         SessionStatus::Disconnected => {
-            if tab.connect_info.is_some() {
+            if tab.is_remote {
                 ui.set_overlay_connecting(false);
                 ui.set_overlay_error(true);
                 ui.set_launchpad_open(false);
@@ -1801,7 +2082,7 @@ fn update_overlays_from_status(ui: &AppWindow, tab: &Tab, status: &SessionStatus
             ui.set_session_status(SharedString::from("disconnected"));
         }
         SessionStatus::Exited(exit) => {
-            if tab.connect_info.is_some() {
+            if tab.is_remote {
                 ui.set_overlay_connecting(false);
                 ui.set_overlay_error(true);
                 ui.set_launchpad_open(false);
@@ -1824,12 +2105,28 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
     let mut to_close: Vec<usize> = Vec::new();
 
     for i in 0..st.tabs.len() {
-        if let Some(snap) = drain_latest(st.tabs[i].session.snapshots()) {
-            if i == active {
-                let img = render_frame(&mut st.tabs[i], &snap, target);
-                ui.set_frame(img);
+        // Drain the latest update for this tab's surface type.
+        match st.tabs[i].session.surface() {
+            Surface::TerminalGrid(rx) => {
+                if let Some(snap) = drain_latest(rx) {
+                    if i == active {
+                        let img = render_frame(&mut st.tabs[i], &snap, target);
+                        ui.set_frame(img);
+                    }
+                    st.tabs[i].last = Some(snap);
+                }
             }
-            st.tabs[i].last = Some(snap);
+            Surface::Framebuffer(rx) => {
+                if let Some(frame) = drain_latest(rx) {
+                    let img = frame_to_image(&frame);
+                    if i == active {
+                        ui.set_rdp_frame(img.clone());
+                    }
+                    st.tabs[i].last_frame = Some(img);
+                    st.tabs[i].rdp_w = frame.width;
+                    st.tabs[i].rdp_h = frame.height;
+                }
+            }
         }
 
         let status = st.tabs[i].session.status();
@@ -1850,7 +2147,7 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
             update_overlays_from_status(ui, &st.tabs[i], &status);
         }
 
-        if st.tabs[i].connect_info.is_none() && matches!(status, SessionStatus::Exited(_)) {
+        if !st.tabs[i].is_remote && matches!(status, SessionStatus::Exited(_)) {
             to_close.push(i);
         }
     }
@@ -1884,12 +2181,36 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
 fn render_active(st: &mut State, ui: &AppWindow) {
     let active = st.active;
     let target = st.target_px();
-    if let Some(tab) = st.tabs.get_mut(active)
-        && let Some(snap) = tab.last.clone()
-    {
-        let img = render_frame(tab, &snap, target);
-        ui.set_frame(img);
+    if let Some(tab) = st.tabs.get_mut(active) {
+        match &tab.session.surface() {
+            Surface::TerminalGrid(_) => {
+                if let Some(snap) = tab.last.clone() {
+                    let img = render_frame(tab, &snap, target);
+                    ui.set_frame(img);
+                }
+                ui.set_rdp_active(false);
+            }
+            Surface::Framebuffer(_) => {
+                if let Some(img) = tab.last_frame.clone() {
+                    ui.set_rdp_frame(img);
+                }
+                ui.set_rdp_active(true);
+            }
+        }
     }
+}
+
+/// Convert a [`FrameUpdate`] into a `slint::Image`.
+///
+/// Called on the UI thread only; `Image::from_rgba8` is `!Send`.
+fn frame_to_image(frame: &FrameUpdate) -> Image {
+    use slint::Rgba8Pixel;
+    let mut buf =
+        slint::SharedPixelBuffer::<Rgba8Pixel>::new(frame.width as u32, frame.height as u32);
+    let bytes = buf.make_mut_bytes();
+    let copy_len = bytes.len().min(frame.rgba.len());
+    bytes[..copy_len].copy_from_slice(&frame.rgba[..copy_len]);
+    Image::from_rgba8(buf)
 }
 
 // ---------------------------------------------------------------------------

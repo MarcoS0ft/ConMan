@@ -29,9 +29,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::engine_owner::{Msg, Transport, run_engine_owner};
 use crate::libghostty::EngineError;
-use crate::session::{
-    ExitStatus, Session, SessionInput, SessionStatus, Surface, TerminalSession,
-};
+use crate::session::{ExitStatus, Session, SessionInput, SessionStatus, Surface, TerminalSession};
 use cm_core::SshSettings;
 
 /// Terminal type advertised to the remote in the PTY request.

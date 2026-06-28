@@ -155,15 +155,15 @@ pub(crate) fn char_to_ps2_scancode(text: &str, special: i32) -> Option<(u8, bool
     // ── Special keys (special != 0) ──────────────────────────────────────────
     if special != 0 {
         return match special {
-            1  => Some((0x1C, false)), // Enter (Return)
-            2  => Some((0x0F, false)), // Tab
-            3  => Some((0x0E, false)), // Backspace
-            4  => Some((0x01, false)), // Escape
-            5  => Some((0x48, true)),  // Up arrow
-            6  => Some((0x50, true)),  // Down arrow
-            7  => Some((0x4B, true)),  // Left arrow
-            8  => Some((0x4D, true)),  // Right arrow
-            9  => Some((0x47, true)),  // Home
+            1 => Some((0x1C, false)),  // Enter (Return)
+            2 => Some((0x0F, false)),  // Tab
+            3 => Some((0x0E, false)),  // Backspace
+            4 => Some((0x01, false)),  // Escape
+            5 => Some((0x48, true)),   // Up arrow
+            6 => Some((0x50, true)),   // Down arrow
+            7 => Some((0x4B, true)),   // Left arrow
+            8 => Some((0x4D, true)),   // Right arrow
+            9 => Some((0x47, true)),   // Home
             10 => Some((0x4F, true)),  // End
             11 => Some((0x49, true)),  // Page Up
             12 => Some((0x51, true)),  // Page Down
@@ -180,7 +180,7 @@ pub(crate) fn char_to_ps2_scancode(text: &str, special: i32) -> Option<(u8, bool
             24 => Some((0x44, false)), // F10
             25 => Some((0x57, false)), // F11
             26 => Some((0x58, false)), // F12
-            _  => None,
+            _ => None,
         };
     }
 
@@ -254,9 +254,9 @@ pub(crate) fn char_to_ps2_scancode(text: &str, special: i32) -> Option<(u8, bool
 }
 
 /// PS/2 scancode for the left modifier key variants.
-const SC_LCTRL:  u8 = 0x1D;
+const SC_LCTRL: u8 = 0x1D;
 const SC_LSHIFT: u8 = 0x2A;
-const SC_LALT:   u8 = 0x38;
+const SC_LALT: u8 = 0x38;
 
 /// Produce the RDP `FastPathInputEvent` sequence for a **key-down** event.
 ///
@@ -270,23 +270,31 @@ const SC_LALT:   u8 = 0x38;
 /// are harmlessly repeated by this approach; IronRDP's input database
 /// coalesces duplicate modifier presses correctly.
 #[must_use]
-pub(crate) fn map_rdp_key_down(
-    text: &str,
-    special: i32,
-    mods_bits: i32,
-) -> Vec<RdpInputEvent> {
+pub(crate) fn map_rdp_key_down(text: &str, special: i32, mods_bits: i32) -> Vec<RdpInputEvent> {
     let mut events = Vec::with_capacity(4);
     if mods_bits & MOD_CTRL != 0 {
-        events.push(RdpInputEvent::KeyDown { scancode: SC_LCTRL, extended: false });
+        events.push(RdpInputEvent::KeyDown {
+            scancode: SC_LCTRL,
+            extended: false,
+        });
     }
     if mods_bits & MOD_ALT != 0 {
-        events.push(RdpInputEvent::KeyDown { scancode: SC_LALT, extended: false });
+        events.push(RdpInputEvent::KeyDown {
+            scancode: SC_LALT,
+            extended: false,
+        });
     }
     if mods_bits & MOD_SHIFT != 0 {
-        events.push(RdpInputEvent::KeyDown { scancode: SC_LSHIFT, extended: false });
+        events.push(RdpInputEvent::KeyDown {
+            scancode: SC_LSHIFT,
+            extended: false,
+        });
     }
     if let Some((sc, ext)) = char_to_ps2_scancode(text, special) {
-        events.push(RdpInputEvent::KeyDown { scancode: sc, extended: ext });
+        events.push(RdpInputEvent::KeyDown {
+            scancode: sc,
+            extended: ext,
+        });
     }
     events
 }
@@ -301,31 +309,70 @@ pub(crate) fn map_rdp_key_down(
 ///
 /// Note: modifier ups follow the character up (the reverse of key-down order).
 #[must_use]
-pub(crate) fn map_rdp_key_up(
-    text: &str,
-    special: i32,
-    mods_bits: i32,
-) -> Vec<RdpInputEvent> {
+pub(crate) fn map_rdp_key_up(text: &str, special: i32, mods_bits: i32) -> Vec<RdpInputEvent> {
     let mut events = Vec::with_capacity(4);
     if let Some((sc, ext)) = char_to_ps2_scancode(text, special) {
-        events.push(RdpInputEvent::KeyUp { scancode: sc, extended: ext });
+        events.push(RdpInputEvent::KeyUp {
+            scancode: sc,
+            extended: ext,
+        });
     }
     if mods_bits & MOD_SHIFT != 0 {
-        events.push(RdpInputEvent::KeyUp { scancode: SC_LSHIFT, extended: false });
+        events.push(RdpInputEvent::KeyUp {
+            scancode: SC_LSHIFT,
+            extended: false,
+        });
     }
     if mods_bits & MOD_ALT != 0 {
-        events.push(RdpInputEvent::KeyUp { scancode: SC_LALT, extended: false });
+        events.push(RdpInputEvent::KeyUp {
+            scancode: SC_LALT,
+            extended: false,
+        });
     }
     if mods_bits & MOD_CTRL != 0 {
-        events.push(RdpInputEvent::KeyUp { scancode: SC_LCTRL, extended: false });
+        events.push(RdpInputEvent::KeyUp {
+            scancode: SC_LCTRL,
+            extended: false,
+        });
     }
     events
+}
+
+/// Coordinate-mapping context for RDP pointer events.
+///
+/// Groups the surface pixel size and RDP desktop resolution to keep mouse/scroll
+/// functions below the `too_many_arguments` threshold.
+pub(crate) struct RdpCoords {
+    /// Logical-pixel width of the Slint surface area.
+    pub surface_w: f32,
+    /// Logical-pixel height of the Slint surface area.
+    pub surface_h: f32,
+    /// RDP desktop width in pixels.
+    pub rdp_w: u16,
+    /// RDP desktop height in pixels.
+    pub rdp_h: u16,
+}
+
+impl RdpCoords {
+    /// Map a logical surface position to an RDP pixel position.
+    ///
+    /// Returns `None` when the surface or desktop dimensions are zero.
+    fn map(&self, x: f32, y: f32) -> Option<(u16, u16)> {
+        if self.surface_w <= 0.0 || self.surface_h <= 0.0 || self.rdp_w == 0 || self.rdp_h == 0 {
+            return None;
+        }
+        let rx =
+            (x / self.surface_w * self.rdp_w as f32).clamp(0.0, self.rdp_w as f32 - 1.0) as u16;
+        let ry =
+            (y / self.surface_h * self.rdp_h as f32).clamp(0.0, self.rdp_h as f32 - 1.0) as u16;
+        Some((rx, ry))
+    }
 }
 
 /// Map a pointer event from the RDP surface into `RdpInputEvent`s.
 ///
 /// Coordinates are in logical pixels relative to the Slint surface; they are
-/// scaled to the RDP desktop resolution (`rdp_w × rdp_h`).
+/// scaled to the RDP desktop resolution via [`RdpCoords`].
 ///
 /// `button`: 1=left, 2=right, 3=middle, 0=none (move).
 /// `kind`:   1=down, 2=up, 3=move.
@@ -335,32 +382,31 @@ pub(crate) fn map_rdp_mouse(
     kind: i32,
     x: f32,
     y: f32,
-    surface_w: f32,
-    surface_h: f32,
-    rdp_w: u16,
-    rdp_h: u16,
+    coords: &RdpCoords,
 ) -> Vec<RdpInputEvent> {
-    if surface_w <= 0.0 || surface_h <= 0.0 || rdp_w == 0 || rdp_h == 0 {
+    let Some((rdp_x, rdp_y)) = coords.map(x, y) else {
         return Vec::new();
-    }
-    let rdp_x = (x / surface_w * rdp_w as f32)
-        .clamp(0.0, rdp_w as f32 - 1.0) as u16;
-    let rdp_y = (y / surface_h * rdp_h as f32)
-        .clamp(0.0, rdp_h as f32 - 1.0) as u16;
-
+    };
     let btn = match button {
         1 => Some(RdpMouseButton::Left),
         2 => Some(RdpMouseButton::Right),
         3 => Some(RdpMouseButton::Middle),
         _ => None,
     };
-
     let mut events = Vec::with_capacity(2);
     // Always emit a move so the cursor tracks the pointer.
     events.push(RdpInputEvent::MouseMove { x: rdp_x, y: rdp_y });
     match (btn, kind) {
-        (Some(b), 1) => events.push(RdpInputEvent::MouseDown { button: b, x: rdp_x, y: rdp_y }),
-        (Some(b), 2) => events.push(RdpInputEvent::MouseUp   { button: b, x: rdp_x, y: rdp_y }),
+        (Some(b), 1) => events.push(RdpInputEvent::MouseDown {
+            button: b,
+            x: rdp_x,
+            y: rdp_y,
+        }),
+        (Some(b), 2) => events.push(RdpInputEvent::MouseUp {
+            button: b,
+            x: rdp_x,
+            y: rdp_y,
+        }),
         _ => {}
     }
     events
@@ -369,24 +415,15 @@ pub(crate) fn map_rdp_mouse(
 /// Map a scroll-wheel delta from the RDP surface into `RdpInputEvent`s.
 ///
 /// `dy > 0` = scroll up (wheel away from user); `dy < 0` = scroll down.
-/// Coordinates are mapped the same way as [`map_rdp_mouse`].
+/// Coordinates are mapped via [`RdpCoords`].
 #[must_use]
-pub(crate) fn map_rdp_scroll(
-    dy: f32,
-    x: f32,
-    y: f32,
-    surface_w: f32,
-    surface_h: f32,
-    rdp_w: u16,
-    rdp_h: u16,
-) -> Vec<RdpInputEvent> {
-    if dy == 0.0 || surface_w <= 0.0 || surface_h <= 0.0 || rdp_w == 0 || rdp_h == 0 {
+pub(crate) fn map_rdp_scroll(dy: f32, x: f32, y: f32, coords: &RdpCoords) -> Vec<RdpInputEvent> {
+    let Some((rdp_x, rdp_y)) = coords.map(x, y) else {
+        return Vec::new();
+    };
+    if dy == 0.0 {
         return Vec::new();
     }
-    let rdp_x = (x / surface_w * rdp_w as f32)
-        .clamp(0.0, rdp_w as f32 - 1.0) as u16;
-    let rdp_y = (y / surface_h * rdp_h as f32)
-        .clamp(0.0, rdp_h as f32 - 1.0) as u16;
     // Convert Slint logical-pixel delta to RDP wheel units (120 = one standard step).
     // Slint typically delivers 3–15 logical pixels per wheel step; multiply to get ~120.
     let delta = (dy * 12.0).clamp(-3600.0, 3600.0) as i16;

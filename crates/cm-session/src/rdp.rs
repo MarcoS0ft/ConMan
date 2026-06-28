@@ -250,8 +250,7 @@ impl CertStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(map)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(map).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 }
@@ -545,12 +544,14 @@ impl RdpSession {
                 rt.block_on(drive(
                     driver_cfg,
                     auth,
-                    verifier,
-                    cert_store,
-                    frame_tx,
-                    cmd_rx,
-                    driver_status,
-                    driver_remote_clipboard,
+                    DriveCtx {
+                        verifier,
+                        cert_store,
+                        frame_tx,
+                        cmd_rx,
+                        status: driver_status,
+                        remote_clipboard: driver_remote_clipboard,
+                    },
                 ));
             })
             .map_err(RdpError::Thread)?;
@@ -563,7 +564,6 @@ impl RdpSession {
             remote_clipboard,
         })
     }
-
 }
 
 impl Session for RdpSession {
@@ -636,29 +636,20 @@ fn set_status(status: &Arc<Mutex<SessionStatus>>, new: SessionStatus) {
 // Async driver
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
-async fn drive(
-    cfg: RdpSettings,
-    auth: RdpAuthInput,
+/// Groups the runtime handles passed to the async driver so `drive_inner` stays
+/// below the clippy `too_many_arguments` threshold.
+struct DriveCtx {
     verifier: Arc<dyn CertVerifier>,
     cert_store: Arc<CertStore>,
     frame_tx: SyncSender<FrameUpdate>,
     cmd_rx: UnboundedReceiver<RdpCmd>,
     status: Arc<Mutex<SessionStatus>>,
     remote_clipboard: Arc<Mutex<Option<String>>>,
-) {
-    match drive_inner(
-        &cfg,
-        auth,
-        verifier,
-        cert_store,
-        &frame_tx,
-        cmd_rx,
-        &status,
-        remote_clipboard,
-    )
-    .await
-    {
+}
+
+async fn drive(cfg: RdpSettings, auth: RdpAuthInput, ctx: DriveCtx) {
+    let status = ctx.status.clone();
+    match drive_inner(&cfg, auth, ctx).await {
         Ok(()) => {}
         Err(e) => set_status(&status, SessionStatus::Failed(e.to_string())),
     }
@@ -667,12 +658,7 @@ async fn drive(
 async fn drive_inner(
     cfg: &RdpSettings,
     auth: RdpAuthInput,
-    verifier: Arc<dyn CertVerifier>,
-    cert_store: Arc<CertStore>,
-    frame_tx: &SyncSender<FrameUpdate>,
-    mut cmd_rx: UnboundedReceiver<RdpCmd>,
-    status: &Arc<Mutex<SessionStatus>>,
-    remote_clipboard: Arc<Mutex<Option<String>>>,
+    mut ctx: DriveCtx,
 ) -> Result<(), RdpError> {
     // 0. Ensure the ring crypto provider is installed before any TLS call.
     //    ironrdp-tls enables both aws-lc-rs (default) and ring features in
@@ -730,7 +716,7 @@ async fn drive_inner(
     //    `ClientConnector::new` takes a local socket address used only for
     //    RDPDR client identification; "0.0.0.0:0" is the right value for
     //    clients that do not bind a fixed local port.
-    let cliprdr = CliprdrClient::new(Box::new(TextCliprdrBackend::new(remote_clipboard)));
+    let cliprdr = CliprdrClient::new(Box::new(TextCliprdrBackend::new(ctx.remote_clipboard)));
     let local_addr: std::net::SocketAddr = "0.0.0.0:0"
         .parse()
         .expect("hardcoded \"0.0.0.0:0\" is a valid SocketAddr");
@@ -751,7 +737,13 @@ async fn drive_inner(
         .map_err(|e| RdpError::Tls(e.to_string()))?;
 
     // 6. Certificate verification: CA store first, then TOFU.
-    let server_public_key = verify_cert(&tls_cert, &cfg.host, cfg.port, &*verifier, &cert_store)?;
+    let server_public_key = verify_cert(
+        &tls_cert,
+        &cfg.host,
+        cfg.port,
+        &*ctx.verifier,
+        &ctx.cert_store,
+    )?;
 
     // 7. Mark TLS as done, rebuild framed over TLS, finalize connection.
     let upgraded = mark_as_upgraded(should_upgrade, &mut connector);
@@ -772,7 +764,7 @@ async fn drive_inner(
     let desktop_size = connection_result.desktop_size;
 
     // 8. Enter active stage (connected).
-    set_status(status, SessionStatus::Connected);
+    set_status(&ctx.status, SessionStatus::Connected);
 
     let mut active_stage = ActiveStage::new(connection_result);
     let mut image = DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
@@ -783,9 +775,9 @@ async fn drive_inner(
         &mut active_stage,
         &mut image,
         &mut input_db,
-        &mut cmd_rx,
-        frame_tx,
-        status,
+        &mut ctx.cmd_rx,
+        &ctx.frame_tx,
+        &ctx.status,
     )
     .await
     .map_err(|e| RdpError::Session(e.to_string()))

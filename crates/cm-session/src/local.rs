@@ -22,9 +22,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::engine_owner::{Msg, Transport, run_engine_owner, timing};
 use crate::libghostty::EngineError;
-use crate::session::{
-    ExitStatus, Session, SessionInput, SessionStatus, Surface, TerminalSession,
-};
+use crate::session::{ExitStatus, Session, SessionInput, SessionStatus, Surface, TerminalSession};
 
 /// Read buffer size for the PTY reader thread.
 const READ_BUF_LEN: usize = 8192;
