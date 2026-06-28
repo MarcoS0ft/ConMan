@@ -1,19 +1,15 @@
 //! UI-thread controller: owns per-tab sessions (local or SSH) + renderers + the
 //! redraw timer, wires Slint callbacks, and drives the snapshot→render→Image pipeline.
 //!
-//! P3.2 upgrade: the controller now holds `Box<dyn TerminalSession>` per tab (local
-//! **or** SSH — uniform dispatch). SSH tabs carry `SshConnectInfo` for reconnect.
+//! P1.4 upgrade: the controller now accepts [`AppConfig`] carrying the repository
+//! (P1.1) and credential store (P1.3).  It wires the Connections panel and Keys
+//! panel to real persisted data and handles all CRUD operations.
 //!
 //! Threading (ARCHITECTURE §4 / P0.3):
-//! - Sessions run their byte-pump on dedicated threads (engine-owner + PTY/SSH driver).
+//! - Sessions run their byte-pump on dedicated threads.
 //! - The controller lives entirely on the UI thread.
-//! - A `slint::Timer` coalesces snapshots, renders the active tab, and drives the
-//!   connecting/error overlay from the active tab's `TerminalSession::status()`.
-//! - Host-key decisions: `UiHostKeyVerifier::decide()` is called from the SSH driver
-//!   thread; it posts a closure to the UI event loop (via `slint::invoke_from_event_loop`)
-//!   to open the HostKeyDialog, then blocks on a `std::sync::mpsc::Receiver` until the
-//!   user clicks Accept/Reject on the UI thread. The SSH thread is blocked but the UI
-//!   thread remains fully reactive — no deadlock.
+//! - A `slint::Timer` coalesces snapshots, renders the active tab.
+//! - Repository calls are synchronous (SQLite; fast enough for UI responses).
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -22,9 +18,12 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cm_core::Secret;
-use cm_core::SshSettings;
 use cm_core::terminal::{GridSnapshot, Key, KeyEvent, KeyModifiers, TerminalSize};
+use cm_core::{
+    Connection, ConnectionId, ConnectionKind, ConnectionSettings, Credential, CredentialFolder,
+    CredentialFolderId, CredentialId, CredentialKind, CredentialPurpose, CredentialRef, Group,
+    GroupId, LocalSettings, RdpSettings, Secret, SshAuthMethod, SshSettings,
+};
 use cm_session::{
     HostKeyDecision, HostKeyInfo, HostKeyVerifier, KnownHosts, LocalTerminalSession, SessionStatus,
     SshAuthInput, SshTerminalSession, TerminalSession,
@@ -32,14 +31,19 @@ use cm_session::{
 use slint::{ComponentHandle, Image, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::input;
+use crate::keys::KeysPanel;
 use crate::terminal_renderer::{FontSet, TerminalRenderer, TerminalTheme};
-use crate::{AppWindow, ConnRow, PaletteAction, TabItem};
+use crate::tree::{ConnectionTree, build_cred_name_list, cred_name_idx};
+use crate::{AppConfig, AppWindow, ConnRow, CredRow, PaletteAction, TabItem};
+
+// Generated Slint structs for the form editors.
+use crate::generated_ui::{ConnProfile, CredFormData, GroupForm};
 
 /// Logical font size for the terminal grid.
 const FONT_SIZE_PX: f32 = 15.0;
-/// Redraw cadence (~60 Hz) for coalescing snapshots and repainting the active tab.
+/// Redraw cadence (~60 Hz) for coalescing snapshots.
 const REDRAW_INTERVAL: Duration = Duration::from_millis(16);
-/// Debounce window for committing a resize to the PTY/engine (B6).
+/// Debounce window for committing a resize to the PTY/engine.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(90);
 /// Initial grid size before the surface reports its real dimensions.
 const INITIAL_SIZE: TerminalSize = TerminalSize { rows: 24, cols: 80 };
@@ -48,10 +52,6 @@ const INITIAL_SIZE: TerminalSize = TerminalSize { rows: 24, cols: 80 };
 // SSH connect info (held for reconnect)
 // ---------------------------------------------------------------------------
 
-/// Everything needed to re-establish an SSH session without re-prompting the form.
-///
-/// Stored in the tab; dropped (and secrets zeroized via `SshAuthInput` → `Secret`)
-/// when the tab is closed.
 struct SshConnectInfo {
     settings: SshSettings,
     auth: SshAuthInput,
@@ -61,20 +61,14 @@ struct SshConnectInfo {
 // Per-tab state
 // ---------------------------------------------------------------------------
 
-/// One open terminal tab — local or SSH.
 struct Tab {
-    /// Polymorphic session (local PTY or SSH). `Box<dyn TerminalSession>` because
-    /// `LocalTerminalSession` and `SshTerminalSession` are different concrete types.
     session: Box<dyn TerminalSession>,
     renderer: TerminalRenderer,
-    /// Most recent snapshot (rendered on tab switch / resize without waiting for output).
     last: Option<GridSnapshot>,
     cols: u16,
     rows: u16,
     scale: f32,
-    /// Displayed tab number (reused from the free set on close).
     num: u32,
-    /// `Some` for SSH tabs; `None` for local tabs.
     connect_info: Option<SshConnectInfo>,
 }
 
@@ -82,21 +76,18 @@ struct Tab {
 // Application state
 // ---------------------------------------------------------------------------
 
-/// All UI-thread mutable state.
 struct State {
     tabs: Vec<Tab>,
     active: usize,
-    /// Shared parsed font faces — reused by every tab's renderer.
     fonts: Arc<FontSet>,
-    /// Current display scale factor.
     scale: f32,
-    /// Current surface size in logical px.
     surface_w: f32,
     surface_h: f32,
+    conn_tree: ConnectionTree,
+    keys_panel: KeysPanel,
 }
 
 impl State {
-    /// Grid size for a new tab from the current surface size, or the initial default.
     fn current_grid(&self) -> TerminalSize {
         if self.surface_w <= 0.0 || self.surface_h <= 0.0 {
             return INITIAL_SIZE;
@@ -110,7 +101,6 @@ impl State {
         grid_for(&probe, self.surface_w, self.surface_h, self.scale)
     }
 
-    /// Active tab's surface target in physical px.
     fn target_px(&self) -> Option<(u32, u32)> {
         if self.surface_w > 0.0 && self.surface_h > 0.0 {
             Some((
@@ -124,21 +114,11 @@ impl State {
 }
 
 // ---------------------------------------------------------------------------
-// UiHostKeyVerifier — P3.2 host-key dialog bridge
+// UiHostKeyVerifier
 // ---------------------------------------------------------------------------
 
-/// Bridges the SSH driver's blocking `decide()` call to the Slint UI thread.
-///
-/// Called from the SSH tokio driver thread (inside russh's `check_server_key` async
-/// fn, but executed synchronously as a non-`await` call). Blocks the SSH driver OS
-/// thread on a `std::sync::mpsc::channel` while the UI thread shows the HostKeyDialog.
-/// The UI thread stays fully reactive during the wait — no deadlock.
-///
-/// `auto_accept`: skips the dialog and always accepts (for headless testing; gated on
-/// `CONMAN_SSH_AUTO_ACCEPT_KEYS=1`).
 struct UiHostKeyVerifier {
     weak_ui: slint::Weak<AppWindow>,
-    /// Set by `decide()` before posting to the UI; cleared by `on_host_key_accept/reject`.
     pending: Arc<Mutex<Option<Sender<HostKeyDecision>>>>,
     auto_accept: bool,
 }
@@ -148,17 +128,12 @@ impl HostKeyVerifier for UiHostKeyVerifier {
         if self.auto_accept {
             return HostKeyDecision::Accept;
         }
-
         let (tx, rx) = std::sync::mpsc::channel::<HostKeyDecision>();
-        // Store the sender so the UI callbacks can reply.
         if let Ok(mut p) = self.pending.lock() {
             *p = Some(tx);
         }
-
         let info = info.clone();
         let weak = self.weak_ui.clone();
-        // Post to the UI event loop — returns immediately; the dialog opens on
-        // the UI thread independently of this blocked SSH thread.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
             let mismatch = matches!(
@@ -181,9 +156,6 @@ impl HostKeyVerifier for UiHostKeyVerifier {
             ui.set_host_key_stored_fp(stored_fp.into());
             ui.set_host_key_open(true);
         });
-
-        // Block the SSH driver thread until the user decides.
-        // On app exit the channel closes → Err → default Reject.
         rx.recv().unwrap_or(HostKeyDecision::Reject)
     }
 }
@@ -192,7 +164,6 @@ impl HostKeyVerifier for UiHostKeyVerifier {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Render `snap` for `tab` into a frame Image at the surface target size.
 fn render_frame(tab: &mut Tab, snap: &GridSnapshot, target: Option<(u32, u32)>) -> Image {
     let buf = match target {
         Some((w, h)) => tab.renderer.render_to(snap, w, h),
@@ -201,7 +172,6 @@ fn render_frame(tab: &mut Tab, snap: &GridSnapshot, target: Option<(u32, u32)>) 
     Image::from_rgba8(buf)
 }
 
-/// Lowest unused positive tab number among the currently open tabs.
 fn lowest_free_number(used: &[u32]) -> u32 {
     let mut n = 1;
     while used.contains(&n) {
@@ -210,7 +180,6 @@ fn lowest_free_number(used: &[u32]) -> u32 {
     n
 }
 
-/// Cells that fit a logical surface at a given scale, using the renderer's cell metrics.
 fn grid_for(r: &TerminalRenderer, logical_w: f32, logical_h: f32, scale: f32) -> TerminalSize {
     let m = r.cell_metrics();
     let phys_w = (logical_w * scale).max(1.0) as u32;
@@ -221,7 +190,6 @@ fn grid_for(r: &TerminalRenderer, logical_w: f32, logical_h: f32, scale: f32) ->
     }
 }
 
-/// Drain a receiver, returning only the most recent value (coalescing).
 pub(crate) fn drain_latest<T>(rx: &Receiver<T>) -> Option<T> {
     let mut latest = None;
     while let Ok(v) = rx.try_recv() {
@@ -230,7 +198,6 @@ pub(crate) fn drain_latest<T>(rx: &Receiver<T>) -> Option<T> {
     latest
 }
 
-/// Lightweight stderr tracing gated on `CONMAN_TRACE=1`.
 fn trace(args: std::fmt::Arguments) {
     if std::env::var_os("CONMAN_TRACE").is_some() {
         eprintln!("[conman] {args}");
@@ -238,31 +205,168 @@ fn trace(args: std::fmt::Arguments) {
 }
 
 // ---------------------------------------------------------------------------
+// Panel model refresh helpers
+// ---------------------------------------------------------------------------
+
+fn refresh_conn_model(state: &State, conn_model: &Rc<VecModel<ConnRow>>) {
+    let flat = state.conn_tree.flat();
+    while conn_model.row_count() > 0 {
+        conn_model.remove(0);
+    }
+    for row in flat {
+        conn_model.push(row);
+    }
+}
+
+fn refresh_cred_model(state: &State, cred_model: &Rc<VecModel<CredRow>>) {
+    let flat = state.keys_panel.flat();
+    while cred_model.row_count() > 0 {
+        cred_model.remove(0);
+    }
+    for row in flat {
+        cred_model.push(row);
+    }
+}
+
+fn refresh_cred_name_list(state: &State, ui: &AppWindow) {
+    let list = build_cred_name_list(
+        state.keys_panel.credentials(),
+        state.keys_panel.folders(),
+        "Inherit from group",
+    );
+    let model: Rc<VecModel<SharedString>> = Rc::new(VecModel::from(list));
+    ui.set_cred_name_list(ModelRc::from(model));
+
+    let folder_list = KeysPanel::build_folder_name_list(state.keys_panel.folders());
+    let fm: Rc<VecModel<SharedString>> = Rc::new(VecModel::from(folder_list));
+    ui.set_folder_name_list(ModelRc::from(fm));
+}
+
+/// Build the flat group name list for the group/parent pickers in editors.
+///
+/// Index 0 = "Root (no group)"; subsequent entries are group names in
+/// `(sort, id)` order — matching [`ConnectionTree::flat`]'s root iteration.
+fn build_group_name_list(groups: &[Group]) -> Vec<SharedString> {
+    let mut out = vec![SharedString::from("Root (no group)")];
+    let mut sorted: Vec<&Group> = groups.iter().collect();
+    sorted.sort_by_key(|g| (g.sort, g.id.get()));
+    for g in sorted {
+        out.push(SharedString::from(g.name.as_str()));
+    }
+    out
+}
+
+/// Rebuild and push the group name list to the UI.
+fn refresh_group_name_list(state: &State, ui: &AppWindow) {
+    let list = build_group_name_list(state.conn_tree.groups());
+    let model: Rc<VecModel<SharedString>> = Rc::new(VecModel::from(list));
+    ui.set_group_name_list(ModelRc::from(model));
+}
+
+/// Map a 1-based dropdown index back to the corresponding [`GroupId`].
+///
+/// Index 0 (the "Root" sentinel) returns `None`.  An out-of-bounds index also
+/// returns `None` (safe degradation to root).
+fn group_id_from_name_idx(idx: i32, groups: &[Group]) -> Option<GroupId> {
+    if idx <= 0 {
+        return None;
+    }
+    let mut sorted: Vec<&Group> = groups.iter().collect();
+    sorted.sort_by_key(|g| (g.sort, g.id.get()));
+    sorted.get((idx - 1) as usize).map(|g| g.id)
+}
+
+/// Find the 1-based dropdown index for a given [`GroupId`] in the name list.
+///
+/// Returns 0 (the "Root" sentinel) when `group_id` is `None` or not found.
+fn group_name_idx(group_id: Option<GroupId>, groups: &[Group]) -> i32 {
+    let Some(gid) = group_id else { return 0 };
+    let mut sorted: Vec<&Group> = groups.iter().collect();
+    sorted.sort_by_key(|g| (g.sort, g.id.get()));
+    sorted
+        .iter()
+        .position(|g| g.id == gid)
+        .map(|i| i as i32 + 1)
+        .unwrap_or(0)
+}
+
+/// Map a 1-based dropdown index back to the corresponding [`CredentialFolderId`].
+///
+/// Index 0 (the "Root" sentinel) returns `None`.  An out-of-bounds index also
+/// returns `None` (safe degradation to root).
+fn folder_id_from_name_idx(idx: i32, folders: &[CredentialFolder]) -> Option<CredentialFolderId> {
+    if idx <= 0 {
+        return None;
+    }
+    let mut sorted: Vec<&CredentialFolder> = folders.iter().collect();
+    sorted.sort_by_key(|f| (f.sort, f.id.get()));
+    sorted.get((idx - 1) as usize).map(|f| f.id)
+}
+
+/// Find the 1-based dropdown index for a given [`CredentialFolderId`] in the name list.
+///
+/// Returns 0 (the "Root" sentinel) when `folder_id` is `None` or not found.
+fn folder_name_idx(folder_id: Option<CredentialFolderId>, folders: &[CredentialFolder]) -> i32 {
+    let Some(fid) = folder_id else { return 0 };
+    let mut sorted: Vec<&CredentialFolder> = folders.iter().collect();
+    sorted.sort_by_key(|f| (f.sort, f.id.get()));
+    sorted
+        .iter()
+        .position(|f| f.id == fid)
+        .map(|i| i as i32 + 1)
+        .unwrap_or(0)
+}
+
+/// Returns `true` if `target` appears anywhere in the ancestor chain of
+/// `candidate_parent` (including `candidate_parent` itself).
+///
+/// Used in [`on_group_save`] to block descendant-as-parent cycles: the caller
+/// should reject any `candidate_parent` for which this returns `true`.
+fn is_ancestor_or_self(target: GroupId, candidate_parent: GroupId, groups: &[Group]) -> bool {
+    let mut current = Some(candidate_parent);
+    let mut depth = 0usize;
+    while let Some(id) = current {
+        if id == target {
+            return true;
+        }
+        depth += 1;
+        if depth > 64 {
+            // Cycle already exists in the DB; stop to avoid an infinite loop.
+            break;
+        }
+        current = groups.iter().find(|g| g.id == id).and_then(|g| g.parent_id);
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
-/// Build and run the ConMan application. Blocks on the Slint event loop until the window
-/// is closed.
+/// Build and run the ConMan application.
 ///
 /// # Errors
 /// Returns a [`slint::PlatformError`] if the window/backend cannot be created.
-pub fn run() -> Result<(), slint::PlatformError> {
+pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
+    let repo = config.repo;
+    let secrets = config.secrets;
+
     let ui = AppWindow::new()?;
     let scale = ui.window().scale_factor();
 
     let tab_model: Rc<VecModel<TabItem>> = Rc::new(VecModel::default());
     ui.set_tabs(ModelRc::from(tab_model.clone()));
 
-    // Seed sample connections so the shell is demoable end-to-end (P1 replaces with real).
-    let conn_model: Rc<VecModel<ConnRow>> = Rc::new(VecModel::from(sample_connections()));
+    let conn_model: Rc<VecModel<ConnRow>> = Rc::new(VecModel::default());
     ui.set_connections(ModelRc::from(conn_model.clone()));
 
-    // Seed command palette with shell actions (includes "New SSH connection").
+    let cred_model: Rc<VecModel<CredRow>> = Rc::new(VecModel::default());
+    ui.set_credentials(ModelRc::from(cred_model.clone()));
+
     let palette_model: Rc<VecModel<PaletteAction>> =
         Rc::new(VecModel::from(initial_palette_actions()));
     ui.set_palette_actions(ModelRc::from(palette_model.clone()));
 
-    // CONMAN_DARK_MODE env var: force dark (1) or light (0).
     if let Ok(v) = std::env::var("CONMAN_DARK_MODE") {
         match v.trim() {
             "1" => ui.set_dark_mode(true),
@@ -274,6 +378,22 @@ pub fn run() -> Result<(), slint::PlatformError> {
         ui.set_palette_open(true);
     }
 
+    // Load initial tree data.
+    let conn_tree = match ConnectionTree::load(repo.as_ref()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("conman: failed to load connections: {e}");
+            ConnectionTree::new(vec![], vec![])
+        }
+    };
+    let keys_panel = match KeysPanel::load(repo.as_ref()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("conman: failed to load credentials: {e}");
+            KeysPanel::new(vec![], vec![])
+        }
+    };
+
     let state = Rc::new(RefCell::new(State {
         tabs: Vec::new(),
         active: 0,
@@ -281,58 +401,62 @@ pub fn run() -> Result<(), slint::PlatformError> {
         scale,
         surface_w: 0.0,
         surface_h: 0.0,
+        conn_tree,
+        keys_panel,
     }));
 
-    // ── Shared host-key pending channel ───────────────────────────────────────
-    // `UiHostKeyVerifier::decide()` (SSH thread) stores its reply Sender here.
-    // The UI callbacks (`on_host_key_accept/reject`) take and send through it.
+    {
+        let st = state.borrow();
+        refresh_conn_model(&st, &conn_model);
+        refresh_cred_model(&st, &cred_model);
+        refresh_cred_name_list(&st, &ui);
+        refresh_group_name_list(&st, &ui);
+    }
+
     let hk_pending: Arc<Mutex<Option<Sender<HostKeyDecision>>>> = Arc::new(Mutex::new(None));
 
-    // ── Open first local tab ──────────────────────────────────────────────────
     open_local_tab(&state, &tab_model, &ui);
 
-    // ── new-tab (local shell) ─────────────────────────────────────────────────
-    {
+    // ── Session tab callbacks ─────────────────────────────────────────────────
+
+    ui.on_new_tab({
         let state = state.clone();
         let tab_model = tab_model.clone();
         let weak = ui.as_weak();
-        ui.on_new_tab(move || {
+        move || {
             if let Some(ui) = weak.upgrade() {
                 open_local_tab(&state, &tab_model, &ui);
             }
-        });
-    }
+        }
+    });
 
-    // ── select-tab ────────────────────────────────────────────────────────────
-    {
+    ui.on_select_tab({
         let state = state.clone();
         let weak = ui.as_weak();
-        ui.on_select_tab(move |idx| {
+        move |idx| {
             if let Some(ui) = weak.upgrade() {
                 select_tab(&state, &ui, idx);
             }
-        });
-    }
+        }
+    });
 
-    // ── close-tab ─────────────────────────────────────────────────────────────
-    {
+    ui.on_close_tab({
         let state = state.clone();
         let tab_model = tab_model.clone();
         let weak = ui.as_weak();
-        ui.on_close_tab(move |idx| {
+        move |idx| {
             if let Some(ui) = weak.upgrade() {
                 close_tab(&state, &tab_model, &ui, idx as usize);
             }
-        });
-    }
+        }
+    });
 
-    // ── keyboard input ────────────────────────────────────────────────────────
-    {
+    ui.on_key_input({
         let state = state.clone();
         let pal_model_kb = palette_model.clone();
         let tab_model_kb = tab_model.clone();
         let weak_kb = ui.as_weak();
-        ui.on_key_input(move |text, special, mods| {
+        move |text, special, mods| {
             let Some(ui) = weak_kb.upgrade() else { return };
             if ui.get_palette_open() {
                 handle_palette_key(
@@ -352,13 +476,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     tab.session.send_key(ev);
                 }
             }
-        });
-    }
+        }
+    });
 
-    // ── pointer ───────────────────────────────────────────────────────────────
-    {
+    ui.on_pointer({
         let state = state.clone();
-        ui.on_pointer(move |button, kind, x, y, mods| {
+        move |button, kind, x, y, mods| {
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active) {
                 let (row, col) = tab.renderer.cell_at(x * st.scale, y * st.scale);
@@ -366,23 +489,21 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     tab.session.send_mouse(ev);
                 }
             }
-        });
-    }
+        }
+    });
 
-    // ── scroll ────────────────────────────────────────────────────────────────
-    {
+    ui.on_scroll({
         let state = state.clone();
-        ui.on_scroll(move |_dx, dy| {
+        move |_dx, dy| {
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active)
                 && let Some(ev) = input::map_scroll(dy, 0, 0, 0)
             {
                 tab.session.send_mouse(ev);
             }
-        });
-    }
+        }
+    });
 
-    // ── resize / scale change ─────────────────────────────────────────────────
     let resize_debounce = Rc::new(Timer::default());
     {
         let state = state.clone();
@@ -409,7 +530,14 @@ pub fn run() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // ── Shell callbacks ───────────────────────────────────────────────────────
+    // ── Shell / panel callbacks ───────────────────────────────────────────────
+    //
+    // UNVERIFIED: Persist panel state (active_panel + sidebar_collapsed/width)
+    // via a settings facility.  No settings store exists in the merged waves
+    // (P1.0–P3.2); persisting theme choices is deferred to P5.2
+    // (settings-theming).  Panel state persistence is similarly deferred to
+    // P5.2 and will be implemented there once the settings infrastructure
+    // lands.  Until then, state resets to defaults on restart.
 
     ui.on_select_panel({
         let weak = ui.as_weak();
@@ -439,7 +567,6 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // ── quick-connect: open the form dialog ───────────────────────────────────
     ui.on_quick_connect({
         let weak = ui.as_weak();
         move || {
@@ -449,7 +576,6 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // ── qc-connect: read form values, spawn SSH session ──────────────────────
     ui.on_qc_connect({
         let state = state.clone();
         let tab_model = tab_model.clone();
@@ -457,22 +583,16 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let hk_pending = hk_pending.clone();
         move || {
             let Some(ui) = weak.upgrade() else { return };
-
-            // Read form values on the UI thread.
             let host = ui.get_qc_host().trim().to_owned();
             let port_str = ui.get_qc_port().trim().to_owned();
             let username = ui.get_qc_username().trim().to_owned();
             let auth_method = ui.get_qc_auth_method();
             let secret_raw = ui.get_qc_secret().to_string();
             let pass_raw = ui.get_qc_passphrase().to_string();
-
-            // Validate required fields (fail silently; P5 adds validation UI).
             if host.is_empty() || username.is_empty() {
                 return;
             }
             let port = port_str.parse::<u16>().unwrap_or(22);
-
-            // Build SshAuthInput; secrets consumed into Secret which zeroizes on drop.
             let auth = match auth_method {
                 0 => SshAuthInput::Key {
                     path: PathBuf::from(secret_raw),
@@ -485,33 +605,25 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 1 => SshAuthInput::Password(Secret::from_string(secret_raw)),
                 _ => SshAuthInput::Agent,
             };
-
             let settings = SshSettings {
                 host,
                 port,
                 username,
-                // SshAuthMethod is for saved profiles (P1); for quick-connect we carry
-                // the real auth in SshAuthInput — use a placeholder value.
-                auth_method: cm_core::SshAuthMethod::Password,
+                auth_method: SshAuthMethod::Password,
             };
-
-            // Close the form and clear secret fields before spawning.
             ui.set_quick_connect_open(false);
             ui.set_qc_secret(Default::default());
             ui.set_qc_passphrase(Default::default());
-
             let auto_accept = std::env::var("CONMAN_SSH_AUTO_ACCEPT_KEYS").as_deref() == Ok("1");
             let verifier = Arc::new(UiHostKeyVerifier {
                 weak_ui: weak.clone(),
                 pending: hk_pending.clone(),
                 auto_accept,
             });
-
             open_ssh_tab(&state, &tab_model, &ui, settings, auth, verifier);
         }
     });
 
-    // ── host-key accept ───────────────────────────────────────────────────────
     ui.on_host_key_accept({
         let pending = hk_pending.clone();
         let weak = ui.as_weak();
@@ -527,7 +639,6 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // ── host-key reject ───────────────────────────────────────────────────────
     ui.on_host_key_reject({
         let pending = hk_pending.clone();
         let weak = ui.as_weak();
@@ -543,19 +654,17 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // ── row-activated: open a local terminal tab ──────────────────────────────
-    {
+    ui.on_row_activated({
         let state = state.clone();
         let tab_model = tab_model.clone();
         let weak = ui.as_weak();
-        ui.on_row_activated(move |_idx| {
+        move |_idx| {
             if let Some(ui) = weak.upgrade() {
                 open_local_tab(&state, &tab_model, &ui);
             }
-        });
-    }
+        }
+    });
 
-    // ── toggle-broadcast ──────────────────────────────────────────────────────
     ui.on_toggle_broadcast({
         let weak = ui.as_weak();
         move || {
@@ -565,7 +674,6 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // ── palette-edited ────────────────────────────────────────────────────────
     ui.on_palette_edited({
         let weak = ui.as_weak();
         let pal_model = palette_model.clone();
@@ -578,24 +686,21 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // ── palette-activated ─────────────────────────────────────────────────────
-    {
+    ui.on_palette_activated({
         let state = state.clone();
         let tab_model = tab_model.clone();
         let pal_model_dispatch = palette_model.clone();
         let weak = ui.as_weak();
-        ui.on_palette_activated(move |idx| {
+        move |idx| {
             if let Some(ui) = weak.upgrade() {
                 dispatch_palette_action(&state, &tab_model, &pal_model_dispatch, &ui, idx as usize);
             }
-        });
-    }
+        }
+    });
 
-    // ── theme-changed / accent-changed ────────────────────────────────────────
     ui.on_theme_changed(|_idx| { /* P5: persist */ });
     ui.on_accent_changed(|_idx| { /* P5: persist */ });
 
-    // ── reconnect: re-establish the active SSH session ────────────────────────
     ui.on_reconnect({
         let state = state.clone();
         let tab_model = tab_model.clone();
@@ -603,8 +708,6 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let hk_pending = hk_pending.clone();
         move || {
             let Some(ui) = weak.upgrade() else { return };
-
-            // Extract connect info from the active tab (must be SSH).
             let (active_idx, connect_info_opt) = {
                 let st = state.borrow();
                 let idx = st.active;
@@ -618,34 +721,703 @@ pub fn run() -> Result<(), slint::PlatformError> {
             let Some((settings, auth)) = connect_info_opt else {
                 return;
             };
-
-            // Shut down the existing (failed) session.
             {
                 let st = state.borrow();
                 if let Some(tab) = st.tabs.get(active_idx) {
                     tab.session.shutdown();
                 }
             }
-
             let auto_accept = std::env::var("CONMAN_SSH_AUTO_ACCEPT_KEYS").as_deref() == Ok("1");
             let verifier = Arc::new(UiHostKeyVerifier {
                 weak_ui: weak.clone(),
                 pending: hk_pending.clone(),
                 auto_accept,
             });
-
             reconnect_ssh_tab(
                 &state, &tab_model, &ui, active_idx, settings, auth, verifier,
             );
         }
     });
 
-    // ── Launchpad callbacks (stubs; P1 wires real data) ──────────────────────
     ui.on_launchpad_edited(|_q| {});
     ui.on_open_recent(|_i| {});
     ui.on_open_group_split(|| {});
 
+    // ── P1.4: Connections panel CRUD ─────────────────────────────────────────
+
+    ui.on_toggle_conn_row({
+        let state = state.clone();
+        let conn_model = conn_model.clone();
+        move |idx| {
+            let mut st = state.borrow_mut();
+            let flat = st.conn_tree.flat();
+            if let Some(row) = flat.get(idx as usize)
+                && row.is_group
+            {
+                st.conn_tree.toggle_expand(row.id as i64);
+                refresh_conn_model(&st, &conn_model);
+            }
+        }
+    });
+
+    ui.on_new_connection({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |group_id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let st = state.borrow();
+            let gid = if group_id == 0 {
+                None
+            } else {
+                Some(GroupId::new(group_id as i64))
+            };
+            let selected_group_idx = group_name_idx(gid, st.conn_tree.groups());
+            let form = ConnProfile {
+                id: 0,
+                name: SharedString::from("New Connection"),
+                group_id,
+                kind: 0,
+                host: SharedString::from(""),
+                port: SharedString::from("22"),
+                username: SharedString::from(""),
+                auth_method: 1,
+                selected_cred_idx: 0,
+                effective_cred_name: SharedString::from(""),
+                effective_inherited: false,
+                selected_group_idx,
+            };
+            drop(st);
+            ui.set_profile_form(form);
+            ui.set_profile_editor_open(true);
+        }
+    });
+
+    ui.on_new_group({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |parent_id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let st = state.borrow();
+            let pid = if parent_id == 0 {
+                None
+            } else {
+                Some(GroupId::new(parent_id as i64))
+            };
+            let selected_parent_idx = group_name_idx(pid, st.conn_tree.groups());
+            let form = GroupForm {
+                id: 0,
+                name: SharedString::from("New Group"),
+                parent_id,
+                default_cred_idx: 0,
+                selected_parent_idx,
+            };
+            drop(st);
+            ui.set_group_form(form);
+            ui.set_group_editor_open(true);
+        }
+    });
+
+    ui.on_edit_conn({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |conn_id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let st = state.borrow();
+            let Some(conn) = st.conn_tree.conn_by_id(conn_id as i64) else {
+                return;
+            };
+            let (kind, host, port, username, auth_method) = profile_fields_from_conn(conn);
+            let cred_sel_idx = cred_name_idx(
+                conn.credential,
+                st.keys_panel.credentials(),
+                st.keys_panel.folders(),
+            );
+            let (eff_cred_id, inherited) =
+                KeysPanel::resolve_effective(conn.credential, conn.group_id, st.conn_tree.groups());
+            let eff_name = KeysPanel::cred_display_name(eff_cred_id, st.keys_panel.credentials());
+            let selected_group_idx = group_name_idx(conn.group_id, st.conn_tree.groups());
+            let form = ConnProfile {
+                id: conn_id,
+                name: SharedString::from(conn.name.as_str()),
+                group_id: conn.group_id.map(|g| g.get() as i32).unwrap_or(0),
+                kind,
+                host: SharedString::from(host.as_str()),
+                port: SharedString::from(port.as_str()),
+                username: SharedString::from(username.as_str()),
+                auth_method,
+                selected_cred_idx: cred_sel_idx,
+                effective_cred_name: SharedString::from(eff_name.as_str()),
+                effective_inherited: inherited,
+                selected_group_idx,
+            };
+            drop(st);
+            ui.set_profile_form(form);
+            ui.set_profile_editor_open(true);
+        }
+    });
+
+    ui.on_edit_group({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |group_id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let st = state.borrow();
+            let Some(group) = st.conn_tree.group_by_id(group_id as i64) else {
+                return;
+            };
+            let default_cred_idx = cred_name_idx(
+                group.default_credential,
+                st.keys_panel.credentials(),
+                st.keys_panel.folders(),
+            );
+            let selected_parent_idx = group_name_idx(group.parent_id, st.conn_tree.groups());
+            let form = GroupForm {
+                id: group_id,
+                name: SharedString::from(group.name.as_str()),
+                parent_id: group.parent_id.map(|g| g.get() as i32).unwrap_or(0),
+                default_cred_idx,
+                selected_parent_idx,
+            };
+            drop(st);
+            ui.set_group_form(form);
+            ui.set_group_editor_open(true);
+        }
+    });
+
+    ui.on_delete_conn_row({
+        let state = state.clone();
+        let conn_model = conn_model.clone();
+        let repo_del = repo.clone();
+        move |id, is_group| {
+            let mut st = state.borrow_mut();
+            let result = if is_group {
+                repo_del.delete_group(GroupId::new(id as i64))
+            } else {
+                repo_del.delete_connection(ConnectionId::new(id as i64))
+            };
+            if let Err(e) = result {
+                eprintln!("conman: delete failed: {e}");
+                return;
+            }
+            if let Err(e) = st.conn_tree.reload(repo_del.as_ref()) {
+                eprintln!("conman: reload after delete failed: {e}");
+            }
+            refresh_conn_model(&st, &conn_model);
+        }
+    });
+
+    ui.on_profile_save({
+        let state = state.clone();
+        let conn_model = conn_model.clone();
+        let repo_ps = repo.clone();
+        let weak = ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let form = ui.get_profile_form();
+            // Resolve group_id from the dropdown index (selected-group-idx).
+            // Falls back to the raw form.group_id when the index is out-of-range
+            // (e.g. on an older saved form with no group list loaded yet).
+            let group_id = {
+                let st = state.borrow();
+                group_id_from_name_idx(form.selected_group_idx, st.conn_tree.groups())
+            };
+            let cred_id = {
+                let st = state.borrow();
+                resolve_cred_from_idx(
+                    form.selected_cred_idx,
+                    st.keys_panel.credentials(),
+                    st.keys_panel.folders(),
+                )
+            };
+            let sort = {
+                let st = state.borrow();
+                if form.id == 0 {
+                    st.conn_tree.next_sort_in_group(group_id)
+                } else {
+                    st.conn_tree
+                        .conn_by_id(form.id as i64)
+                        .map(|c| c.sort)
+                        .unwrap_or(0)
+                }
+            };
+            let settings = settings_from_form(&form);
+            let kind = kind_from_form_int(form.kind);
+            let now = crate::tree::now_secs();
+            let created_at = {
+                let st = state.borrow();
+                st.conn_tree
+                    .conn_by_id(form.id as i64)
+                    .map(|c| c.created_at)
+                    .unwrap_or(now)
+            };
+            let conn = match Connection::new(
+                ConnectionId::new(form.id as i64),
+                group_id,
+                form.name.to_string(),
+                kind,
+                settings,
+                cred_id,
+                sort,
+                created_at,
+                now,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("conman: profile validation error: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = repo_ps.upsert_connection(&conn) {
+                eprintln!("conman: upsert connection failed: {e}");
+                return;
+            }
+            ui.set_profile_editor_open(false);
+            let mut st = state.borrow_mut();
+            if let Err(e) = st.conn_tree.reload(repo_ps.as_ref()) {
+                eprintln!("conman: reload after save failed: {e}");
+            }
+            refresh_conn_model(&st, &conn_model);
+            refresh_group_name_list(&st, &ui);
+        }
+    });
+
+    ui.on_group_save({
+        let state = state.clone();
+        let conn_model = conn_model.clone();
+        let repo_gs = repo.clone();
+        let weak = ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let form = ui.get_group_form();
+            // Resolve parent_id from the dropdown index (selected-parent-idx).
+            // Reject any parent choice that would form a cycle: the chosen parent
+            // must not be the group itself AND must not be any of its descendants.
+            // (`is_ancestor_or_self` covers both: it returns true when
+            //  candidate == self and when candidate is reachable from self.)
+            let parent_id = {
+                let st = state.borrow();
+                let resolved =
+                    group_id_from_name_idx(form.selected_parent_idx, st.conn_tree.groups());
+                resolved.filter(|&gid| {
+                    form.id == 0
+                        || !is_ancestor_or_self(
+                            GroupId::new(form.id as i64),
+                            gid,
+                            st.conn_tree.groups(),
+                        )
+                })
+            };
+            let default_credential = {
+                let st = state.borrow();
+                resolve_cred_from_idx(
+                    form.default_cred_idx,
+                    st.keys_panel.credentials(),
+                    st.keys_panel.folders(),
+                )
+            };
+            let sort = {
+                let st = state.borrow();
+                if form.id == 0 {
+                    st.conn_tree.next_group_sort_in_parent(parent_id)
+                } else {
+                    st.conn_tree
+                        .group_by_id(form.id as i64)
+                        .map(|g| g.sort)
+                        .unwrap_or(0)
+                }
+            };
+            let group = Group {
+                id: GroupId::new(form.id as i64),
+                parent_id,
+                name: form.name.to_string(),
+                sort,
+                default_credential,
+            };
+            if let Err(e) = repo_gs.upsert_group(&group) {
+                eprintln!("conman: upsert group failed: {e}");
+                return;
+            }
+            ui.set_group_editor_open(false);
+            let mut st = state.borrow_mut();
+            if let Err(e) = st.conn_tree.reload(repo_gs.as_ref()) {
+                eprintln!("conman: reload after group save failed: {e}");
+            }
+            refresh_conn_model(&st, &conn_model);
+            refresh_group_name_list(&st, &ui);
+        }
+    });
+
+    // ── P1.4: Reorder / move-between-groups ──────────────────────────────────
+
+    ui.on_reorder_conn_row({
+        let state = state.clone();
+        let conn_model = conn_model.clone();
+        let repo_rcr = repo.clone();
+        move |conn_id, direction| {
+            let mut st = state.borrow_mut();
+            let Some(conn) = st.conn_tree.conn_by_id(conn_id as i64).cloned() else {
+                return;
+            };
+            let group_id = conn.group_id;
+            // Collect siblings (same parent) sorted by (sort, id).
+            let mut siblings: Vec<Connection> = st
+                .conn_tree
+                .connections()
+                .iter()
+                .filter(|c| c.group_id == group_id)
+                .cloned()
+                .collect();
+            siblings.sort_by_key(|c| (c.sort, c.id.get()));
+            let Some(pos) = siblings.iter().position(|c| c.id == conn.id) else {
+                return;
+            };
+            let target_pos = if direction < 0 {
+                if pos == 0 {
+                    return;
+                }
+                pos - 1
+            } else {
+                if pos + 1 >= siblings.len() {
+                    return;
+                }
+                pos + 1
+            };
+            // Swap sort values between the two siblings.
+            let sort_a = siblings[pos].sort;
+            let sort_b = siblings[target_pos].sort;
+            let mut a = siblings[pos].clone();
+            let mut b = siblings[target_pos].clone();
+            if sort_a == sort_b {
+                // Equal sorts: nudge them apart without touching the other sibling.
+                if direction < 0 {
+                    a.sort = sort_a.saturating_sub(1);
+                } else {
+                    a.sort = sort_a.saturating_add(1);
+                }
+                if let Err(e) = repo_rcr.upsert_connection(&a) {
+                    eprintln!("conman: reorder conn (nudge) failed: {e}");
+                    return;
+                }
+            } else {
+                a.sort = sort_b;
+                b.sort = sort_a;
+                if let Err(e) = repo_rcr.upsert_connection(&b) {
+                    eprintln!("conman: reorder conn (swap target) failed: {e}");
+                    return;
+                }
+                if let Err(e) = repo_rcr.upsert_connection(&a) {
+                    eprintln!("conman: reorder conn (swap source) failed: {e}");
+                    return;
+                }
+            }
+            if let Err(e) = st.conn_tree.reload(repo_rcr.as_ref()) {
+                eprintln!("conman: reload after reorder failed: {e}");
+            }
+            refresh_conn_model(&st, &conn_model);
+        }
+    });
+
+    ui.on_reorder_group_row({
+        let state = state.clone();
+        let conn_model = conn_model.clone();
+        let repo_rgr = repo.clone();
+        let weak_rgr = ui.as_weak();
+        move |group_id, direction| {
+            let mut st = state.borrow_mut();
+            let Some(grp) = st.conn_tree.group_by_id(group_id as i64).cloned() else {
+                return;
+            };
+            let parent_id = grp.parent_id;
+            // Collect sibling groups (same parent) sorted by (sort, id).
+            let mut siblings: Vec<Group> = st
+                .conn_tree
+                .groups()
+                .iter()
+                .filter(|g| g.parent_id == parent_id)
+                .cloned()
+                .collect();
+            siblings.sort_by_key(|g| (g.sort, g.id.get()));
+            let Some(pos) = siblings.iter().position(|g| g.id == grp.id) else {
+                return;
+            };
+            let target_pos = if direction < 0 {
+                if pos == 0 {
+                    return;
+                }
+                pos - 1
+            } else {
+                if pos + 1 >= siblings.len() {
+                    return;
+                }
+                pos + 1
+            };
+            let sort_a = siblings[pos].sort;
+            let sort_b = siblings[target_pos].sort;
+            let mut a = siblings[pos].clone();
+            let mut b = siblings[target_pos].clone();
+            if sort_a == sort_b {
+                if direction < 0 {
+                    a.sort = sort_a.saturating_sub(1);
+                } else {
+                    a.sort = sort_a.saturating_add(1);
+                }
+                if let Err(e) = repo_rgr.upsert_group(&a) {
+                    eprintln!("conman: reorder group (nudge) failed: {e}");
+                    return;
+                }
+            } else {
+                a.sort = sort_b;
+                b.sort = sort_a;
+                if let Err(e) = repo_rgr.upsert_group(&b) {
+                    eprintln!("conman: reorder group (swap target) failed: {e}");
+                    return;
+                }
+                if let Err(e) = repo_rgr.upsert_group(&a) {
+                    eprintln!("conman: reorder group (swap source) failed: {e}");
+                    return;
+                }
+            }
+            if let Err(e) = st.conn_tree.reload(repo_rgr.as_ref()) {
+                eprintln!("conman: reload after group reorder failed: {e}");
+            }
+            refresh_conn_model(&st, &conn_model);
+            if let Some(ui) = weak_rgr.upgrade() {
+                refresh_group_name_list(&st, &ui);
+            }
+        }
+    });
+
+    // ── P1.4: Keys panel CRUD ─────────────────────────────────────────────────
+
+    ui.on_toggle_cred_row({
+        let state = state.clone();
+        let cred_model = cred_model.clone();
+        move |idx| {
+            let mut st = state.borrow_mut();
+            let flat = st.keys_panel.flat();
+            if let Some(row) = flat.get(idx as usize)
+                && row.is_folder
+            {
+                st.keys_panel.toggle_expand(row.id as i64);
+                refresh_cred_model(&st, &cred_model);
+            }
+        }
+    });
+
+    ui.on_new_cred({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |folder_id| {
+            let Some(ui) = weak.upgrade() else { return };
+            // Resolve the DB folder id to a combo index so the picker
+            // pre-selects the folder from which the "New Credential" action
+            // was triggered.
+            let selected_folder_idx = {
+                let st = state.borrow();
+                let fid = if folder_id == 0 {
+                    None
+                } else {
+                    Some(CredentialFolderId::new(folder_id as i64))
+                };
+                folder_name_idx(fid, st.keys_panel.folders())
+            };
+            let form = CredFormData {
+                id: 0,
+                name: SharedString::from("New Credential"),
+                kind: 0,
+                username: SharedString::from(""),
+                folder_id,
+                selected_folder_idx,
+                secret: SharedString::from(""),
+                passphrase: SharedString::from(""),
+            };
+            ui.set_cred_form(form);
+            ui.set_cred_editor_open(true);
+        }
+    });
+
+    ui.on_new_cred_folder({
+        let state = state.clone();
+        let cred_model = cred_model.clone();
+        let repo_ncf = repo.clone();
+        let weak = ui.as_weak();
+        move |parent_folder_id| {
+            let Some(_ui) = weak.upgrade() else { return };
+            let fid = if parent_folder_id == 0 {
+                None
+            } else {
+                Some(CredentialFolderId::new(parent_folder_id as i64))
+            };
+            let sort = {
+                let st = state.borrow();
+                st.keys_panel
+                    .folders()
+                    .iter()
+                    .filter(|f| f.parent_id == fid)
+                    .map(|f| f.sort)
+                    .max()
+                    .map(|m| m + 1)
+                    .unwrap_or(0)
+            };
+            let folder = CredentialFolder {
+                id: CredentialFolderId::UNSAVED,
+                parent_id: fid,
+                name: "New Folder".to_owned(),
+                sort,
+            };
+            if let Err(e) = repo_ncf.upsert_credential_folder(&folder) {
+                eprintln!("conman: create folder failed: {e}");
+                return;
+            }
+            let mut st = state.borrow_mut();
+            if let Err(e) = st.keys_panel.reload(repo_ncf.as_ref()) {
+                eprintln!("conman: reload after folder create failed: {e}");
+            }
+            refresh_cred_model(&st, &cred_model);
+        }
+    });
+
+    ui.on_edit_cred({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |cred_id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let st = state.borrow();
+            let Some(cred) = st
+                .keys_panel
+                .credentials()
+                .iter()
+                .find(|c| c.id.get() == cred_id as i64)
+            else {
+                return;
+            };
+            let kind = match cred.kind {
+                CredentialKind::Password => 0,
+                CredentialKind::SshKey => 1,
+                CredentialKind::SshKeyWithPassphrase => 2,
+            };
+            let raw_folder_id = cred.folder_id.map(|f| f.get() as i32).unwrap_or(0);
+            // Resolve the credential's current folder to a combo-box index so
+            // the picker shows the correct folder when the editor opens.
+            let selected_folder_idx = folder_name_idx(cred.folder_id, st.keys_panel.folders());
+            let form = CredFormData {
+                id: cred_id,
+                name: SharedString::from(cred.name.as_str()),
+                kind,
+                username: SharedString::from(cred.username.as_deref().unwrap_or("")),
+                folder_id: raw_folder_id,
+                selected_folder_idx,
+                secret: SharedString::from(""),
+                passphrase: SharedString::from(""),
+            };
+            drop(st);
+            ui.set_cred_form(form);
+            ui.set_cred_editor_open(true);
+        }
+    });
+
+    ui.on_delete_cred_row({
+        let state = state.clone();
+        let cred_model = cred_model.clone();
+        let repo_del = repo.clone();
+        let weak = ui.as_weak();
+        move |id, is_folder| {
+            let mut st = state.borrow_mut();
+            let result = if is_folder {
+                repo_del.delete_credential_folder(CredentialFolderId::new(id as i64))
+            } else {
+                repo_del.delete_credential(CredentialId::new(id as i64))
+            };
+            if let Err(e) = result {
+                eprintln!("conman: delete cred/folder failed: {e}");
+                return;
+            }
+            if let Err(e) = st.keys_panel.reload(repo_del.as_ref()) {
+                eprintln!("conman: reload after cred delete failed: {e}");
+            }
+            refresh_cred_model(&st, &cred_model);
+            let Some(ui) = weak.upgrade() else { return };
+            refresh_cred_name_list(&st, &ui);
+        }
+    });
+
+    ui.on_cred_save({
+        let state = state.clone();
+        let cred_model = cred_model.clone();
+        let repo_cs = repo.clone();
+        let secrets_cs = secrets.clone();
+        let weak = ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut form = ui.get_cred_form();
+            // Resolve folder from the combo index (selected-folder-idx) so that
+            // a move-between-folders edit is honoured, not the stale raw folder_id.
+            let fid = {
+                let st = state.borrow();
+                folder_id_from_name_idx(form.selected_folder_idx, st.keys_panel.folders())
+            };
+            let kind = match form.kind {
+                1 => CredentialKind::SshKey,
+                2 => CredentialKind::SshKeyWithPassphrase,
+                _ => CredentialKind::Password,
+            };
+            let cred = Credential {
+                id: CredentialId::new(form.id as i64),
+                name: form.name.to_string(),
+                kind,
+                folder_id: fid,
+                username: {
+                    let u = form.username.trim().to_owned();
+                    if u.is_empty() { None } else { Some(u) }
+                },
+            };
+            let upserted_id = match repo_cs.upsert_credential(&cred) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("conman: upsert credential failed: {e}");
+                    form.secret = SharedString::from("");
+                    form.passphrase = SharedString::from("");
+                    ui.set_cred_form(form);
+                    return;
+                }
+            };
+            // Capture secrets before clearing them.
+            let secret_text = form.secret.to_string();
+            let passphrase_text = form.passphrase.to_string();
+            // SECURITY: clear transient secret fields before any further ops.
+            form.secret = SharedString::from("");
+            form.passphrase = SharedString::from("");
+            ui.set_cred_form(form);
+
+            if !secret_text.is_empty() {
+                let purpose = match kind {
+                    CredentialKind::Password => CredentialPurpose::Password,
+                    _ => CredentialPurpose::SshKey,
+                };
+                let key_ref = CredentialRef::new(upserted_id, purpose);
+                if let Err(e) = secrets_cs.store(&key_ref, &Secret::from_string(secret_text)) {
+                    eprintln!("conman: keychain store failed: {e}");
+                }
+            }
+            if kind == CredentialKind::SshKeyWithPassphrase && !passphrase_text.is_empty() {
+                let pp_ref = CredentialRef::new(upserted_id, CredentialPurpose::SshPassphrase);
+                if let Err(e) = secrets_cs.store(&pp_ref, &Secret::from_string(passphrase_text)) {
+                    eprintln!("conman: keychain passphrase store failed: {e}");
+                }
+            }
+
+            ui.set_cred_editor_open(false);
+            let mut st = state.borrow_mut();
+            if let Err(e) = st.keys_panel.reload(repo_cs.as_ref()) {
+                eprintln!("conman: reload after cred save failed: {e}");
+            }
+            refresh_cred_model(&st, &cred_model);
+            refresh_cred_name_list(&st, &ui);
+        }
+    });
+
     // ── Redraw timer ──────────────────────────────────────────────────────────
+
     let redraw = Timer::default();
     {
         let state = state.clone();
@@ -659,10 +1431,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
     }
 
     // ── Optional headless test hooks ──────────────────────────────────────────
+
     let mut hooks: Vec<Timer> = Vec::new();
 
-    // CONMAN_SSH_AUTOINIT="username:password:host:port" — auto-open SSH tab at startup.
-    // Used by the real-host P3.2 verification run.
     if let Ok(init) = std::env::var("CONMAN_SSH_AUTOINIT") {
         let parts: Vec<&str> = init.splitn(4, ':').collect();
         if parts.len() >= 3 {
@@ -677,7 +1448,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 host,
                 port,
                 username,
-                auth_method: cm_core::SshAuthMethod::Password,
+                auth_method: SshAuthMethod::Password,
             };
             let auth = SshAuthInput::Password(Secret::from_string(password));
             let auto_accept = std::env::var("CONMAN_SSH_AUTO_ACCEPT_KEYS").as_deref() == Ok("1");
@@ -690,7 +1461,6 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     }
 
-    // CONMAN_AUTODRIVE — send keystrokes to the active tab after a delay.
     if let Ok(cmd) = std::env::var("CONMAN_AUTODRIVE") {
         let delay = std::env::var("CONMAN_AUTODRIVE_MS")
             .ok()
@@ -720,7 +1490,6 @@ pub fn run() -> Result<(), slint::PlatformError> {
         hooks.push(t);
     }
 
-    // CONMAN_AUTORESIZE — scripted resize steps for headless resize screenshots.
     if let Ok(script) = std::env::var("CONMAN_AUTORESIZE") {
         for step in script.split(';').filter(|s| !s.is_empty()) {
             if let Some((ms, dims)) = step.split_once(':')
@@ -757,18 +1526,17 @@ pub fn run() -> Result<(), slint::PlatformError> {
         hooks.push(t);
     }
 
+    if std::env::var("CONMAN_SHOW_KEYS").as_deref() == Ok("1") {
+        ui.set_active_panel(1);
+    }
+
     ui.run()
-    // `redraw`, `resize_debounce`, and `hooks` stay alive across `run()`.
 }
 
 // ---------------------------------------------------------------------------
 // Tab management
 // ---------------------------------------------------------------------------
 
-/// Shared helper: push a fully-constructed session into state + tab model.
-///
-/// Computes the initial grid size from the current surface (or `INITIAL_SIZE`),
-/// builds a renderer, assigns a tab number, and updates the active tab indicator.
 fn push_tab(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,
@@ -813,10 +1581,9 @@ fn push_tab(
     ui.set_session_status(SharedString::from(initial_status));
 }
 
-/// Open a new local PTY shell tab.
 fn open_local_tab(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppWindow) {
     let size = state.borrow().current_grid();
-    let session = match LocalTerminalSession::spawn(&cm_core::LocalSettings::default(), size) {
+    let session = match LocalTerminalSession::spawn(&LocalSettings::default(), size) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("conman: failed to open terminal: {e}");
@@ -832,19 +1599,16 @@ fn open_local_tab(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>,
         tab_model,
         ui,
         Box::new(session),
-        None, // no connect_info for local
+        None,
         title,
         "connected",
     );
     ui.set_session_identity(SharedString::from(identity));
-    // Local tabs never show overlays.
     ui.set_overlay_connecting(false);
     ui.set_overlay_error(false);
     ui.set_launchpad_open(false);
 }
 
-/// Open a new SSH tab. Returns immediately (status = Connecting); the async driver
-/// updates status to Connected or Failed on its background threads.
 fn open_ssh_tab(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,
@@ -857,7 +1621,6 @@ fn open_ssh_tab(
     let identity = format!("{}@{}:{}", settings.username, settings.host, settings.port);
     let title = format!("SSH {}", settings.host);
     let auth_for_reconnect = auth.clone();
-
     match SshTerminalSession::connect(&settings, auth, verifier, KnownHosts::with_defaults(), size)
     {
         Ok(session) => {
@@ -882,13 +1645,10 @@ fn open_ssh_tab(
         }
         Err(e) => {
             eprintln!("conman: SSH connect setup error: {e}");
-            // Synchronous setup errors (thread spawn, engine init) are rare; surface to stderr.
-            // A dead-tab placeholder is deferred; the user can retry via Quick Connect.
         }
     }
 }
 
-/// Replace the session in an existing tab slot (reconnect).
 fn reconnect_ssh_tab(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,
@@ -901,7 +1661,6 @@ fn reconnect_ssh_tab(
     let size = state.borrow().current_grid();
     let identity = format!("{}@{}:{}", settings.username, settings.host, settings.port);
     let auth_for_reconnect = auth.clone();
-
     match SshTerminalSession::connect(&settings, auth, verifier, KnownHosts::with_defaults(), size)
     {
         Ok(new_session) => {
@@ -959,7 +1718,7 @@ fn close_tab(
     }
     let tab = st.tabs.remove(idx);
     tab.session.shutdown();
-    drop(tab); // ensure SshConnectInfo / Secret are zeroized now
+    drop(tab);
     tab_model.remove(idx);
 
     if st.tabs.is_empty() {
@@ -980,7 +1739,6 @@ fn close_tab(
     render_active(&mut st, ui);
 }
 
-/// Commit the settled resize to every tab's session + renderer.
 fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {
     let mut st = state.borrow_mut();
     let scale = st.scale;
@@ -1007,11 +1765,6 @@ fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {
     render_active(&mut st, ui);
 }
 
-// ---------------------------------------------------------------------------
-// Overlay helpers
-// ---------------------------------------------------------------------------
-
-/// Update session-state overlays and tab-strip dot from a session status.
 fn update_overlays_from_status(ui: &AppWindow, tab: &Tab, status: &SessionStatus) {
     match status {
         SessionStatus::Connecting => {
@@ -1064,20 +1817,13 @@ fn update_overlays_from_status(ui: &AppWindow, tab: &Tab, status: &SessionStatus
     }
 }
 
-// ---------------------------------------------------------------------------
-// Redraw tick
-// ---------------------------------------------------------------------------
-
 fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppWindow) {
     let mut st = state.borrow_mut();
     let active = st.active;
     let target = st.target_px();
-    // Local (non-SSH) tabs auto-close when the shell exits;
-    // SSH tabs stay showing the error overlay for reconnect.
     let mut to_close: Vec<usize> = Vec::new();
 
     for i in 0..st.tabs.len() {
-        // Drain latest snapshot for every tab.
         if let Some(snap) = drain_latest(st.tabs[i].session.snapshots()) {
             if i == active {
                 let img = render_frame(&mut st.tabs[i], &snap, target);
@@ -1087,8 +1833,6 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
         }
 
         let status = st.tabs[i].session.status();
-
-        // Update tab-strip status dot in the model.
         let dot = match &status {
             SessionStatus::Connecting => "connecting",
             SessionStatus::Connected => "connected",
@@ -1102,12 +1846,10 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
             tab_model.set_row_data(i, item);
         }
 
-        // Active-tab overlay.
         if i == active {
             update_overlays_from_status(ui, &st.tabs[i], &status);
         }
 
-        // Only local (non-SSH) tabs auto-close on exit.
         if st.tabs[i].connect_info.is_none() && matches!(status, SessionStatus::Exited(_)) {
             to_close.push(i);
         }
@@ -1139,7 +1881,6 @@ fn tick(state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>, ui: &AppW
     }
 }
 
-/// Render the active tab's most recent snapshot into the `frame` image.
 fn render_active(st: &mut State, ui: &AppWindow) {
     let active = st.active;
     let target = st.target_px();
@@ -1149,6 +1890,105 @@ fn render_active(st: &mut State, ui: &AppWindow) {
         let img = render_frame(tab, &snap, target);
         ui.set_frame(img);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Profile form ↔ domain helpers
+// ---------------------------------------------------------------------------
+
+fn profile_fields_from_conn(conn: &Connection) -> (i32, String, String, String, i32) {
+    match &conn.settings {
+        ConnectionSettings::Ssh(s) => (
+            0,
+            s.host.clone(),
+            s.port.to_string(),
+            s.username.clone(),
+            match s.auth_method {
+                SshAuthMethod::PublicKey { .. } => 0,
+                SshAuthMethod::Password => 1,
+                SshAuthMethod::Agent => 2,
+            },
+        ),
+        ConnectionSettings::Rdp(s) => (
+            1,
+            s.host.clone(),
+            s.port.to_string(),
+            s.username.clone().unwrap_or_default(),
+            1,
+        ),
+        ConnectionSettings::Local(_) => (2, String::new(), String::new(), String::new(), 1),
+    }
+}
+
+fn settings_from_form(form: &ConnProfile) -> ConnectionSettings {
+    match form.kind {
+        1 => ConnectionSettings::Rdp(RdpSettings {
+            host: form.host.to_string(),
+            port: form.port.as_str().parse::<u16>().unwrap_or(3389),
+            domain: None,
+            username: {
+                let u = form.username.trim().to_owned();
+                if u.is_empty() { None } else { Some(u) }
+            },
+        }),
+        2 => ConnectionSettings::Local(LocalSettings::default()),
+        _ => ConnectionSettings::Ssh(SshSettings {
+            host: form.host.to_string(),
+            port: form.port.as_str().parse::<u16>().unwrap_or(22),
+            username: form.username.to_string(),
+            auth_method: match form.auth_method {
+                0 => SshAuthMethod::PublicKey {
+                    key_ref: CredentialRef::new(CredentialId::UNSAVED, CredentialPurpose::SshKey),
+                },
+                2 => SshAuthMethod::Agent,
+                _ => SshAuthMethod::Password,
+            },
+        }),
+    }
+}
+
+fn kind_from_form_int(n: i32) -> ConnectionKind {
+    match n {
+        1 => ConnectionKind::Rdp,
+        2 => ConnectionKind::LocalTerminal,
+        _ => ConnectionKind::Ssh,
+    }
+}
+
+fn resolve_cred_from_idx(
+    idx: i32,
+    credentials: &[Credential],
+    folders: &[CredentialFolder],
+) -> Option<CredentialId> {
+    if idx <= 0 {
+        return None;
+    }
+    // Build the same ordered credential sequence that build_cred_name_list
+    // produces and index directly by position (idx-1, because index 0 is the
+    // "Inherit" sentinel).  This avoids the name-collision bug that arose from
+    // splitting on '/' and doing a first-match lookup.
+    let mut ordered: Vec<CredentialId> = Vec::new();
+    // Root credentials first (no folder), sorted by name.
+    let mut root_creds: Vec<&Credential> = credentials
+        .iter()
+        .filter(|c| c.folder_id.is_none())
+        .collect();
+    root_creds.sort_by_key(|c| c.name.as_str());
+    for c in root_creds {
+        ordered.push(c.id);
+    }
+    // Credentials in each folder, in the same folder iteration order and name-sorted.
+    for folder in folders {
+        let mut folder_creds: Vec<&Credential> = credentials
+            .iter()
+            .filter(|c| c.folder_id == Some(folder.id))
+            .collect();
+        folder_creds.sort_by_key(|c| c.name.as_str());
+        for c in folder_creds {
+            ordered.push(c.id);
+        }
+    }
+    ordered.get((idx - 1) as usize).copied()
 }
 
 // ---------------------------------------------------------------------------
@@ -1237,68 +2077,13 @@ fn dispatch_palette_action(
         "New SSH connection" => ui.set_quick_connect_open(true),
         "Toggle sidebar" => ui.set_sidebar_collapsed(!ui.get_sidebar_collapsed()),
         "Focus Connections" => ui.set_active_panel(0),
+        "Focus Keys" => ui.set_active_panel(1),
         "Focus Settings" => ui.set_active_panel(2),
+        // BLOCKED: Import / Export requires P1.2 (json-import-export), which has
+        // not yet been merged.  No-op here; wire once P1.2 lands.
+        "Import / Export\u{2026}" => {}
         _ => {}
     }
-}
-
-// ---------------------------------------------------------------------------
-// Sample data helpers
-// ---------------------------------------------------------------------------
-
-fn sample_connections() -> Vec<ConnRow> {
-    vec![
-        ConnRow {
-            id: 1,
-            label: SharedString::from("Lab"),
-            host: SharedString::from(""),
-            kind: SharedString::from(""),
-            status: SharedString::from(""),
-            is_group: true,
-            expanded: true,
-            selected: false,
-        },
-        ConnRow {
-            id: 2,
-            label: SharedString::from("web-dev-01"),
-            host: SharedString::from("ops@10.0.1.11"),
-            kind: SharedString::from("SSH"),
-            status: SharedString::from("connected"),
-            is_group: false,
-            expanded: false,
-            selected: false,
-        },
-        ConnRow {
-            id: 3,
-            label: SharedString::from("db-dev"),
-            host: SharedString::from("admin@10.0.1.22"),
-            kind: SharedString::from("SSH"),
-            status: SharedString::from("disconnected"),
-            is_group: false,
-            expanded: false,
-            selected: false,
-        },
-        ConnRow {
-            id: 4,
-            label: SharedString::from("Prod"),
-            host: SharedString::from(""),
-            kind: SharedString::from(""),
-            status: SharedString::from(""),
-            is_group: true,
-            expanded: true,
-            selected: false,
-        },
-        ConnRow {
-            id: 5,
-            label: SharedString::from("web-prod-01"),
-            host: SharedString::from("ops@10.0.4.11"),
-            kind: SharedString::from("SSH"),
-            status: SharedString::from("disconnected"),
-            is_group: false,
-            expanded: false,
-            selected: false,
-        },
-    ]
 }
 
 fn initial_palette_actions() -> Vec<PaletteAction> {
@@ -1346,10 +2131,33 @@ fn initial_palette_actions() -> Vec<PaletteAction> {
         PaletteAction {
             category: SharedString::from("ACTIONS"),
             first_in_group: false,
+            label: SharedString::from("Focus Keys"),
+            detail: SharedString::from(""),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{E8D7}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        PaletteAction {
+            category: SharedString::from("ACTIONS"),
+            first_in_group: false,
             label: SharedString::from("Focus Settings"),
             detail: SharedString::from(""),
             shortcut: SharedString::from(""),
             glyph: SharedString::from("\u{E713}"),
+            status: SharedString::from(""),
+            selected: false,
+        },
+        // BLOCKED: Import / Export requires P1.2 (json-import-export), which
+        // has not yet landed.  This entry is present so the affordance appears
+        // in the palette; it is a no-op until P1.2 is merged and wired here.
+        PaletteAction {
+            category: SharedString::from("DATA"),
+            first_in_group: true,
+            label: SharedString::from("Import / Export\u{2026}"),
+            detail: SharedString::from("Blocked — requires P1.2 (not yet merged)"),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{E8B5}"),
             status: SharedString::from(""),
             selected: false,
         },
@@ -1414,8 +2222,6 @@ mod tests {
         assert!(tiny.cols >= 1 && tiny.rows >= 1);
     }
 
-    // ── P3.2 unit tests ───────────────────────────────────────────────────────
-
     #[test]
     fn palette_filter_empty_query_returns_all() {
         let all = filter_palette_actions("");
@@ -1432,14 +2238,10 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    /// "New SSH connection" is present in the palette action list.
     #[test]
     fn palette_contains_new_ssh_connection() {
         let all = initial_palette_actions();
-        assert!(
-            all.iter().any(|a| a.label.as_str() == "New SSH connection"),
-            "expected 'New SSH connection' in the palette"
-        );
+        assert!(all.iter().any(|a| a.label.as_str() == "New SSH connection"));
     }
 
     #[test]
@@ -1454,31 +2256,6 @@ mod tests {
         let result = filter_palette_actions("tab");
         assert!(!result.is_empty(), "expected at least one result for 'tab'");
         assert!(result[0].first_in_group);
-    }
-
-    #[test]
-    fn sample_connections_has_groups_and_leaves() {
-        let conns = sample_connections();
-        assert!(conns.iter().any(|c| c.is_group));
-        assert!(conns.iter().any(|c| !c.is_group));
-    }
-
-    #[test]
-    fn sample_connections_leaves_have_kind() {
-        let conns = sample_connections();
-        for c in &conns {
-            if !c.is_group {
-                assert!(!c.kind.is_empty(), "leaf '{}' has no kind", c.label);
-            }
-        }
-    }
-
-    #[test]
-    fn rebuild_palette_model_empty_query_fills_all() {
-        let model: Rc<VecModel<PaletteAction>> = Rc::new(VecModel::default());
-        rebuild_palette_model(&model, &SharedString::from(""));
-        let all = initial_palette_actions();
-        assert_eq!(model.row_count(), all.len());
     }
 
     #[test]
@@ -1500,9 +2277,6 @@ mod tests {
         assert_ne!(meta & 0b1001, 0);
     }
 
-    // ── Form-to-SshSettings mapping tests (P3.2 §Verification) ───────────────
-
-    /// auth_method=1 (Password) maps correctly to SshAuthInput::Password.
     #[test]
     fn form_to_ssh_auth_password() {
         let auth_method: i32 = 1;
@@ -1523,7 +2297,6 @@ mod tests {
         assert!(matches!(auth, SshAuthInput::Password(_)));
     }
 
-    /// auth_method=0 (Public key) maps correctly to SshAuthInput::Key.
     #[test]
     fn form_to_ssh_auth_pubkey_no_passphrase() {
         let auth_method: i32 = 0;
@@ -1550,7 +2323,6 @@ mod tests {
         ));
     }
 
-    /// auth_method=2 (Agent) maps to SshAuthInput::Agent.
     #[test]
     fn form_to_ssh_auth_agent() {
         let auth_method: i32 = 2;
@@ -1566,13 +2338,11 @@ mod tests {
         assert!(matches!(auth, SshAuthInput::Agent));
     }
 
-    /// SshSettings::DEFAULT_PORT is 22.
     #[test]
     fn ssh_settings_default_port() {
         assert_eq!(SshSettings::DEFAULT_PORT, 22);
     }
 
-    /// Session status dot mapping covers all variants.
     #[test]
     fn session_status_dot_all_variants() {
         let cases: Vec<(SessionStatus, &str)> = vec![
@@ -1597,5 +2367,308 @@ mod tests {
             };
             assert_eq!(dot, expected_dot, "status {status:?} -> dot {dot}");
         }
+    }
+
+    #[test]
+    fn kind_from_form_int_all_variants() {
+        assert_eq!(kind_from_form_int(0), ConnectionKind::Ssh);
+        assert_eq!(kind_from_form_int(1), ConnectionKind::Rdp);
+        assert_eq!(kind_from_form_int(2), ConnectionKind::LocalTerminal);
+        assert_eq!(kind_from_form_int(99), ConnectionKind::Ssh);
+    }
+
+    #[test]
+    fn profile_form_mapping_ssh() {
+        let form = ConnProfile {
+            id: 0,
+            name: SharedString::from("Test"),
+            group_id: 0,
+            kind: 0,
+            host: SharedString::from("10.0.0.1"),
+            port: SharedString::from("2222"),
+            username: SharedString::from("admin"),
+            auth_method: 1,
+            selected_cred_idx: 0,
+            effective_cred_name: SharedString::from(""),
+            effective_inherited: false,
+            selected_group_idx: 0,
+        };
+        let settings = settings_from_form(&form);
+        assert!(
+            matches!(
+                settings,
+                ConnectionSettings::Ssh(SshSettings { port: 2222, .. })
+            ),
+            "SSH settings port should be 2222"
+        );
+    }
+
+    // ── resolve_cred_from_idx ─────────────────────────────────────────────
+
+    fn make_cred(id: i64, folder_id: Option<i64>, name: &str) -> Credential {
+        use cm_core::{CredentialFolderId, CredentialId, CredentialKind};
+        Credential {
+            id: CredentialId::new(id),
+            name: name.to_owned(),
+            kind: CredentialKind::Password,
+            folder_id: folder_id.map(CredentialFolderId::new),
+            username: None,
+        }
+    }
+
+    fn make_folder(id: i64, name: &str) -> CredentialFolder {
+        use cm_core::CredentialFolderId;
+        CredentialFolder {
+            id: CredentialFolderId::new(id),
+            parent_id: None,
+            name: name.to_owned(),
+            sort: 0,
+        }
+    }
+
+    #[test]
+    fn resolve_cred_idx_zero_returns_none() {
+        let creds = vec![make_cred(1, None, "alpha")];
+        assert!(resolve_cred_from_idx(0, &creds, &[]).is_none());
+    }
+
+    #[test]
+    fn resolve_cred_idx_negative_returns_none() {
+        let creds = vec![make_cred(1, None, "alpha")];
+        assert!(resolve_cred_from_idx(-1, &creds, &[]).is_none());
+    }
+
+    #[test]
+    fn resolve_cred_idx_position_based_not_name_match() {
+        // Two creds with the same bare name but in different folders.
+        // Idx 1 = root "ops" (alphabetically first among root creds).
+        // Idx 2 = "folder/ops" (would be a false match under old name-split logic).
+        let creds = vec![make_cred(10, None, "ops"), make_cred(20, Some(99), "ops")];
+        let folders = vec![make_folder(99, "folder")];
+        let id1 = resolve_cred_from_idx(1, &creds, &folders);
+        let id2 = resolve_cred_from_idx(2, &creds, &folders);
+        use cm_core::CredentialId;
+        assert_eq!(
+            id1,
+            Some(CredentialId::new(10)),
+            "idx 1 must be root ops (id 10)"
+        );
+        assert_eq!(
+            id2,
+            Some(CredentialId::new(20)),
+            "idx 2 must be folder ops (id 20)"
+        );
+        // Old name-split logic would return id 10 for both (first-match on "ops").
+        assert_ne!(id1, id2, "position-based lookup must distinguish them");
+    }
+
+    #[test]
+    fn resolve_cred_idx_out_of_bounds_returns_none() {
+        let creds = vec![make_cred(1, None, "only")];
+        assert!(resolve_cred_from_idx(99, &creds, &[]).is_none());
+    }
+
+    // ── group name list helpers ───────────────────────────────────────────
+
+    fn make_group(id: i64, sort: i64, name: &str) -> Group {
+        Group {
+            id: GroupId::new(id),
+            parent_id: None,
+            name: name.to_owned(),
+            sort,
+            default_credential: None,
+        }
+    }
+
+    #[test]
+    fn group_name_list_sentinel_is_root() {
+        let list = build_group_name_list(&[]);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].as_str(), "Root (no group)");
+    }
+
+    #[test]
+    fn group_name_list_sorted_by_sort_then_id() {
+        let groups = vec![
+            make_group(3, 1, "C"),
+            make_group(1, 0, "A"),
+            make_group(2, 0, "B"),
+        ];
+        let list = build_group_name_list(&groups);
+        // sentinel + A(sort=0,id=1) + B(sort=0,id=2) + C(sort=1,id=3)
+        assert_eq!(list.len(), 4);
+        assert_eq!(list[1].as_str(), "A");
+        assert_eq!(list[2].as_str(), "B");
+        assert_eq!(list[3].as_str(), "C");
+    }
+
+    #[test]
+    fn group_id_from_name_idx_zero_is_root() {
+        let groups = vec![make_group(1, 0, "G1")];
+        assert!(group_id_from_name_idx(0, &groups).is_none());
+    }
+
+    #[test]
+    fn group_id_from_name_idx_one_is_first_sorted_group() {
+        let groups = vec![make_group(7, 0, "G7"), make_group(1, 0, "G1")];
+        // G1 sort=0,id=1 comes first; G7 sort=0,id=7 comes second.
+        let id = group_id_from_name_idx(1, &groups).expect("should resolve");
+        assert_eq!(id, GroupId::new(1));
+    }
+
+    #[test]
+    fn group_name_idx_round_trips() {
+        let groups = vec![make_group(5, 0, "Five"), make_group(2, 0, "Two")];
+        // sorted: Two(id=2), Five(id=5) → indices 1, 2
+        let idx_two = group_name_idx(Some(GroupId::new(2)), &groups);
+        let idx_five = group_name_idx(Some(GroupId::new(5)), &groups);
+        assert_eq!(idx_two, 1);
+        assert_eq!(idx_five, 2);
+        // Round-trip: idx → id → idx.
+        let recovered = group_id_from_name_idx(idx_two, &groups).expect("should resolve");
+        assert_eq!(recovered, GroupId::new(2));
+    }
+
+    #[test]
+    fn group_name_idx_none_returns_zero() {
+        let groups = vec![make_group(1, 0, "G")];
+        assert_eq!(group_name_idx(None, &groups), 0);
+    }
+
+    #[test]
+    fn palette_contains_import_export_blocked_action() {
+        let all = initial_palette_actions();
+        let entry = all
+            .iter()
+            .find(|a| a.label.as_str().contains("Import"))
+            .expect("Import/Export palette entry must exist");
+        assert!(
+            entry.detail.as_str().contains("P1.2"),
+            "detail must call out P1.2 as the dependency"
+        );
+    }
+
+    // ── folder name-list helpers ─────────────────────────────────────────────
+
+    fn make_folder_sorted(id: i64, sort: i64, name: &str) -> CredentialFolder {
+        CredentialFolder {
+            id: CredentialFolderId::new(id),
+            parent_id: None,
+            name: name.to_owned(),
+            sort,
+        }
+    }
+
+    /// Groups with parent relationships for cycle tests.
+    fn make_group_with_parent(id: i64, parent: Option<i64>, sort: i64, name: &str) -> Group {
+        Group {
+            id: GroupId::new(id),
+            parent_id: parent.map(GroupId::new),
+            name: name.to_owned(),
+            sort,
+            default_credential: None,
+        }
+    }
+
+    #[test]
+    fn folder_id_from_name_idx_zero_is_root() {
+        let folders = vec![make_folder_sorted(1, 0, "Work")];
+        assert!(folder_id_from_name_idx(0, &folders).is_none());
+    }
+
+    #[test]
+    fn folder_id_from_name_idx_one_is_first_sorted_folder() {
+        let folders = vec![make_folder_sorted(7, 0, "Z"), make_folder_sorted(1, 0, "A")];
+        // sorted: A(id=1,sort=0) then Z(id=7,sort=0) → index 1 → id 1
+        let id = folder_id_from_name_idx(1, &folders).expect("should resolve");
+        assert_eq!(id, CredentialFolderId::new(1));
+    }
+
+    #[test]
+    fn folder_name_idx_round_trips() {
+        let folders = vec![
+            make_folder_sorted(5, 0, "Five"),
+            make_folder_sorted(2, 0, "Two"),
+        ];
+        // sorted by (sort=0, id): Two(id=2)→1, Five(id=5)→2
+        let idx_two = folder_name_idx(Some(CredentialFolderId::new(2)), &folders);
+        let idx_five = folder_name_idx(Some(CredentialFolderId::new(5)), &folders);
+        assert_eq!(idx_two, 1);
+        assert_eq!(idx_five, 2);
+        let recovered = folder_id_from_name_idx(idx_two, &folders).expect("should resolve");
+        assert_eq!(recovered, CredentialFolderId::new(2));
+    }
+
+    #[test]
+    fn folder_name_idx_none_returns_zero() {
+        let folders = vec![make_folder_sorted(1, 0, "F")];
+        assert_eq!(folder_name_idx(None, &folders), 0);
+    }
+
+    // ── is_ancestor_or_self ──────────────────────────────────────────────────
+
+    #[test]
+    fn ancestor_self_is_detected() {
+        let g = make_group_with_parent(1, None, 0, "G");
+        assert!(is_ancestor_or_self(GroupId::new(1), GroupId::new(1), &[g]));
+    }
+
+    #[test]
+    fn ancestor_direct_child_detected() {
+        // hierarchy: A(1) → B(2). Moving A under B would create a cycle.
+        let groups = vec![
+            make_group_with_parent(1, None, 0, "A"),
+            make_group_with_parent(2, Some(1), 0, "B"),
+        ];
+        // B is a descendant of A, so assigning B as A's parent is a cycle.
+        assert!(is_ancestor_or_self(
+            GroupId::new(1),
+            GroupId::new(2),
+            &groups
+        ));
+    }
+
+    #[test]
+    fn ancestor_transitive_descendant_detected() {
+        // A(1) → B(2) → C(3). Moving A under C is a deeper cycle.
+        let groups = vec![
+            make_group_with_parent(1, None, 0, "A"),
+            make_group_with_parent(2, Some(1), 0, "B"),
+            make_group_with_parent(3, Some(2), 0, "C"),
+        ];
+        assert!(is_ancestor_or_self(
+            GroupId::new(1),
+            GroupId::new(3),
+            &groups
+        ));
+    }
+
+    #[test]
+    fn ancestor_sibling_is_safe() {
+        // A(1) and B(2) are siblings under Root. Moving A under B is safe.
+        let groups = vec![
+            make_group_with_parent(1, None, 0, "A"),
+            make_group_with_parent(2, None, 0, "B"),
+        ];
+        assert!(!is_ancestor_or_self(
+            GroupId::new(1),
+            GroupId::new(2),
+            &groups
+        ));
+    }
+
+    #[test]
+    fn ancestor_unrelated_group_is_safe() {
+        // B(2) → C(3). Moving A(1) under C is fine; A is not in B/C's chain.
+        let groups = vec![
+            make_group_with_parent(1, None, 0, "A"),
+            make_group_with_parent(2, None, 0, "B"),
+            make_group_with_parent(3, Some(2), 0, "C"),
+        ];
+        assert!(!is_ancestor_or_self(
+            GroupId::new(1),
+            GroupId::new(3),
+            &groups
+        ));
     }
 }

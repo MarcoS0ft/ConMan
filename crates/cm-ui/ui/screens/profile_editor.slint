@@ -1,0 +1,302 @@
+// P1.4 — Connection profile editor + group settings modal.
+//
+// ProfileEditor: per-kind form (SSH / RDP / Local) with name, host/port/user,
+// auth method, and credential assignment (with inherited/effective display).
+// GroupEditor:   sets the group name and its default_credential.
+//
+// Both are mounted inside a Modal in app.slint and populated by the Rust
+// controller before opening.  The Rust handler reads the form back via the
+// save callbacks; it MUST clear any transient secret fields immediately.
+
+import { Theme } from "../theme.slint";
+import {
+    FormField, PrimaryButton, SecondaryButton, SegmentedControl, Card
+} from "../components.slint";
+import { ComboBox } from "std-widgets.slint";
+
+// ── ConnProfile ────────────────────────────────────────────────────────────
+// Data bag for the connection profile editor. All fields are in-out so Rust
+// can pre-populate them before opening and read them back after save.
+//
+// `kind`  0 = SSH · 1 = RDP · 2 = Local
+// `auth-method`  0 = Public key · 1 = Password · 2 = Agent  (SSH only)
+// `selected-cred-idx`  index into AppWindow.cred-name-list; 0 = "Inherit"
+// `effective-cred-name`  resolved credential name (may come from a group)
+// `effective-inherited`  true when the effective cred comes from a group
+// `selected-group-idx`  index into AppWindow.group-name-list; 0 = "Root (no group)"
+export struct ConnProfile {
+    id: int,
+    name: string,
+    group-id: int,
+    kind: int,
+    host: string,
+    port: string,
+    username: string,
+    auth-method: int,
+    selected-cred-idx: int,
+    effective-cred-name: string,
+    effective-inherited: bool,
+    selected-group-idx: int,
+}
+
+// ── GroupForm ──────────────────────────────────────────────────────────────
+// Data bag for the group editor.  `default-cred-idx` is an index into
+// AppWindow.cred-name-list (0 = "No default / inherit from parent").
+// `selected-parent-idx` is an index into AppWindow.group-name-list;
+// 0 = "Root (no parent)".
+export struct GroupForm {
+    id: int,
+    name: string,
+    parent-id: int,
+    default-cred-idx: int,
+    selected-parent-idx: int,
+}
+
+// ── ProfileEditor ──────────────────────────────────────────────────────────
+// Mounted inside a Modal.  Rust sets `form` + `cred-name-list` + `group-name-list`
+// before opening.
+export component ProfileEditor {
+    in-out property <ConnProfile> form;
+    // Flat list of credential names for the ComboBox.
+    // cred-name-list[0] is always "Inherit from group"; the rest map 1-to-1
+    // to persisted credentials (Rust maintains this list in sync with the DB).
+    in property <[string]> cred-name-list;
+    // Flat list of group names for the group picker.
+    // group-name-list[0] is always "Root (no group)"; the rest are group names
+    // in sort order.  form.selected-group-idx indexes into this list.
+    in property <[string]> group-name-list;
+    callback save();
+    callback cancel();
+
+    VerticalLayout {
+        padding: Theme.space-6;
+        spacing: Theme.space-5;
+
+        // ── Title ──────────────────────────────────────────────────────
+        Text {
+            text: root.form.id == 0 ? "New Connection" : "Edit Connection";
+            color: Theme.color-text;
+            font-size: Theme.font-lg;
+            font-family: Theme.font-family;
+            font-weight: 700;
+        }
+
+        // ── Name ──────────────────────────────────────────────────────
+        FormField {
+            label: "Name";
+            placeholder: "Connection name";
+            text <=> root.form.name;
+        }
+
+        // ── Group (move between groups) ───────────────────────────────
+        if root.group-name-list.length > 0 : VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: "Group";
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-sm;
+                font-family: Theme.font-family;
+                font-weight: 600;
+            }
+            ComboBox {
+                model: root.group-name-list;
+                current-index <=> root.form.selected-group-idx;
+            }
+        }
+
+        // ── Kind ──────────────────────────────────────────────────────
+        VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: "Type";
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-sm;
+                font-family: Theme.font-family;
+                font-weight: 600;
+            }
+            SegmentedControl {
+                options: ["SSH", "RDP", "Local"];
+                selected <=> root.form.kind;
+            }
+        }
+
+        // ── Host / Port (SSH + RDP) ───────────────────────────────────
+        if root.form.kind != 2 : FormField {
+            label: "Host";
+            placeholder: "hostname or IP address";
+            text <=> root.form.host;
+        }
+        if root.form.kind != 2 : FormField {
+            label: "Port";
+            placeholder: root.form.kind == 0 ? "22" : "3389";
+            text <=> root.form.port;
+        }
+
+        // ── Username (SSH + RDP) ──────────────────────────────────────
+        if root.form.kind != 2 : FormField {
+            label: "Username";
+            placeholder: "login username";
+            text <=> root.form.username;
+        }
+
+        // ── Auth method (SSH only) ────────────────────────────────────
+        if root.form.kind == 0 : VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: "Authentication";
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-sm;
+                font-family: Theme.font-family;
+                font-weight: 600;
+            }
+            SegmentedControl {
+                options: ["Public Key", "Password", "Agent"];
+                selected <=> root.form.auth-method;
+            }
+        }
+
+        // ── Credential ────────────────────────────────────────────────
+        VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: "Credential";
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-sm;
+                font-family: Theme.font-family;
+                font-weight: 600;
+            }
+            ComboBox {
+                model: root.cred-name-list;
+                current-index <=> root.form.selected-cred-idx;
+            }
+            // Show the effective (possibly inherited) credential.
+            if root.form.effective-cred-name != "" : HorizontalLayout {
+                spacing: Theme.space-2;
+                padding-top: Theme.space-1;
+                Text {
+                    text: root.form.effective-inherited ? "Inheriting:" : "Using:";
+                    color: Theme.color-text-disabled;
+                    font-size: Theme.font-sm;
+                    font-family: Theme.font-family;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.form.effective-cred-name;
+                    color: root.form.effective-inherited
+                        ? Theme.color-accent : Theme.color-text;
+                    font-size: Theme.font-sm;
+                    font-family: Theme.font-family;
+                    font-weight: 500;
+                    vertical-alignment: center;
+                }
+                if root.form.effective-inherited : Text {
+                    text: "(from group)";
+                    color: Theme.color-text-disabled;
+                    font-size: Theme.font-sm;
+                    font-family: Theme.font-family;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // ── Actions ──────────────────────────────────────────────────
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            alignment: end;
+            padding-top: Theme.space-2;
+            SecondaryButton {
+                text: "Cancel";
+                clicked => { root.cancel(); }
+            }
+            PrimaryButton {
+                text: "Save";
+                enabled: root.form.name != "";
+                clicked => { root.save(); }
+            }
+        }
+    }
+}
+
+// ── GroupEditor ────────────────────────────────────────────────────────────
+// Lets the user rename a group, pick its default credential, and move it to a
+// different parent group.
+export component GroupEditor {
+    in-out property <GroupForm> form;
+    in property <[string]> cred-name-list;
+    // Flat list of group names for the parent picker.
+    // group-name-list[0] = "Root (no parent)"; the rest are sorted group names.
+    in property <[string]> group-name-list;
+    callback save();
+    callback cancel();
+
+    VerticalLayout {
+        padding: Theme.space-6;
+        spacing: Theme.space-5;
+
+        Text {
+            text: root.form.id == 0 ? "New Group" : "Group Settings";
+            color: Theme.color-text;
+            font-size: Theme.font-lg;
+            font-family: Theme.font-family;
+            font-weight: 700;
+        }
+
+        FormField {
+            label: "Name";
+            placeholder: "Group name";
+            text <=> root.form.name;
+        }
+
+        // ── Parent group (move between groups) ────────────────────────
+        if root.group-name-list.length > 0 : VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: "Parent Group";
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-sm;
+                font-family: Theme.font-family;
+                font-weight: 600;
+            }
+            ComboBox {
+                model: root.group-name-list;
+                current-index <=> root.form.selected-parent-idx;
+            }
+        }
+
+        VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: "Default Credential";
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-sm;
+                font-family: Theme.font-family;
+                font-weight: 600;
+            }
+            Text {
+                text: "Connections in this group inherit this credential unless they override it.";
+                color: Theme.color-text-disabled;
+                font-size: Theme.font-xs;
+                font-family: Theme.font-family;
+                wrap: word-wrap;
+            }
+            ComboBox {
+                model: root.cred-name-list;
+                current-index <=> root.form.default-cred-idx;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            alignment: end;
+            SecondaryButton {
+                text: "Cancel";
+                clicked => { root.cancel(); }
+            }
+            PrimaryButton {
+                text: "Save";
+                enabled: root.form.name != "";
+                clicked => { root.save(); }
+            }
+        }
+    }
+}

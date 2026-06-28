@@ -1,79 +1,80 @@
-// ConMan — main application window (Direction A shell, retrofit of P2.4).
+// ConMan — main application window (Direction A shell, P1.4 panels).
 //
-// Retrofits the P2.4 model-driven tab bar + TerminalSurface onto the design system
-// (theme.slint tokens + components.slint primitives) and adds the modern shell from
-// GUI_DESIGN §2: activity bar · collapsible side panel (connection tree) · tab strip ·
-// session area · status bar · broadcast bar. Targets Slint 1.17.
+// P1.4 additions over P2.8/P3.2 baseline:
+//  • ConnRow gains `depth: int` for subgroup indentation.
+//  • ConnectionRow gains CRUD hover buttons and group-toggle behaviour.
+//  • New CredRow struct + CredTreeRow component for the Keys panel.
+//  • New ConnProfile / GroupForm / CredFormData structs (in screen files).
+//  • Keys panel is now a real credential folder tree (replaces the P2.8 stub).
+//  • Connections panel header has New Group + New Connection buttons.
+//  • ProfileEditor / GroupEditor / CredEditor modals mounted here.
+//  • AppWindow gains credentials, cred-name-list, editor state + callbacks.
 //
-// BEHAVIOUR PRESERVED: TerminalSurface and its callbacks (key-input / pointer / scroll /
-// resized) are UNCHANGED from P2.4 — the Rust controller (crates/cm-ui/src/controller.rs)
-// keeps pushing a fresh `Image` into `frame` each tick. Only chrome is restyled + added.
-//
-// Feature overlays (command palette, quick-connect, host-key dialog, launchpad, settings)
-// live in their own files under screens/ and mount on top of this shell — see HANDOFF.md.
+// BEHAVIOUR PRESERVED: TerminalSurface and its callbacks are UNCHANGED from P2.4.
 
 import { Theme } from "theme.slint";
-import { StatusDot, StatusPill, IconButton, ActivityBarButton, PrimaryButton, EmptyState } from "components.slint";
-// ListView + Palette are exported from std-widgets in Slint 1.17.
-// Palette is needed to read Palette.color-scheme in the theme-changed callback.
+import {
+    StatusDot, StatusPill, IconButton, ActivityBarButton,
+    PrimaryButton, SecondaryButton, EmptyState
+} from "components.slint";
 import { ListView, Palette } from "std-widgets.slint";
-// Screen overlays — mounted as last children of AppWindow so they float above the shell.
 import { Modal, QuickConnectForm, HostKeyDialog } from "screens/dialogs.slint";
 import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
 import { SettingsPanel } from "screens/settings_panel.slint";
-// Session-state overlays (connecting / error) and the launchpad (empty-tab home screen).
-// These are compiled via the imports; gated by bools on AppWindow so they're always in the
-// compile graph but only visible when needed.
 import { ConnectingOverlay, ErrorOverlay } from "screens/session_overlays.slint";
 import { Launchpad, RecentItem } from "screens/launchpad.slint";
+import {
+    ConnProfile, GroupForm, ProfileEditor, GroupEditor
+} from "screens/profile_editor.slint";
+import { CredFormData, CredEditor } from "screens/cred_editor.slint";
 
-// ── Models ────────────────────────────────────────────────────────────────────
-// One tab = a pane group. `status` summarises the group (worst-of); `pane-count` drives
-// the ×N split badge.
+// ── Models ────────────────────────────────────────────────────────────────
 export struct TabItem {
     title: string,
     id: int,
-    status: string,      // "connected" | "connecting" | "disconnected" | "error"
-    pane-count: int,     // 1 = single session; >1 = split
+    status: string,
+    pane-count: int,
 }
 
-// Flattened connection tree row (group header OR leaf). The Rust side flattens the
-// group/leaf tree into this list honouring expand/collapse so the ListView stays simple.
+// Flattened connection-tree row.  `depth` drives left-indent (16 px per level).
+// Rust flattens the group/connection tree into this list honouring expand/collapse.
 export struct ConnRow {
     id: int,
     label: string,
-    host: string,        // leaf only, e.g. "ops@10.0.4.11"
-    kind: string,        // "SSH" | "RDP" | "LOCAL" ("" for groups)
-    status: string,      // leaf status string (StatusDot)
+    host: string,
+    kind: string,      // "SSH" | "RDP" | "LOCAL" | "" (groups)
+    status: string,
     is-group: bool,
-    expanded: bool,      // group only
-    selected: bool,      // active leaf (accent row)
+    expanded: bool,
+    selected: bool,
+    depth: int,        // 0 = root level, 1 = inside a group, etc.
 }
 
-// ── TerminalSurface (verbatim from P2.4; only `background` now tokenised) ───────
-// The terminal viewport: an Image fed by the renderer, wrapped in a FocusScope for keys
-// and a TouchArea for pointer/scroll. Emits normalized input + size changes to Rust.
-// Not exported: only AppWindow (inherits Window) is the root export; TerminalSurface is
-// used internally by AppWindow and Rust accesses it only through AppWindow's callbacks.
+// Flattened credential-folder row for the Keys panel.  Mirrors ConnRow shape.
+export struct CredRow {
+    id: int,
+    label: string,
+    kind: string,      // "Password" | "SSH Key" | "SSH Key+PP" | "" (folder)
+    username: string,
+    is-folder: bool,
+    expanded: bool,
+    selected: bool,
+    depth: int,
+}
+
+// ── TerminalSurface (verbatim from P2.4; background tokenised) ─────────────
 component TerminalSurface inherits Rectangle {
     in property <image> frame;
-
-    // text, special-key-code (0 = use text), modifier bitmask (1=ctrl 2=alt 4=shift 8=meta)
     callback key-input(string, int, int);
-    // button (1=L 2=R 3=M), kind (1=down 2=up 3=move), x, y (logical px), modifier bitmask
     callback pointer(int, int, length, length, int);
     callback scroll(length, length);
     callback resized(length, length);
-    // Fired for Ctrl-K / Ctrl-Shift-K (GUI_DESIGN §5 / §8 reserved Ctrl-Shift layer).
-    // The Rust controller opens/closes the palette in response instead of forwarding the
-    // key to the terminal session. Not a toggle here — AppWindow decides open vs. close.
     callback toggle-palette();
 
     pure function mods(c: bool, a: bool, s: bool, m: bool) -> int {
         (c ? 1 : 0) + (a ? 2 : 0) + (s ? 4 : 0) + (m ? 8 : 0)
     }
 
-    // Default terminal bg now derives from Theme so a theme switch recolors it too.
     background: Theme.color-terminal-bg;
     forward-focus: fs;
 
@@ -82,9 +83,6 @@ component TerminalSurface inherits Rectangle {
         height: 100%;
 
         key-pressed(e) => {
-            // ── Ctrl-K / Ctrl-Shift-K → command palette (GUI_DESIGN §5 / §8) ──────
-            // Intercepted BEFORE forwarding to the terminal so the shell never sees it.
-            // e.text is "k" for plain Ctrl-K and "K" for Ctrl-Shift-K.
             if (e.modifiers.control && (e.text == "k" || e.text == "K")) {
                 root.toggle-palette();
                 accept
@@ -144,7 +142,7 @@ component TerminalSurface inherits Rectangle {
     changed height => { root.resized(self.width, self.height); }
 }
 
-// ── Tab (retrofit of the P2.4 TabButton) ───────────────────────────────────────
+// ── Tab ────────────────────────────────────────────────────────────────────
 component Tab inherits Rectangle {
     in property <string> title;
     in property <string> status;
@@ -154,7 +152,7 @@ component Tab inherits Rectangle {
     callback closed();
 
     height: Theme.tab-height;
-    border-radius: Theme.radius-sm + 0px;  // top corners only (visually); kept simple here
+    border-radius: Theme.radius-sm + 0px;
     background: active ? Theme.color-card : (touch.has-hover ? Theme.color-hover : transparent);
 
     touch := TouchArea { clicked => { root.clicked(); } }
@@ -171,7 +169,6 @@ component Tab inherits Rectangle {
             font-family: Theme.font-family;
             vertical-alignment: center;
         }
-        // ×N split badge (only when this tab holds >1 pane).
         if root.pane-count > 1 : Rectangle {
             y: (parent.height - self.height) / 2;
             height: 16px;
@@ -182,7 +179,6 @@ component Tab inherits Rectangle {
                 Text {
                     text: "⊟ " + root.pane-count;
                     color: Theme.color-accent;
-                    // Split-badge chip text — Theme.font-xxs token (was 9px literal).
                     font-size: Theme.font-xxs;
                     font-family: Theme.font-family-mono;
                     vertical-alignment: center;
@@ -192,7 +188,7 @@ component Tab inherits Rectangle {
         VerticalLayout {
             alignment: center;
             IconButton {
-                glyph: "\u{E711}";    // Cancel / close
+                glyph: "\u{E711}";
                 size: 16px;
                 glyph-size: Theme.icon-xs;
                 clicked => { root.closed(); }
@@ -201,42 +197,57 @@ component Tab inherits Rectangle {
     }
 }
 
-// ── ConnectionRow (tree leaf or group header) ───────────────────────────────────
-// Note: `row` is reserved by Slint 1.17 for grid layout; property renamed to `data`.
+// ── ConnectionRow (P1.4: depth-indent + hover CRUD buttons) ────────────────
+// The base `touch` is the FIRST child so the HorizontalLayout (holding the
+// interactive action buttons) is rendered on top and captures clicks first —
+// the same pattern used by the Tab component's close button.
 component ConnectionRow inherits Rectangle {
     in property <ConnRow> data;
-    callback activated();
+    callback activated();       // open session tab (leaf)
+    callback toggled();         // expand / collapse group
+    callback edit-clicked();    // open profile / group editor
+    callback new-sub();         // new child item under this group
+    callback delete-clicked();
+    callback move-up();         // reorder: move one step up within same parent
+    callback move-down();       // reorder: move one step down within same parent
 
     height: Theme.tree-row-height;
     border-radius: Theme.radius-sm;
     background: data.selected ? Theme.color-accent-subtle
               : touch.has-hover ? Theme.color-hover : transparent;
 
-    // Accent rail on the selected leaf.
+    // Accent rail (selected connection).
     Rectangle {
-        x: 0px; width: 2.5px; height: 15px;
+        x: 0px; width: 2.5px; height: Theme.tag-height;
         y: (parent.height - self.height) / 2;
-        border-radius: 2px;
+        border-radius: Theme.radius-xs - 1px;
         background: data.selected ? Theme.color-accent : transparent;
     }
 
+    // Base touch — FIRST interactive child; content layer on top captures first.
+    touch := TouchArea {
+        clicked => {
+            if (data.is-group) { root.toggled(); }
+            else { root.activated(); }
+        }
+    }
+
     HorizontalLayout {
-        padding-left: data.is-group ? Theme.space-1 : Theme.space-6;
-        padding-right: Theme.space-2;
+        padding-left: (data.depth * 16px) + (data.is-group ? Theme.space-1 : Theme.space-3);
+        padding-right: Theme.space-1;
         spacing: Theme.space-2;
 
-        // Group chevron OR leaf status dot.
         VerticalLayout {
             alignment: center;
             if data.is-group : Text {
-                text: data.expanded ? "\u{E70D}" : "\u{E76C}";   // ChevronDown / ChevronRight
+                text: data.expanded ? "\u{E70D}" : "\u{E76C}";
                 font-family: Theme.font-family-icons;
-                // Chevron glyph — Theme.icon-xs token (was 10px literal).
                 font-size: Theme.icon-xs;
                 color: Theme.color-text-secondary;
             }
             if !data.is-group : StatusDot { state: data.status; diameter: 6px; }
         }
+
         Text {
             text: data.label;
             color: data.is-group ? Theme.color-text
@@ -248,19 +259,18 @@ component ConnectionRow inherits Rectangle {
             horizontal-stretch: 1;
             overflow: elide;
         }
-        // Protocol chip on leaves.
-        if !data.is-group : VerticalLayout {
+
+        if !data.is-group && data.kind != "" : VerticalLayout {
             alignment: center;
             Rectangle {
-                height: 15px;
-                border-radius: 3px;
+                height: Theme.tag-height;
+                border-radius: Theme.radius-xs;
                 background: Theme.color-hover;
                 HorizontalLayout {
                     padding-left: 5px; padding-right: 5px;
                     Text {
                         text: data.kind;
                         color: Theme.color-text-secondary;
-                        // Protocol chip text — Theme.font-xxs token (was 9px literal).
                         font-size: Theme.font-xxs;
                         font-family: Theme.font-family-mono;
                         font-weight: 600;
@@ -269,12 +279,149 @@ component ConnectionRow inherits Rectangle {
                 }
             }
         }
-    }
 
-    touch := TouchArea { clicked => { root.activated(); } }
+        // Hover action buttons (shown only while the pointer is over the row).
+        if touch.has-hover : HorizontalLayout {
+            spacing: Theme.gap-hairline;
+            alignment: center;
+            // ↑ / ↓ reorder within the same parent.
+            IconButton {
+                glyph: "\u{E70E}";   // ChevronUp
+                size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                clicked => { root.move-up(); }
+            }
+            IconButton {
+                glyph: "\u{E70D}";   // ChevronDown
+                size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                clicked => { root.move-down(); }
+            }
+            // Group: new-child + edit; Connection: edit (pencil).
+            if data.is-group : IconButton {
+                glyph: "\u{E710}";   // Add (new child)
+                size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                clicked => { root.new-sub(); }
+            }
+            IconButton {
+                glyph: "\u{E70F}";   // Edit (pencil)
+                size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                clicked => { root.edit-clicked(); }
+            }
+            IconButton {
+                glyph: "\u{E74D}";   // Delete (trash)
+                size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                glyph-color: Theme.color-error;
+                clicked => { root.delete-clicked(); }
+            }
+        }
+    }
 }
 
-// ── AppWindow ───────────────────────────────────────────────────────────────────
+// ── CredTreeRow — Keys panel tree row ─────────────────────────────────────
+component CredTreeRow inherits Rectangle {
+    in property <CredRow> data;
+    callback activated();
+    callback toggled();
+    callback new-sub();
+    callback delete-clicked();
+
+    height: Theme.tree-row-height;
+    border-radius: Theme.radius-sm;
+    background: data.selected ? Theme.color-accent-subtle
+              : touch.has-hover ? Theme.color-hover : transparent;
+
+    touch := TouchArea {
+        clicked => {
+            if (data.is-folder) { root.toggled(); }
+            else { root.activated(); }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: (data.depth * 16px) + (data.is-folder ? Theme.space-1 : Theme.space-3);
+        padding-right: Theme.space-1;
+        spacing: Theme.space-2;
+
+        VerticalLayout {
+            alignment: center;
+            if data.is-folder : Text {
+                text: data.expanded ? "\u{E70D}" : "\u{E76C}";
+                font-family: Theme.font-family-icons;
+                font-size: Theme.icon-xs;
+                color: Theme.color-text-secondary;
+            }
+            if !data.is-folder : Rectangle {
+                width: 7px; height: 7px;
+                border-radius: 4px;
+                background: Theme.color-accent-subtle;
+            }
+        }
+
+        Text {
+            text: data.label;
+            color: data.is-folder ? Theme.color-text : Theme.color-text-secondary;
+            font-size: Theme.font-base;
+            font-family: Theme.font-family;
+            font-weight: data.is-folder ? 600 : 500;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+
+        if !data.is-folder && data.username != "" : VerticalLayout {
+            alignment: center;
+            Text {
+                text: data.username;
+                color: Theme.color-text-disabled;
+                font-size: Theme.font-xxs;
+                font-family: Theme.font-family-mono;
+                vertical-alignment: center;
+            }
+        }
+
+        if !data.is-folder && data.kind != "" : VerticalLayout {
+            alignment: center;
+            Rectangle {
+                height: Theme.tag-height;
+                border-radius: Theme.radius-xs;
+                background: Theme.color-hover;
+                HorizontalLayout {
+                    padding-left: 5px; padding-right: 5px;
+                    Text {
+                        text: data.kind;
+                        color: Theme.color-text-secondary;
+                        font-size: Theme.font-xxs;
+                        font-family: Theme.font-family-mono;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        if touch.has-hover : HorizontalLayout {
+            spacing: Theme.gap-hairline;
+            alignment: center;
+            if data.is-folder : IconButton {
+                glyph: "\u{E710}";
+                size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                clicked => { root.new-sub(); }
+            }
+            if !data.is-folder : IconButton {
+                glyph: "\u{E70F}";
+                size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                clicked => { root.activated(); }
+            }
+            IconButton {
+                glyph: "\u{E74D}";
+                size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                glyph-color: Theme.color-error;
+                clicked => { root.delete-clicked(); }
+            }
+        }
+    }
+}
+
+// ── AppWindow ──────────────────────────────────────────────────────────────
 export component AppWindow inherits Window {
     title: "ConMan";
     preferred-width: 1280px;
@@ -282,31 +429,39 @@ export component AppWindow inherits Window {
     background: Theme.color-base;
     forward-focus: surface;
 
-    // Tabs / session (P2.4 contract, extended with status + pane-count).
+    // ── Session / tabs (P2.4 contract unchanged) ──────────────────────
     in property <[TabItem]> tabs;
     in property <int>       active-tab;
     in property <image>     frame;
 
-    // Side panel.
+    // ── Side panel ────────────────────────────────────────────────────
     in property <[ConnRow]> connections;
-    in-out property <int>   active-panel: 0;   // 0 Connections · 1 Keys · 2 Settings
+    in-out property <int>   active-panel: 0;
     in-out property <bool>  sidebar-collapsed: false;
 
-    // Status bar / broadcast.
-    in property <string> session-status: "disconnected";
-    in property <string> session-identity: "";
+    // ── Keys panel data ───────────────────────────────────────────────
+    in property <[CredRow]>  credentials;
+    // Flat list of credential names for all dropdowns.
+    // Index 0 = "Inherit from group" / "No default"; 1.. = credential names.
+    in property <[string]>   cred-name-list;
+    // Flat folder name list for the credential editor's folder picker.
+    in property <[string]>   folder-name-list;
+    // Flat list of group names for the group/parent pickers in editors.
+    // Index 0 = "Root (no group)"; 1.. = group names in sort order.
+    in property <[string]>   group-name-list;
+
+    // ── Status bar / broadcast ────────────────────────────────────────
+    in property <string>  session-status: "disconnected";
+    in property <string>  session-identity: "";
     in-out property <bool> broadcast-active: false;
 
-    // Command palette overlay.
-    in-out property <bool>             palette-open: false;
-    in-out property <string>           palette-query: "";
-    in property <[PaletteAction]>      palette-actions;
-    // Keyboard-selection index within the palette's filtered result list.
-    // Rust increments/decrements this on Up/Down (via on_key_input when palette is open)
-    // and resets it to 0 on each palette-edited call.
-    in-out property <int>              palette-selected: 0;
+    // ── Command palette ───────────────────────────────────────────────
+    in-out property <bool>           palette-open: false;
+    in-out property <string>         palette-query: "";
+    in property <[PaletteAction]>    palette-actions;
+    in-out property <int>            palette-selected: 0;
 
-    // Session-state overlays (gated — default hidden; P3.2 drives these from tab state).
+    // ── Session overlays ──────────────────────────────────────────────
     in-out property <bool>   overlay-connecting: false;
     in-out property <bool>   overlay-error: false;
     in-out property <bool>   launchpad-open: false;
@@ -315,30 +470,22 @@ export component AppWindow inherits Window {
     in property <string>     error-detail: "";
     in property <[RecentItem]> launchpad-recents;
     in-out property <string> launchpad-query: "";
-    // Fired by ErrorOverlay Reconnect button; P3.2 re-establishes the session.
     callback reconnect();
-    // Launchpad search / recent-item callbacks; P3.2 wires real connection data.
     callback launchpad-edited(string);
     callback open-recent(int);
     callback open-group-split();
 
-    // ── Quick-connect form (P3.2) ─────────────────────────────────────────────
-    // Modal over the shell; Rust opens it via quick-connect(); data read back in qc-connect().
-    // auth-method: 0 Public key · 1 Password · 2 Agent (must match SegmentedControl order).
+    // ── Quick-connect form (P3.2) ─────────────────────────────────────
     in-out property <bool>   quick-connect-open: false;
     in-out property <string> qc-host: "";
     in-out property <string> qc-port: "22";
     in-out property <string> qc-username: "";
-    in-out property <int>    qc-auth-method: 1;   // default: Password
-    in-out property <string> qc-secret: "";        // password text OR key-file path
-    in-out property <string> qc-passphrase: "";    // key-file passphrase
-    // Fired by the form's Connect button; Rust reads the above props and spawns the session.
+    in-out property <int>    qc-auth-method: 1;
+    in-out property <string> qc-secret: "";
+    in-out property <string> qc-passphrase: "";
     callback qc-connect();
 
-    // ── Host-key dialog (P3.2 / P3.1 policy) ─────────────────────────────────
-    // Blocked-connect path: Rust's UiHostKeyVerifier opens this via invoke_from_event_loop,
-    // then blocks on a channel waiting for host-key-accept() or host-key-reject() to fire.
-    // Do NOT dismiss by clicking the scrim — user must make an explicit choice.
+    // ── Host-key dialog (P3.2) ────────────────────────────────────────
     in-out property <bool>   host-key-open: false;
     in property <bool>       host-key-mismatch: false;
     in property <string>     host-key-host: "";
@@ -348,18 +495,27 @@ export component AppWindow inherits Window {
     callback host-key-accept();
     callback host-key-reject();
 
-    // Settings (theme mode driven from the settings panel).
-    in-out property <int>  theme-mode: 2;  // 0 dark · 1 light · 2 system
-
-    // Appearance bridge properties — two-way aliases to Theme globals so Rust (cm-platform
-    // or test fixtures) can inject OS-level values without touching Theme directly.
-    //   ui.set_dark_mode(true)   // force dark
-    //   ui.set_dark_mode(false)  // force light
-    //   ui.set_accent(Color::…)  // inject OS accent (e.g. DwmGetColorizationColor)
+    // ── Appearance ────────────────────────────────────────────────────
+    in-out property <int>   theme-mode: 2;
     in-out property <bool>  dark-mode <=> Theme.dark-mode;
     in-out property <color> accent    <=> Theme.accent;
 
-    // Shell callbacks.
+    // ── P1.4: Profile editor modal ───────────────────────────────────
+    in-out property <bool>        profile-editor-open: false;
+    in-out property <ConnProfile> profile-form;
+    callback profile-save();
+
+    // ── P1.4: Group editor modal ──────────────────────────────────────
+    in-out property <bool>      group-editor-open: false;
+    in-out property <GroupForm> group-form;
+    callback group-save();
+
+    // ── P1.4: Credential editor modal ────────────────────────────────
+    in-out property <bool>         cred-editor-open: false;
+    in-out property <CredFormData> cred-form;
+    callback cred-save();
+
+    // ── Shell callbacks ───────────────────────────────────────────────
     callback select-tab(int);
     callback close-tab(int);
     callback new-tab();
@@ -372,7 +528,27 @@ export component AppWindow inherits Window {
     callback palette-edited(string);
     callback palette-activated(int);
     callback theme-changed(int);
-    callback accent-changed(int);   // fired when a preset swatch is picked; idx into Theme.accent-presets
+    callback accent-changed(int);
+
+    // P1.4 — Connections panel CRUD.
+    callback toggle-conn-row(int);       // idx → expand/collapse group
+    callback new-connection(int);        // parent group_id (0=root)
+    callback new-group(int);             // parent group_id (0=root)
+    callback edit-conn(int);             // connection id → profile editor
+    callback edit-group(int);            // group id → group editor
+    callback delete-conn-row(int, bool); // id, is_group
+    // P1.4 — Reorder (up/down within the same parent) + move-between-groups.
+    // Reorder is wired from hover ↑/↓ buttons; move-between-groups is exposed
+    // via the group/parent-group ComboBoxes in the profile and group editors.
+    callback reorder-conn-row(int, int);  // conn_id, direction (-1=up, +1=down)
+    callback reorder-group-row(int, int); // group_id, direction
+
+    // P1.4 — Keys panel CRUD.
+    callback toggle-cred-row(int);        // idx → expand/collapse folder
+    callback new-cred-folder(int);        // parent_folder_id (0=root)
+    callback new-cred(int);               // folder_id (0=root)
+    callback edit-cred(int);              // credential id
+    callback delete-cred-row(int, bool);  // id, is_folder
 
     // TerminalSurface passthrough (UNCHANGED from P2.4).
     callback key-input(string, int, int);
@@ -380,9 +556,9 @@ export component AppWindow inherits Window {
     callback scroll(length, length);
     callback surface-resized(length, length);
 
-    // ── Main shell (fills the window) ──────────────────────────────────────────
+    // ── Main shell ────────────────────────────────────────────────────
     VerticalLayout {
-        // ── Tab strip ──────────────────────────────────────────────────────────
+        // Tab strip.
         Rectangle {
             height: 40px;
             background: Theme.color-base.darker(0.2);
@@ -399,14 +575,14 @@ export component AppWindow inherits Window {
                     closed => { root.close-tab(idx); }
                 }
                 IconButton {
-                    glyph: "\u{E710}";   // Add
+                    glyph: "\u{E710}";
                     clicked => { root.new-tab(); }
                 }
                 Rectangle { horizontal-stretch: 1; }
             }
         }
 
-        // ── Body: activity bar + side panel + session area ──────────────────────
+        // Body: activity bar + side panel + session area.
         HorizontalLayout {
             spacing: 0px;
             vertical-stretch: 1;
@@ -419,27 +595,32 @@ export component AppWindow inherits Window {
                     padding-top: Theme.space-2;
                     padding-bottom: Theme.space-2;
                     spacing: Theme.space-1;
-                    ActivityBarButton { glyph: "\u{E968}"; active: active-panel == 0;  // Server/Connections
-                        clicked => { root.select-panel(0); } }
-                    ActivityBarButton { glyph: "\u{E8D7}"; active: active-panel == 1;  // Permissions/Keys
-                        clicked => { root.select-panel(1); } }
+                    ActivityBarButton {
+                        glyph: "\u{E968}"; active: active-panel == 0;
+                        clicked => { root.select-panel(0); }
+                    }
+                    ActivityBarButton {
+                        glyph: "\u{E8D7}"; active: active-panel == 1;
+                        clicked => { root.select-panel(1); }
+                    }
                     Rectangle { vertical-stretch: 1; }
-                    ActivityBarButton { glyph: "\u{E713}"; active: active-panel == 2;  // Settings
-                        clicked => { root.select-panel(2); } }
-                    ActivityBarButton { glyph: "\u{E77B}"; }                            // Account
+                    ActivityBarButton {
+                        glyph: "\u{E713}"; active: active-panel == 2;
+                        clicked => { root.select-panel(2); }
+                    }
+                    ActivityBarButton { glyph: "\u{E77B}"; }
                 }
             }
 
-            // Side panel (collapsible; content switches by active-panel).
+            // Side panel (collapsible).
             if !sidebar-collapsed : Rectangle {
                 width: Theme.side-panel-width;
                 background: Theme.color-elevated;
 
-                // ── Connections panel (panel 0) ──────────────────────────────────
+                // ── Connections panel ──────────────────────────────
                 if active-panel == 0 : VerticalLayout {
-                    // Header.
                     HorizontalLayout {
-                        padding-left: Theme.space-4; padding-right: Theme.space-3;
+                        padding-left: Theme.space-4; padding-right: Theme.space-2;
                         padding-top: Theme.space-3; padding-bottom: Theme.space-2;
                         Text {
                             text: "CONNECTIONS";
@@ -451,18 +632,50 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
-                        IconButton { glyph: "\u{E710}"; size: 24px; glyph-size: 12px;
-                            clicked => { root.quick-connect(); } }
+                        IconButton {
+                            glyph: "\u{E8F4}";   // New folder / group
+                            size: 24px; glyph-size: 12px;
+                            clicked => { root.new-group(0); }
+                        }
+                        IconButton {
+                            glyph: "\u{E710}";   // Add connection
+                            size: 24px; glyph-size: 12px;
+                            clicked => { root.new-connection(0); }
+                        }
                     }
-                    // Tree.
+
                     ListView {
                         vertical-stretch: 1;
                         for conn[idx] in connections: ConnectionRow {
                             data: conn;
-                            activated => { root.row-activated(idx); }
+                            activated     => { root.row-activated(idx); }
+                            toggled       => { root.toggle-conn-row(idx); }
+                            edit-clicked  => {
+                                if (conn.is-group) { root.edit-group(conn.id); }
+                                else { root.edit-conn(conn.id); }
+                            }
+                            new-sub => { root.new-connection(conn.id); }
+                            delete-clicked => {
+                                root.delete-conn-row(conn.id, conn.is-group);
+                            }
+                            move-up => {
+                                if (conn.is-group) { root.reorder-group-row(conn.id, -1); }
+                                else { root.reorder-conn-row(conn.id, -1); }
+                            }
+                            move-down => {
+                                if (conn.is-group) { root.reorder-group-row(conn.id, 1); }
+                                else { root.reorder-conn-row(conn.id, 1); }
+                            }
                         }
                     }
-                    // Footer quick-connect.
+
+                    if connections.length == 0 : EmptyState {
+                        vertical-stretch: 1;
+                        glyph: "\u{E968}";
+                        title: "No connections yet";
+                        subtitle: "Use the + button above to add your first connection.";
+                    }
+
                     Rectangle {
                         height: 52px;
                         HorizontalLayout {
@@ -475,40 +688,64 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // ── Keys panel (panel 1) — stub ──────────────────────────────────
+                // ── Keys panel ─────────────────────────────────────
                 if active-panel == 1 : VerticalLayout {
                     HorizontalLayout {
-                        padding-left: Theme.space-4; padding-top: Theme.space-3;
-                        Text { text: "KEYS"; color: Theme.color-text-disabled;
-                            font-size: Theme.font-sm; font-family: Theme.font-family;
-                            font-weight: 700; letter-spacing: 0.7px; }
+                        padding-left: Theme.space-4; padding-right: Theme.space-2;
+                        padding-top: Theme.space-3; padding-bottom: Theme.space-2;
+                        Text {
+                            text: "KEYS";
+                            color: Theme.color-text-disabled;
+                            font-size: Theme.font-sm;
+                            font-family: Theme.font-family;
+                            font-weight: 700;
+                            letter-spacing: 0.7px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        IconButton {
+                            glyph: "\u{E8F4}";   // New folder
+                            size: 24px; glyph-size: 12px;
+                            clicked => { root.new-cred-folder(0); }
+                        }
+                        IconButton {
+                            glyph: "\u{E710}";   // New credential
+                            size: 24px; glyph-size: 12px;
+                            clicked => { root.new-cred(0); }
+                        }
                     }
-                    EmptyState {
+
+                    ListView {
+                        vertical-stretch: 1;
+                        for cred[idx] in credentials: CredTreeRow {
+                            data: cred;
+                            activated      => { root.edit-cred(cred.id); }
+                            toggled        => { root.toggle-cred-row(idx); }
+                            new-sub        => { root.new-cred(cred.id); }
+                            delete-clicked => {
+                                root.delete-cred-row(cred.id, cred.is-folder);
+                            }
+                        }
+                    }
+
+                    if credentials.length == 0 : EmptyState {
                         vertical-stretch: 1;
                         glyph: "\u{E8D7}";
                         title: "No credentials yet";
-                        subtitle: "SSH keys and credentials will appear here (P1).";
+                        subtitle: "Use the + button above to add SSH keys or passwords.";
                     }
                 }
 
-                // ── Settings panel (panel 2) ──────────────────────────────────────
+                // ── Settings panel ─────────────────────────────────
                 if active-panel == 2 : SettingsPanel {
                     theme-mode <=> root.theme-mode;
                     theme-changed(i) => {
                         root.theme-changed(i);
-                        // 0 dark · 1 light · 2 system → drive Theme.dark-mode.
-                        // Once a manual write occurs the property's Palette binding is
-                        // permanently broken in Slint (assignment replaces a binding).
-                        // For mode 2 we re-apply the current OS value so at least the
-                        // "System" pick is not a silent no-op. A proper reactive fix
-                        // (flags-based approach in Theme global) is deferred to P5.
                         if (i == 0) { Theme.dark-mode = true; }
                         else if (i == 1) { Theme.dark-mode = false; }
                         else { Theme.dark-mode = (Palette.color-scheme == ColorScheme.dark); }
                     }
-                    accent-changed(i) => {
-                        root.accent-changed(i);
-                    }
+                    accent-changed(i) => { root.accent-changed(i); }
                 }
             }
 
@@ -523,15 +760,11 @@ export component AppWindow inherits Window {
                     pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
                     scroll(dx, dy) => { root.scroll(dx, dy); }
                     resized(w, h) => { root.surface-resized(w, h); }
-                    // Ctrl-K / Ctrl-Shift-K toggles the command palette (Finding 1 fix).
-                    // TerminalSurface intercepts it before the terminal session sees it.
                     toggle-palette => {
                         root.palette-open = !root.palette-open;
                         if (!root.palette-open) { root.palette-selected = 0; }
                     }
                 }
-                // Broadcast bar (only while armed). Input handling lives in the
-                // BroadcastBar screen component; this is the docked affordance.
                 if broadcast-active : Rectangle {
                     height: 46px;
                     background: Theme.color-elevated;
@@ -541,7 +774,7 @@ export component AppWindow inherits Window {
                         padding-left: Theme.space-4; padding-right: Theme.space-4;
                         spacing: Theme.space-3;
                         Text {
-                            text: "\u{E95A}  Broadcast on";   // Streaming glyph
+                            text: "\u{E95A}  Broadcast on";
                             color: Theme.color-accent;
                             font-size: Theme.font-sm;
                             font-family: Theme.font-family;
@@ -554,7 +787,7 @@ export component AppWindow inherits Window {
             }
         }
 
-        // ── Status bar ──────────────────────────────────────────────────────────
+        // Status bar.
         Rectangle {
             height: Theme.status-bar-height;
             background: Theme.color-base.darker(0.2);
@@ -571,7 +804,6 @@ export component AppWindow inherits Window {
                     }
                 }
                 Rectangle { horizontal-stretch: 1; }
-                // Palette hint.
                 Rectangle {
                     y: (parent.height - self.height) / 2;
                     height: 18px;
@@ -580,7 +812,6 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         padding-left: Theme.space-2; padding-right: Theme.space-2;
                         spacing: Theme.space-1;
-                        // Keyboard hint — Theme.font-xs token (was 10px literal).
                         Text { text: "Ctrl K"; color: Theme.color-accent; font-size: Theme.font-xs;
                             font-family: Theme.font-family-mono; font-weight: 700; vertical-alignment: center; }
                         Text { text: "Palette"; color: Theme.color-accent; font-size: Theme.font-sm;
@@ -592,15 +823,12 @@ export component AppWindow inherits Window {
         }
     }
 
-    // ── Session-state overlays — float above the shell, below the palette ───────
-    // ConnectingOverlay: shown while an SSH session is being established.
-    // Gated by overlay-connecting; defaults false so normally invisible.
+    // ── Session-state overlays ────────────────────────────────────────────
     if overlay-connecting : ConnectingOverlay {
         x: 0; y: 0; width: 100%; height: 100%;
         identity: session-identity;
         step: connecting-step;
     }
-    // ErrorOverlay: shown on connection failure.
     if overlay-error : ErrorOverlay {
         x: 0; y: 0; width: 100%; height: 100%;
         identity: session-identity;
@@ -609,7 +837,6 @@ export component AppWindow inherits Window {
         reconnect => { root.reconnect(); }
         edit => { root.quick-connect(); }
     }
-    // Launchpad: fills the session area for a tab with no live session.
     if launchpad-open : Launchpad {
         x: 0; y: 0; width: 100%; height: 100%;
         recents: launchpad-recents;
@@ -620,9 +847,7 @@ export component AppWindow inherits Window {
         open-group-split => { root.open-group-split(); }
     }
 
-    // ── Quick-connect form modal (P3.2) — above session overlays ────────────────
-    // Esc / click-out dismisses (no connection started). Secrets in qc-secret /
-    // qc-passphrase are cleared by Rust after reading them in the qc-connect callback.
+    // ── Quick-connect modal ───────────────────────────────────────────────
     Modal {
         open: root.quick-connect-open;
         dismissed => { root.quick-connect-open = false; }
@@ -638,44 +863,71 @@ export component AppWindow inherits Window {
         }
     }
 
-    // ── Host-key dialog modal (P3.2 / P3.1 policy) ───────────────────────────
-    // Blocks the SSH driver's tokio thread (via a back-channel) until the user decides.
-    // Do NOT wire dismissed → close: the user must choose Accept or Reject explicitly.
+    // ── Host-key dialog ───────────────────────────────────────────────────
     Modal {
         open: root.host-key-open;
-        dismissed => {}   // security: no click-out dismiss; explicit choice required
+        dismissed => {}
         HostKeyDialog {
-            mismatch:          root.host-key-mismatch;
-            host:              root.host-key-host;
-            key-type:          root.host-key-type;
-            fingerprint:       root.host-key-fingerprint;
+            mismatch:           root.host-key-mismatch;
+            host:               root.host-key-host;
+            key-type:           root.host-key-type;
+            fingerprint:        root.host-key-fingerprint;
             stored-fingerprint: root.host-key-stored-fp;
             reject => { root.host-key-reject(); }
             accept => { root.host-key-accept(); }
         }
     }
 
-    // ── Command palette overlay — LAST child so it floats above the shell ──────
-    // The Modal provides the scrim + click-out dismiss. Dismiss also resets selection.
-    // Ctrl-K / Ctrl-Shift-K is intercepted in TerminalSurface.fs.key-pressed (above);
-    // the `toggle-palette` callback on TerminalSurface flips `palette-open` here.
-    // Typing while the palette is open is routed through Rust's on_key_input, which
-    // updates palette-query and palette-selected without the LineEdit needing focus.
+    // ── P1.4: Profile editor modal ────────────────────────────────────────
+    Modal {
+        open: root.profile-editor-open;
+        dismissed => { root.profile-editor-open = false; }
+        ProfileEditor {
+            form <=> root.profile-form;
+            cred-name-list: root.cred-name-list;
+            group-name-list: root.group-name-list;
+            save   => { root.profile-save(); }
+            cancel => { root.profile-editor-open = false; }
+        }
+    }
+
+    // ── P1.4: Group editor modal ──────────────────────────────────────────
+    Modal {
+        open: root.group-editor-open;
+        dismissed => { root.group-editor-open = false; }
+        GroupEditor {
+            form <=> root.group-form;
+            cred-name-list: root.cred-name-list;
+            group-name-list: root.group-name-list;
+            save   => { root.group-save(); }
+            cancel => { root.group-editor-open = false; }
+        }
+    }
+
+    // ── P1.4: Credential editor modal ─────────────────────────────────────
+    Modal {
+        open: root.cred-editor-open;
+        dismissed => { root.cred-editor-open = false; }
+        CredEditor {
+            form <=> root.cred-form;
+            folder-name-list: root.folder-name-list;
+            save   => { root.cred-save(); }
+            cancel => { root.cred-editor-open = false; }
+        }
+    }
+
+    // ── Command palette (last child = topmost z-layer) ────────────────────
     palette-modal := Modal {
         open: root.palette-open;
         dismissed => {
             root.palette-open = false;
             root.palette-selected = 0;
         }
-
         CommandPalette {
             query <=> root.palette-query;
             actions: root.palette-actions;
-            // Keyboard selection index driven by Rust on Up/Down keys.
             selected-index <=> root.palette-selected;
-            edited(q) => {
-                root.palette-edited(q);
-            }
+            edited(q) => { root.palette-edited(q); }
             activated(idx) => {
                 root.palette-open = false;
                 root.palette-selected = 0;
