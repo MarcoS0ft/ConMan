@@ -51,6 +51,17 @@ def main() -> int:
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--theme", default="dark")
+    ap.add_argument(
+        "--shot-path",
+        default=None,
+        help=(
+            "Path passed verbatim to the {\"cmd\":\"screenshot\"} request, on the "
+            "filesystem of the machine actually running conman (not necessarily this "
+            "one) — e.g. a Windows path when driving Part B's runner over an SSH "
+            "port-forward (scripts/qa-win.sh). Defaults to "
+            "<out-dir>/qa-scenario-<theme>.png (this machine == the QA target)."
+        ),
+    )
     args = ap.parse_args()
 
     client = QaClient(args.host, args.port)
@@ -79,7 +90,7 @@ def main() -> int:
             raise AssertionError("state: tab count changed unexpectedly after typing a probe")
 
         # 4. screenshot.
-        shot_path = f"{args.out_dir}/qa-scenario-{args.theme}.png"
+        shot_path = args.shot_path or f"{args.out_dir}/qa-scenario-{args.theme}.png"
         reply3 = expect_ok(
             "screenshot", client.send({"cmd": "screenshot", "path": shot_path})
         )
