@@ -82,17 +82,31 @@ CONMAN_QA_PORT="$PORT" \
 APP_PID=$!
 
 cleanup() {
+    # When wrapped in xvfb-run, $APP_PID is the xvfb-run shell, not conman
+    # itself. If xvfb-run's own shell is killed (or dies from `timeout`)
+    # before it forwards the signal, conman is reparented to init and keeps
+    # running as an orphan holding the single-instance loopback lock
+    # (cm-platform, port 52734) — which then blocks the *next* scenario run
+    # from ever starting. Match by the exact binary path (not just "conman",
+    # and not Xvfb — this host runs several agents' builds in parallel, so
+    # only kill what *this* script launched) rather than relying on process
+    # tree parentage, which is not reliable across xvfb-run/timeout layers.
+    pkill -TERM -f "$BINARY" 2>/dev/null || true
     if kill -0 "$APP_PID" 2>/dev/null; then
         kill "$APP_PID" 2>/dev/null || true
         wait "$APP_PID" 2>/dev/null || true
     fi
+    sleep 0.2
+    pkill -KILL -f "$BINARY" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 # Wait for the QA socket to accept connections (bounded poll, no fixed sleep
-# for command sequencing — only for the one-time process-startup race).
+# for command sequencing — only for the one-time process-startup race). 30s
+# covers a loaded/shared build host (winit + software GL under xvfb can take
+# a few seconds to come up even when the host is otherwise idle).
 ready=0
-for _ in $(seq 1 100); do
+for _ in $(seq 1 300); do
     if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
         exec 3>&- 3<&-
         ready=1
