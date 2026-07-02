@@ -407,6 +407,11 @@ export component SettingsPanel inherits Rectangle {
             ShortcutRow { keys: "Ctrl ⇧ B";    action: "Toggle broadcast to all panes"; }
             ShortcutRow { keys: "Ctrl ⇧ ←/→";  action: "Focus prev / next pane (H-split)"; }
             ShortcutRow { keys: "Ctrl ⇧ ↑/↓";  action: "Focus prev / next pane (V-split)"; }
+            // P6.9 (gap 17): direct shortcuts on the same reserved Ctrl⇧ layer.
+            ShortcutRow { keys: "Ctrl ⇧ T";    action: "Open new local tab"; }
+            ShortcutRow { keys: "Ctrl ⇧ Tab";  action: "Switch to next tab"; }
+            ShortcutRow { keys: "Ctrl ⇧ 1-9";  action: "Jump to tab N"; }
+            ShortcutRow { keys: "Ctrl ⇧ E";    action: "Toggle the side panel"; }
 
             // Sub-header: global shortcuts
             Rectangle {
