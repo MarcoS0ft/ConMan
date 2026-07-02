@@ -609,6 +609,14 @@ export component AppWindow inherits Window {
     in property <[ConnRow]> connections;
     in-out property <int>   active-panel: 0;
     in-out property <bool>  sidebar-collapsed: false;
+    // P6.9 (gap 11): live + persisted side-panel width in logical px. Plain
+    // `int` (not `length`) — the Rust side stores/round-trips it as a plain
+    // pixel integer via the settings table, same as every other persisted
+    // int preference (theme-mode, density, ...).
+    in-out property <int>   sidebar-width: Theme.side-panel-width / 1px;
+    // Fired once per drag gesture (on pointer-up), not on every intermediate
+    // move — avoids spamming the settings DB while dragging.
+    callback sidebar-width-changed(int);
     // P5.3b: live search/filter for the connection tree and keys tree.
     in-out property <string> conn-filter: "";
     in-out property <string> cred-filter: "";
@@ -839,13 +847,21 @@ export component AppWindow inherits Window {
                         glyph: "\u{F0493}"; active: active-panel == 2;
                         clicked => { root.select-panel(2); }
                     }
+                    // P6.9 (gap 11): chrome collapse toggle beyond the palette-only
+                    // path ("Toggle sidebar" in the command palette). Same glyph as
+                    // that palette action (cod-three_bars); `active` mirrors the
+                    // current collapsed state so the rail lights up when hidden.
+                    ActivityBarButton {
+                        glyph: "\u{EB6A}"; active: root.sidebar-collapsed;
+                        clicked => { root.toggle-sidebar(); }
+                    }
                     ActivityBarButton { glyph: "\u{F0849}"; }
                 }
             }
 
-            // Side panel (collapsible).
+            // Side panel (collapsible + drag-resizable).
             if !sidebar-collapsed : Rectangle {
-                width: Theme.side-panel-width;
+                width: root.sidebar-width * 1px;
                 background: Theme.color-elevated;
 
                 // ── Connections panel ──────────────────────────────
@@ -1096,6 +1112,35 @@ export component AppWindow inherits Window {
                     shell-args-changed(v)        => { root.settings-shell-args-changed(v); }
                     shell-cwd-changed(v)         => { root.settings-shell-cwd-changed(v); }
                     startup-behavior-changed(v)  => { root.startup-behavior-changed(v); }
+                }
+            }
+
+            // Side-panel drag handle (P6.9, gap 11). Live-resizes `sidebar-width`
+            // (clamped to Theme's min/max) while dragging; commits the final width
+            // via `sidebar-width-changed` on release so the DB is written once per
+            // gesture, not once per pixel.
+            if !sidebar-collapsed : Rectangle {
+                width: 4px;
+                background: sb-resize.pressed ? Theme.color-accent
+                          : sb-resize.has-hover ? Theme.color-accent.with-alpha(0.4)
+                          : transparent;
+                property <int> drag-base-width: 0;
+                sb-resize := TouchArea {
+                    mouse-cursor: MouseCursor.ew-resize;
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down) {
+                            parent.drag-base-width = root.sidebar-width;
+                        } else if (e.kind == PointerEventKind.up) {
+                            root.sidebar-width-changed(root.sidebar-width);
+                        }
+                    }
+                    moved => {
+                        root.sidebar-width = clamp(
+                            parent.drag-base-width
+                                + round((sb-resize.mouse-x - sb-resize.pressed-x) / 1px),
+                            Theme.side-panel-min-width,
+                            Theme.side-panel-max-width);
+                    }
                 }
             }
 

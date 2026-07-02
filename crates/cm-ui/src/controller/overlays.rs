@@ -12,6 +12,7 @@ use super::*;
 pub(super) fn wire_overlays(ctx: &Ctx) {
     wire_select_panel(ctx);
     wire_toggle_sidebar(ctx);
+    wire_sidebar_width_changed(ctx);
     wire_toast_dismissed(ctx);
     wire_stub_callbacks(ctx);
 }
@@ -44,6 +45,28 @@ fn wire_toggle_sidebar(ctx: &Ctx) {
                 if let Err(e) = svc.save_sidebar_collapsed(new_val) {
                     tracing::warn!("save sidebar_collapsed: {e}");
                 }
+            }
+        }
+    });
+}
+
+/// Persist the side-panel width once per drag gesture (P6.9 gap 11). Defensively
+/// re-clamps server-side (see `util::clamp_sidebar_width`) so a value from any
+/// non-drag caller (e.g. a future QA-harness command) can't persist a width
+/// outside the chrome's own bounds.
+fn wire_sidebar_width_changed(ctx: &Ctx) {
+    ctx.ui.on_sidebar_width_changed({
+        let weak = ctx.ui.as_weak();
+        let repo_sw = ctx.repo.clone();
+        move |v| {
+            let Some(ui) = weak.upgrade() else { return };
+            let clamped = util::clamp_sidebar_width(v);
+            if clamped != v {
+                ui.set_sidebar_width(clamped);
+            }
+            let svc = SettingsService::new(repo_sw.as_ref());
+            if let Err(e) = svc.save_side_panel_width(clamped) {
+                tracing::warn!("save side_panel_width: {e}");
             }
         }
     });

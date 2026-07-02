@@ -71,6 +71,20 @@ pub(super) fn grid_for(
     }
 }
 
+/// Side-panel drag-resize clamps (P6.9 gap 11). Rust-side mirror of the
+/// `Theme.side-panel-min-width` / `-max-width` tokens (`cm-ui/ui/theme.slint`)
+/// -- the `.slint` drag handle already clamps live while dragging, but every
+/// value that reaches the settings table goes through this Rust copy too, so
+/// a stale/out-of-range persisted value (e.g. from a future lower minimum)
+/// can never restore a sidebar wider/narrower than what the chrome allows.
+pub(super) const SIDEBAR_WIDTH_MIN: i32 = 180;
+pub(super) const SIDEBAR_WIDTH_MAX: i32 = 480;
+
+/// Clamp a sidebar width (logical px) to `[SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX]`.
+pub(super) fn clamp_sidebar_width(px: i32) -> i32 {
+    px.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
+}
+
 /// Apply the small set of env-var overrides that must take effect before the
 /// window is populated (theme + palette visibility) -- read once at startup.
 pub(super) fn apply_early_env_overrides(ui: &AppWindow) {
@@ -99,6 +113,24 @@ pub(super) fn wire_env_hooks(ctx: &Ctx, hooks: &mut Vec<Timer>) {
     wire_show_keys(ctx);
     wire_autosplit(ctx, hooks);
     wire_autobroadcast(ctx);
+    wire_autosidebarwidth(ctx);
+}
+
+// P6.9 (gap 11) headless test hook: CONMAN_SIDEBAR_WIDTH=<px> — updates the
+// live width then fires the exact same `sidebar-width-changed` callback a
+// real drag-release does (the `.slint` handle updates `sidebar-width` live
+// during the drag and only calls this callback, with the already-current
+// value, on release — mirrored here), so an xvfb screenshot scenario can
+// exercise "resize, then relaunch and see it restored" without synthesizing
+// real OS-level mouse-drag events (out of scope for this generic endpoint,
+// same rationale as the other CONMAN_AUTO* hooks above).
+fn wire_autosidebarwidth(ctx: &Ctx) {
+    if let Ok(px) = std::env::var("CONMAN_SIDEBAR_WIDTH")
+        && let Ok(px) = px.trim().parse::<i32>()
+    {
+        ctx.ui.set_sidebar_width(px);
+        ctx.ui.invoke_sidebar_width_changed(px);
+    }
 }
 
 fn wire_ssh_autoinit(ctx: &Ctx) {
@@ -316,6 +348,34 @@ mod tests {
     // at all) is a compile-time structural property verified by
     // code-inspection of `ssh_auto_accept_keys`/`rdp_auto_accept_certs`
     // above, not by this test — see the P6.3 report for the inspection note.
+
+    // ── gap 11: sidebar-width clamp ─────────────────────────────────────
+
+    #[test]
+    fn clamp_sidebar_width_passes_through_in_range() {
+        assert_eq!(clamp_sidebar_width(252), 252);
+        assert_eq!(clamp_sidebar_width(SIDEBAR_WIDTH_MIN), SIDEBAR_WIDTH_MIN);
+        assert_eq!(clamp_sidebar_width(SIDEBAR_WIDTH_MAX), SIDEBAR_WIDTH_MAX);
+    }
+
+    #[test]
+    fn clamp_sidebar_width_clamps_below_min() {
+        assert_eq!(clamp_sidebar_width(0), SIDEBAR_WIDTH_MIN);
+        assert_eq!(clamp_sidebar_width(-100), SIDEBAR_WIDTH_MIN);
+        assert_eq!(
+            clamp_sidebar_width(SIDEBAR_WIDTH_MIN - 1),
+            SIDEBAR_WIDTH_MIN
+        );
+    }
+
+    #[test]
+    fn clamp_sidebar_width_clamps_above_max() {
+        assert_eq!(clamp_sidebar_width(10_000), SIDEBAR_WIDTH_MAX);
+        assert_eq!(
+            clamp_sidebar_width(SIDEBAR_WIDTH_MAX + 1),
+            SIDEBAR_WIDTH_MAX
+        );
+    }
 
     #[test]
     fn is_flag_one_requires_exact_1() {
