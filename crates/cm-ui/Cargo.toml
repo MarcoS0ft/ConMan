@@ -24,6 +24,9 @@ dirs = "6"
 # arboard: cross-platform clipboard access for RDP CLIPRDR bidirectional sync (P4.2).
 # See docs/devel/memos/p4.2-clipboard-dep.md for the rationale.
 arboard = "3"
+# Structured logging facade (P6.3). The composition root (`conman`) installs
+# the actual subscriber; libraries only ever call the `tracing::*` macros.
+tracing = "0.1"
 # serde_json: already a workspace dependency (cm-core, cm-storage, cm-session); made
 # direct here, optional, only pulled in by the `qa-harness` feature (P6.2b) to parse
 # the JSON-lines QA-endpoint protocol. No new crate added to the dependency graph.

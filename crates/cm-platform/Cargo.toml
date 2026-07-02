@@ -12,6 +12,9 @@ publish.workspace = true
 # call site here. No memo required (dep already approved/present workspace-wide).
 dirs = "6"
 thiserror = "2"
+# Structured logging facade (P6.3). The composition root (`conman`) installs
+# the actual subscriber; libraries only ever call the `tracing::*` macros.
+tracing = "0.1"
 
 [lints]
 workspace = true

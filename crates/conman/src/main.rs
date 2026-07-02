@@ -14,6 +14,13 @@
 //! finds a primary already running asks it to activate and exits immediately;
 //! a squatted lock port degrades to a normal (unlocked) launch rather than
 //! blocking startup.
+//!
+//! P6.3: installs the `tracing` subscriber before anything else runs (see
+//! `logging.rs`) — console layer in debug, rotating file layer under
+//! `cm_platform::app_log_dir()` in release (`windows_subsystem = "windows"`
+//! swallows stderr there).
+
+mod logging;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -30,6 +37,9 @@ use cm_ui::AppConfig;
 use slint as _;
 
 fn main() -> ExitCode {
+    // Install the tracing subscriber first — everything below may log.
+    let _logging_guard = logging::init();
+
     // ── Single-instance guard (P6.16) — first, before storage/keyring ──────
     let activation_rx: Option<Receiver<()>> = match single_instance::acquire() {
         AcquireOutcome::AlreadyRunning => {
