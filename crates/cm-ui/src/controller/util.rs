@@ -107,6 +107,7 @@ pub(super) fn apply_early_env_overrides(ui: &AppWindow) {
 pub(super) fn wire_env_hooks(ctx: &Ctx, hooks: &mut Vec<Timer>) {
     wire_ssh_autoinit(ctx);
     wire_rdp_autoinit(ctx);
+    wire_tree_autolaunch(ctx);
     wire_autodrive(ctx, hooks);
     wire_autoresize(ctx, hooks);
     wire_autoquit(hooks);
@@ -164,11 +165,52 @@ fn wire_ssh_autoinit(ctx: &Ctx) {
                 &ctx.ui,
                 settings,
                 auth,
+                AuthProvenance::Direct,
                 verifier,
                 None,
             );
         }
     }
+}
+
+// ── CONMAN_TREE_AUTOLAUNCH (P6.4 QA hook) ────────────────────────────────
+// Format: "<connection-id>" — resolves + connects a saved connection through
+// the exact same stored-credential path a tree row click uses
+// (`sessions::launch_saved_connection`: resolve_effective_credential ->
+// keychain fetch -> real SshAuthInput/RdpAuthInput). Lets an xvfb screenshot
+// script prove the Keys-panel credential wiring reaches Connected (or the
+// auth-error overlay for a credential-less connection) without simulating a
+// pixel-precise tree click.
+fn wire_tree_autolaunch(ctx: &Ctx) {
+    let Ok(raw_id) = std::env::var("CONMAN_TREE_AUTOLAUNCH") else {
+        return;
+    };
+    let Ok(id) = raw_id.trim().parse::<i64>() else {
+        tracing::warn!("CONMAN_TREE_AUTOLAUNCH: invalid connection id {raw_id:?}");
+        return;
+    };
+    let conn = {
+        let st = ctx.state.borrow();
+        st.conn_tree
+            .connections()
+            .iter()
+            .find(|c| c.id.get() == id)
+            .cloned()
+    };
+    let Some(conn) = conn else {
+        tracing::warn!("CONMAN_TREE_AUTOLAUNCH: no connection with id {id}");
+        return;
+    };
+    sessions::launch_saved_connection(
+        &ctx.state,
+        &ctx.tab_model,
+        &ctx.ui,
+        &ctx.ui.as_weak(),
+        &ctx.hk_pending,
+        &ctx.cert_pending,
+        &ctx.secrets,
+        &conn,
+    );
 }
 
 // ── CONMAN_RDP_AUTOINIT (P4.2 test hook) ─────────────────────────────────

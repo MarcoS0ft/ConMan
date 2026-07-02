@@ -8,12 +8,15 @@
 //! `mod support;` / `#[path = "support/mod.rs"] mod support;`.
 #![cfg(unix)]
 
+use std::collections::HashMap;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use cm_core::{CredentialError, CredentialRef, CredentialStore, Secret};
 use russh::keys::PrivateKey;
 use russh::keys::ssh_key::{HashAlg, PublicKey};
 use russh::server::{
@@ -21,6 +24,52 @@ use russh::server::{
 };
 use russh::{ChannelId, Pty};
 use tokio::net::TcpListener;
+
+/// A minimal in-memory [`CredentialStore`] for P6.4 loopback tests: proves
+/// the credential-resolution + keychain-fetch + real-transport chain without
+/// touching the OS keychain (which the plain `cm-secrets` mock backend also
+/// avoids, but this keeps the test self-contained in `cm-session`, which has
+/// no dependency on `cm-secrets`).
+#[derive(Default)]
+pub(crate) struct InMemoryCredentialStore {
+    entries: Mutex<HashMap<(String, String), Vec<u8>>>,
+}
+
+impl InMemoryCredentialStore {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl CredentialStore for InMemoryCredentialStore {
+    fn store(&self, key: &CredentialRef, secret: &Secret) -> Result<(), CredentialError> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                (key.service().to_owned(), key.account().to_owned()),
+                secret.expose().to_vec(),
+            );
+        Ok(())
+    }
+
+    fn get(&self, key: &CredentialRef) -> Result<Option<Secret>, CredentialError> {
+        Ok(self
+            .entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&(key.service().to_owned(), key.account().to_owned()))
+            .map(|bytes| Secret::new(bytes.clone())))
+    }
+
+    fn delete(&self, key: &CredentialRef) -> Result<(), CredentialError> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&(key.service().to_owned(), key.account().to_owned()));
+        Ok(())
+    }
+}
 
 /// Behavior knobs for [`LoopbackSshServer`]. Every test configures exactly the
 /// bits it needs; everything else stays at the (rejecting) default so a
