@@ -59,9 +59,33 @@ const RESIZE_DEBOUNCE: Duration = Duration::from_millis(90);
 /// Initial grid size before the surface reports its real dimensions.
 const INITIAL_SIZE: TerminalSize = TerminalSize { rows: 24, cols: 80 };
 
+/// Where an SSH tab's auth material comes from, for reconnect (P6.4).
+///
+/// `Direct` (quick-connect / debug autoinit hooks) caches the typed
+/// [`SshAuthInput`] verbatim, exactly as before P6.4 — there is no credential
+/// record to re-resolve against. `Credential` (tree-launched, stored-credential
+/// connections) caches only the [`cm_core::ConnectionId`]: a reconnect re-runs
+/// [`sessions::resolve_ssh_auth`] against the live credential store, so the
+/// fetched secret never lingers in `Tab` state longer than one connect attempt
+/// (spec: "a reconnect re-fetches rather than caching plaintext").
+enum SshAuthSource {
+    Direct(SshAuthInput),
+    Credential(cm_core::ConnectionId),
+}
+
+/// How the caller obtained the `SshAuthInput` passed to [`sessions::open_ssh_tab`]
+/// / [`sessions::reconnect_ssh_tab`] — mirrors [`SshAuthSource`] but without an
+/// already-resolved `SshAuthInput` payload (the caller still owns that, since it
+/// is about to move it into `SshTerminalSession::connect`).
+#[derive(Clone, Copy)]
+enum AuthProvenance {
+    Direct,
+    Credential(cm_core::ConnectionId),
+}
+
 struct SshConnectInfo {
     settings: SshSettings,
-    auth: SshAuthInput,
+    auth_source: SshAuthSource,
 }
 
 /// State for an additional (non-primary) pane within a split tab.
