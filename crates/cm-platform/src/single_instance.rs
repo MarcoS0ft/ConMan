@@ -23,7 +23,7 @@
 //! best-effort per OS/window-manager; see the P6.16 report for what each
 //! platform actually does.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
@@ -142,6 +142,48 @@ fn acquire_on_port(port: u16) -> AcquireOutcome {
     }
 }
 
+/// Upper bound on a single handshake line, in bytes. Both fixed protocol
+/// strings are well under this; the margin covers a future version bump.
+/// P6.3 Wave-1 advisory: a peer that never sends `\n` must not grow memory
+/// unboundedly — [`read_bounded_line`] enforces this independently of the
+/// per-read [`IO_TIMEOUT`] (a slow drip of single bytes, each arriving just
+/// under the timeout, would otherwise never trip a length-unaware reader).
+const MAX_LINE_LEN: usize = 256;
+
+/// Reads one `\n`-terminated line from `reader`, capped at [`MAX_LINE_LEN`]
+/// bytes. Returns `Ok(None)` on immediate EOF, `Err` on a read error, a
+/// per-read timeout, or exceeding the length cap — never buffers past the
+/// cap. `\r` (if present before `\n`) is left in and trimmed by the caller.
+fn read_bounded_line(reader: &mut impl Read) -> std::io::Result<Option<String>> {
+    let mut buf = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match reader.read(&mut byte) {
+            Ok(0) => {
+                return Ok(if buf.is_empty() {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(&buf).into_owned())
+                });
+            }
+            Ok(_) if byte[0] == b'\n' => {
+                return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
+            }
+            Ok(_) => {
+                buf.push(byte[0]);
+                if buf.len() > MAX_LINE_LEN {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "handshake line exceeded the length bound",
+                    ));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Something already holds `addr`. Connect and run the client side of the
 /// handshake to find out whether it is a ConMan primary (in which case this
 /// call *is* the activation request) or an unrelated process.
@@ -172,10 +214,8 @@ fn probe_existing(addr: SocketAddr, bind_err: &std::io::Error) -> AcquireOutcome
             addr.port()
         ));
     }
-    let mut reply = String::new();
-    let read_result = BufReader::new(&mut stream).read_line(&mut reply);
-    match read_result {
-        Ok(n) if n > 0 && reply.trim_end() == HANDSHAKE_REPLY => AcquireOutcome::AlreadyRunning,
+    match read_bounded_line(&mut stream) {
+        Ok(Some(reply)) if reply.trim_end() == HANDSHAKE_REPLY => AcquireOutcome::AlreadyRunning,
         _ => AcquireOutcome::Unavailable(format!(
             "port {} occupied by a process that did not answer the ConMan handshake",
             addr.port()
@@ -186,20 +226,20 @@ fn probe_existing(addr: SocketAddr, bind_err: &std::io::Error) -> AcquireOutcome
 /// Server side of the handshake for one accepted connection. Reads a single
 /// line; if (and only if) it matches [`HANDSHAKE_REQUEST`] exactly, replies
 /// with [`HANDSHAKE_REPLY`] and reports a validated activation. Any I/O
-/// error, timeout, or content mismatch is treated as "not a real activation"
-/// and the connection is dropped silently — this reads untrusted bytes off a
-/// loopback socket and must never panic (CONVENTIONS §2).
+/// error, timeout, length-bound violation, or content mismatch is treated as
+/// "not a real activation" and the connection is dropped silently — this
+/// reads untrusted bytes off a loopback socket and must never panic, hang
+/// the accept loop, or grow memory unboundedly (CONVENTIONS §2 / P6.3
+/// Wave-1 advisory).
 fn handle_activation_request(mut stream: TcpStream) -> bool {
-    if stream.set_read_timeout(Some(IO_TIMEOUT)).is_err() {
+    if stream.set_read_timeout(Some(IO_TIMEOUT)).is_err()
+        || stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
+    {
         return false;
     }
-    let mut line = String::new();
-    {
-        let mut reader = BufReader::new(&mut stream);
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            return false;
-        }
-    }
+    let Ok(Some(line)) = read_bounded_line(&mut stream) else {
+        return false;
+    };
     if line.trim_end() != HANDSHAKE_REQUEST {
         return false;
     }
@@ -273,5 +313,54 @@ mod tests {
             AcquireOutcome::Unavailable(reason) => assert!(!reason.is_empty()),
             other => panic!("expected Unavailable, got {other:?}"),
         }
+    }
+
+    // ── P6.3 Wave-1 advisory: bounded reads ─────────────────────────────
+
+    #[test]
+    fn read_bounded_line_rejects_unterminated_oversized_input() {
+        // A byte stream that never sends '\n' -- proves the length bound
+        // trips instead of buffering forever.
+        let hostile = vec![b'x'; MAX_LINE_LEN + 1];
+        let mut cursor = std::io::Cursor::new(hostile);
+        assert!(read_bounded_line(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn read_bounded_line_accepts_line_within_bound() {
+        let mut cursor = std::io::Cursor::new(b"hello\n".to_vec());
+        assert_eq!(
+            read_bounded_line(&mut cursor).unwrap().as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn read_bounded_line_returns_none_on_immediate_eof() {
+        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        assert_eq!(read_bounded_line(&mut cursor).unwrap(), None);
+    }
+
+    #[test]
+    fn oversized_line_without_newline_does_not_activate() {
+        let port = next_test_port();
+        let AcquireOutcome::Acquired(guard) = acquire_on_port(port) else {
+            panic!("expected to acquire the primary lock");
+        };
+        let rx = guard.listen();
+        std::thread::sleep(Duration::from_millis(50));
+
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let mut stream = TcpStream::connect(addr).expect("connect to primary");
+        // Well past MAX_LINE_LEN, no newline -- the accept-loop thread must
+        // reject this (not hang, not buffer it all) and move on.
+        let hostile = vec![b'x'; MAX_LINE_LEN * 4];
+        let _ = stream.write_all(&hostile);
+        drop(stream);
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "an oversized, unterminated line must never be treated as a valid activation"
+        );
     }
 }
