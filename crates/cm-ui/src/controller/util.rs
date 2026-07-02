@@ -99,6 +99,7 @@ pub(super) fn wire_env_hooks(ctx: &Ctx, hooks: &mut Vec<Timer>) {
     wire_show_keys(ctx);
     wire_autosplit(ctx, hooks);
     wire_autobroadcast(ctx);
+    wire_autoimport(ctx, hooks);
 }
 
 fn wire_ssh_autoinit(ctx: &Ctx) {
@@ -290,6 +291,35 @@ fn wire_autosplit(ctx: &Ctx, hooks: &mut Vec<Timer>) {
 fn wire_autobroadcast(ctx: &Ctx) {
     if std::env::var("CONMAN_AUTOBROADCAST").as_deref() == Ok("1") {
         ctx.ui.set_broadcast_active(true);
+    }
+}
+
+// P6.6: CONMAN_AUTOIMPORT=<path> — import the given JSON export file shortly
+// after startup, bypassing the native file-open dialog
+// (`import_export::run_import`, the same dialog-free half
+// `import_via_dialog` calls once a path is chosen). Exists so the xvfb
+// screenshot gate can produce and capture the real post-import summary
+// toast without a display-dependent, blocking native file picker in CI.
+fn wire_autoimport(ctx: &Ctx, hooks: &mut Vec<Timer>) {
+    if let Ok(path) = std::env::var("CONMAN_AUTOIMPORT") {
+        let io = ctx.state.borrow().io.clone();
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
+        let delay = std::env::var("CONMAN_AUTOIMPORT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(600);
+        let t = Timer::default();
+        t.start(
+            TimerMode::SingleShot,
+            Duration::from_millis(delay),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    import_export::run_import(&io, &state, &ui, std::path::Path::new(&path));
+                }
+            },
+        );
+        hooks.push(t);
     }
 }
 

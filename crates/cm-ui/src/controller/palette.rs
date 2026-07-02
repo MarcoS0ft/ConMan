@@ -247,8 +247,17 @@ pub(super) fn dispatch_palette_action(
         "Focus Keys" => ui.set_active_panel(1),
         "Open Settings" => ui.set_active_panel(2),
         // ── DATA ──────────────────────────────────────────────────────────────
-        // BLOCKED: Import / Export requires P1.2 (json-import-export).
-        "Import / Export\u{2026}" => {}
+        // P6.6: native save/open dialogs (`rfd`) wired to `cm_storage::json_io`.
+        // Secrets are excluded by default on export (ARCHITECTURE §6); see
+        // `import_export.rs` and `docs/devel/memos/P6.6-rfd-dep.md`.
+        "Export connections\u{2026}" => {
+            let io = state.borrow().io.clone();
+            import_export::export_via_dialog(&io);
+        }
+        "Import connections\u{2026}" => {
+            let io = state.borrow().io.clone();
+            import_export::import_via_dialog(&io, state, ui);
+        }
         // ── PANES ─────────────────────────────────────────────────────────────
         "Split horizontal" => panes::do_split(state, tab_model, ui, PaneLayout::HSplit),
         "Split vertical" => panes::do_split(state, tab_model, ui, PaneLayout::VSplit),
@@ -378,15 +387,25 @@ pub(super) fn initial_palette_actions() -> Vec<PaletteAction> {
             status: SharedString::from(""),
             selected: false,
         },
-        // Import / Export — present so the affordance is discoverable; no-op
-        // until P1.2 (json-import-export) is merged and wired here.
+        // P6.6: export/import the full connection tree as versioned JSON
+        // (secrets excluded by default; native save/open dialogs via `rfd`).
         PaletteAction {
             category: SharedString::from("DATA"),
             first_in_group: true,
-            label: SharedString::from("Import / Export\u{2026}"),
-            detail: SharedString::from("Blocked — requires P1.2 (not yet merged)"),
+            label: SharedString::from("Export connections\u{2026}"),
+            detail: SharedString::from("Save groups, connections & credential refs as JSON"),
             shortcut: SharedString::from(""),
             glyph: SharedString::from("\u{EBAC}"), // cod-export
+            status: SharedString::from(""),
+            selected: false,
+        },
+        PaletteAction {
+            category: SharedString::from("DATA"),
+            first_in_group: false,
+            label: SharedString::from("Import connections\u{2026}"),
+            detail: SharedString::from("Load groups, connections & credential refs from JSON"),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{F02FA}"), // md-import
             status: SharedString::from(""),
             selected: false,
         },
@@ -627,15 +646,17 @@ mod tests {
     }
 
     #[test]
-    fn palette_contains_import_export_blocked_action() {
+    fn palette_contains_export_and_import_actions() {
         let all = initial_palette_actions();
-        let entry = all
-            .iter()
-            .find(|a| a.label.as_str().contains("Import"))
-            .expect("Import/Export palette entry must exist");
         assert!(
-            entry.detail.as_str().contains("P1.2"),
-            "detail must call out P1.2 as the dependency"
+            all.iter()
+                .any(|a| a.label.as_str() == "Export connections\u{2026}"),
+            "Export action must exist"
+        );
+        assert!(
+            all.iter()
+                .any(|a| a.label.as_str() == "Import connections\u{2026}"),
+            "Import action must exist"
         );
     }
 }

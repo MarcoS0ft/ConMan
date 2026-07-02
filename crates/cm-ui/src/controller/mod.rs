@@ -35,6 +35,7 @@ use crate::{AppConfig, AppWindow, ConnRow, CredRow, PaletteAction, TabItem, Toas
 
 mod util;
 
+mod import_export;
 mod keys_ctl;
 mod overlays;
 mod palette;
@@ -133,6 +134,13 @@ struct State {
     // P5.3b: Current filter text for the connection tree and keys tree.
     conn_filter: String,
     cred_filter: String,
+    // P6.6: repo/secrets + the Slint list-model handles the Import/Export
+    // palette actions need. Carried on `State` (not threaded through
+    // `dispatch_palette_action`'s parameters) so the QA harness's narrower
+    // handle set and the keyboard-dispatch path in `sessions.rs` — both
+    // outside this lane this wave — don't need to change. See
+    // `import_export.rs`.
+    io: import_export::ImportExportHandles,
 }
 
 impl State {
@@ -271,6 +279,15 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         // P5.3b: search/filter boxes start empty.
         conn_filter: String::new(),
         cred_filter: String::new(),
+        // P6.6: see the `io` field doc comment.
+        io: import_export::ImportExportHandles {
+            repo: repo.clone(),
+            secrets: secrets.clone(),
+            conn_model: conn_model.clone(),
+            cred_model: cred_model.clone(),
+            toast_model: toast_model.clone(),
+            toast_next_id: toast_next_id.clone(),
+        },
     }));
 
     {
