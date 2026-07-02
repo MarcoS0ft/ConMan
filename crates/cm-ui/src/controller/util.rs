@@ -51,15 +51,20 @@ pub(super) fn apply_early_env_overrides(ui: &AppWindow) {
 }
 
 /// Register every `CONMAN_*` headless test hook. Each hook is independent and
-/// gated on its own env var.
-pub(super) fn wire_env_hooks(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    hk_pending: &HkQueue,
-    cert_pending: &Arc<Mutex<Option<Sender<CertDecision>>>>,
-    hooks: &mut Vec<Timer>,
-) {
+/// gated on its own env var; split into one function per hook (P6.1
+/// function-size budget) — pure code move, identical logic/order.
+pub(super) fn wire_env_hooks(ctx: &Ctx, hooks: &mut Vec<Timer>) {
+    wire_ssh_autoinit(ctx);
+    wire_rdp_autoinit(ctx);
+    wire_autodrive(ctx, hooks);
+    wire_autoresize(ctx, hooks);
+    wire_autoquit(hooks);
+    wire_show_keys(ctx);
+    wire_autosplit(ctx, hooks);
+    wire_autobroadcast(ctx);
+}
+
+fn wire_ssh_autoinit(ctx: &Ctx) {
     if let Ok(init) = std::env::var("CONMAN_SSH_AUTOINIT") {
         let parts: Vec<&str> = init.splitn(4, ':').collect();
         if parts.len() >= 3 {
@@ -79,17 +84,26 @@ pub(super) fn wire_env_hooks(
             let auth = SshAuthInput::Password(Secret::from_string(password));
             let auto_accept = std::env::var("CONMAN_SSH_AUTO_ACCEPT_KEYS").as_deref() == Ok("1");
             let verifier = Arc::new(sessions::UiHostKeyVerifier {
-                weak_ui: ui.as_weak(),
-                pending: hk_pending.clone(),
+                weak_ui: ctx.ui.as_weak(),
+                pending: ctx.hk_pending.clone(),
                 auto_accept,
             });
-            sessions::open_ssh_tab(state, tab_model, ui, settings, auth, verifier);
+            sessions::open_ssh_tab(
+                &ctx.state,
+                &ctx.tab_model,
+                &ctx.ui,
+                settings,
+                auth,
+                verifier,
+            );
         }
     }
+}
 
-    // ── CONMAN_RDP_AUTOINIT (P4.2 test hook) ─────────────────────────────
-    // Format: "username:password:host[:port]" — opens an RDP tab immediately
-    // on startup without requiring the user to click a connection in the panel.
+// ── CONMAN_RDP_AUTOINIT (P4.2 test hook) ─────────────────────────────────
+// Format: "username:password:host[:port]" — opens an RDP tab immediately on
+// startup without requiring the user to click a connection in the panel.
+fn wire_rdp_autoinit(ctx: &Ctx) {
     if let Ok(init) = std::env::var("CONMAN_RDP_AUTOINIT") {
         let parts: Vec<&str> = init.splitn(4, ':').collect();
         if parts.len() >= 3 {
@@ -102,8 +116,8 @@ pub(super) fn wire_env_hooks(
                 .unwrap_or(3389);
             let auto_accept = std::env::var("CONMAN_RDP_AUTO_ACCEPT_CERTS").as_deref() == Ok("1");
             let verifier = Arc::new(sessions::UiCertVerifier {
-                weak_ui: ui.as_weak(),
-                pending: cert_pending.clone(),
+                weak_ui: ctx.ui.as_weak(),
+                pending: ctx.cert_pending.clone(),
                 auto_accept,
             });
             let settings = RdpSettings {
@@ -116,16 +130,25 @@ pub(super) fn wire_env_hooks(
                 password: Secret::from_string(password),
                 domain: None,
             };
-            sessions::open_rdp_tab(state, tab_model, ui, settings, auth, verifier);
+            sessions::open_rdp_tab(
+                &ctx.state,
+                &ctx.tab_model,
+                &ctx.ui,
+                settings,
+                auth,
+                verifier,
+            );
         }
     }
+}
 
+fn wire_autodrive(ctx: &Ctx, hooks: &mut Vec<Timer>) {
     if let Ok(cmd) = std::env::var("CONMAN_AUTODRIVE") {
         let delay = std::env::var("CONMAN_AUTODRIVE_MS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(800);
-        let state = state.clone();
+        let state = ctx.state.clone();
         let t = Timer::default();
         t.start(
             TimerMode::SingleShot,
@@ -148,7 +171,9 @@ pub(super) fn wire_env_hooks(
         );
         hooks.push(t);
     }
+}
 
+fn wire_autoresize(ctx: &Ctx, hooks: &mut Vec<Timer>) {
     if let Ok(script) = std::env::var("CONMAN_AUTORESIZE") {
         for step in script.split(';').filter(|s| !s.is_empty()) {
             if let Some((ms, dims)) = step.split_once(':')
@@ -158,7 +183,7 @@ pub(super) fn wire_env_hooks(
                         .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))),
                 )
             {
-                let weak = ui.as_weak();
+                let weak = ctx.ui.as_weak();
                 let t = Timer::default();
                 t.start(
                     TimerMode::SingleShot,
@@ -173,7 +198,9 @@ pub(super) fn wire_env_hooks(
             }
         }
     }
+}
 
+fn wire_autoquit(hooks: &mut Vec<Timer>) {
     if let Some(ms) = std::env::var("CONMAN_AUTOQUIT_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -184,22 +211,26 @@ pub(super) fn wire_env_hooks(
         });
         hooks.push(t);
     }
+}
 
+fn wire_show_keys(ctx: &Ctx) {
     if std::env::var("CONMAN_SHOW_KEYS").as_deref() == Ok("1") {
-        ui.set_active_panel(1);
+        ctx.ui.set_active_panel(1);
     }
+}
 
-    // P5.1: Auto-split hook (headless screenshot tests).
-    // CONMAN_AUTOSPLIT=h|v — trigger an H- or V-split after a short delay.
+// P5.1: Auto-split hook (headless screenshot tests).
+// CONMAN_AUTOSPLIT=h|v — trigger an H- or V-split after a short delay.
+fn wire_autosplit(ctx: &Ctx, hooks: &mut Vec<Timer>) {
     if let Ok(dir) = std::env::var("CONMAN_AUTOSPLIT") {
         let layout = if dir.trim().eq_ignore_ascii_case("v") {
             PaneLayout::VSplit
         } else {
             PaneLayout::HSplit
         };
-        let state_as = state.clone();
-        let tab_model_as = tab_model.clone();
-        let weak_as = ui.as_weak();
+        let state_as = ctx.state.clone();
+        let tab_model_as = ctx.tab_model.clone();
+        let weak_as = ctx.ui.as_weak();
         let delay = std::env::var("CONMAN_AUTOSPLIT_MS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -216,10 +247,12 @@ pub(super) fn wire_env_hooks(
         );
         hooks.push(t);
     }
+}
 
-    // CONMAN_AUTOBROADCAST=1 — enable broadcast at startup.
+// CONMAN_AUTOBROADCAST=1 — enable broadcast at startup.
+fn wire_autobroadcast(ctx: &Ctx) {
     if std::env::var("CONMAN_AUTOBROADCAST").as_deref() == Ok("1") {
-        ui.set_broadcast_active(true);
+        ctx.ui.set_broadcast_active(true);
     }
 }
 

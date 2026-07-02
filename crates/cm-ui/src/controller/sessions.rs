@@ -21,41 +21,29 @@ use crate::{AppWindow, TabItem, ToastEntry};
 
 use super::*;
 
-pub(super) fn wire_sessions(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    palette_model: &Rc<VecModel<PaletteAction>>,
-    hk_pending: &HkQueue,
-    cert_pending: &Arc<Mutex<Option<Sender<CertDecision>>>>,
-) {
-    wire_key_input(ui, state, tab_model, palette_model);
-    wire_pointer(ui, state);
-    wire_scroll(ui, state);
-    wire_rdp_scroll(ui, state);
-    wire_quick_connect(ui);
-    wire_qc_connect(ui, state, tab_model, hk_pending);
-    wire_host_key_accept(ui, hk_pending);
-    wire_host_key_reject(ui, hk_pending);
-    wire_cert_accept(ui, cert_pending);
-    wire_cert_reject(ui, cert_pending);
-    wire_rdp_key_down(ui, state);
-    wire_rdp_key_up(ui, state);
-    wire_row_activated(ui, state, tab_model, hk_pending, cert_pending);
-    wire_reconnect(ui, state, tab_model, hk_pending);
+pub(super) fn wire_sessions(ctx: &Ctx) {
+    wire_key_input(ctx);
+    wire_pointer(ctx);
+    wire_scroll(ctx);
+    wire_rdp_scroll(ctx);
+    wire_quick_connect(ctx);
+    wire_qc_connect(ctx);
+    wire_host_key_accept(ctx);
+    wire_host_key_reject(ctx);
+    wire_cert_accept(ctx);
+    wire_cert_reject(ctx);
+    wire_rdp_key_down(ctx);
+    wire_rdp_key_up(ctx);
+    wire_row_activated(ctx);
+    wire_reconnect(ctx);
 }
 
-fn wire_key_input(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    palette_model: &Rc<VecModel<PaletteAction>>,
-) {
-    ui.on_key_input({
-        let state = state.clone();
-        let pal_model_kb = palette_model.clone();
-        let tab_model_kb = tab_model.clone();
-        let weak_kb = ui.as_weak();
+fn wire_key_input(ctx: &Ctx) {
+    ctx.ui.on_key_input({
+        let state = ctx.state.clone();
+        let pal_model_kb = ctx.palette_model.clone();
+        let tab_model_kb = ctx.tab_model.clone();
+        let weak_kb = ctx.ui.as_weak();
         move |text, special, mods| {
             let Some(ui) = weak_kb.upgrade() else { return };
             if ui.get_palette_open() {
@@ -208,9 +196,9 @@ fn wire_key_input(
     });
 }
 
-fn wire_pointer(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    ui.on_pointer({
-        let state = state.clone();
+fn wire_pointer(ctx: &Ctx) {
+    ctx.ui.on_pointer({
+        let state = ctx.state.clone();
         move |button, kind, x, y, mods| {
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active) {
@@ -256,9 +244,9 @@ fn wire_pointer(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
-fn wire_scroll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    ui.on_scroll({
-        let state = state.clone();
+fn wire_scroll(ctx: &Ctx) {
+    ctx.ui.on_scroll({
+        let state = ctx.state.clone();
         move |_dx, dy| {
             let st = state.borrow();
             // Terminal scroll only — RDP scroll is handled by on_rdp_scroll (fix c).
@@ -272,9 +260,9 @@ fn wire_scroll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
-fn wire_rdp_scroll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    ui.on_rdp_scroll({
-        let state = state.clone();
+fn wire_rdp_scroll(ctx: &Ctx) {
+    ctx.ui.on_rdp_scroll({
+        let state = ctx.state.clone();
         move |x, y, _dx, dy| {
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active)
@@ -300,9 +288,9 @@ fn wire_rdp_scroll(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
-fn wire_quick_connect(ui: &AppWindow) {
-    ui.on_quick_connect({
-        let weak = ui.as_weak();
+fn wire_quick_connect(ctx: &Ctx) {
+    ctx.ui.on_quick_connect({
+        let weak = ctx.ui.as_weak();
         move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_quick_connect_open(true);
@@ -311,17 +299,12 @@ fn wire_quick_connect(ui: &AppWindow) {
     });
 }
 
-fn wire_qc_connect(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    hk_pending: &HkQueue,
-) {
-    ui.on_qc_connect({
-        let state = state.clone();
-        let tab_model = tab_model.clone();
-        let weak = ui.as_weak();
-        let hk_pending = hk_pending.clone();
+fn wire_qc_connect(ctx: &Ctx) {
+    ctx.ui.on_qc_connect({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let weak = ctx.ui.as_weak();
+        let hk_pending = ctx.hk_pending.clone();
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let host = ui.get_qc_host().trim().to_owned();
@@ -366,10 +349,10 @@ fn wire_qc_connect(
     });
 }
 
-fn wire_host_key_accept(ui: &AppWindow, hk_pending: &HkQueue) {
-    ui.on_host_key_accept({
-        let pending = hk_pending.clone();
-        let weak = ui.as_weak();
+fn wire_host_key_accept(ctx: &Ctx) {
+    ctx.ui.on_host_key_accept({
+        let pending = ctx.hk_pending.clone();
+        let weak = ctx.ui.as_weak();
         move || {
             // Pop the front sender (oldest pending request) — carry-over fix (a).
             if let Ok(mut q) = pending.lock()
@@ -384,10 +367,10 @@ fn wire_host_key_accept(ui: &AppWindow, hk_pending: &HkQueue) {
     });
 }
 
-fn wire_host_key_reject(ui: &AppWindow, hk_pending: &HkQueue) {
-    ui.on_host_key_reject({
-        let pending = hk_pending.clone();
-        let weak = ui.as_weak();
+fn wire_host_key_reject(ctx: &Ctx) {
+    ctx.ui.on_host_key_reject({
+        let pending = ctx.hk_pending.clone();
+        let weak = ctx.ui.as_weak();
         move || {
             // Pop the front sender (oldest pending request) — carry-over fix (a).
             if let Ok(mut q) = pending.lock()
@@ -402,10 +385,10 @@ fn wire_host_key_reject(ui: &AppWindow, hk_pending: &HkQueue) {
     });
 }
 
-fn wire_cert_accept(ui: &AppWindow, cert_pending: &Arc<Mutex<Option<Sender<CertDecision>>>>) {
-    ui.on_cert_accept({
-        let pending = cert_pending.clone();
-        let weak = ui.as_weak();
+fn wire_cert_accept(ctx: &Ctx) {
+    ctx.ui.on_cert_accept({
+        let pending = ctx.cert_pending.clone();
+        let weak = ctx.ui.as_weak();
         move || {
             if let Ok(mut p) = pending.lock()
                 && let Some(tx) = p.take()
@@ -419,10 +402,10 @@ fn wire_cert_accept(ui: &AppWindow, cert_pending: &Arc<Mutex<Option<Sender<CertD
     });
 }
 
-fn wire_cert_reject(ui: &AppWindow, cert_pending: &Arc<Mutex<Option<Sender<CertDecision>>>>) {
-    ui.on_cert_reject({
-        let pending = cert_pending.clone();
-        let weak = ui.as_weak();
+fn wire_cert_reject(ctx: &Ctx) {
+    ctx.ui.on_cert_reject({
+        let pending = ctx.cert_pending.clone();
+        let weak = ctx.ui.as_weak();
         move || {
             if let Ok(mut p) = pending.lock()
                 && let Some(tx) = p.take()
@@ -436,9 +419,9 @@ fn wire_cert_reject(ui: &AppWindow, cert_pending: &Arc<Mutex<Option<Sender<CertD
     });
 }
 
-fn wire_rdp_key_down(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    ui.on_rdp_key_down({
-        let state = state.clone();
+fn wire_rdp_key_down(ctx: &Ctx) {
+    ctx.ui.on_rdp_key_down({
+        let state = ctx.state.clone();
         move |text, special, mods| {
             // Local→remote clipboard sync: intercept Ctrl+V, announce our clipboard.
             if mods & input::MOD_CTRL != 0 && text.as_str().eq_ignore_ascii_case("v") {
@@ -468,9 +451,9 @@ fn wire_rdp_key_down(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
-fn wire_rdp_key_up(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    ui.on_rdp_key_up({
-        let state = state.clone();
+fn wire_rdp_key_up(ctx: &Ctx) {
+    ctx.ui.on_rdp_key_up({
+        let state = ctx.state.clone();
         move |text, special, mods| {
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active) {
@@ -483,19 +466,13 @@ fn wire_rdp_key_up(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
-fn wire_row_activated(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    hk_pending: &HkQueue,
-    cert_pending: &Arc<Mutex<Option<Sender<CertDecision>>>>,
-) {
-    ui.on_row_activated({
-        let state = state.clone();
-        let tab_model = tab_model.clone();
-        let cert_pending = cert_pending.clone();
-        let hk_pending = hk_pending.clone();
-        let weak = ui.as_weak();
+fn wire_row_activated(ctx: &Ctx) {
+    ctx.ui.on_row_activated({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let cert_pending = ctx.cert_pending.clone();
+        let hk_pending = ctx.hk_pending.clone();
+        let weak = ctx.ui.as_weak();
         move |idx| {
             let Some(ui) = weak.upgrade() else { return };
             let row = {
@@ -553,17 +530,12 @@ fn wire_row_activated(
     });
 }
 
-fn wire_reconnect(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    hk_pending: &HkQueue,
-) {
-    ui.on_reconnect({
-        let state = state.clone();
-        let tab_model = tab_model.clone();
-        let weak = ui.as_weak();
-        let hk_pending = hk_pending.clone();
+fn wire_reconnect(ctx: &Ctx) {
+    ctx.ui.on_reconnect({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let weak = ctx.ui.as_weak();
+        let hk_pending = ctx.hk_pending.clone();
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let (active_idx, connect_info_opt) = {
@@ -865,6 +837,178 @@ pub(super) fn reconnect_ssh_tab(
     }
 }
 
+/// Drain and render one tab's surfaces (primary + extra panes), sync its
+/// status dot / overlays / toast, and report whether it should be queued for
+/// closing (local shell that has exited).
+///
+/// Extracted from [`tick`]'s per-tab loop body (P6.1 function-size budget) --
+/// pure code move, identical logic, same field-by-field mutation of `st`. The
+/// 8-parameter signature mirrors `tick`'s own (state access + the 3 model/ui
+/// handles it forwards); bundling them would be a needless intermediate type
+/// for a single private call site.
+#[allow(clippy::too_many_arguments)]
+fn tick_tab(
+    st: &mut State,
+    i: usize,
+    active: usize,
+    target: Option<(u32, u32)>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    toast_model: &Rc<VecModel<ToastEntry>>,
+    toast_next_id: &Rc<RefCell<i32>>,
+    ui: &AppWindow,
+) -> bool {
+    // Drain the latest update for this tab's primary surface.
+    match st.tabs[i].session.surface() {
+        Surface::TerminalGrid(rx) => {
+            if let Some(snap) = drain_latest(rx) {
+                if i == active {
+                    let img = render_frame(&mut st.tabs[i], &snap, target);
+                    ui.set_frame(img);
+                }
+                st.tabs[i].last = Some(snap);
+            }
+        }
+        Surface::Framebuffer(rx) => {
+            if let Some(frame) = drain_latest(rx) {
+                let img = frame_to_image(&frame);
+                if i == active {
+                    ui.set_rdp_frame(img.clone());
+                }
+                st.tabs[i].last_frame = Some(img);
+                st.tabs[i].rdp_w = frame.width;
+                st.tabs[i].rdp_h = frame.height;
+            }
+            // Remote→local clipboard sync: poll slot written by the drive thread.
+            if let (Some(ref arc), Some(ref mut cb)) =
+                (st.tabs[i].rdp_clipboard.clone(), st.sys_clipboard.as_mut())
+                && let Ok(mut slot) = arc.try_lock()
+                && let Some(text) = slot.take()
+            {
+                let _ = cb.set_text(text);
+            }
+        }
+    }
+
+    // P5.1: Drain extra pane surfaces (pane 1+).
+    // Carry-over fix (f): collect extra panes that have Exited/Failed for collapse.
+    let mut extra_panes_to_close: Vec<usize> = Vec::new();
+    for ep_idx in 0..st.tabs[i].extra_panes.len() {
+        match st.tabs[i].extra_panes[ep_idx].session.surface() {
+            Surface::TerminalGrid(rx) => {
+                if let Some(snap) = drain_latest(rx) {
+                    if i == active {
+                        // ep_idx 0 = pane 1 → pane-frame-2.
+                        if ep_idx == 0 {
+                            let ep = &mut st.tabs[i].extra_panes[ep_idx];
+                            let ep_target = if ep.surface_w > 0.0 && ep.surface_h > 0.0 {
+                                Some((
+                                    (ep.surface_w * ep.scale).round().max(1.0) as u32,
+                                    (ep.surface_h * ep.scale).round().max(1.0) as u32,
+                                ))
+                            } else {
+                                None
+                            };
+                            let img = render_frame_ep(ep, &snap, ep_target);
+                            ui.set_pane_frame_2(img);
+                        }
+                    }
+                    st.tabs[i].extra_panes[ep_idx].last = Some(snap);
+                }
+            }
+            Surface::Framebuffer(rx) => {
+                // Drain but discard (RDP-in-pane is an unimplemented edge case; noted).
+                drain_latest(rx);
+            }
+        }
+        // Auto-collapse extra pane when its local shell exits/fails (fix f).
+        let ep_status = st.tabs[i].extra_panes[ep_idx].session.status();
+        if matches!(
+            ep_status,
+            SessionStatus::Exited(_) | SessionStatus::Failed(_)
+        ) {
+            extra_panes_to_close.push(ep_idx);
+        }
+    }
+    // Collapse exited extra panes (process in reverse order to keep indices valid).
+    for &ep_idx in extra_panes_to_close.iter().rev() {
+        let ep = st.tabs[i].extra_panes.remove(ep_idx);
+        ep.session.shutdown();
+        // Close the corresponding pane slot in the group tracker.
+        // pane index = ep_idx + 1 (extra_panes are panes 1+).
+        // PaneGroup::close_focused requires us to focus the pane first.
+        st.tabs[i].pane_group.set_focused(ep_idx + 1);
+        st.tabs[i].pane_group.close_focused();
+    }
+    if !extra_panes_to_close.is_empty() {
+        // Tab-strip badge update applies to ALL tabs whose pane count changed,
+        // not only the active one (fix j: background tabs must sync their badge).
+        if let Some(mut item) = tab_model.row_data(i) {
+            let new_count = st.tabs[i].pane_group.count() as i32;
+            if item.pane_count != new_count {
+                item.pane_count = new_count;
+                tab_model.set_row_data(i, item);
+            }
+        }
+        if i == active {
+            let new_layout = st.tabs[i].pane_group.layout();
+            let new_focused = st.tabs[i].pane_group.focused();
+            ui.set_pane_layout(panes::layout_to_int(new_layout));
+            ui.set_active_pane(new_focused as i32);
+        }
+    }
+
+    let status = st.tabs[i].session.status();
+    let dot = match &status {
+        SessionStatus::Connecting => "connecting",
+        SessionStatus::Connected => "connected",
+        SessionStatus::Failed(_) => "error",
+        SessionStatus::Disconnected | SessionStatus::Exited(_) => "disconnected",
+    };
+    if let Some(mut item) = tab_model.row_data(i)
+        && item.status.as_str() != dot
+    {
+        // P5.3b: emit a toast when a background tab disconnects/fails.
+        if i != active
+            && st.tabs[i].is_remote
+            && matches!(
+                status,
+                SessionStatus::Disconnected | SessionStatus::Failed(_)
+            )
+        {
+            let msg = match &status {
+                SessionStatus::Failed(r) => {
+                    format!("{}: connection failed – {r}", item.title.as_str())
+                }
+                _ => format!("{}: disconnected", item.title.as_str()),
+            };
+            let kind: i32 = if matches!(status, SessionStatus::Failed(_)) {
+                3
+            } else {
+                2
+            };
+            let id = {
+                let mut n = toast_next_id.borrow_mut();
+                let id = *n;
+                *n += 1;
+                id
+            };
+            toast_model.push(ToastEntry {
+                id,
+                message: SharedString::from(msg),
+                kind,
+            });
+        }
+        item.status = SharedString::from(dot);
+        tab_model.set_row_data(i, item);
+    }
+
+    if i == active {
+        overlays::update_overlays_from_status(ui, &st.tabs[i], &status);
+    }
+
+    !st.tabs[i].is_remote && matches!(status, SessionStatus::Exited(_))
+}
+
 pub(super) fn tick(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,
@@ -878,156 +1022,16 @@ pub(super) fn tick(
     let mut to_close: Vec<usize> = Vec::new();
 
     for i in 0..st.tabs.len() {
-        // Drain the latest update for this tab's primary surface.
-        match st.tabs[i].session.surface() {
-            Surface::TerminalGrid(rx) => {
-                if let Some(snap) = drain_latest(rx) {
-                    if i == active {
-                        let img = render_frame(&mut st.tabs[i], &snap, target);
-                        ui.set_frame(img);
-                    }
-                    st.tabs[i].last = Some(snap);
-                }
-            }
-            Surface::Framebuffer(rx) => {
-                if let Some(frame) = drain_latest(rx) {
-                    let img = frame_to_image(&frame);
-                    if i == active {
-                        ui.set_rdp_frame(img.clone());
-                    }
-                    st.tabs[i].last_frame = Some(img);
-                    st.tabs[i].rdp_w = frame.width;
-                    st.tabs[i].rdp_h = frame.height;
-                }
-                // Remote→local clipboard sync: poll slot written by the drive thread.
-                if let (Some(ref arc), Some(ref mut cb)) =
-                    (st.tabs[i].rdp_clipboard.clone(), st.sys_clipboard.as_mut())
-                    && let Ok(mut slot) = arc.try_lock()
-                    && let Some(text) = slot.take()
-                {
-                    let _ = cb.set_text(text);
-                }
-            }
-        }
-
-        // P5.1: Drain extra pane surfaces (pane 1+).
-        // Carry-over fix (f): collect extra panes that have Exited/Failed for collapse.
-        let mut extra_panes_to_close: Vec<usize> = Vec::new();
-        for ep_idx in 0..st.tabs[i].extra_panes.len() {
-            match st.tabs[i].extra_panes[ep_idx].session.surface() {
-                Surface::TerminalGrid(rx) => {
-                    if let Some(snap) = drain_latest(rx) {
-                        if i == active {
-                            // ep_idx 0 = pane 1 → pane-frame-2.
-                            if ep_idx == 0 {
-                                let ep = &mut st.tabs[i].extra_panes[ep_idx];
-                                let ep_target = if ep.surface_w > 0.0 && ep.surface_h > 0.0 {
-                                    Some((
-                                        (ep.surface_w * ep.scale).round().max(1.0) as u32,
-                                        (ep.surface_h * ep.scale).round().max(1.0) as u32,
-                                    ))
-                                } else {
-                                    None
-                                };
-                                let img = render_frame_ep(ep, &snap, ep_target);
-                                ui.set_pane_frame_2(img);
-                            }
-                        }
-                        st.tabs[i].extra_panes[ep_idx].last = Some(snap);
-                    }
-                }
-                Surface::Framebuffer(rx) => {
-                    // Drain but discard (RDP-in-pane is an unimplemented edge case; noted).
-                    drain_latest(rx);
-                }
-            }
-            // Auto-collapse extra pane when its local shell exits/fails (fix f).
-            let ep_status = st.tabs[i].extra_panes[ep_idx].session.status();
-            if matches!(
-                ep_status,
-                SessionStatus::Exited(_) | SessionStatus::Failed(_)
-            ) {
-                extra_panes_to_close.push(ep_idx);
-            }
-        }
-        // Collapse exited extra panes (process in reverse order to keep indices valid).
-        for &ep_idx in extra_panes_to_close.iter().rev() {
-            let ep = st.tabs[i].extra_panes.remove(ep_idx);
-            ep.session.shutdown();
-            // Close the corresponding pane slot in the group tracker.
-            // pane index = ep_idx + 1 (extra_panes are panes 1+).
-            // PaneGroup::close_focused requires us to focus the pane first.
-            st.tabs[i].pane_group.set_focused(ep_idx + 1);
-            st.tabs[i].pane_group.close_focused();
-        }
-        if !extra_panes_to_close.is_empty() {
-            // Tab-strip badge update applies to ALL tabs whose pane count changed,
-            // not only the active one (fix j: background tabs must sync their badge).
-            if let Some(mut item) = tab_model.row_data(i) {
-                let new_count = st.tabs[i].pane_group.count() as i32;
-                if item.pane_count != new_count {
-                    item.pane_count = new_count;
-                    tab_model.set_row_data(i, item);
-                }
-            }
-            if i == active {
-                let new_layout = st.tabs[i].pane_group.layout();
-                let new_focused = st.tabs[i].pane_group.focused();
-                ui.set_pane_layout(panes::layout_to_int(new_layout));
-                ui.set_active_pane(new_focused as i32);
-            }
-        }
-
-        let status = st.tabs[i].session.status();
-        let dot = match &status {
-            SessionStatus::Connecting => "connecting",
-            SessionStatus::Connected => "connected",
-            SessionStatus::Failed(_) => "error",
-            SessionStatus::Disconnected | SessionStatus::Exited(_) => "disconnected",
-        };
-        if let Some(mut item) = tab_model.row_data(i)
-            && item.status.as_str() != dot
-        {
-            // P5.3b: emit a toast when a background tab disconnects/fails.
-            if i != active
-                && st.tabs[i].is_remote
-                && matches!(
-                    status,
-                    SessionStatus::Disconnected | SessionStatus::Failed(_)
-                )
-            {
-                let msg = match &status {
-                    SessionStatus::Failed(r) => {
-                        format!("{}: connection failed – {r}", item.title.as_str())
-                    }
-                    _ => format!("{}: disconnected", item.title.as_str()),
-                };
-                let kind: i32 = if matches!(status, SessionStatus::Failed(_)) {
-                    3
-                } else {
-                    2
-                };
-                let id = {
-                    let mut n = toast_next_id.borrow_mut();
-                    let id = *n;
-                    *n += 1;
-                    id
-                };
-                toast_model.push(ToastEntry {
-                    id,
-                    message: SharedString::from(msg),
-                    kind,
-                });
-            }
-            item.status = SharedString::from(dot);
-            tab_model.set_row_data(i, item);
-        }
-
-        if i == active {
-            overlays::update_overlays_from_status(ui, &st.tabs[i], &status);
-        }
-
-        if !st.tabs[i].is_remote && matches!(status, SessionStatus::Exited(_)) {
+        if tick_tab(
+            &mut st,
+            i,
+            active,
+            target,
+            tab_model,
+            toast_model,
+            toast_next_id,
+            ui,
+        ) {
             to_close.push(i);
         }
     }
@@ -1148,19 +1152,13 @@ pub(super) fn frame_to_image(frame: &FrameUpdate) -> Image {
     Image::from_rgba8(buf)
 }
 
-pub(super) fn wire_tick(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    toast_model: &Rc<VecModel<ToastEntry>>,
-    toast_next_id: &Rc<RefCell<i32>>,
-) -> Timer {
+pub(super) fn wire_tick(ctx: &Ctx) -> Timer {
     let redraw = Timer::default();
-    let state = state.clone();
-    let tab_model = tab_model.clone();
-    let toast_model = toast_model.clone();
-    let toast_next_id = toast_next_id.clone();
-    let weak = ui.as_weak();
+    let state = ctx.state.clone();
+    let tab_model = ctx.tab_model.clone();
+    let toast_model = ctx.toast_model.clone();
+    let toast_next_id = ctx.toast_next_id.clone();
+    let weak = ctx.ui.as_weak();
     redraw.start(TimerMode::Repeated, REDRAW_INTERVAL, move || {
         if let Some(ui) = weak.upgrade() {
             tick(&state, &tab_model, &toast_model, &toast_next_id, &ui);

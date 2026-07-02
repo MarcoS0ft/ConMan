@@ -16,33 +16,24 @@ use crate::generated_ui::{ConnProfile, GroupForm};
 
 use super::*;
 
-pub(super) fn wire_tree_ctl(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    conn_model: &Rc<VecModel<ConnRow>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-) {
-    wire_conn_filter_changed(ui, state, conn_model);
-    wire_toggle_conn_row(ui, state, conn_model);
-    wire_new_connection(ui, state);
-    wire_new_group(ui, state);
-    wire_edit_conn(ui, state);
-    wire_edit_group(ui, state);
-    wire_delete_conn_row(ui, state, conn_model, repo);
-    wire_profile_save(ui, state, conn_model, repo);
-    wire_group_save(ui, state, conn_model, repo);
-    wire_reorder_conn_row(ui, state, conn_model, repo);
-    wire_reorder_group_row(ui, state, conn_model, repo);
+pub(super) fn wire_tree_ctl(ctx: &Ctx) {
+    wire_conn_filter_changed(ctx);
+    wire_toggle_conn_row(ctx);
+    wire_new_connection(ctx);
+    wire_new_group(ctx);
+    wire_edit_conn(ctx);
+    wire_edit_group(ctx);
+    wire_delete_conn_row(ctx);
+    wire_profile_save(ctx);
+    wire_group_save(ctx);
+    wire_reorder_conn_row(ctx);
+    wire_reorder_group_row(ctx);
 }
 
-fn wire_conn_filter_changed(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    conn_model: &Rc<VecModel<ConnRow>>,
-) {
-    ui.on_conn_filter_changed({
-        let state = state.clone();
-        let conn_model = conn_model.clone();
+fn wire_conn_filter_changed(ctx: &Ctx) {
+    ctx.ui.on_conn_filter_changed({
+        let state = ctx.state.clone();
+        let conn_model = ctx.conn_model.clone();
         move |q| {
             let mut st = state.borrow_mut();
             st.conn_filter = q.to_string();
@@ -51,14 +42,10 @@ fn wire_conn_filter_changed(
     });
 }
 
-fn wire_toggle_conn_row(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    conn_model: &Rc<VecModel<ConnRow>>,
-) {
-    ui.on_toggle_conn_row({
-        let state = state.clone();
-        let conn_model = conn_model.clone();
+fn wire_toggle_conn_row(ctx: &Ctx) {
+    ctx.ui.on_toggle_conn_row({
+        let state = ctx.state.clone();
+        let conn_model = ctx.conn_model.clone();
         move |idx| {
             let mut st = state.borrow_mut();
             let flat = st.conn_tree.flat();
@@ -72,10 +59,10 @@ fn wire_toggle_conn_row(
     });
 }
 
-fn wire_new_connection(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    ui.on_new_connection({
-        let state = state.clone();
-        let weak = ui.as_weak();
+fn wire_new_connection(ctx: &Ctx) {
+    ctx.ui.on_new_connection({
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
         move |group_id| {
             let Some(ui) = weak.upgrade() else { return };
             let st = state.borrow();
@@ -106,10 +93,10 @@ fn wire_new_connection(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
-fn wire_new_group(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    ui.on_new_group({
-        let state = state.clone();
-        let weak = ui.as_weak();
+fn wire_new_group(ctx: &Ctx) {
+    ctx.ui.on_new_group({
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
         move |parent_id| {
             let Some(ui) = weak.upgrade() else { return };
             let st = state.borrow();
@@ -133,10 +120,10 @@ fn wire_new_group(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
-fn wire_edit_conn(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    ui.on_edit_conn({
-        let state = state.clone();
-        let weak = ui.as_weak();
+fn wire_edit_conn(ctx: &Ctx) {
+    ctx.ui.on_edit_conn({
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
         move |conn_id| {
             let Some(ui) = weak.upgrade() else { return };
             let st = state.borrow();
@@ -174,10 +161,10 @@ fn wire_edit_conn(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
-fn wire_edit_group(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    ui.on_edit_group({
-        let state = state.clone();
-        let weak = ui.as_weak();
+fn wire_edit_group(ctx: &Ctx) {
+    ctx.ui.on_edit_group({
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
         move |group_id| {
             let Some(ui) = weak.upgrade() else { return };
             let st = state.borrow();
@@ -204,16 +191,11 @@ fn wire_edit_group(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
-fn wire_delete_conn_row(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    conn_model: &Rc<VecModel<ConnRow>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-) {
-    ui.on_delete_conn_row({
-        let state = state.clone();
-        let conn_model = conn_model.clone();
-        let repo_del = repo.clone();
+fn wire_delete_conn_row(ctx: &Ctx) {
+    ctx.ui.on_delete_conn_row({
+        let state = ctx.state.clone();
+        let conn_model = ctx.conn_model.clone();
+        let repo_del = ctx.repo.clone();
         move |id, is_group| {
             let mut st = state.borrow_mut();
             let result = if is_group {
@@ -233,17 +215,12 @@ fn wire_delete_conn_row(
     });
 }
 
-fn wire_profile_save(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    conn_model: &Rc<VecModel<ConnRow>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-) {
-    ui.on_profile_save({
-        let state = state.clone();
-        let conn_model = conn_model.clone();
-        let repo_ps = repo.clone();
-        let weak = ui.as_weak();
+fn wire_profile_save(ctx: &Ctx) {
+    ctx.ui.on_profile_save({
+        let state = ctx.state.clone();
+        let conn_model = ctx.conn_model.clone();
+        let repo_ps = ctx.repo.clone();
+        let weak = ctx.ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let form = ui.get_profile_form();
@@ -315,17 +292,12 @@ fn wire_profile_save(
     });
 }
 
-fn wire_group_save(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    conn_model: &Rc<VecModel<ConnRow>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-) {
-    ui.on_group_save({
-        let state = state.clone();
-        let conn_model = conn_model.clone();
-        let repo_gs = repo.clone();
-        let weak = ui.as_weak();
+fn wire_group_save(ctx: &Ctx) {
+    ctx.ui.on_group_save({
+        let state = ctx.state.clone();
+        let conn_model = ctx.conn_model.clone();
+        let repo_gs = ctx.repo.clone();
+        let weak = ctx.ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let form = ui.get_group_form();
@@ -388,16 +360,11 @@ fn wire_group_save(
     });
 }
 
-fn wire_reorder_conn_row(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    conn_model: &Rc<VecModel<ConnRow>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-) {
-    ui.on_reorder_conn_row({
-        let state = state.clone();
-        let conn_model = conn_model.clone();
-        let repo_rcr = repo.clone();
+fn wire_reorder_conn_row(ctx: &Ctx) {
+    ctx.ui.on_reorder_conn_row({
+        let state = ctx.state.clone();
+        let conn_model = ctx.conn_model.clone();
+        let repo_rcr = ctx.repo.clone();
         move |conn_id, direction| {
             let mut st = state.borrow_mut();
             let Some(conn) = st.conn_tree.conn_by_id(conn_id as i64).cloned() else {
@@ -463,17 +430,12 @@ fn wire_reorder_conn_row(
     });
 }
 
-fn wire_reorder_group_row(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    conn_model: &Rc<VecModel<ConnRow>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-) {
-    ui.on_reorder_group_row({
-        let state = state.clone();
-        let conn_model = conn_model.clone();
-        let repo_rgr = repo.clone();
-        let weak_rgr = ui.as_weak();
+fn wire_reorder_group_row(ctx: &Ctx) {
+    ctx.ui.on_reorder_group_row({
+        let state = ctx.state.clone();
+        let conn_model = ctx.conn_model.clone();
+        let repo_rgr = ctx.repo.clone();
+        let weak_rgr = ctx.ui.as_weak();
         move |group_id, direction| {
             let mut st = state.borrow_mut();
             let Some(grp) = st.conn_tree.group_by_id(group_id as i64).cloned() else {

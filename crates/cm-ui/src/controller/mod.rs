@@ -13,10 +13,8 @@
 //!
 //! P6.1: split from a single 4,525-line `controller.rs` god-module into this
 //! `controller/` tree — one file per feature area, each registering its Slint
-//! callbacks via a `wire_*()` function called from [`run`], taking whatever
-//! handles it needs directly (mirrors the local bindings `run()` used to
-//! capture per closure). Pure code move: no behavior change. See
-//! `docs/devel/tasks/P6.1-controller-decomposition.md`.
+//! callbacks via a `wire_*(ctx: &Ctx)` function called from [`run`]. Pure code
+//! move: no behavior change. See `docs/devel/tasks/P6.1-controller-decomposition.md`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -168,6 +166,30 @@ impl State {
 /// front, so no sender is ever clobbered by a subsequent connection.
 type HkQueue = Arc<Mutex<std::collections::VecDeque<Sender<HostKeyDecision>>>>;
 
+/// Bundles the handles every `wire_*` setup function needs: the live
+/// `AppWindow`, shared `State`, the Slint list models, the storage/secrets
+/// adapters, and the pending-decision queues for the host-key/cert dialogs.
+///
+/// Built once in [`run`] after all models + initial state are constructed,
+/// then passed by reference to each feature module's `wire_*` function. Pure
+/// parameter bundling — introduced by the P6.1 controller split, no behavior
+/// change (CONVENTIONS §3: internal/private, no memo required).
+struct Ctx {
+    ui: AppWindow,
+    state: Rc<RefCell<State>>,
+    tab_model: Rc<VecModel<TabItem>>,
+    conn_model: Rc<VecModel<ConnRow>>,
+    cred_model: Rc<VecModel<CredRow>>,
+    palette_model: Rc<VecModel<PaletteAction>>,
+    toast_model: Rc<VecModel<ToastEntry>>,
+    toast_next_id: Rc<RefCell<i32>>,
+    repo: Arc<dyn cm_core::ConnectionRepository>,
+    secrets: Arc<dyn cm_core::CredentialStore>,
+    hk_pending: HkQueue,
+    cert_pending: Arc<Mutex<Option<Sender<CertDecision>>>>,
+    resize_debounce: Rc<Timer>,
+}
+
 /// Build and run the ConMan application.
 ///
 /// # Errors
@@ -262,35 +284,37 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
 
     tabs::open_local_tab(&state, &tab_model, &ui);
 
-    tabs::wire_tabs(&ui, &state, &tab_model, &resize_debounce);
-    sessions::wire_sessions(
-        &ui,
-        &state,
-        &tab_model,
-        &palette_model,
-        &hk_pending,
-        &cert_pending,
-    );
-    panes::wire_panes(&ui, &state, &tab_model, &resize_debounce);
-    tree_ctl::wire_tree_ctl(&ui, &state, &conn_model, &repo);
-    keys_ctl::wire_keys_ctl(&ui, &state, &cred_model, &repo, &secrets);
-    settings_ctl::wire_settings_ctl(&ui, &state, &repo);
-    palette::wire_palette(&ui, &state, &tab_model, &palette_model);
-    overlays::wire_overlays(&ui, &repo, &toast_model);
+    let ctx = Ctx {
+        ui,
+        state: state.clone(),
+        tab_model: tab_model.clone(),
+        conn_model: conn_model.clone(),
+        cred_model: cred_model.clone(),
+        palette_model: palette_model.clone(),
+        toast_model: toast_model.clone(),
+        toast_next_id: toast_next_id.clone(),
+        repo: repo.clone(),
+        secrets: secrets.clone(),
+        hk_pending: hk_pending.clone(),
+        cert_pending: cert_pending.clone(),
+        resize_debounce: resize_debounce.clone(),
+    };
+
+    tabs::wire_tabs(&ctx);
+    sessions::wire_sessions(&ctx);
+    panes::wire_panes(&ctx);
+    tree_ctl::wire_tree_ctl(&ctx);
+    keys_ctl::wire_keys_ctl(&ctx);
+    settings_ctl::wire_settings_ctl(&ctx);
+    palette::wire_palette(&ctx);
+    overlays::wire_overlays(&ctx);
 
     // -- Redraw timer ---------------------------------------------------------
-    let _redraw = sessions::wire_tick(&ui, &state, &tab_model, &toast_model, &toast_next_id);
+    let _redraw = sessions::wire_tick(&ctx);
 
     // -- Optional headless test hooks -----------------------------------------
     let mut hooks: Vec<Timer> = Vec::new();
-    util::wire_env_hooks(
-        &ui,
-        &state,
-        &tab_model,
-        &hk_pending,
-        &cert_pending,
-        &mut hooks,
-    );
+    util::wire_env_hooks(&ctx, &mut hooks);
 
-    ui.run()
+    ctx.ui.run()
 }

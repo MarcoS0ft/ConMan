@@ -9,21 +9,17 @@ use crate::AppWindow;
 
 use super::*;
 
-pub(super) fn wire_overlays(
-    ui: &AppWindow,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-    toast_model: &Rc<VecModel<ToastEntry>>,
-) {
-    wire_select_panel(ui, repo);
-    wire_toggle_sidebar(ui, repo);
-    wire_toast_dismissed(ui, toast_model);
-    wire_stub_callbacks(ui);
+pub(super) fn wire_overlays(ctx: &Ctx) {
+    wire_select_panel(ctx);
+    wire_toggle_sidebar(ctx);
+    wire_toast_dismissed(ctx);
+    wire_stub_callbacks(ctx);
 }
 
-fn wire_select_panel(ui: &AppWindow, repo: &Arc<dyn cm_core::ConnectionRepository>) {
-    ui.on_select_panel({
-        let weak = ui.as_weak();
-        let repo_sp = repo.clone();
+fn wire_select_panel(ctx: &Ctx) {
+    ctx.ui.on_select_panel({
+        let weak = ctx.ui.as_weak();
+        let repo_sp = ctx.repo.clone();
         move |idx| {
             if let Some(ui) = weak.upgrade() {
                 ui.set_active_panel(idx);
@@ -36,10 +32,10 @@ fn wire_select_panel(ui: &AppWindow, repo: &Arc<dyn cm_core::ConnectionRepositor
     });
 }
 
-fn wire_toggle_sidebar(ui: &AppWindow, repo: &Arc<dyn cm_core::ConnectionRepository>) {
-    ui.on_toggle_sidebar({
-        let weak = ui.as_weak();
-        let repo_ts = repo.clone();
+fn wire_toggle_sidebar(ctx: &Ctx) {
+    ctx.ui.on_toggle_sidebar({
+        let weak = ctx.ui.as_weak();
+        let repo_ts = ctx.repo.clone();
         move || {
             if let Some(ui) = weak.upgrade() {
                 let new_val = !ui.get_sidebar_collapsed();
@@ -53,9 +49,9 @@ fn wire_toggle_sidebar(ui: &AppWindow, repo: &Arc<dyn cm_core::ConnectionReposit
     });
 }
 
-fn wire_toast_dismissed(ui: &AppWindow, toast_model: &Rc<VecModel<ToastEntry>>) {
-    ui.on_toast_dismissed({
-        let toast_model = toast_model.clone();
+fn wire_toast_dismissed(ctx: &Ctx) {
+    ctx.ui.on_toast_dismissed({
+        let toast_model = ctx.toast_model.clone();
         move |id| {
             // Find the entry with the given id and remove it.
             let idx = (0..toast_model.row_count())
@@ -67,10 +63,10 @@ fn wire_toast_dismissed(ui: &AppWindow, toast_model: &Rc<VecModel<ToastEntry>>) 
     });
 }
 
-fn wire_stub_callbacks(ui: &AppWindow) {
-    ui.on_launchpad_edited(|_q| {});
-    ui.on_open_recent(|_i| {});
-    ui.on_open_group_split(|| {});
+fn wire_stub_callbacks(ctx: &Ctx) {
+    ctx.ui.on_launchpad_edited(|_q| {});
+    ctx.ui.on_open_recent(|_i| {});
+    ctx.ui.on_open_group_split(|| {});
 }
 
 pub(super) fn update_overlays_from_status(ui: &AppWindow, tab: &Tab, status: &SessionStatus) {

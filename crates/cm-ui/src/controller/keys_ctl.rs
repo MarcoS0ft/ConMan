@@ -16,30 +16,20 @@ use crate::generated_ui::CredFormData;
 
 use super::*;
 
-pub(super) fn wire_keys_ctl(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    cred_model: &Rc<VecModel<CredRow>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-    secrets: &Arc<dyn cm_core::CredentialStore>,
-) {
-    wire_cred_filter_changed(ui, state, cred_model);
-    wire_toggle_cred_row(ui, state, cred_model);
-    wire_new_cred(ui, state);
-    wire_new_cred_folder(ui, state, cred_model, repo);
-    wire_edit_cred(ui, state);
-    wire_delete_cred_row(ui, state, cred_model, repo);
-    wire_cred_save(ui, state, cred_model, repo, secrets);
+pub(super) fn wire_keys_ctl(ctx: &Ctx) {
+    wire_cred_filter_changed(ctx);
+    wire_toggle_cred_row(ctx);
+    wire_new_cred(ctx);
+    wire_new_cred_folder(ctx);
+    wire_edit_cred(ctx);
+    wire_delete_cred_row(ctx);
+    wire_cred_save(ctx);
 }
 
-fn wire_cred_filter_changed(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    cred_model: &Rc<VecModel<CredRow>>,
-) {
-    ui.on_cred_filter_changed({
-        let state = state.clone();
-        let cred_model = cred_model.clone();
+fn wire_cred_filter_changed(ctx: &Ctx) {
+    ctx.ui.on_cred_filter_changed({
+        let state = ctx.state.clone();
+        let cred_model = ctx.cred_model.clone();
         move |q| {
             let mut st = state.borrow_mut();
             st.cred_filter = q.to_string();
@@ -48,14 +38,10 @@ fn wire_cred_filter_changed(
     });
 }
 
-fn wire_toggle_cred_row(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    cred_model: &Rc<VecModel<CredRow>>,
-) {
-    ui.on_toggle_cred_row({
-        let state = state.clone();
-        let cred_model = cred_model.clone();
+fn wire_toggle_cred_row(ctx: &Ctx) {
+    ctx.ui.on_toggle_cred_row({
+        let state = ctx.state.clone();
+        let cred_model = ctx.cred_model.clone();
         move |idx| {
             let mut st = state.borrow_mut();
             let flat = st.keys_panel.flat();
@@ -69,10 +55,10 @@ fn wire_toggle_cred_row(
     });
 }
 
-fn wire_new_cred(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    ui.on_new_cred({
-        let state = state.clone();
-        let weak = ui.as_weak();
+fn wire_new_cred(ctx: &Ctx) {
+    ctx.ui.on_new_cred({
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
         move |folder_id| {
             let Some(ui) = weak.upgrade() else { return };
             // Resolve the DB folder id to a combo index so the picker
@@ -103,17 +89,12 @@ fn wire_new_cred(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
-fn wire_new_cred_folder(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    cred_model: &Rc<VecModel<CredRow>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-) {
-    ui.on_new_cred_folder({
-        let state = state.clone();
-        let cred_model = cred_model.clone();
-        let repo_ncf = repo.clone();
-        let weak = ui.as_weak();
+fn wire_new_cred_folder(ctx: &Ctx) {
+    ctx.ui.on_new_cred_folder({
+        let state = ctx.state.clone();
+        let cred_model = ctx.cred_model.clone();
+        let repo_ncf = ctx.repo.clone();
+        let weak = ctx.ui.as_weak();
         move |parent_folder_id| {
             let Some(_ui) = weak.upgrade() else { return };
             let fid = if parent_folder_id == 0 {
@@ -151,10 +132,10 @@ fn wire_new_cred_folder(
     });
 }
 
-fn wire_edit_cred(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    ui.on_edit_cred({
-        let state = state.clone();
-        let weak = ui.as_weak();
+fn wire_edit_cred(ctx: &Ctx) {
+    ctx.ui.on_edit_cred({
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
         move |cred_id| {
             let Some(ui) = weak.upgrade() else { return };
             let st = state.borrow();
@@ -192,17 +173,12 @@ fn wire_edit_cred(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
-fn wire_delete_cred_row(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    cred_model: &Rc<VecModel<CredRow>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-) {
-    ui.on_delete_cred_row({
-        let state = state.clone();
-        let cred_model = cred_model.clone();
-        let repo_del = repo.clone();
-        let weak = ui.as_weak();
+fn wire_delete_cred_row(ctx: &Ctx) {
+    ctx.ui.on_delete_cred_row({
+        let state = ctx.state.clone();
+        let cred_model = ctx.cred_model.clone();
+        let repo_del = ctx.repo.clone();
+        let weak = ctx.ui.as_weak();
         move |id, is_folder| {
             let mut st = state.borrow_mut();
             let result = if is_folder {
@@ -224,19 +200,13 @@ fn wire_delete_cred_row(
     });
 }
 
-fn wire_cred_save(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    cred_model: &Rc<VecModel<CredRow>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-    secrets: &Arc<dyn cm_core::CredentialStore>,
-) {
-    ui.on_cred_save({
-        let state = state.clone();
-        let cred_model = cred_model.clone();
-        let repo_cs = repo.clone();
-        let secrets_cs = secrets.clone();
-        let weak = ui.as_weak();
+fn wire_cred_save(ctx: &Ctx) {
+    ctx.ui.on_cred_save({
+        let state = ctx.state.clone();
+        let cred_model = ctx.cred_model.clone();
+        let repo_cs = ctx.repo.clone();
+        let secrets_cs = ctx.secrets.clone();
+        let weak = ctx.ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let mut form = ui.get_cred_form();

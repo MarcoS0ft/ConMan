@@ -9,24 +9,20 @@ use crate::AppWindow;
 
 use super::*;
 
-pub(super) fn wire_settings_ctl(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-) {
-    wire_theme_changed(ui, repo);
-    wire_density_changed(ui, repo);
-    wire_accent_changed(ui, repo);
-    wire_settings_font_size_changed(ui, state, repo);
-    wire_settings_shell_path_changed(ui, state, repo);
-    wire_settings_shell_args_changed(ui, state, repo);
-    wire_settings_shell_cwd_changed(ui, state, repo);
-    wire_startup_behavior_changed(ui, repo);
+pub(super) fn wire_settings_ctl(ctx: &Ctx) {
+    wire_theme_changed(ctx);
+    wire_density_changed(ctx);
+    wire_accent_changed(ctx);
+    wire_settings_font_size_changed(ctx);
+    wire_settings_shell_path_changed(ctx);
+    wire_settings_shell_args_changed(ctx);
+    wire_settings_shell_cwd_changed(ctx);
+    wire_startup_behavior_changed(ctx);
 }
 
-fn wire_theme_changed(ui: &AppWindow, repo: &Arc<dyn cm_core::ConnectionRepository>) {
-    ui.on_theme_changed({
-        let repo_s = repo.clone();
+fn wire_theme_changed(ctx: &Ctx) {
+    ctx.ui.on_theme_changed({
+        let repo_s = ctx.repo.clone();
         move |idx| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_theme_mode(idx) {
@@ -36,9 +32,9 @@ fn wire_theme_changed(ui: &AppWindow, repo: &Arc<dyn cm_core::ConnectionReposito
     });
 }
 
-fn wire_density_changed(ui: &AppWindow, repo: &Arc<dyn cm_core::ConnectionRepository>) {
-    ui.on_density_changed({
-        let repo_s = repo.clone();
+fn wire_density_changed(ctx: &Ctx) {
+    ctx.ui.on_density_changed({
+        let repo_s = ctx.repo.clone();
         move |idx| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_density(idx) {
@@ -48,9 +44,9 @@ fn wire_density_changed(ui: &AppWindow, repo: &Arc<dyn cm_core::ConnectionReposi
     });
 }
 
-fn wire_accent_changed(ui: &AppWindow, repo: &Arc<dyn cm_core::ConnectionRepository>) {
-    ui.on_accent_changed({
-        let repo_s = repo.clone();
+fn wire_accent_changed(ctx: &Ctx) {
+    ctx.ui.on_accent_changed({
+        let repo_s = ctx.repo.clone();
         move |idx| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_accent_index(idx) {
@@ -60,15 +56,11 @@ fn wire_accent_changed(ui: &AppWindow, repo: &Arc<dyn cm_core::ConnectionReposit
     });
 }
 
-fn wire_settings_font_size_changed(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-) {
-    ui.on_settings_font_size_changed({
-        let repo_s = repo.clone();
-        let state_fs = state.clone();
-        let weak_fs = ui.as_weak();
+fn wire_settings_font_size_changed(ctx: &Ctx) {
+    ctx.ui.on_settings_font_size_changed({
+        let repo_s = ctx.repo.clone();
+        let state_fs = ctx.state.clone();
+        let weak_fs = ctx.ui.as_weak();
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_font_size(v) {
@@ -96,14 +88,10 @@ fn wire_settings_font_size_changed(
     });
 }
 
-fn wire_settings_shell_path_changed(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-) {
-    ui.on_settings_shell_path_changed({
-        let repo_s = repo.clone();
-        let state_sp = state.clone();
+fn wire_settings_shell_path_changed(ctx: &Ctx) {
+    ctx.ui.on_settings_shell_path_changed({
+        let repo_s = ctx.repo.clone();
+        let state_sp = ctx.state.clone();
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_shell_path(v.as_str()) {
@@ -119,14 +107,10 @@ fn wire_settings_shell_path_changed(
     });
 }
 
-fn wire_settings_shell_args_changed(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-) {
-    ui.on_settings_shell_args_changed({
-        let repo_s = repo.clone();
-        let state_sa = state.clone();
+fn wire_settings_shell_args_changed(ctx: &Ctx) {
+    ctx.ui.on_settings_shell_args_changed({
+        let repo_s = ctx.repo.clone();
+        let state_sa = ctx.state.clone();
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_shell_args(v.as_str()) {
@@ -142,14 +126,10 @@ fn wire_settings_shell_args_changed(
     });
 }
 
-fn wire_settings_shell_cwd_changed(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    repo: &Arc<dyn cm_core::ConnectionRepository>,
-) {
-    ui.on_settings_shell_cwd_changed({
-        let repo_s = repo.clone();
-        let state_sc = state.clone();
+fn wire_settings_shell_cwd_changed(ctx: &Ctx) {
+    ctx.ui.on_settings_shell_cwd_changed({
+        let repo_s = ctx.repo.clone();
+        let state_sc = ctx.state.clone();
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_shell_cwd(v.as_str()) {
@@ -165,9 +145,9 @@ fn wire_settings_shell_cwd_changed(
     });
 }
 
-fn wire_startup_behavior_changed(ui: &AppWindow, repo: &Arc<dyn cm_core::ConnectionRepository>) {
-    ui.on_startup_behavior_changed({
-        let repo_s = repo.clone();
+fn wire_startup_behavior_changed(ctx: &Ctx) {
+    ctx.ui.on_startup_behavior_changed({
+        let repo_s = ctx.repo.clone();
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_startup_behavior(v) {

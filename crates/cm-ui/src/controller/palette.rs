@@ -12,28 +12,18 @@ use crate::generated_ui::ConnProfile;
 
 use super::*;
 
-pub(super) fn wire_palette(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    palette_model: &Rc<VecModel<PaletteAction>>,
-) {
-    wire_open_palette(ui, state, tab_model, palette_model);
-    wire_palette_edited(ui, state, tab_model, palette_model);
-    wire_palette_activated(ui, state, tab_model, palette_model);
+pub(super) fn wire_palette(ctx: &Ctx) {
+    wire_open_palette(ctx);
+    wire_palette_edited(ctx);
+    wire_palette_activated(ctx);
 }
 
-fn wire_open_palette(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    palette_model: &Rc<VecModel<PaletteAction>>,
-) {
-    ui.on_open_palette({
-        let weak = ui.as_weak();
-        let pal_model = palette_model.clone();
-        let tab_model_op = tab_model.clone();
-        let state = state.clone();
+fn wire_open_palette(ctx: &Ctx) {
+    ctx.ui.on_open_palette({
+        let weak = ctx.ui.as_weak();
+        let pal_model = ctx.palette_model.clone();
+        let tab_model_op = ctx.tab_model.clone();
+        let state = ctx.state.clone();
         move || {
             if let Some(ui) = weak.upgrade() {
                 let labels: Vec<String> = state
@@ -54,17 +44,12 @@ fn wire_open_palette(
     });
 }
 
-fn wire_palette_edited(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    palette_model: &Rc<VecModel<PaletteAction>>,
-) {
-    ui.on_palette_edited({
-        let weak = ui.as_weak();
-        let pal_model = palette_model.clone();
-        let tab_model_pe = tab_model.clone();
-        let state = state.clone();
+fn wire_palette_edited(ctx: &Ctx) {
+    ctx.ui.on_palette_edited({
+        let weak = ctx.ui.as_weak();
+        let pal_model = ctx.palette_model.clone();
+        let tab_model_pe = ctx.tab_model.clone();
+        let state = ctx.state.clone();
         move |query| {
             let labels: Vec<String> = state
                 .borrow()
@@ -84,17 +69,12 @@ fn wire_palette_edited(
     });
 }
 
-fn wire_palette_activated(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    palette_model: &Rc<VecModel<PaletteAction>>,
-) {
-    ui.on_palette_activated({
-        let state = state.clone();
-        let tab_model = tab_model.clone();
-        let pal_model_dispatch = palette_model.clone();
-        let weak = ui.as_weak();
+fn wire_palette_activated(ctx: &Ctx) {
+    ctx.ui.on_palette_activated({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let pal_model_dispatch = ctx.palette_model.clone();
+        let weak = ctx.ui.as_weak();
         move |idx| {
             if let Some(ui) = weak.upgrade() {
                 dispatch_palette_action(&state, &tab_model, &pal_model_dispatch, &ui, idx as usize);

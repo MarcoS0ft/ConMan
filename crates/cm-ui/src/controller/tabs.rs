@@ -11,23 +11,18 @@ use crate::{AppWindow, TabItem};
 
 use super::*;
 
-pub(super) fn wire_tabs(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    resize_debounce: &Rc<Timer>,
-) {
-    wire_new_tab(ui, state, tab_model);
-    wire_select_tab(ui, state);
-    wire_close_tab(ui, state, tab_model);
-    wire_surface_resized(ui, state, resize_debounce);
+pub(super) fn wire_tabs(ctx: &Ctx) {
+    wire_new_tab(ctx);
+    wire_select_tab(ctx);
+    wire_close_tab(ctx);
+    wire_surface_resized(ctx);
 }
 
-fn wire_new_tab(ui: &AppWindow, state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>) {
-    ui.on_new_tab({
-        let state = state.clone();
-        let tab_model = tab_model.clone();
-        let weak = ui.as_weak();
+fn wire_new_tab(ctx: &Ctx) {
+    ctx.ui.on_new_tab({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let weak = ctx.ui.as_weak();
         move || {
             if let Some(ui) = weak.upgrade() {
                 open_local_tab(&state, &tab_model, &ui);
@@ -36,10 +31,10 @@ fn wire_new_tab(ui: &AppWindow, state: &Rc<RefCell<State>>, tab_model: &Rc<VecMo
     });
 }
 
-fn wire_select_tab(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    ui.on_select_tab({
-        let state = state.clone();
-        let weak = ui.as_weak();
+fn wire_select_tab(ctx: &Ctx) {
+    ctx.ui.on_select_tab({
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
         move |idx| {
             if let Some(ui) = weak.upgrade() {
                 select_tab(&state, &ui, idx);
@@ -48,11 +43,11 @@ fn wire_select_tab(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
-fn wire_close_tab(ui: &AppWindow, state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>) {
-    ui.on_close_tab({
-        let state = state.clone();
-        let tab_model = tab_model.clone();
-        let weak = ui.as_weak();
+fn wire_close_tab(ctx: &Ctx) {
+    ctx.ui.on_close_tab({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let weak = ctx.ui.as_weak();
         move |idx| {
             if let Some(ui) = weak.upgrade() {
                 close_tab(&state, &tab_model, &ui, idx as usize);
@@ -61,12 +56,12 @@ fn wire_close_tab(ui: &AppWindow, state: &Rc<RefCell<State>>, tab_model: &Rc<Vec
     });
 }
 
-fn wire_surface_resized(ui: &AppWindow, state: &Rc<RefCell<State>>, resize_debounce: &Rc<Timer>) {
+fn wire_surface_resized(ctx: &Ctx) {
     {
-        let state = state.clone();
-        let weak = ui.as_weak();
-        let debounce = resize_debounce.clone();
-        ui.on_surface_resized(move |w, h| {
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
+        let debounce = ctx.resize_debounce.clone();
+        ctx.ui.on_surface_resized(move |w, h| {
             if let Some(ui) = weak.upgrade() {
                 let mut st = state.borrow_mut();
                 st.scale = ui.window().scale_factor();

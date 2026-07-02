@@ -11,24 +11,19 @@ use crate::{AppWindow, TabItem};
 
 use super::*;
 
-pub(super) fn wire_panes(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    resize_debounce: &Rc<Timer>,
-) {
-    wire_toggle_broadcast(ui);
-    wire_split_pane_h(ui, state, tab_model);
-    wire_split_pane_v(ui, state, tab_model);
-    wire_close_pane(ui, state, tab_model);
-    wire_detach_session(ui, state, tab_model);
-    wire_pane_focused(ui, state);
-    wire_pane_resized(ui, state, resize_debounce);
+pub(super) fn wire_panes(ctx: &Ctx) {
+    wire_toggle_broadcast(ctx);
+    wire_split_pane_h(ctx);
+    wire_split_pane_v(ctx);
+    wire_close_pane(ctx);
+    wire_detach_session(ctx);
+    wire_pane_focused(ctx);
+    wire_pane_resized(ctx);
 }
 
-fn wire_toggle_broadcast(ui: &AppWindow) {
-    ui.on_toggle_broadcast({
-        let weak = ui.as_weak();
+fn wire_toggle_broadcast(ctx: &Ctx) {
+    ctx.ui.on_toggle_broadcast({
+        let weak = ctx.ui.as_weak();
         move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_broadcast_active(!ui.get_broadcast_active());
@@ -37,15 +32,11 @@ fn wire_toggle_broadcast(ui: &AppWindow) {
     });
 }
 
-fn wire_split_pane_h(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-) {
-    ui.on_split_pane_h({
-        let state = state.clone();
-        let tab_model = tab_model.clone();
-        let weak = ui.as_weak();
+fn wire_split_pane_h(ctx: &Ctx) {
+    ctx.ui.on_split_pane_h({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let weak = ctx.ui.as_weak();
         move || {
             if let Some(ui) = weak.upgrade() {
                 do_split(&state, &tab_model, &ui, PaneLayout::HSplit);
@@ -54,15 +45,11 @@ fn wire_split_pane_h(
     });
 }
 
-fn wire_split_pane_v(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-) {
-    ui.on_split_pane_v({
-        let state = state.clone();
-        let tab_model = tab_model.clone();
-        let weak = ui.as_weak();
+fn wire_split_pane_v(ctx: &Ctx) {
+    ctx.ui.on_split_pane_v({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let weak = ctx.ui.as_weak();
         move || {
             if let Some(ui) = weak.upgrade() {
                 do_split(&state, &tab_model, &ui, PaneLayout::VSplit);
@@ -71,11 +58,11 @@ fn wire_split_pane_v(
     });
 }
 
-fn wire_close_pane(ui: &AppWindow, state: &Rc<RefCell<State>>, tab_model: &Rc<VecModel<TabItem>>) {
-    ui.on_close_pane({
-        let state = state.clone();
-        let tab_model = tab_model.clone();
-        let weak = ui.as_weak();
+fn wire_close_pane(ctx: &Ctx) {
+    ctx.ui.on_close_pane({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let weak = ctx.ui.as_weak();
         move || {
             if let Some(ui) = weak.upgrade() {
                 do_close_pane(&state, &tab_model, &ui, false);
@@ -84,15 +71,11 @@ fn wire_close_pane(ui: &AppWindow, state: &Rc<RefCell<State>>, tab_model: &Rc<Ve
     });
 }
 
-fn wire_detach_session(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-) {
-    ui.on_detach_session({
-        let state = state.clone();
-        let tab_model = tab_model.clone();
-        let weak = ui.as_weak();
+fn wire_detach_session(ctx: &Ctx) {
+    ctx.ui.on_detach_session({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let weak = ctx.ui.as_weak();
         move || {
             if let Some(ui) = weak.upgrade() {
                 do_close_pane(&state, &tab_model, &ui, true);
@@ -101,10 +84,10 @@ fn wire_detach_session(
     });
 }
 
-fn wire_pane_focused(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    ui.on_pane_focused({
-        let state = state.clone();
-        let weak = ui.as_weak();
+fn wire_pane_focused(ctx: &Ctx) {
+    ctx.ui.on_pane_focused({
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
         move |pane_idx| {
             let mut st = state.borrow_mut();
             let active = st.active;
@@ -118,11 +101,11 @@ fn wire_pane_focused(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
-fn wire_pane_resized(ui: &AppWindow, state: &Rc<RefCell<State>>, resize_debounce: &Rc<Timer>) {
-    ui.on_pane_resized({
-        let state = state.clone();
-        let debounce = resize_debounce.clone();
-        let weak = ui.as_weak();
+fn wire_pane_resized(ctx: &Ctx) {
+    ctx.ui.on_pane_resized({
+        let state = ctx.state.clone();
+        let debounce = ctx.resize_debounce.clone();
+        let weak = ctx.ui.as_weak();
         move |pane_idx, w, h| {
             {
                 let mut st = state.borrow_mut();
