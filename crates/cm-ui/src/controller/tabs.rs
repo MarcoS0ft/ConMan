@@ -67,9 +67,7 @@ fn wire_surface_resized(ctx: &Ctx) {
                 st.scale = ui.window().scale_factor();
                 st.surface_w = w;
                 st.surface_h = h;
-                util::trace(format_args!(
-                    "resize event  {w:.0}x{h:.0} logical (debouncing)"
-                ));
+                tracing::debug!("resize event  {w:.0}x{h:.0} logical (debouncing)");
                 sessions::render_active(&mut st, &ui);
             }
             let state = state.clone();
@@ -173,7 +171,7 @@ pub(super) fn open_local_tab(
     let session = match LocalTerminalSession::spawn(&ls, size) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("conman: failed to open terminal: {e}");
+            tracing::warn!("failed to open terminal: {e}");
             return;
         }
     };
@@ -306,10 +304,11 @@ pub(super) fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {
                     tab.session.resize_cells(size.cols, size.rows);
                     tab.cols = size.cols;
                     tab.rows = size.rows;
-                    util::trace(format_args!(
+                    tracing::debug!(
                         "resize commit -> {}x{} cells (settled)",
-                        size.cols, size.rows
-                    ));
+                        size.cols,
+                        size.rows
+                    );
                 }
             }
             Surface::Framebuffer(_) => {

@@ -1,5 +1,5 @@
-//! Small shared helpers: the `CONMAN_TRACE` logger, the pixel-grid sizing
-//! math, and the CONMAN_* headless test-hook env vars.
+//! Small shared helpers: the pixel-grid sizing math, and the CONMAN_*
+//! headless test-hook env vars.
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,12 +25,6 @@ pub(super) fn grid_for(
     TerminalSize {
         cols: (phys_w / m.cell_w).max(1) as u16,
         rows: (phys_h / m.cell_h).max(1) as u16,
-    }
-}
-
-pub(super) fn trace(args: std::fmt::Arguments) {
-    if std::env::var_os("CONMAN_TRACE").is_some() {
-        eprintln!("[conman] {args}");
     }
 }
 

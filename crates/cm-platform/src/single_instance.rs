@@ -98,12 +98,7 @@ impl InstanceGuard {
                 for stream in listener.incoming() {
                     let Ok(stream) = stream else { continue };
                     if handle_activation_request(stream) {
-                        // Observability for manual/xvfb verification ahead of the P6.3
-                        // tracing sweep, which will replace this like the rest of the
-                        // codebase's `eprintln!`s.
-                        eprintln!(
-                            "conman: single-instance: activation received from a second launch"
-                        );
+                        tracing::info!("single-instance: activation received from a second launch");
                         if tx.send(()).is_err() {
                             // Receiver dropped — nothing left to notify.
                             break;
@@ -116,7 +111,7 @@ impl InstanceGuard {
         // activations. Rare (thread exhaustion); not worth widening the
         // return type of `listen()` for it.
         if let Err(e) = spawned {
-            eprintln!("cm-platform: warning: failed to spawn single-instance listener thread: {e}");
+            tracing::warn!("single-instance: failed to spawn listener thread: {e}");
         }
         rx
     }

@@ -1,5 +1,6 @@
 // B1: run as a Windows GUI app in release (no allocated console window).
-// Debug keeps the console so `eprintln!` diagnostics remain visible.
+// Debug keeps the console so the `tracing` stderr layer stays visible (see
+// `logging.rs`); release logs to a rotating file instead.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 //! `conman` — the application binary and composition root.
@@ -43,16 +44,14 @@ fn main() -> ExitCode {
     // ── Single-instance guard (P6.16) — first, before storage/keyring ──────
     let activation_rx: Option<Receiver<()>> = match single_instance::acquire() {
         AcquireOutcome::AlreadyRunning => {
-            println!(
-                "conman: another instance is already running; it has been asked to come to the foreground."
+            tracing::info!(
+                "another instance is already running; it has been asked to come to the foreground."
             );
             return ExitCode::SUCCESS;
         }
         AcquireOutcome::Acquired(guard) => Some(guard.listen()),
         AcquireOutcome::Unavailable(reason) => {
-            eprintln!(
-                "conman: warning: single-instance guard unavailable ({reason}); continuing without it."
-            );
+            tracing::warn!("single-instance guard unavailable ({reason}); continuing without it.");
             None
         }
     };
@@ -66,14 +65,14 @@ fn main() -> ExitCode {
     let config = match build_config(activation_rx) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("conman: fatal: failed to initialise storage: {e}");
+            tracing::error!("fatal: failed to initialise storage: {e}");
             return ExitCode::FAILURE;
         }
     };
     match cm_ui::run(config) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("conman: fatal: {e}");
+            tracing::error!("fatal: {e}");
             ExitCode::FAILURE
         }
     }

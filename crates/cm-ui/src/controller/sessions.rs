@@ -767,7 +767,7 @@ pub(super) fn open_rdp_tab(
     let session = match RdpSession::connect(&settings, auth, verifier, cert_store) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("conman: RDP connect error: {e}");
+            tracing::warn!("RDP connect error: {e}");
             return;
         }
     };
@@ -831,7 +831,7 @@ pub(super) fn reconnect_ssh_tab(
             ui.set_connecting_step(0);
         }
         Err(e) => {
-            eprintln!("conman: SSH reconnect error: {e}");
+            tracing::warn!("SSH reconnect error: {e}");
             ui.set_error_reason(SharedString::from(e.to_string()));
         }
     }

@@ -73,9 +73,7 @@ pub(super) fn wire_qa_harness(ctx: &Ctx) {
         return;
     };
     let Ok(port) = port_str.trim().parse::<u16>() else {
-        super::util::trace(format_args!(
-            "qa-harness: ignoring invalid {CONMAN_QA_PORT}={port_str:?}"
-        ));
+        tracing::warn!("qa-harness: ignoring invalid {CONMAN_QA_PORT}={port_str:?}");
         return;
     };
 
@@ -91,23 +89,23 @@ pub(super) fn wire_qa_harness(ctx: &Ctx) {
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("conman: qa-harness: failed to bind 127.0.0.1:{port}: {e}");
+            tracing::error!("qa-harness: failed to bind 127.0.0.1:{port}: {e}");
             return;
         }
     };
-    super::util::trace(format_args!("qa-harness: listening on 127.0.0.1:{port}"));
+    tracing::info!("qa-harness: listening on 127.0.0.1:{port}");
 
     std::thread::spawn(move || listen_loop(listener));
 }
 
 /// Accept connections one at a time; each is fully drained (line by line)
-/// before the next `accept()`. Never panics on socket errors — logs (via the
-/// existing `CONMAN_TRACE` helper's `eprintln!` convention) and moves on.
+/// before the next `accept()`. Never panics on socket errors — logs and moves
+/// on.
 fn listen_loop(listener: TcpListener) {
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => handle_client(stream),
-            Err(e) => eprintln!("conman: qa-harness: accept error: {e}"),
+            Err(e) => tracing::warn!("qa-harness: accept error: {e}"),
         }
     }
 }
@@ -116,7 +114,7 @@ fn handle_client(stream: TcpStream) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("conman: qa-harness: failed to clone socket: {e}");
+            tracing::warn!("qa-harness: failed to clone socket: {e}");
             return;
         }
     };

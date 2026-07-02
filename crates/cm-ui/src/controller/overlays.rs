@@ -25,7 +25,7 @@ fn wire_select_panel(ctx: &Ctx) {
                 ui.set_active_panel(idx);
                 let svc = SettingsService::new(repo_sp.as_ref());
                 if let Err(e) = svc.save_active_panel(idx) {
-                    eprintln!("conman: save active_panel: {e}");
+                    tracing::warn!("save active_panel: {e}");
                 }
             }
         }
@@ -42,7 +42,7 @@ fn wire_toggle_sidebar(ctx: &Ctx) {
                 ui.set_sidebar_collapsed(new_val);
                 let svc = SettingsService::new(repo_ts.as_ref());
                 if let Err(e) = svc.save_sidebar_collapsed(new_val) {
-                    eprintln!("conman: save sidebar_collapsed: {e}");
+                    tracing::warn!("save sidebar_collapsed: {e}");
                 }
             }
         }

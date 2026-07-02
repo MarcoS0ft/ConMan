@@ -122,7 +122,7 @@ impl LocalTerminalSession {
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<GridSnapshot>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), EngineError>>();
 
-        // B7 startup-latency instrumentation (gated on CONMAN_TIMING).
+        // B7 startup-latency instrumentation (trace-level; see engine_owner::timing).
         let start = std::time::Instant::now();
 
         let reader_tx = control_tx.clone();
@@ -558,8 +558,9 @@ mod resize_storm_tests {
 }
 
 /// B7 startup-latency profiling (cross-platform; uses the OS default shell). Run with
-/// `--ignored --nocapture` (optionally `CONMAN_TIMING=1`). Measures spawn → first
-/// non-empty snapshot, isolating the session/PTY layer from the GUI/render path.
+/// `--ignored --nocapture` (optionally `CONMAN_LOG=trace` to also see the
+/// `engine_owner::timing` markers). Measures spawn → first non-empty snapshot,
+/// isolating the session/PTY layer from the GUI/render path.
 #[cfg(test)]
 mod startup_timing {
     use super::*;
@@ -613,7 +614,7 @@ mod startup_timing {
     }
 
     #[test]
-    #[ignore = "B7 profiling aid; run with --ignored --nocapture (optionally CONMAN_TIMING=1)"]
+    #[ignore = "B7 profiling aid; run with --ignored --nocapture (optionally CONMAN_LOG=trace)"]
     fn time_to_first_nonempty_snapshot() {
         let size = TerminalSize {
             rows: 30,
@@ -630,7 +631,7 @@ mod startup_timing {
     }
 
     #[test]
-    #[ignore = "B7 cold-start probe; run with --ignored --nocapture (optionally CONMAN_TIMING=1)"]
+    #[ignore = "B7 cold-start probe; run with --ignored --nocapture (optionally CONMAN_LOG=trace)"]
     fn back_to_back_spawns_cold_start_vs_per_spawn() {
         let size = TerminalSize {
             rows: 30,

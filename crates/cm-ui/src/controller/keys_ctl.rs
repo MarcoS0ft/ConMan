@@ -120,12 +120,12 @@ fn wire_new_cred_folder(ctx: &Ctx) {
                 sort,
             };
             if let Err(e) = repo_ncf.upsert_credential_folder(&folder) {
-                eprintln!("conman: create folder failed: {e}");
+                tracing::warn!("create folder failed: {e}");
                 return;
             }
             let mut st = state.borrow_mut();
             if let Err(e) = st.keys_panel.reload(repo_ncf.as_ref()) {
-                eprintln!("conman: reload after folder create failed: {e}");
+                tracing::warn!("reload after folder create failed: {e}");
             }
             refresh_cred_model(&st, &cred_model);
         }
@@ -187,11 +187,11 @@ fn wire_delete_cred_row(ctx: &Ctx) {
                 repo_del.delete_credential(CredentialId::new(id as i64))
             };
             if let Err(e) = result {
-                eprintln!("conman: delete cred/folder failed: {e}");
+                tracing::warn!("delete cred/folder failed: {e}");
                 return;
             }
             if let Err(e) = st.keys_panel.reload(repo_del.as_ref()) {
-                eprintln!("conman: reload after cred delete failed: {e}");
+                tracing::warn!("reload after cred delete failed: {e}");
             }
             refresh_cred_model(&st, &cred_model);
             let Some(ui) = weak.upgrade() else { return };
@@ -234,7 +234,7 @@ fn wire_cred_save(ctx: &Ctx) {
             let upserted_id = match repo_cs.upsert_credential(&cred) {
                 Ok(id) => id,
                 Err(e) => {
-                    eprintln!("conman: upsert credential failed: {e}");
+                    tracing::warn!("upsert credential failed: {e}");
                     form.secret = SharedString::from("");
                     form.passphrase = SharedString::from("");
                     ui.set_cred_form(form);
@@ -256,20 +256,20 @@ fn wire_cred_save(ctx: &Ctx) {
                 };
                 let key_ref = CredentialRef::new(upserted_id, purpose);
                 if let Err(e) = secrets_cs.store(&key_ref, &Secret::from_string(secret_text)) {
-                    eprintln!("conman: keychain store failed: {e}");
+                    tracing::warn!("keychain store failed: {e}");
                 }
             }
             if kind == CredentialKind::SshKeyWithPassphrase && !passphrase_text.is_empty() {
                 let pp_ref = CredentialRef::new(upserted_id, CredentialPurpose::SshPassphrase);
                 if let Err(e) = secrets_cs.store(&pp_ref, &Secret::from_string(passphrase_text)) {
-                    eprintln!("conman: keychain passphrase store failed: {e}");
+                    tracing::warn!("keychain passphrase store failed: {e}");
                 }
             }
 
             ui.set_cred_editor_open(false);
             let mut st = state.borrow_mut();
             if let Err(e) = st.keys_panel.reload(repo_cs.as_ref()) {
-                eprintln!("conman: reload after cred save failed: {e}");
+                tracing::warn!("reload after cred save failed: {e}");
             }
             refresh_cred_model(&st, &cred_model);
             refresh_cred_name_list(&st, &ui);
