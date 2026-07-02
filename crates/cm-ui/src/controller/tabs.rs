@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use cm_session::{LocalTerminalSession, PaneGroup, Session, SessionStatus, Surface};
 use slint::{ComponentHandle, Model, SharedString, TimerMode, VecModel};
 
+use crate::selection::PaneSelectionState;
 use crate::terminal_renderer::{TerminalRenderer, TerminalTheme};
 use crate::{AppWindow, TabItem};
 
@@ -144,6 +145,8 @@ pub(super) fn push_tab(
         is_remote,
         pane_group: PaneGroup::single(),
         extra_panes: Vec::new(),
+        sel: PaneSelectionState::default(),
+        last_focused_pane: 0,
     });
     st.active = st.tabs.len() - 1;
     let active = st.active;

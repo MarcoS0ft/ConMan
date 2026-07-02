@@ -6,6 +6,7 @@ use std::rc::Rc;
 use cm_session::{LocalTerminalSession, PaneGroup, PaneLayout, SessionStatus, Surface};
 use slint::{ComponentHandle, Model, SharedString, TimerMode, VecModel};
 
+use crate::selection::PaneSelectionState;
 use crate::terminal_renderer::{TerminalRenderer, TerminalTheme};
 use crate::{AppWindow, TabItem};
 
@@ -220,6 +221,7 @@ pub(super) fn do_split(
                 scale,
                 surface_w: pane_w,
                 surface_h: pane_h,
+                sel: PaneSelectionState::default(),
             };
             // Defensive: only push when the index is contiguous (2-pane case
             // always satisfies this; a future N-pane extension might not).
@@ -374,6 +376,8 @@ pub(super) fn reattach_session(
             is_remote,
             pane_group: PaneGroup::single(),
             extra_panes: Vec::new(),
+            sel: PaneSelectionState::default(),
+            last_focused_pane: 0,
         });
         st.active = st.tabs.len() - 1;
         let active = st.active;

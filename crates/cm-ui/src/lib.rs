@@ -17,9 +17,11 @@ use std::sync::Arc;
 
 use cm_core::{ConnectionRepository, CredentialStore};
 
+mod clipboard;
 mod controller;
 mod input;
 pub mod keys;
+mod selection;
 pub mod terminal_renderer;
 pub mod tree;
 

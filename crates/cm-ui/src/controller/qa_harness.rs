@@ -403,8 +403,10 @@ fn button_from_name(v: Option<&str>) -> i32 {
 /// "dx":…,"dy":…,"button":…,"modifiers":[…]}` (logical px) — injects through
 /// `AppWindow::pointer` / `AppWindow::scroll`, the same callbacks the
 /// terminal surface's `TouchArea` uses (see `wire_pointer`/`wire_scroll` in
-/// `sessions.rs`). RDP-surface-specific routes (`rdp-scroll`) are out of
-/// scope for this generic endpoint (spec's "Out": OS-level input injection
+/// `sessions.rs`). `"button"` on `"move"` is optional (P6.5: pass it to script
+/// a click-drag — see `cmd_pointer`'s `"move"` arm); omitted defaults to no
+/// button (a plain hover). RDP-surface-specific routes (`rdp-scroll`) are out
+/// of scope for this generic endpoint (spec's "Out": OS-level input injection
 /// only lists SendInput/xdotool, but a dedicated RDP scroll route is not one
 /// of the pinned commands either — the active tab's own `pointer`/`scroll`
 /// wiring already dispatches to RDP vs terminal internally for move/press/
@@ -419,7 +421,17 @@ fn cmd_pointer(h: &QaHandles, req: &serde_json::Value) -> String {
     };
     match action {
         "move" => {
-            h.ui.invoke_pointer(0, 3, f("x"), f("y"), mods);
+            // P6.5: an optional "button" simulates a drag-in-progress move
+            // (the button stays logically "held", matching how Slint's
+            // `TouchArea` reports move events during a real mouse-captured
+            // drag) — needed to script click-drag text selection over the
+            // JSON protocol. Omitted (the common hover-probe case) preserves
+            // the pre-P6.5 button=none behavior.
+            let btn = req
+                .get("button")
+                .and_then(|v| v.as_str())
+                .map_or(0, |name| button_from_name(Some(name)));
+            h.ui.invoke_pointer(btn, 3, f("x"), f("y"), mods);
         }
         "press" => {
             let btn = button_from_name(req.get("button").and_then(|v| v.as_str()));
