@@ -39,6 +39,8 @@ mod keys_ctl;
 mod overlays;
 mod palette;
 mod panes;
+#[cfg(feature = "qa-harness")]
+mod qa_harness;
 mod sessions;
 mod settings_ctl;
 mod tabs;
@@ -316,6 +318,10 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     // -- Optional headless test hooks -----------------------------------------
     let mut hooks: Vec<Timer> = Vec::new();
     util::wire_env_hooks(&ctx, &mut hooks);
+
+    // -- P6.2b: in-app QA endpoint (feature-gated, off by default) ------------
+    #[cfg(feature = "qa-harness")]
+    qa_harness::wire_qa_harness(&ctx);
 
     // P6.16: single-instance activation — a second `conman` launch asked us to
     // come to the foreground. The composition root already validated the

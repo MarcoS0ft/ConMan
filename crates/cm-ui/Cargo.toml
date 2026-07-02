@@ -24,6 +24,21 @@ dirs = "6"
 # arboard: cross-platform clipboard access for RDP CLIPRDR bidirectional sync (P4.2).
 # See docs/devel/memos/p4.2-clipboard-dep.md for the rationale.
 arboard = "3"
+# serde_json: already a workspace dependency (cm-core, cm-storage, cm-session); made
+# direct here, optional, only pulled in by the `qa-harness` feature (P6.2b) to parse
+# the JSON-lines QA-endpoint protocol. No new crate added to the dependency graph.
+serde_json = { version = "1", optional = true }
+# png: PNG encoder for the `qa-harness` feature's `screenshot` command (P6.2b). Already
+# resolved in the workspace lockfile transitively (via `image`/`tiny-skia`/`muda`, all
+# pulled in by Slint's own dependency graph) — adding it as a direct, feature-gated dep
+# of cm-ui adds no new crate version. See docs/devel/memos/P6.2b-png-encoder-new-dep.md.
+png = { version = "0.18", optional = true }
+
+[features]
+# Off by default (dev-facing only): a loopback JSON-lines QA endpoint used by agents to
+# drive/inspect/screenshot the running app. Never present in a normal `--release` build
+# unless explicitly opted in. See docs/devel/tasks/P6.2b-remote-qa-harness.md.
+qa-harness = ["dep:serde_json", "dep:png"]
 
 [build-dependencies]
 # Compiles `ui/app.slint` into Rust (consumed via `slint::include_modules!`).

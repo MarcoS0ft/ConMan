@@ -9,6 +9,12 @@ publish.workspace = true
 name = "conman"
 path = "src/main.rs"
 
+[features]
+# Forwards to cm-ui's qa-harness feature (P6.2b). Off by default; opt in with
+# `cargo build -p conman --features qa-harness` (or `conman/qa-harness` from the
+# workspace root).
+qa-harness = ["cm-ui/qa-harness"]
+
 [dependencies]
 cm-ui = { path = "../cm-ui" }
 cm-core = { path = "../cm-core" }
