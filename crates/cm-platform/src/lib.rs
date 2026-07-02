@@ -3,8 +3,17 @@
 //! Confines operating-system-specific behavior to one place: data and config
 //! directory resolution, the single-instance guard, clipboard access, and DPI
 //! helpers. Keeps the core and UI platform-agnostic.
+//!
+//! # Current scope
+//!
+//! - [`app_db_path`]: OS-standard per-user data directory resolution (P1.5).
+//! - [`single_instance`]: the single-instance guard (P6.16) — a `std`-only
+//!   loopback-TCP lock + activation handshake; see the module docs for the
+//!   protocol. Clipboard access and DPI helpers remain unimplemented (not yet
+//!   scheduled).
 
 mod error;
+pub mod single_instance;
 
 pub use error::PlatformError;
 
