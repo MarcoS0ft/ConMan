@@ -281,7 +281,10 @@ impl russh::client::Handler for ClientHandler {
         {
             Ok(true)
         } else {
-            *self.rejected.lock().unwrap() = Some(format!(
+            *self
+                .rejected
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(format!(
                 "{} key {} not trusted",
                 key.algorithm().as_str(),
                 fingerprint(key)
@@ -597,7 +600,11 @@ async fn drive_inner(
         match russh::client::connect(config, (cfg.host.as_str(), cfg.port), handler).await {
             Ok(h) => h,
             Err(e) => {
-                if let Some(reason) = rejected.lock().unwrap().take() {
+                let reason = rejected
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                if let Some(reason) = reason {
                     return Err(SshError::HostKey(reason));
                 }
                 return Err(SshError::Connect(e.to_string()));

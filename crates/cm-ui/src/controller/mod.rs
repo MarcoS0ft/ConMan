@@ -229,7 +229,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         match svc.load() {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("conman: failed to load settings: {e}");
+                tracing::warn!("failed to load settings: {e}");
                 cm_storage::AppSettings::default()
             }
         }
@@ -241,14 +241,14 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     let conn_tree = match ConnectionTree::load(repo.as_ref()) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("conman: failed to load connections: {e}");
+            tracing::warn!("failed to load connections: {e}");
             ConnectionTree::new(vec![], vec![])
         }
     };
     let keys_panel = match KeysPanel::load(repo.as_ref()) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("conman: failed to load credentials: {e}");
+            tracing::warn!("failed to load credentials: {e}");
             KeysPanel::new(vec![], vec![])
         }
     };

@@ -26,7 +26,7 @@ fn wire_theme_changed(ctx: &Ctx) {
         move |idx| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_theme_mode(idx) {
-                eprintln!("conman: save theme_mode: {e}");
+                tracing::warn!("save theme_mode: {e}");
             }
         }
     });
@@ -38,7 +38,7 @@ fn wire_density_changed(ctx: &Ctx) {
         move |idx| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_density(idx) {
-                eprintln!("conman: save density: {e}");
+                tracing::warn!("save density: {e}");
             }
         }
     });
@@ -50,7 +50,7 @@ fn wire_accent_changed(ctx: &Ctx) {
         move |idx| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_accent_index(idx) {
-                eprintln!("conman: save accent_index: {e}");
+                tracing::warn!("save accent_index: {e}");
             }
         }
     });
@@ -64,7 +64,7 @@ fn wire_settings_font_size_changed(ctx: &Ctx) {
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_font_size(v) {
-                eprintln!("conman: save font_size: {e}");
+                tracing::warn!("save font_size: {e}");
             }
             // Apply font size change to all live renderers immediately.
             {
@@ -95,7 +95,7 @@ fn wire_settings_shell_path_changed(ctx: &Ctx) {
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_shell_path(v.as_str()) {
-                eprintln!("conman: save shell_path: {e}");
+                tracing::warn!("save shell_path: {e}");
             }
             let mut st = state_sp.borrow_mut();
             st.local_settings.program = if v.is_empty() {
@@ -114,7 +114,7 @@ fn wire_settings_shell_args_changed(ctx: &Ctx) {
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_shell_args(v.as_str()) {
-                eprintln!("conman: save shell_args: {e}");
+                tracing::warn!("save shell_args: {e}");
             }
             let mut st = state_sa.borrow_mut();
             st.local_settings.args = if v.is_empty() {
@@ -133,7 +133,7 @@ fn wire_settings_shell_cwd_changed(ctx: &Ctx) {
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_shell_cwd(v.as_str()) {
-                eprintln!("conman: save shell_cwd: {e}");
+                tracing::warn!("save shell_cwd: {e}");
             }
             let mut st = state_sc.borrow_mut();
             st.local_settings.working_dir = if v.is_empty() {
@@ -151,7 +151,7 @@ fn wire_startup_behavior_changed(ctx: &Ctx) {
         move |v| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_startup_behavior(v) {
-                eprintln!("conman: save startup_behavior: {e}");
+                tracing::warn!("save startup_behavior: {e}");
             }
         }
     });

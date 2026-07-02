@@ -195,7 +195,7 @@ pub(super) fn do_split(
     let session = match LocalTerminalSession::spawn(&ls, size) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("conman: split pane spawn failed: {e}");
+            tracing::warn!("split pane spawn failed: {e}");
             // Roll back the pane group change.
             let mut st = state.borrow_mut();
             let active = st.active;

@@ -20,6 +20,7 @@ engine-libghostty = [
     "dep:portable-pty",
     "dep:russh",
     "dep:dirs",
+    "dep:tracing",
 ]
 # Future pure-Rust fallback engine (alacritty_terminal) — not implemented yet.
 # Exists so a zig-free build is possible once the fallback lands.
@@ -31,6 +32,9 @@ thiserror = "2"
 # Pinned to the exact versions validated in the P0.2 spike.
 libghostty-vt = { version = "=0.2.0", optional = true }
 portable-pty = { version = "0.9.0", optional = true }
+# Structured logging facade (P6.3). The composition root (`conman`) installs
+# the actual subscriber; libraries only ever call the `tracing::*` macros.
+tracing = { version = "0.1", optional = true }
 # SSH transport (P3.1). russh 0.61 re-exports keys/agent/known_hosts via `russh::keys`.
 # Use the `ring` crypto backend (not the default `aws-lc-rs`, which needs NASM + a C
 # build that fails on MSVC); keep `rsa` (RSA keys) and `flate2` (compression).

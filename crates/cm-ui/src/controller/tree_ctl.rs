@@ -204,11 +204,11 @@ fn wire_delete_conn_row(ctx: &Ctx) {
                 repo_del.delete_connection(ConnectionId::new(id as i64))
             };
             if let Err(e) = result {
-                eprintln!("conman: delete failed: {e}");
+                tracing::warn!("delete failed: {e}");
                 return;
             }
             if let Err(e) = st.conn_tree.reload(repo_del.as_ref()) {
-                eprintln!("conman: reload after delete failed: {e}");
+                tracing::warn!("reload after delete failed: {e}");
             }
             refresh_conn_model(&st, &conn_model);
         }
@@ -273,18 +273,18 @@ fn wire_profile_save(ctx: &Ctx) {
             ) {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("conman: profile validation error: {e}");
+                    tracing::warn!("profile validation error: {e}");
                     return;
                 }
             };
             if let Err(e) = repo_ps.upsert_connection(&conn) {
-                eprintln!("conman: upsert connection failed: {e}");
+                tracing::warn!("upsert connection failed: {e}");
                 return;
             }
             ui.set_profile_editor_open(false);
             let mut st = state.borrow_mut();
             if let Err(e) = st.conn_tree.reload(repo_ps.as_ref()) {
-                eprintln!("conman: reload after save failed: {e}");
+                tracing::warn!("reload after save failed: {e}");
             }
             refresh_conn_model(&st, &conn_model);
             refresh_group_name_list(&st, &ui);
@@ -346,13 +346,13 @@ fn wire_group_save(ctx: &Ctx) {
                 default_credential,
             };
             if let Err(e) = repo_gs.upsert_group(&group) {
-                eprintln!("conman: upsert group failed: {e}");
+                tracing::warn!("upsert group failed: {e}");
                 return;
             }
             ui.set_group_editor_open(false);
             let mut st = state.borrow_mut();
             if let Err(e) = st.conn_tree.reload(repo_gs.as_ref()) {
-                eprintln!("conman: reload after group save failed: {e}");
+                tracing::warn!("reload after group save failed: {e}");
             }
             refresh_conn_model(&st, &conn_model);
             refresh_group_name_list(&st, &ui);
@@ -407,23 +407,23 @@ fn wire_reorder_conn_row(ctx: &Ctx) {
                     a.sort = sort_a.saturating_add(1);
                 }
                 if let Err(e) = repo_rcr.upsert_connection(&a) {
-                    eprintln!("conman: reorder conn (nudge) failed: {e}");
+                    tracing::warn!("reorder conn (nudge) failed: {e}");
                     return;
                 }
             } else {
                 a.sort = sort_b;
                 b.sort = sort_a;
                 if let Err(e) = repo_rcr.upsert_connection(&b) {
-                    eprintln!("conman: reorder conn (swap target) failed: {e}");
+                    tracing::warn!("reorder conn (swap target) failed: {e}");
                     return;
                 }
                 if let Err(e) = repo_rcr.upsert_connection(&a) {
-                    eprintln!("conman: reorder conn (swap source) failed: {e}");
+                    tracing::warn!("reorder conn (swap source) failed: {e}");
                     return;
                 }
             }
             if let Err(e) = st.conn_tree.reload(repo_rcr.as_ref()) {
-                eprintln!("conman: reload after reorder failed: {e}");
+                tracing::warn!("reload after reorder failed: {e}");
             }
             refresh_conn_model(&st, &conn_model);
         }
@@ -476,23 +476,23 @@ fn wire_reorder_group_row(ctx: &Ctx) {
                     a.sort = sort_a.saturating_add(1);
                 }
                 if let Err(e) = repo_rgr.upsert_group(&a) {
-                    eprintln!("conman: reorder group (nudge) failed: {e}");
+                    tracing::warn!("reorder group (nudge) failed: {e}");
                     return;
                 }
             } else {
                 a.sort = sort_b;
                 b.sort = sort_a;
                 if let Err(e) = repo_rgr.upsert_group(&b) {
-                    eprintln!("conman: reorder group (swap target) failed: {e}");
+                    tracing::warn!("reorder group (swap target) failed: {e}");
                     return;
                 }
                 if let Err(e) = repo_rgr.upsert_group(&a) {
-                    eprintln!("conman: reorder group (swap source) failed: {e}");
+                    tracing::warn!("reorder group (swap source) failed: {e}");
                     return;
                 }
             }
             if let Err(e) = st.conn_tree.reload(repo_rgr.as_ref()) {
-                eprintln!("conman: reload after group reorder failed: {e}");
+                tracing::warn!("reload after group reorder failed: {e}");
             }
             refresh_conn_model(&st, &conn_model);
             if let Some(ui) = weak_rgr.upgrade() {

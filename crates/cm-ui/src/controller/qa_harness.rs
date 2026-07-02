@@ -29,10 +29,11 @@
 //! aborts; this listens on loopback only but the input is still
 //! agent/script-supplied, not to be trusted blindly).
 use std::cell::RefCell;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::rc::Rc;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use slint::{ComponentHandle, Model};
 
@@ -73,9 +74,7 @@ pub(super) fn wire_qa_harness(ctx: &Ctx) {
         return;
     };
     let Ok(port) = port_str.trim().parse::<u16>() else {
-        super::util::trace(format_args!(
-            "qa-harness: ignoring invalid {CONMAN_QA_PORT}={port_str:?}"
-        ));
+        tracing::warn!("qa-harness: ignoring invalid {CONMAN_QA_PORT}={port_str:?}");
         return;
     };
 
@@ -91,38 +90,96 @@ pub(super) fn wire_qa_harness(ctx: &Ctx) {
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("conman: qa-harness: failed to bind 127.0.0.1:{port}: {e}");
+            tracing::error!("qa-harness: failed to bind 127.0.0.1:{port}: {e}");
             return;
         }
     };
-    super::util::trace(format_args!("qa-harness: listening on 127.0.0.1:{port}"));
+    tracing::info!("qa-harness: listening on 127.0.0.1:{port}");
 
     std::thread::spawn(move || listen_loop(listener));
 }
 
 /// Accept connections one at a time; each is fully drained (line by line)
-/// before the next `accept()`. Never panics on socket errors — logs (via the
-/// existing `CONMAN_TRACE` helper's `eprintln!` convention) and moves on.
+/// before the next `accept()`. Never panics on socket errors — logs and moves
+/// on.
 fn listen_loop(listener: TcpListener) {
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => handle_client(stream),
-            Err(e) => eprintln!("conman: qa-harness: accept error: {e}"),
+            Err(e) => tracing::warn!("qa-harness: accept error: {e}"),
         }
     }
 }
 
-fn handle_client(stream: TcpStream) {
+/// Upper bound on a single QA-command line, in bytes. Generous for any
+/// realistic key/text/pointer/palette/screenshot JSON payload, while still
+/// bounding memory against a malformed or hostile local client that never
+/// sends `\n` (P6.3 Wave-1 advisory).
+const MAX_LINE_LEN: usize = 1 << 20; // 1 MiB
+
+/// How long a reply write to the QA client may block before the connection
+/// is dropped. Protects against a stalled/dead client whose receive buffer
+/// never drains, which would otherwise wedge `write_all` forever — and since
+/// the harness serves one client at a time, that would also block every
+/// subsequent connection (P6.3 Wave-1 advisory). No read timeout is set: an
+/// idle client between commands (normal for a scripted, long-lived session)
+/// must not be disconnected.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Reads one `\n`-terminated line from `reader`, capped at [`MAX_LINE_LEN`]
+/// bytes. Returns `Ok(None)` on immediate EOF, `Err` on a read error or
+/// exceeding the length cap — never buffers past the cap.
+fn read_bounded_line(reader: &mut impl Read) -> std::io::Result<Option<String>> {
+    let mut buf = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match reader.read(&mut byte) {
+            Ok(0) => {
+                return Ok(if buf.is_empty() {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(&buf).into_owned())
+                });
+            }
+            Ok(_) if byte[0] == b'\n' => {
+                return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
+            }
+            Ok(_) => {
+                buf.push(byte[0]);
+                if buf.len() > MAX_LINE_LEN {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "qa-harness line exceeded the length bound",
+                    ));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn handle_client(mut stream: TcpStream) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("conman: qa-harness: failed to clone socket: {e}");
+            tracing::warn!("qa-harness: failed to clone socket: {e}");
             return;
         }
     };
-    let reader = BufReader::new(stream);
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
+    if writer.set_write_timeout(Some(WRITE_TIMEOUT)).is_err() {
+        tracing::warn!("qa-harness: failed to set write timeout; dropping connection");
+        return;
+    }
+    loop {
+        let line = match read_bounded_line(&mut stream) {
+            Ok(Some(line)) => line,
+            Ok(None) => break, // EOF
+            Err(e) => {
+                tracing::warn!("qa-harness: read error: {e}");
+                break;
+            }
+        };
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -545,5 +602,31 @@ mod tests {
         let reply = dispatch_line("{}");
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["ok"], false);
+    }
+
+    // ── P6.3 Wave-1 advisory: bounded reads ─────────────────────────────
+
+    #[test]
+    fn read_bounded_line_rejects_unterminated_oversized_input() {
+        // A byte stream that never sends '\n' -- proves the length bound
+        // trips instead of buffering forever.
+        let hostile = vec![b'x'; MAX_LINE_LEN + 1];
+        let mut cursor = std::io::Cursor::new(hostile);
+        assert!(read_bounded_line(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn read_bounded_line_accepts_line_within_bound() {
+        let mut cursor = std::io::Cursor::new(b"{\"cmd\":\"state\"}\n".to_vec());
+        assert_eq!(
+            read_bounded_line(&mut cursor).unwrap().as_deref(),
+            Some("{\"cmd\":\"state\"}")
+        );
+    }
+
+    #[test]
+    fn read_bounded_line_returns_none_on_immediate_eof() {
+        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        assert_eq!(read_bounded_line(&mut cursor).unwrap(), None);
     }
 }

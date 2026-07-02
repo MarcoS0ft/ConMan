@@ -95,12 +95,9 @@ pub(crate) fn run_engine_owner<T: Transport>(
     // engine + transport dropped here.
 }
 
-/// Emit a B7 startup-timing marker on stderr when `CONMAN_TIMING` is set (no cost otherwise).
+/// Emit a B7 startup-timing marker at `trace` level (P6.3: replaces the
+/// ad-hoc `CONMAN_TIMING` env-var gate — enable with `CONMAN_LOG=trace` or
+/// `CONMAN_LOG=cm_session=trace`; no cost when the level is filtered out).
 pub(crate) fn timing(start: Instant, stage: &str) {
-    if std::env::var_os("CONMAN_TIMING").is_some() {
-        eprintln!(
-            "[timing] {:>8.1} ms  {stage}",
-            start.elapsed().as_secs_f64() * 1000.0
-        );
-    }
+    tracing::trace!(elapsed_ms = start.elapsed().as_secs_f64() * 1000.0, stage);
 }

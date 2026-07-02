@@ -27,6 +27,18 @@ unreachable_pub = "warn"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
+# P6.3 (gap 26): release-build tuning. Measured on Linux (see the P6.3
+# report for the before/after binary-size and clean-build-time numbers):
+# thin LTO + stripping cut the shipped binary noticeably with a modest link-
+# time cost; codegen-units=1 trades a slower release build for better
+# cross-crate optimization, acceptable since release builds are infrequent
+# (CI/release, not the inner dev loop -- `cargo build`/`cargo run` default to
+# the unaffected dev profile).
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
+
 # P4.1: Resolve pre-release crypto dep conflicts between russh 0.61.x and
 # ironrdp-connector 0.9.0 (which depends on picky/sspi with conflicting pinned
 # pre-release crypto crates).

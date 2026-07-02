@@ -338,7 +338,7 @@ fn wire_qc_connect(ctx: &Ctx) {
             ui.set_quick_connect_open(false);
             ui.set_qc_secret(Default::default());
             ui.set_qc_passphrase(Default::default());
-            let auto_accept = std::env::var("CONMAN_SSH_AUTO_ACCEPT_KEYS").as_deref() == Ok("1");
+            let auto_accept = util::ssh_auto_accept_keys();
             let verifier = Arc::new(UiHostKeyVerifier {
                 weak_ui: weak.clone(),
                 pending: hk_pending.clone(),
@@ -500,8 +500,7 @@ fn wire_row_activated(ctx: &Ctx) {
                 ConnectionSettings::Local(_) => tabs::open_local_tab(&state, &tab_model, &ui),
                 ConnectionSettings::Ssh(s) => {
                     let auth = SshAuthInput::Password(Secret::from_string(String::new()));
-                    let auto_accept =
-                        std::env::var("CONMAN_SSH_AUTO_ACCEPT_KEYS").as_deref() == Ok("1");
+                    let auto_accept = util::ssh_auto_accept_keys();
                     let verifier = Arc::new(UiHostKeyVerifier {
                         weak_ui: weak.clone(),
                         pending: hk_pending.clone(),
@@ -510,8 +509,7 @@ fn wire_row_activated(ctx: &Ctx) {
                     open_ssh_tab(&state, &tab_model, &ui, s, auth, verifier);
                 }
                 ConnectionSettings::Rdp(s) => {
-                    let auto_accept =
-                        std::env::var("CONMAN_RDP_AUTO_ACCEPT_CERTS").as_deref() == Ok("1");
+                    let auto_accept = util::rdp_auto_accept_certs();
                     let verifier = Arc::new(UiCertVerifier {
                         weak_ui: weak.clone(),
                         pending: cert_pending.clone(),
@@ -557,7 +555,7 @@ fn wire_reconnect(ctx: &Ctx) {
                     tab.session.shutdown();
                 }
             }
-            let auto_accept = std::env::var("CONMAN_SSH_AUTO_ACCEPT_KEYS").as_deref() == Ok("1");
+            let auto_accept = util::ssh_auto_accept_keys();
             let verifier = Arc::new(UiHostKeyVerifier {
                 weak_ui: weak.clone(),
                 pending: hk_pending.clone(),
@@ -616,9 +614,11 @@ impl HostKeyVerifier for UiHostKeyVerifier {
 /// Shows the cert-accept dialog (P4.2 slint UI) and blocks the RDP connection
 /// thread until the user accepts or rejects.
 ///
-/// When `auto_accept` is `true` (set via `CONMAN_RDP_AUTO_ACCEPT_CERTS=1`) the
-/// verifier immediately returns `AcceptAndRemember` without showing the dialog —
-/// useful for headless CI / screenshot tests.
+/// When `auto_accept` is `true` (debug builds only, set via
+/// `CONMAN_RDP_AUTO_ACCEPT_CERTS=1` — see `util::rdp_auto_accept_certs`,
+/// P6.3 gap 24) the verifier immediately returns `AcceptAndRemember` without
+/// showing the dialog — useful for headless CI / screenshot tests. Always
+/// `false` in release.
 pub(super) struct UiCertVerifier {
     pub(super) weak_ui: slint::Weak<AppWindow>,
     pub(super) pending: Arc<Mutex<Option<Sender<CertDecision>>>>,
@@ -767,7 +767,7 @@ pub(super) fn open_rdp_tab(
     let session = match RdpSession::connect(&settings, auth, verifier, cert_store) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("conman: RDP connect error: {e}");
+            tracing::warn!("RDP connect error: {e}");
             return;
         }
     };
@@ -831,7 +831,7 @@ pub(super) fn reconnect_ssh_tab(
             ui.set_connecting_step(0);
         }
         Err(e) => {
-            eprintln!("conman: SSH reconnect error: {e}");
+            tracing::warn!("SSH reconnect error: {e}");
             ui.set_error_reason(SharedString::from(e.to_string()));
         }
     }
