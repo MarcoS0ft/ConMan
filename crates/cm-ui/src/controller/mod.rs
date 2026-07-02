@@ -28,7 +28,9 @@ use cm_session::{CertDecision, HostKeyDecision, PaneGroup, Session, SshAuthInput
 use cm_storage::SettingsService;
 use slint::{ComponentHandle, Image, ModelRc, Timer, VecModel};
 
+use crate::clipboard::Clipboard;
 use crate::keys::KeysPanel;
+use crate::selection::PaneSelectionState;
 use crate::terminal_renderer::{FontSet, TerminalRenderer, TerminalTheme};
 use crate::tree::ConnectionTree;
 use crate::{AppConfig, AppWindow, ConnRow, CredRow, PaletteAction, TabItem, ToastEntry};
@@ -74,6 +76,8 @@ struct ExtraPaneState {
     surface_w: f32,
     /// Logical height reported by the last `pane-resized` event for this pane.
     surface_h: f32,
+    /// P6.5: mouse-drag text selection + multi-click state for this pane.
+    sel: PaneSelectionState,
 }
 
 /// A session that has been detached from its tab but is still running.
@@ -117,6 +121,15 @@ struct Tab {
     pane_group: PaneGroup,
     /// Extra panes (beyond the primary pane 0 held in `session`).
     extra_panes: Vec<ExtraPaneState>,
+    /// P6.5: mouse-drag text selection + multi-click state for the primary pane
+    /// (pane 0). Extra panes carry their own in [`ExtraPaneState::sel`].
+    sel: PaneSelectionState,
+    /// P6.5 lifecycle: the pane index (`PaneGroup::focused()`) observed on the
+    /// last tick, so a focus change (Ctrl+Shift+arrow, clicking another pane)
+    /// can be detected reactively and clear every pane's stale selection —
+    /// see `selection lifecycle` in `docs/devel/tasks/
+    /// P6.5-terminal-selection-copy-paste.md`.
+    last_focused_pane: usize,
 }
 
 struct State {
@@ -128,11 +141,17 @@ struct State {
     surface_h: f32,
     conn_tree: ConnectionTree,
     keys_panel: KeysPanel,
-    /// OS clipboard handle for RDP CLIPRDR bidirectional sync.
-    /// Created lazily on first use; `None` if arboard fails (e.g. no display).
-    sys_clipboard: Option<arboard::Clipboard>,
+    /// Shared OS clipboard handle (P6.5: factored out of the RDP-only P4.2
+    /// field — used for both RDP CLIPRDR sync and terminal copy/paste). Fails
+    /// soft internally if no clipboard is available (e.g. no display).
+    sys_clipboard: Clipboard,
     // P5.1: Detached sessions (still running; drained in tick).
     detached: Vec<DetachedEntry>,
+    /// P6.5 lifecycle: the active tab index observed on the last tick, so a
+    /// tab switch can be detected reactively and clear the outgoing/incoming
+    /// tab's stale terminal selection (see `Tab::last_focused_pane` for the
+    /// pane-level counterpart).
+    last_active_tab: usize,
     // P5.2: Persisted terminal font size (logical px), updated live from Settings.
     font_size_px: f32,
     // P5.2: Persisted default local-shell settings, updated live from Settings.
@@ -276,9 +295,10 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         surface_h: 0.0,
         conn_tree,
         keys_panel,
-        // Created lazily; silently ignored if arboard fails (e.g. no display in CI).
-        sys_clipboard: arboard::Clipboard::new().ok(),
+        // Created lazily; fails soft if arboard has no clipboard (e.g. no display in CI).
+        sys_clipboard: Clipboard::new(),
         detached: Vec::new(),
+        last_active_tab: 0,
         // P5.2: persist terminal rendering font size and local shell defaults.
         font_size_px: stored_settings.font_size as f32,
         local_settings: settings_ctl::local_settings_from_app(&stored_settings),

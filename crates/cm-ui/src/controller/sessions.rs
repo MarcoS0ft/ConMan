@@ -5,18 +5,18 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use cm_core::terminal::GridSnapshot;
 use cm_core::{ConnectionSettings, RdpSettings, Secret, SshAuthMethod, SshSettings};
 use cm_session::{
     CertDecision, CertInfo, CertStore, CertVerifier, FailedSession, FrameUpdate, HostKeyDecision,
-    HostKeyInfo, HostKeyVerifier, KnownHosts, PaneLayout, RdpAuthInput, RdpSession, Session,
-    SessionInput, SessionStatus, SshAuthInput, SshTerminalSession, Surface,
+    HostKeyInfo, HostKeyVerifier, KnownHosts, PaneLayout, RdpAuthInput, RdpSession, SessionInput,
+    SessionStatus, SshAuthInput, SshTerminalSession, Surface,
 };
 use slint::{ComponentHandle, Image, Model, SharedString, Timer, TimerMode, VecModel};
 
 use crate::input;
-use crate::terminal_renderer::TerminalRenderer;
 use crate::{AppWindow, TabItem, ToastEntry};
 
 use super::*;
@@ -150,6 +150,16 @@ fn wire_key_input(ctx: &Ctx) {
                         panes::do_close_pane(&state, &tab_model_kb, &ui, true);
                         return;
                     }
+                    // Ctrl+Shift+C → copy the focused pane's selection (P6.5).
+                    (0, "c" | "C") => {
+                        do_copy(&state);
+                        return;
+                    }
+                    // Ctrl+Shift+V → paste the OS clipboard (P6.5).
+                    (0, "v" | "V") => {
+                        do_paste(&state);
+                        return;
+                    }
                     _ => {}
                 }
                 // P6.9 (gap 17) — direct shortcuts on this same reserved layer, kept
@@ -270,49 +280,160 @@ pub(super) fn classify_ctrl_shift_shortcut(special: i32, text: &str) -> CtrlShif
     }
 }
 
+/// P6.5: copy the focused pane's live selection to the OS clipboard
+/// (`Ctrl⇧C`). A no-op when nothing is selected — never overwrites the
+/// clipboard with an empty string. Does not clear the selection (pinned
+/// lifecycle rule: "copying does not clear").
+fn do_copy(state: &Rc<RefCell<State>>) {
+    let mut st = state.borrow_mut();
+    let active = st.active;
+    let Some(tab) = st.tabs.get(active) else {
+        return;
+    };
+    let focused = tab.pane_group.focused();
+    let text = if focused == 0 {
+        tab.last.as_ref().and_then(|snap| tab.sel.copy_text(snap))
+    } else {
+        tab.extra_panes
+            .get(focused - 1)
+            .and_then(|ep| ep.last.as_ref().and_then(|snap| ep.sel.copy_text(snap)))
+    };
+    if let Some(text) = text {
+        st.sys_clipboard.set_text(text);
+    }
+}
+
+/// P6.5: paste the OS clipboard into the focused pane (`Ctrl⇧V`, and
+/// middle-click on Linux — see [`wire_pointer`]). Routed through
+/// `SessionInput::Paste` -> `TerminalSession::paste()`, which
+/// bracketed-paste-wraps at the engine/session layer when the app enabled
+/// DECSET 2004 (raw otherwise — see `cm_session::engine_owner::wrap_paste`).
+fn do_paste(state: &Rc<RefCell<State>>) {
+    let mut st = state.borrow_mut();
+    let Some(text) = st.sys_clipboard.get_text() else {
+        return;
+    };
+    if text.is_empty() {
+        return;
+    }
+    let active = st.active;
+    let Some(tab) = st.tabs.get(active) else {
+        return;
+    };
+    let focused = tab.pane_group.focused();
+    let bytes = text.into_bytes();
+    if focused == 0 {
+        tab.session.send_input(SessionInput::Paste(bytes));
+    } else if let Some(ep) = tab.extra_panes.get(focused - 1) {
+        ep.session.send_input(SessionInput::Paste(bytes));
+    } else {
+        tab.session.send_input(SessionInput::Paste(bytes));
+    }
+}
+
+/// Mouse button discriminant for a middle-click (see `input::map_mouse`'s
+/// button encoding, mirrored here since this file, not `input.rs`, decides
+/// what a middle-click *does* on the terminal surface).
+const BTN_MIDDLE: i32 = 3;
+const KIND_PRESS: i32 = 1;
+
+/// Whether the pane currently focused in `tab` is a terminal surface (as
+/// opposed to an RDP framebuffer, which has no selection/paste concept).
+/// Extra panes are terminal-only in practice today (RDP-in-a-split-pane is a
+/// noted unimplemented edge case — see `tick_tab`'s framebuffer-drain
+/// comment), but this checks the real surface rather than assuming it.
+fn focused_surface_is_terminal(tab: &Tab) -> bool {
+    let focused = tab.pane_group.focused();
+    let surf = if focused == 0 {
+        tab.session.surface()
+    } else {
+        match tab.extra_panes.get(focused - 1) {
+            Some(ep) => ep.session.surface(),
+            None => tab.session.surface(),
+        }
+    };
+    matches!(surf, Surface::TerminalGrid(_))
+}
+
 fn wire_pointer(ctx: &Ctx) {
     ctx.ui.on_pointer({
         let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
         move |button, kind, x, y, mods| {
-            let st = state.borrow();
-            if let Some(tab) = st.tabs.get(st.active) {
-                let focused = tab.pane_group.focused();
-                // Route pointer to the focused pane's session.
-                let (session, renderer, scale): (&dyn Session, &TerminalRenderer, f32) =
-                    if focused == 0 {
-                        (tab.session.as_ref(), &tab.renderer, st.scale)
-                    } else {
-                        let ep_idx = focused - 1;
-                        if let Some(ep) = tab.extra_panes.get(ep_idx) {
-                            (ep.session.as_ref(), &ep.renderer, ep.scale)
-                        } else {
-                            (tab.session.as_ref(), &tab.renderer, st.scale)
-                        }
-                    };
-                match session.surface() {
+            let now = Instant::now();
+
+            // P6.5: middle-click paste (Linux convenience — the regular OS
+            // clipboard, not the X11 PRIMARY selection; see the task report's
+            // note on that simplification). Checked read-only up front so it
+            // never fights the mutable pass below over the borrow.
+            if button == BTN_MIDDLE && kind == KIND_PRESS {
+                let is_terminal = {
+                    let st = state.borrow();
+                    st.tabs
+                        .get(st.active)
+                        .is_some_and(focused_surface_is_terminal)
+                };
+                if is_terminal {
+                    do_paste(&state);
+                }
+                return;
+            }
+
+            let mut st = state.borrow_mut();
+            let active = st.active;
+            let base_scale = st.scale;
+            let (surface_w, surface_h) = (st.surface_w, st.surface_h);
+            let Some(tab) = st.tabs.get_mut(active) else {
+                return;
+            };
+            let focused = tab.pane_group.focused();
+
+            if focused == 0 || tab.extra_panes.get(focused - 1).is_none() {
+                // Primary pane (or an out-of-range focus index — defensive
+                // fallback matching the pre-P6.5 behavior).
+                match tab.session.surface() {
                     Surface::TerminalGrid(_) => {
-                        let (row, col) = renderer.cell_at(x * scale, y * scale);
+                        let (row, col) = tab.renderer.cell_at(x * base_scale, y * base_scale);
+                        let snap = tab.last.as_ref();
+                        tab.sel.on_pointer(button, kind, (row, col), snap, now);
                         if let Some(ev) = input::map_mouse(button, kind, row, col, mods) {
-                            session.send_input(SessionInput::Mouse(ev));
+                            tab.session.send_input(SessionInput::Mouse(ev));
                         }
                     }
                     Surface::Framebuffer(_) => {
-                        let w = st.surface_w;
-                        let h = st.surface_h;
-                        let rdp_w = tab.rdp_w;
-                        let rdp_h = tab.rdp_h;
                         let coords = input::RdpCoords {
-                            surface_w: w,
-                            surface_h: h,
-                            rdp_w,
-                            rdp_h,
+                            surface_w,
+                            surface_h,
+                            rdp_w: tab.rdp_w,
+                            rdp_h: tab.rdp_h,
                         };
                         let events = input::map_rdp_mouse(button, kind, x, y, &coords);
                         if !events.is_empty() {
-                            session.send_input(SessionInput::Rdp(events));
+                            tab.session.send_input(SessionInput::Rdp(events));
                         }
                     }
                 }
+            } else {
+                let ep_idx = focused - 1;
+                let ep = &mut tab.extra_panes[ep_idx];
+                if matches!(ep.session.surface(), Surface::TerminalGrid(_)) {
+                    let (row, col) = ep.renderer.cell_at(x * ep.scale, y * ep.scale);
+                    let snap = ep.last.as_ref();
+                    ep.sel.on_pointer(button, kind, (row, col), snap, now);
+                    if let Some(ev) = input::map_mouse(button, kind, row, col, mods) {
+                        ep.session.send_input(SessionInput::Mouse(ev));
+                    }
+                }
+            }
+
+            // P6.5: a selection change has no new `GridSnapshot` of its own
+            // (nothing was typed), so the tick loop's snapshot-driven redraw
+            // would never pick it up — force one render now against the
+            // pane's last known snapshot so the highlight (or its removal)
+            // appears immediately rather than waiting for the next
+            // unrelated output event.
+            if let Some(ui) = weak.upgrade() {
+                render_active(&mut st, &ui);
             }
         }
     });
@@ -500,11 +621,7 @@ fn wire_rdp_key_down(ctx: &Ctx) {
         move |text, special, mods| {
             // Local→remote clipboard sync: intercept Ctrl+V, announce our clipboard.
             if mods & input::MOD_CTRL != 0 && text.as_str().eq_ignore_ascii_case("v") {
-                let paste_text = state
-                    .borrow_mut()
-                    .sys_clipboard
-                    .as_mut()
-                    .and_then(|cb| cb.get_text().ok());
+                let paste_text = state.borrow_mut().sys_clipboard.get_text();
                 if let Some(text_to_paste) = paste_text {
                     let st = state.borrow();
                     if let Some(tab) = st.tabs.get(st.active) {
@@ -758,9 +875,10 @@ pub(super) fn render_frame(
     snap: &GridSnapshot,
     target: Option<(u32, u32)>,
 ) -> Image {
+    let sel = tab.sel.selection().copied();
     let buf = match target {
-        Some((w, h)) => tab.renderer.render_to(snap, w, h),
-        None => tab.renderer.render(snap),
+        Some((w, h)) => tab.renderer.render_to_selected(snap, w, h, sel.as_ref()),
+        None => tab.renderer.render_selected(snap, sel.as_ref()),
     };
     Image::from_rgba8(buf)
 }
@@ -956,10 +1074,29 @@ fn tick_tab(
     toast_next_id: &Rc<RefCell<i32>>,
     ui: &AppWindow,
 ) -> bool {
+    // P6.5 selection lifecycle, "clears on focus change": a pane-focus switch
+    // (Ctrl+Shift+arrow, or clicking a different pane) invalidates every
+    // pane's selection in this tab — cheap and simple, and correct since a
+    // selection is only ever meaningful while its pane is the one receiving
+    // input. Checked every tick rather than at each focus-changing call site
+    // so this stays entirely within this file (`sessions.rs`) regardless of
+    // which controller module actually calls `PaneGroup::set_focused`.
+    let focused_now = st.tabs[i].pane_group.focused();
+    if st.tabs[i].last_focused_pane != focused_now {
+        st.tabs[i].sel.clear();
+        for ep in &mut st.tabs[i].extra_panes {
+            ep.sel.clear();
+        }
+        st.tabs[i].last_focused_pane = focused_now;
+    }
+
     // Drain the latest update for this tab's primary surface.
     match st.tabs[i].session.surface() {
         Surface::TerminalGrid(rx) => {
             if let Some(snap) = drain_latest(rx) {
+                // "Clears on new output that scrolls the region" (or a
+                // resize) — see `PaneSelectionState::invalidate_if_stale`.
+                st.tabs[i].sel.invalidate_if_stale(&snap);
                 if i == active {
                     let img = render_frame(&mut st.tabs[i], &snap, target);
                     ui.set_frame(img);
@@ -978,12 +1115,11 @@ fn tick_tab(
                 st.tabs[i].rdp_h = frame.height;
             }
             // Remote→local clipboard sync: poll slot written by the drive thread.
-            if let (Some(ref arc), Some(ref mut cb)) =
-                (st.tabs[i].rdp_clipboard.clone(), st.sys_clipboard.as_mut())
+            if let Some(ref arc) = st.tabs[i].rdp_clipboard.clone()
                 && let Ok(mut slot) = arc.try_lock()
                 && let Some(text) = slot.take()
             {
-                let _ = cb.set_text(text);
+                st.sys_clipboard.set_text(text);
             }
         }
     }
@@ -995,6 +1131,9 @@ fn tick_tab(
         match st.tabs[i].extra_panes[ep_idx].session.surface() {
             Surface::TerminalGrid(rx) => {
                 if let Some(snap) = drain_latest(rx) {
+                    st.tabs[i].extra_panes[ep_idx]
+                        .sel
+                        .invalidate_if_stale(&snap);
                     if i == active {
                         // ep_idx 0 = pane 1 → pane-frame-2.
                         if ep_idx == 0 {
@@ -1120,6 +1259,30 @@ pub(super) fn tick(
     let target = st.target_px();
     let mut to_close: Vec<usize> = Vec::new();
 
+    // P6.5 selection lifecycle, "clears on focus change": a tab switch
+    // invalidates the selection of both the tab losing view and the one
+    // gaining it (a leftover highlight on the outgoing tab would look like a
+    // stale/incorrect selection if the user switches back). Detected
+    // reactively here (up to one ~16ms tick of latency, imperceptible)
+    // instead of at every `select_tab`/`row-activated` call site, so tab
+    // switching stays entirely out of this lane's touched files.
+    if st.last_active_tab != active {
+        let old = st.last_active_tab;
+        if let Some(tab) = st.tabs.get_mut(old) {
+            tab.sel.clear();
+            for ep in &mut tab.extra_panes {
+                ep.sel.clear();
+            }
+        }
+        if let Some(tab) = st.tabs.get_mut(active) {
+            tab.sel.clear();
+            for ep in &mut tab.extra_panes {
+                ep.sel.clear();
+            }
+        }
+        st.last_active_tab = active;
+    }
+
     for i in 0..st.tabs.len() {
         if tick_tab(
             &mut st,
@@ -1234,9 +1397,10 @@ pub(super) fn render_frame_ep(
     snap: &GridSnapshot,
     target: Option<(u32, u32)>,
 ) -> Image {
+    let sel = ep.sel.selection().copied();
     let buf = match target {
-        Some((w, h)) => ep.renderer.render_to(snap, w, h),
-        None => ep.renderer.render(snap),
+        Some((w, h)) => ep.renderer.render_to_selected(snap, w, h, sel.as_ref()),
+        None => ep.renderer.render_selected(snap, sel.as_ref()),
     };
     Image::from_rgba8(buf)
 }

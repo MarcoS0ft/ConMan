@@ -62,6 +62,103 @@ pub struct CellMetrics {
     pub descent: f32,
 }
 
+/// A single endpoint of a terminal text selection: a cell position within the
+/// **currently rendered** [`GridSnapshot`].
+///
+/// **P6.7 seam.** `row` here is viewport-relative — an index into the grid the
+/// engine currently renders, not an absolute scrollback-buffer line. P6.5's
+/// pinned lifecycle rule (a selection clears the instant new output changes the
+/// content it covers — see [`Selection::row_span`]'s callers in
+/// `cm-ui/src/selection.rs`) means a *live* selection is always valid against
+/// the viewport it was made in; it never needs to survive a scroll, so a
+/// viewport-relative row is sufficient today. When P6.7 adds scrollback
+/// viewing, replace `row`'s meaning with an absolute buffer-line index and
+/// translate to a viewport row at render/copy time (`viewport_row = line -
+/// viewport_offset`) — the geometry below (`normalized`/`row_span`/`contains`)
+/// does not need to change, only what populates `row`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionPoint {
+    pub row: u16,
+    pub col: u16,
+}
+
+/// A mouse-drag text selection over the terminal grid.
+///
+/// `anchor` is where the drag/click started; `cursor` is the current drag
+/// position (word/line selections set both to the expanded word/line bounds
+/// instead of tracking a live drag — see `cm-ui/src/selection.rs`). Endpoints
+/// are stored in click order, not sorted; use [`Selection::normalized`] for
+/// row-major `(start, end)` order regardless of drag direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: SelectionPoint,
+    pub cursor: SelectionPoint,
+}
+
+impl Selection {
+    #[must_use]
+    pub fn new(anchor: SelectionPoint, cursor: SelectionPoint) -> Self {
+        Self { anchor, cursor }
+    }
+
+    /// `(start, end)` in row-major order (`start <= end` as `(row, col)`
+    /// tuples), regardless of which endpoint the drag started from.
+    #[must_use]
+    pub fn normalized(&self) -> (SelectionPoint, SelectionPoint) {
+        let a = (self.anchor.row, self.anchor.col);
+        let b = (self.cursor.row, self.cursor.col);
+        if a <= b {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+
+    /// True when the selection spans zero cells (anchor == cursor) — a single
+    /// click that hasn't been dragged, nothing to highlight or copy.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.cursor
+    }
+
+    /// The inclusive `(start_col, end_col)` span selected within `row`, or
+    /// `None` if `row` is outside the selection or `cols` is zero. Full
+    /// interior rows of a multi-row selection span the whole width;
+    /// `cols` clamps the boundary rows to the current grid width (a selection
+    /// made at a wider size before a shrink-resize would otherwise report an
+    /// out-of-range column — resize also clears the selection at the
+    /// controller layer, but this keeps the geometry itself panic-safe).
+    #[must_use]
+    pub fn row_span(&self, row: u16, cols: u16) -> Option<(u16, u16)> {
+        if cols == 0 {
+            return None;
+        }
+        let (start, end) = self.normalized();
+        if row < start.row || row > end.row {
+            return None;
+        }
+        let last_col = cols - 1;
+        Some(if start.row == end.row {
+            (start.col.min(last_col), end.col.min(last_col))
+        } else if row == start.row {
+            (start.col.min(last_col), last_col)
+        } else if row == end.row {
+            (0, end.col.min(last_col))
+        } else {
+            (0, last_col)
+        })
+    }
+
+    /// Whether `(row, col)` falls inside the selection, given the grid's
+    /// current `cols` (needed to resolve the "to end of row" span of a
+    /// multi-row selection's boundary rows).
+    #[must_use]
+    pub fn contains(&self, row: u16, col: u16, cols: u16) -> bool {
+        self.row_span(row, cols)
+            .is_some_and(|(from, to)| col >= from && col <= to)
+    }
+}
+
 /// Terminal color theme: default fg/bg, the 16 ANSI base colors (extended to 256 via the
 /// standard color-cube/grayscale formula), and the cursor color. One dark default ships;
 /// a theming UI is P5.
@@ -70,6 +167,9 @@ pub struct TerminalTheme {
     pub fg: Rgb,
     pub bg: Rgb,
     pub cursor: Rgb,
+    /// Background tint painted over a selected cell (P6.5), instead of its
+    /// normal resolved background. Text color is left as-is on top of it.
+    pub selection_bg: Rgb,
     /// The 16 ANSI colors (0-7 normal, 8-15 bright).
     pub ansi: [Rgb; 16],
 }
@@ -82,6 +182,8 @@ impl TerminalTheme {
             fg: (0xd4, 0xd4, 0xd4),
             bg: (0x1e, 0x1e, 0x1e),
             cursor: (0xd4, 0xd4, 0xd4),
+            // VS Code dark's default editor selection blue.
+            selection_bg: (0x26, 0x4f, 0x78),
             ansi: [
                 (0x1e, 0x1e, 0x1e), // 0 black
                 (0xcd, 0x31, 0x31), // 1 red
@@ -376,6 +478,17 @@ impl TerminalRenderer {
         self.render_to(snap, w, h)
     }
 
+    /// [`render`](Self::render) with an optional P6.5 text selection tinted
+    /// into the draw pass. `None` behaves exactly like `render`.
+    pub fn render_selected(
+        &mut self,
+        snap: &GridSnapshot,
+        selection: Option<&Selection>,
+    ) -> SharedPixelBuffer<Rgba8Pixel> {
+        let (w, h) = self.pixel_size(snap.size);
+        self.render_to_selected(snap, w, h, selection)
+    }
+
     /// Rasterize a snapshot into a buffer of an **exact** target physical size (B2).
     ///
     /// The grid is drawn at a constant cell size at the top-left; the sub-cell remainder
@@ -389,6 +502,29 @@ impl TerminalRenderer {
         snap: &GridSnapshot,
         target_w: u32,
         target_h: u32,
+    ) -> SharedPixelBuffer<Rgba8Pixel> {
+        self.render_to_selected(snap, target_w, target_h, None)
+    }
+
+    /// [`render_to`](Self::render_to) with an optional P6.5 text selection
+    /// tinted into the draw pass: selected cells are painted with
+    /// [`TerminalTheme::selection_bg`] instead of their resolved background
+    /// (glyph/underline/strikethrough still draw in the cell's normal fg on
+    /// top, and the cursor still draws over everything — same order as
+    /// before). `None` behaves exactly like `render_to`.
+    ///
+    /// A `Selection` with `anchor == cursor` is a legitimate single-cell
+    /// selection (e.g. double-click-to-select-word on a one-character word)
+    /// and *will* render — deciding whether a plain, undragged click should
+    /// produce a visible selection at all is a `cm-ui/src/selection.rs`
+    /// click-state-machine concern (it simply never constructs one in that
+    /// case), not something this pure draw pass second-guesses.
+    pub fn render_to_selected(
+        &mut self,
+        snap: &GridSnapshot,
+        target_w: u32,
+        target_h: u32,
+        selection: Option<&Selection>,
     ) -> SharedPixelBuffer<Rgba8Pixel> {
         self.last_size = snap.size;
         let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(target_w.max(1), target_h.max(1));
@@ -426,6 +562,14 @@ impl TerminalRenderer {
                         (u16::from(fg.1) * 11 / 20) as u8,
                         (u16::from(fg.2) * 11 / 20) as u8,
                     );
+                }
+                // P6.5: a selected cell's background is overridden with the
+                // theme's selection tint (fg — and any reverse/dim already
+                // applied above — is left as-is on top of it).
+                if let Some(sel) = selection
+                    && sel.contains(row as u16, col as u16, snap.size.cols)
+                {
+                    bg = self.theme.selection_bg;
                 }
                 let draw_glyph = !cell.attrs.hidden() && !cell.grapheme.is_empty();
 
@@ -895,6 +1039,115 @@ mod tests {
         assert_eq!(t.palette_256(232), (8, 8, 8));
         // ANSI passthrough.
         assert_eq!(t.palette_256(1), t.ansi[1]);
+    }
+
+    // ── P6.5: Selection geometry ─────────────────────────────────────────
+
+    fn pt(row: u16, col: u16) -> SelectionPoint {
+        SelectionPoint { row, col }
+    }
+
+    #[test]
+    fn normalized_is_order_independent_of_drag_direction() {
+        // Dragged top-left -> bottom-right.
+        let forward = Selection::new(pt(1, 2), pt(3, 4));
+        assert_eq!(forward.normalized(), (pt(1, 2), pt(3, 4)));
+        // Dragged bottom-right -> top-left: same normalized range.
+        let backward = Selection::new(pt(3, 4), pt(1, 2));
+        assert_eq!(backward.normalized(), (pt(1, 2), pt(3, 4)));
+        // Same row, dragged right -> left.
+        let same_row = Selection::new(pt(0, 5), pt(0, 1));
+        assert_eq!(same_row.normalized(), (pt(0, 1), pt(0, 5)));
+    }
+
+    #[test]
+    fn is_empty_true_only_when_anchor_equals_cursor() {
+        assert!(Selection::new(pt(2, 2), pt(2, 2)).is_empty());
+        assert!(!Selection::new(pt(2, 2), pt(2, 3)).is_empty());
+    }
+
+    #[test]
+    fn contains_single_row_span() {
+        let sel = Selection::new(pt(0, 2), pt(0, 5));
+        assert!(!sel.contains(0, 1, 10));
+        assert!(sel.contains(0, 2, 10));
+        assert!(sel.contains(0, 5, 10));
+        assert!(!sel.contains(0, 6, 10));
+        // A different row is never in range.
+        assert!(!sel.contains(1, 3, 10));
+    }
+
+    #[test]
+    fn contains_multi_row_first_middle_last() {
+        let sel = Selection::new(pt(1, 5), pt(3, 2));
+        let cols = 10;
+        // First row: from col 5 to end of row.
+        assert!(!sel.contains(1, 4, cols));
+        assert!(sel.contains(1, 5, cols));
+        assert!(sel.contains(1, 9, cols));
+        // Middle row: fully covered.
+        assert!(sel.contains(2, 0, cols));
+        assert!(sel.contains(2, 9, cols));
+        // Last row: from start of row to col 2.
+        assert!(sel.contains(3, 0, cols));
+        assert!(sel.contains(3, 2, cols));
+        assert!(!sel.contains(3, 3, cols));
+        // Outside the row range entirely.
+        assert!(!sel.contains(0, 0, cols));
+        assert!(!sel.contains(4, 0, cols));
+    }
+
+    #[test]
+    fn row_span_clamps_to_grid_width() {
+        // A selection made at a wider grid (col 20) queried against a
+        // narrower one (cols=10) clamps rather than panicking or returning an
+        // out-of-range column — belt-and-suspenders alongside the
+        // controller-layer "clear selection on resize" lifecycle rule.
+        let sel = Selection::new(pt(0, 0), pt(0, 20));
+        assert_eq!(sel.row_span(0, 10), Some((0, 9)));
+    }
+
+    #[test]
+    fn row_span_none_for_zero_cols_or_out_of_range_row() {
+        let sel = Selection::new(pt(0, 0), pt(2, 0));
+        assert_eq!(sel.row_span(1, 0), None);
+        assert_eq!(sel.row_span(5, 10), None);
+    }
+
+    #[test]
+    fn no_selection_paints_no_highlight() {
+        let mut r = TerminalRenderer::new(14.0, 1.0, TerminalTheme::dark());
+        let bg = Color::Rgb {
+            r: 10,
+            g: 10,
+            b: 10,
+        };
+        let cell = mk("", Color::Default, bg, CellAttrs::empty(), 1);
+        let buf = r.render_selected(&snap(1, 1, vec![cell], blank_cursor()), None);
+        let (cx, cy) = cell_center(&r, 0, 0);
+        assert_eq!(px_at(&buf, cx, cy), (10, 10, 10));
+    }
+
+    #[test]
+    fn single_cell_selection_tints_only_that_cell() {
+        let mut r = TerminalRenderer::new(14.0, 1.0, TerminalTheme::dark());
+        let bg = Color::Rgb {
+            r: 10,
+            g: 10,
+            b: 10,
+        };
+        // Two cells; only cell 0 is selected (anchor == cursor is a legitimate
+        // single-cell selection — e.g. double-click on a one-char word).
+        let cells = vec![
+            mk("", Color::Default, bg, CellAttrs::empty(), 1),
+            mk("", Color::Default, bg, CellAttrs::empty(), 1),
+        ];
+        let sel = Selection::new(pt(0, 0), pt(0, 0));
+        let buf = r.render_selected(&snap(1, 2, cells, blank_cursor()), Some(&sel));
+        let (c0x, c0y) = cell_center(&r, 0, 0);
+        let (c1x, c1y) = cell_center(&r, 0, 1);
+        assert_eq!(px_at(&buf, c0x, c0y), TerminalTheme::dark().selection_bg);
+        assert_eq!(px_at(&buf, c1x, c1y), (10, 10, 10));
     }
 
     #[test]

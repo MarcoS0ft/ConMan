@@ -24,7 +24,7 @@ use cm_core::terminal::{
 };
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::{Style as VtStyle, StyleColor, Underline};
-use libghostty_vt::terminal::{Options, Point, PointCoordinate, Terminal};
+use libghostty_vt::terminal::{Mode, Options, Point, PointCoordinate, Terminal};
 use libghostty_vt::{key, mouse};
 
 /// Scrollback retained by the engine. Scrollback navigation is out of P2.1
@@ -227,6 +227,10 @@ impl TerminalEngine for LibghosttyEngine {
 
     fn encode_mouse(&self, ev: &MouseEvent) -> Vec<u8> {
         self.try_encode_mouse(ev).unwrap_or_default()
+    }
+
+    fn bracketed_paste_enabled(&self) -> bool {
+        self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
     }
 
     fn take_responses(&mut self) -> Vec<u8> {
@@ -582,5 +586,15 @@ mod tests {
         });
         // SGR press at 1-based col;row = 4;3.
         assert_eq!(bytes, b"\x1b[<0;4;3M");
+    }
+
+    #[test]
+    fn bracketed_paste_enabled_tracks_decset_2004() {
+        let mut e = engine(10, 40);
+        assert!(!e.bracketed_paste_enabled(), "off by default");
+        e.feed(b"\x1b[?2004h");
+        assert!(e.bracketed_paste_enabled());
+        e.feed(b"\x1b[?2004l");
+        assert!(!e.bracketed_paste_enabled());
     }
 }
