@@ -13,6 +13,49 @@ use crate::terminal_renderer::TerminalRenderer;
 
 use super::*;
 
+/// `true` only for an exact `"1"` value — the shared predicate behind both
+/// `*_auto_accept_*` hooks below, split out so it is unit-testable without
+/// mutating real process env vars (which would race other tests). Compiled
+/// in for debug builds (its only caller) and for `cfg(test)` (its unit test
+/// below), so a plain release lib build has zero references to it.
+#[cfg(any(debug_assertions, test))]
+fn is_flag_one(v: Option<&str>) -> bool {
+    v == Some("1")
+}
+
+/// Debug-only headless test hook: auto-accept SSH host keys without prompting
+/// (`CONMAN_SSH_AUTO_ACCEPT_KEYS=1`). P6.3 gap 24: compiled out entirely in
+/// release builds -- the `#[cfg(not(debug_assertions))]` variant below never
+/// calls `std::env::var` at all, so a release binary cannot be made to skip
+/// host-key verification regardless of its environment (verified by
+/// inspection of that fn body, plus `is_flag_one`'s unit test below covering
+/// the value-matching predicate the debug variant uses). The xvfb/QA
+/// automation gates run debug builds, so this is not a regression for them.
+#[cfg(debug_assertions)]
+pub(super) fn ssh_auto_accept_keys() -> bool {
+    is_flag_one(std::env::var("CONMAN_SSH_AUTO_ACCEPT_KEYS").ok().as_deref())
+}
+#[cfg(not(debug_assertions))]
+pub(super) fn ssh_auto_accept_keys() -> bool {
+    false
+}
+
+/// Debug-only headless test hook: auto-accept RDP TLS certs without prompting
+/// (`CONMAN_RDP_AUTO_ACCEPT_CERTS=1`). Same release-inertness rationale as
+/// [`ssh_auto_accept_keys`] (P6.3 gap 24).
+#[cfg(debug_assertions)]
+pub(super) fn rdp_auto_accept_certs() -> bool {
+    is_flag_one(
+        std::env::var("CONMAN_RDP_AUTO_ACCEPT_CERTS")
+            .ok()
+            .as_deref(),
+    )
+}
+#[cfg(not(debug_assertions))]
+pub(super) fn rdp_auto_accept_certs() -> bool {
+    false
+}
+
 pub(super) fn grid_for(
     r: &TerminalRenderer,
     logical_w: f32,
@@ -76,7 +119,7 @@ fn wire_ssh_autoinit(ctx: &Ctx) {
                 auth_method: SshAuthMethod::Password,
             };
             let auth = SshAuthInput::Password(Secret::from_string(password));
-            let auto_accept = std::env::var("CONMAN_SSH_AUTO_ACCEPT_KEYS").as_deref() == Ok("1");
+            let auto_accept = ssh_auto_accept_keys();
             let verifier = Arc::new(sessions::UiHostKeyVerifier {
                 weak_ui: ctx.ui.as_weak(),
                 pending: ctx.hk_pending.clone(),
@@ -108,7 +151,7 @@ fn wire_rdp_autoinit(ctx: &Ctx) {
                 .get(3)
                 .and_then(|p| p.parse::<u16>().ok())
                 .unwrap_or(3389);
-            let auto_accept = std::env::var("CONMAN_RDP_AUTO_ACCEPT_CERTS").as_deref() == Ok("1");
+            let auto_accept = rdp_auto_accept_certs();
             let verifier = Arc::new(sessions::UiCertVerifier {
                 weak_ui: ctx.ui.as_weak(),
                 pending: ctx.cert_pending.clone(),
@@ -263,5 +306,23 @@ mod tests {
         assert_eq!(size.rows, 12);
         let tiny = grid_for(&r, 1.0, 1.0, 1.0);
         assert!(tiny.cols >= 1 && tiny.rows >= 1);
+    }
+
+    // ── gap 24: verification-bypass gating ──────────────────────────────
+    //
+    // `is_flag_one` is the value-matching predicate both debug-only
+    // `*_auto_accept_*` hooks use. The release inertness itself (the
+    // `#[cfg(not(debug_assertions))]` variants never calling `std::env::var`
+    // at all) is a compile-time structural property verified by
+    // code-inspection of `ssh_auto_accept_keys`/`rdp_auto_accept_certs`
+    // above, not by this test — see the P6.3 report for the inspection note.
+
+    #[test]
+    fn is_flag_one_requires_exact_1() {
+        assert!(is_flag_one(Some("1")));
+        assert!(!is_flag_one(Some("true")));
+        assert!(!is_flag_one(Some("")));
+        assert!(!is_flag_one(Some("0")));
+        assert!(!is_flag_one(None));
     }
 }
