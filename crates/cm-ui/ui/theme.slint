@@ -141,7 +141,12 @@ export global Theme {
   // breaking any layout constraints.  All callers read these tokens — zero
   // hardcoded sizes outside this file.
   out property <length> activity-bar-width: 48px;
-  out property <length> side-panel-width:  252px;   // default; resizable + persisted (P5.2)
+  out property <length> side-panel-width:  252px;   // default; resizable + persisted (P6.9)
+  // Drag-resize clamps for the side panel (P6.9, gap 11). Plain `int` (not
+  // `length`) so they compare directly against the `int`-typed
+  // `AppWindow.sidebar-width` property with no unit-stripping conversion.
+  out property <int> side-panel-min-width: 180;
+  out property <int> side-panel-max-width: 480;
   out property <length> tab-height:         density == 1 ? 36px : 30px;
   out property <length> tree-row-height:    density == 1 ? 32px : 26px;
   out property <length> status-bar-height:  density == 1 ? 30px : 26px;

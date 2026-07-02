@@ -97,6 +97,9 @@ pub(super) struct PushTabArgs {
     pub(super) rdp_clipboard: Option<Arc<Mutex<Option<String>>>>,
     pub(super) title: String,
     pub(super) initial_status: &'static str,
+    /// The stored connection id this tab was launched from, if any (P6.9 gap 16;
+    /// see `Tab::origin_connection_id`).
+    pub(super) origin_connection_id: Option<i32>,
 }
 
 pub(super) fn push_tab(
@@ -112,6 +115,7 @@ pub(super) fn push_tab(
         rdp_clipboard,
         title,
         initial_status,
+        origin_connection_id,
     } = args;
     let mut st = state.borrow_mut();
     let scale = st.scale;
@@ -142,6 +146,7 @@ pub(super) fn push_tab(
         num,
         connect_info,
         is_remote,
+        origin_connection_id,
         pane_group: PaneGroup::single(),
         extra_panes: Vec::new(),
     });
@@ -190,6 +195,7 @@ pub(super) fn open_local_tab(
             rdp_clipboard: None,
             title,
             initial_status: "connected",
+            origin_connection_id: None,
         },
     );
     ui.set_session_identity(SharedString::from(identity));

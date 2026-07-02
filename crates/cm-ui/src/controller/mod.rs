@@ -105,6 +105,12 @@ struct Tab {
     connect_info: Option<SshConnectInfo>,
     /// True for any remote session (SSH or RDP) — drives the error overlay.
     is_remote: bool,
+    /// The stored connection profile this tab was launched from (tree-launched
+    /// SSH/RDP), if any. `None` for quick-connect and local-shell tabs, which
+    /// have no profile to edit. Drives the ErrorOverlay "Edit…" button (P6.9
+    /// gap 16): with an id, it opens that profile's editor; without one, it
+    /// falls back to quick-connect (the only thing there ever was to edit).
+    origin_connection_id: Option<i32>,
     // P5.1: Split-pane support.
     /// Pane layout and focus tracking.
     pane_group: PaneGroup,

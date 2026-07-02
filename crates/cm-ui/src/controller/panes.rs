@@ -372,6 +372,10 @@ pub(super) fn reattach_session(
             num,
             connect_info: None,
             is_remote,
+            // `DetachedEntry` doesn't carry the originating profile id, so a
+            // reattached tab's ErrorOverlay "Edit…" falls back to quick-connect
+            // (same degradation reattachment already has for `connect_info`/reconnect).
+            origin_connection_id: None,
             pane_group: PaneGroup::single(),
             extra_panes: Vec::new(),
         });

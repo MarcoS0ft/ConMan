@@ -12,6 +12,8 @@ use super::*;
 pub(super) fn wire_overlays(ctx: &Ctx) {
     wire_select_panel(ctx);
     wire_toggle_sidebar(ctx);
+    wire_sidebar_width_changed(ctx);
+    wire_edit_failed_profile(ctx);
     wire_toast_dismissed(ctx);
     wire_stub_callbacks(ctx);
 }
@@ -49,6 +51,68 @@ fn wire_toggle_sidebar(ctx: &Ctx) {
     });
 }
 
+/// Persist the side-panel width once per drag gesture (P6.9 gap 11). Defensively
+/// re-clamps server-side (see `util::clamp_sidebar_width`) so a value from any
+/// non-drag caller (e.g. a future QA-harness command) can't persist a width
+/// outside the chrome's own bounds.
+fn wire_sidebar_width_changed(ctx: &Ctx) {
+    ctx.ui.on_sidebar_width_changed({
+        let weak = ctx.ui.as_weak();
+        let repo_sw = ctx.repo.clone();
+        move |v| {
+            let Some(ui) = weak.upgrade() else { return };
+            let clamped = util::clamp_sidebar_width(v);
+            if clamped != v {
+                ui.set_sidebar_width(clamped);
+            }
+            let svc = SettingsService::new(repo_sw.as_ref());
+            if let Err(e) = svc.save_side_panel_width(clamped) {
+                tracing::warn!("save side_panel_width: {e}");
+            }
+        }
+    });
+}
+
+/// ErrorOverlay "Edit…" (P6.9 gap 16): reopen the failed profile's own editor
+/// via the exact existing CRUD callback (`edit_conn`), or fall back to
+/// quick-connect when the failing tab has no originating stored profile
+/// (quick-connect / local-shell tabs never show this overlay's Edit path
+/// against a profile that doesn't exist).
+fn wire_edit_failed_profile(ctx: &Ctx) {
+    ctx.ui.on_edit_failed_profile({
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let origin = {
+                let st = state.borrow();
+                st.tabs.get(st.active).and_then(|t| t.origin_connection_id)
+            };
+            match resolve_edit_action(origin) {
+                EditAction::EditConnection(id) => ui.invoke_edit_conn(id),
+                EditAction::QuickConnect => ui.invoke_quick_connect(),
+            }
+        }
+    });
+}
+
+/// Pure decision behind [`wire_edit_failed_profile`] -- kept separate from the
+/// `AppWindow` dispatch so it is unit-testable without a live UI (mirrors the
+/// "menu-action dispatch" test style used for other CRUD-callback reuse in
+/// this codebase, e.g. `palette::dispatch_palette_action`).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum EditAction {
+    EditConnection(i32),
+    QuickConnect,
+}
+
+pub(super) fn resolve_edit_action(origin_connection_id: Option<i32>) -> EditAction {
+    match origin_connection_id {
+        Some(id) => EditAction::EditConnection(id),
+        None => EditAction::QuickConnect,
+    }
+}
+
 fn wire_toast_dismissed(ctx: &Ctx) {
     ctx.ui.on_toast_dismissed({
         let toast_model = ctx.toast_model.clone();
@@ -75,7 +139,6 @@ pub(super) fn update_overlays_from_status(ui: &AppWindow, tab: &Tab, status: &Se
             ui.set_overlay_connecting(true);
             ui.set_overlay_error(false);
             ui.set_launchpad_open(false);
-            ui.set_connecting_step(0);
             ui.set_session_status(SharedString::from("connecting"));
         }
         SessionStatus::Connected => {
@@ -150,5 +213,20 @@ mod tests {
             };
             assert_eq!(dot, expected_dot, "status {status:?} -> dot {dot}");
         }
+    }
+
+    // ── gap 16: ErrorOverlay "Edit…" dispatch ───────────────────────────
+
+    #[test]
+    fn resolve_edit_action_with_origin_edits_that_profile() {
+        assert_eq!(
+            resolve_edit_action(Some(42)),
+            EditAction::EditConnection(42)
+        );
+    }
+
+    #[test]
+    fn resolve_edit_action_without_origin_falls_back_to_quick_connect() {
+        assert_eq!(resolve_edit_action(None), EditAction::QuickConnect);
     }
 }

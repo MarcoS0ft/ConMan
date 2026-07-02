@@ -152,6 +152,37 @@ fn wire_key_input(ctx: &Ctx) {
                     }
                     _ => {}
                 }
+                // P6.9 (gap 17) — direct shortcuts on this same reserved layer, kept
+                // as a separate pure classifier (`classify_ctrl_shift_shortcut`) so
+                // the dispatch decision is unit-testable without a live UI/session.
+                match classify_ctrl_shift_shortcut(special, t) {
+                    CtrlShiftAction::NewTab => {
+                        ui.invoke_new_tab();
+                        return;
+                    }
+                    // Goes through the real `toggle-sidebar` callback (not a bare
+                    // property flip) so the collapsed state persists the same as
+                    // the chrome button does.
+                    CtrlShiftAction::ToggleSidebar => {
+                        ui.invoke_toggle_sidebar();
+                        return;
+                    }
+                    CtrlShiftAction::NextTab => {
+                        let n = tab_model_kb.row_count();
+                        if n > 0 {
+                            let next = (ui.get_active_tab() as usize + 1) % n;
+                            tabs::select_tab(&state, &ui, next as i32);
+                        }
+                        return;
+                    }
+                    CtrlShiftAction::JumpToTab(idx) => {
+                        if idx < tab_model_kb.row_count() {
+                            tabs::select_tab(&state, &ui, idx as i32);
+                        }
+                        return;
+                    }
+                    CtrlShiftAction::None => {}
+                }
             }
 
             let st = state.borrow();
@@ -194,6 +225,49 @@ fn wire_key_input(ctx: &Ctx) {
             }
         }
     });
+}
+
+/// The new P6.9 (gap 17) Ctrl+Shift shortcuts, as a pure `(special, text)` ->
+/// action classifier -- kept separate from `wire_key_input`'s dispatch so the
+/// decision is unit-testable without a live `AppWindow`/session `State`.
+/// `special`/`text` are the same encoding `TerminalSurface.key-pressed`
+/// packs in `app.slint` (see `crate::input::map_key`'s doc comment).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CtrlShiftAction {
+    /// Ctrl+Shift+T — open a new local tab.
+    NewTab,
+    /// Ctrl+Shift+E — toggle the side panel.
+    ToggleSidebar,
+    /// Ctrl+Shift+Tab — switch to the next tab (wraps around).
+    NextTab,
+    /// Ctrl+Shift+1..9 — jump directly to the Nth tab (0-based index here;
+    /// the shortcut itself is 1-based, i.e. Ctrl+Shift+1 -> `JumpToTab(0)`).
+    JumpToTab(usize),
+    /// Not one of this layer's direct shortcuts (falls through to the older
+    /// P5.1 split/broadcast/close/detach/focus-move arms, or to the session).
+    None,
+}
+
+pub(super) fn classify_ctrl_shift_shortcut(special: i32, text: &str) -> CtrlShiftAction {
+    match (special, text) {
+        (0, "t" | "T") => CtrlShiftAction::NewTab,
+        (0, "e" | "E") => CtrlShiftAction::ToggleSidebar,
+        (2, _) => CtrlShiftAction::NextTab,
+        (0, digit)
+            if digit.len() == 1
+                && digit.chars().next().is_some_and(|c| c.is_ascii_digit())
+                && digit != "0" =>
+        {
+            // Safe: guarded above to be exactly one ASCII digit '1'..='9'.
+            let d = digit
+                .chars()
+                .next()
+                .and_then(|c| c.to_digit(10))
+                .unwrap_or(1);
+            CtrlShiftAction::JumpToTab((d as usize).saturating_sub(1))
+        }
+        _ => CtrlShiftAction::None,
+    }
 }
 
 fn wire_pointer(ctx: &Ctx) {
@@ -344,7 +418,8 @@ fn wire_qc_connect(ctx: &Ctx) {
                 pending: hk_pending.clone(),
                 auto_accept,
             });
-            open_ssh_tab(&state, &tab_model, &ui, settings, auth, verifier);
+            // Quick-connect has no originating stored profile to edit on failure.
+            open_ssh_tab(&state, &tab_model, &ui, settings, auth, verifier, None);
         }
     });
 }
@@ -496,6 +571,9 @@ fn wire_row_activated(ctx: &Ctx) {
                 tabs::open_local_tab(&state, &tab_model, &ui);
                 return;
             };
+            // P6.9 (gap 16): remember which stored profile this tab came from so
+            // the ErrorOverlay "Edit…" button can reopen it on failure.
+            let origin_connection_id = Some(conn.id.get() as i32);
             match conn.settings {
                 ConnectionSettings::Local(_) => tabs::open_local_tab(&state, &tab_model, &ui),
                 ConnectionSettings::Ssh(s) => {
@@ -506,7 +584,15 @@ fn wire_row_activated(ctx: &Ctx) {
                         pending: hk_pending.clone(),
                         auto_accept,
                     });
-                    open_ssh_tab(&state, &tab_model, &ui, s, auth, verifier);
+                    open_ssh_tab(
+                        &state,
+                        &tab_model,
+                        &ui,
+                        s,
+                        auth,
+                        verifier,
+                        origin_connection_id,
+                    );
                 }
                 ConnectionSettings::Rdp(s) => {
                     let auto_accept = util::rdp_auto_accept_certs();
@@ -521,7 +607,15 @@ fn wire_row_activated(ctx: &Ctx) {
                         password: cm_core::Secret::from_string(String::new()),
                         domain: None,
                     };
-                    open_rdp_tab(&state, &tab_model, &ui, s, auth, verifier);
+                    open_rdp_tab(
+                        &state,
+                        &tab_model,
+                        &ui,
+                        s,
+                        auth,
+                        verifier,
+                        origin_connection_id,
+                    );
                 }
             }
         }
@@ -686,6 +780,7 @@ pub(super) fn open_ssh_tab(
     settings: SshSettings,
     auth: SshAuthInput,
     verifier: Arc<dyn HostKeyVerifier>,
+    origin_connection_id: Option<i32>,
 ) {
     let size = state.borrow().current_grid();
     let identity = format!("{}@{}:{}", settings.username, settings.host, settings.port);
@@ -709,13 +804,14 @@ pub(super) fn open_ssh_tab(
                     rdp_clipboard: None,
                     title,
                     initial_status: "connecting",
+                    origin_connection_id,
                 },
             );
             ui.set_session_identity(SharedString::from(identity));
             ui.set_overlay_connecting(true);
             ui.set_overlay_error(false);
             ui.set_launchpad_open(false);
-            ui.set_connecting_step(0);
+            ui.set_connecting_kind(SharedString::from("SSH"));
             ui.set_rdp_active(false);
         }
         Err(e) => {
@@ -733,6 +829,7 @@ pub(super) fn open_ssh_tab(
                     rdp_clipboard: None,
                     title,
                     initial_status: "error",
+                    origin_connection_id,
                 },
             );
             ui.set_session_identity(SharedString::from(identity));
@@ -753,6 +850,7 @@ pub(super) fn open_rdp_tab(
     settings: RdpSettings,
     auth: RdpAuthInput,
     verifier: Arc<dyn CertVerifier>,
+    origin_connection_id: Option<i32>,
 ) {
     let title = format!("RDP {}", settings.host);
     let identity = format!("{}@{}:{}", auth.username, settings.host, settings.port);
@@ -784,13 +882,14 @@ pub(super) fn open_rdp_tab(
             rdp_clipboard,
             title,
             initial_status: "connecting",
+            origin_connection_id,
         },
     );
     ui.set_session_identity(SharedString::from(identity));
     ui.set_overlay_connecting(true);
     ui.set_overlay_error(false);
     ui.set_launchpad_open(false);
-    ui.set_connecting_step(0);
+    ui.set_connecting_kind(SharedString::from("RDP"));
     ui.set_rdp_active(true);
 }
 
@@ -828,7 +927,7 @@ pub(super) fn reconnect_ssh_tab(
             ui.set_session_identity(SharedString::from(identity));
             ui.set_overlay_connecting(true);
             ui.set_overlay_error(false);
-            ui.set_connecting_step(0);
+            ui.set_connecting_kind(SharedString::from("SSH"));
         }
         Err(e) => {
             tracing::warn!("SSH reconnect error: {e}");
@@ -1181,5 +1280,67 @@ mod tests {
         tx.send(3).unwrap();
         assert_eq!(drain_latest(&rx), Some(3));
         assert_eq!(drain_latest(&rx), None);
+    }
+
+    // ── gap 17: Ctrl+Shift direct-shortcut classifier ───────────────────
+
+    #[test]
+    fn ctrl_shift_t_is_new_tab() {
+        assert_eq!(
+            classify_ctrl_shift_shortcut(0, "t"),
+            CtrlShiftAction::NewTab
+        );
+        assert_eq!(
+            classify_ctrl_shift_shortcut(0, "T"),
+            CtrlShiftAction::NewTab
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_e_is_toggle_sidebar() {
+        assert_eq!(
+            classify_ctrl_shift_shortcut(0, "e"),
+            CtrlShiftAction::ToggleSidebar
+        );
+        assert_eq!(
+            classify_ctrl_shift_shortcut(0, "E"),
+            CtrlShiftAction::ToggleSidebar
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_tab_is_next_tab() {
+        // special == 2 is the Tab key (see `input::map_key`'s special-code table);
+        // the text payload is irrelevant for this arm.
+        assert_eq!(
+            classify_ctrl_shift_shortcut(2, ""),
+            CtrlShiftAction::NextTab
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_digits_1_to_9_jump_to_zero_based_index() {
+        for d in 1..=9 {
+            let text = d.to_string();
+            assert_eq!(
+                classify_ctrl_shift_shortcut(0, &text),
+                CtrlShiftAction::JumpToTab(d - 1),
+                "Ctrl+Shift+{d} should jump to 0-based index {}",
+                d - 1
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_shift_0_is_not_a_tab_jump() {
+        // "0" is deliberately excluded -- there is no "tab 0" in 1-based UI counting.
+        assert_eq!(classify_ctrl_shift_shortcut(0, "0"), CtrlShiftAction::None);
+    }
+
+    #[test]
+    fn ctrl_shift_unrelated_keys_fall_through() {
+        assert_eq!(classify_ctrl_shift_shortcut(0, "z"), CtrlShiftAction::None);
+        assert_eq!(classify_ctrl_shift_shortcut(0, "\\"), CtrlShiftAction::None);
+        assert_eq!(classify_ctrl_shift_shortcut(5, ""), CtrlShiftAction::None);
     }
 }

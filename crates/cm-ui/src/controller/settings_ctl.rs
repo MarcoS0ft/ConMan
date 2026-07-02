@@ -199,6 +199,9 @@ pub(super) fn apply_settings_to_ui(s: &cm_storage::AppSettings, ui: &AppWindow) 
     ui.set_startup_behavior(s.startup_behavior);
     ui.set_active_panel(s.active_panel);
     ui.set_sidebar_collapsed(s.sidebar_collapsed);
+    // P6.9 (gap 11): restore the persisted side-panel width, defensively
+    // re-clamped in case the stored value predates a bounds change.
+    ui.set_sidebar_width(util::clamp_sidebar_width(s.side_panel_width));
 
     // Apply theme-mode to the live Theme.dark-mode token (system is already the
     // default; dark/light need an explicit override).

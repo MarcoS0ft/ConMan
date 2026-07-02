@@ -37,6 +37,9 @@ pub const KEY_STARTUP_BEHAVIOR: &str = "ui.startup_behavior";
 pub const KEY_ACTIVE_PANEL: &str = "ui.active_panel";
 /// Sidebar collapsed: "0" visible, "1" collapsed.
 pub const KEY_SIDEBAR_COLLAPSED: &str = "ui.sidebar_collapsed";
+/// Side-panel width in logical px (integer string). P6.9 gap 11: the
+/// `side-panel-width` token comment promised this persistence since P5.2.
+pub const KEY_SIDE_PANEL_WIDTH: &str = "ui.side_panel_width";
 /// First-run demo data seeded: "1" = already seeded, absent / "0" = not yet.
 /// Gating on this setting (rather than `list_groups().is_empty()`) prevents
 /// re-seeding when the user intentionally deletes all groups (CONVENTIONS §P1.5).
@@ -71,6 +74,8 @@ pub struct AppSettings {
     pub active_panel: i32,
     /// Whether the sidebar was collapsed on last exit.
     pub sidebar_collapsed: bool,
+    /// Side-panel width in logical px, persisted across restarts (P6.9 gap 11).
+    pub side_panel_width: i32,
 }
 
 impl Default for AppSettings {
@@ -86,6 +91,7 @@ impl Default for AppSettings {
             startup_behavior: 0, // clean start
             active_panel: 0,     // Connections
             sidebar_collapsed: false,
+            side_panel_width: 252, // matches Theme.side-panel-width (cm-ui/ui/theme.slint)
         }
     }
 }
@@ -133,6 +139,7 @@ impl<'a> SettingsService<'a> {
         s.startup_behavior = self.read_i32(KEY_STARTUP_BEHAVIOR, s.startup_behavior)?;
         s.active_panel = self.read_i32(KEY_ACTIVE_PANEL, s.active_panel)?;
         s.sidebar_collapsed = self.read_bool(KEY_SIDEBAR_COLLAPSED, s.sidebar_collapsed)?;
+        s.side_panel_width = self.read_i32(KEY_SIDE_PANEL_WIDTH, s.side_panel_width)?;
         Ok(s)
     }
 
@@ -185,6 +192,11 @@ impl<'a> SettingsService<'a> {
     pub fn save_sidebar_collapsed(&self, v: bool) -> Result<(), RepositoryError> {
         self.repo
             .set_setting(KEY_SIDEBAR_COLLAPSED, if v { "1" } else { "0" })
+    }
+
+    /// Persist `side_panel_width` (logical px).
+    pub fn save_side_panel_width(&self, v: i32) -> Result<(), RepositoryError> {
+        self.repo.set_setting(KEY_SIDE_PANEL_WIDTH, &v.to_string())
     }
 
     /// Read whether first-run demo data has been seeded.
@@ -248,6 +260,7 @@ mod tests {
         assert_eq!(s.font_size, 13);
         assert!(!s.sidebar_collapsed);
         assert_eq!(s.active_panel, 0);
+        assert_eq!(s.side_panel_width, 252);
     }
 
     #[test]
@@ -265,6 +278,7 @@ mod tests {
         svc.save_startup_behavior(1).unwrap();
         svc.save_active_panel(2).unwrap();
         svc.save_sidebar_collapsed(true).unwrap();
+        svc.save_side_panel_width(340).unwrap();
 
         let s = svc.load().unwrap();
         assert_eq!(s.theme_mode, 1);
@@ -277,6 +291,18 @@ mod tests {
         assert_eq!(s.startup_behavior, 1);
         assert_eq!(s.active_panel, 2);
         assert!(s.sidebar_collapsed);
+        assert_eq!(s.side_panel_width, 340);
+    }
+
+    #[test]
+    fn side_panel_width_round_trips_independently() {
+        let repo = fresh();
+        let svc = SettingsService::new(&repo);
+        assert_eq!(svc.load().unwrap().side_panel_width, 252, "default");
+        svc.save_side_panel_width(180).unwrap();
+        assert_eq!(svc.load().unwrap().side_panel_width, 180);
+        svc.save_side_panel_width(480).unwrap();
+        assert_eq!(svc.load().unwrap().side_panel_width, 480);
     }
 
     #[test]
