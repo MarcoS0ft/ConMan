@@ -292,6 +292,16 @@ pub trait TerminalEngine {
     /// format. Returns empty when no mouse mode is enabled.
     fn encode_mouse(&self, ev: &MouseEvent) -> Vec<u8>;
 
+    /// Whether the application has enabled bracketed paste (DECSET 2004).
+    /// `cm_session::engine_owner`'s `Msg::Paste` handler consults this to
+    /// decide whether to wrap pasted bytes in the `ESC[200~`/`ESC[201~`
+    /// markers (P6.5) or send them raw. Defaults to `false` (raw paste), so
+    /// adding this method is non-breaking for any engine that doesn't track
+    /// the mode — see `docs/devel/memos/P6.5-bracketed-paste-port.md`.
+    fn bracketed_paste_enabled(&self) -> bool {
+        false
+    }
+
     /// Drain any bytes the engine needs to write *back* to the PTY in reply to
     /// host queries it processed during [`feed`](Self::feed) — e.g. a DSR
     /// cursor-position report (`CSI 6 n`) or device attributes (`CSI c`). The
