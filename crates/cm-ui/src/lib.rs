@@ -58,6 +58,17 @@ pub struct AppConfig {
     pub repo: Arc<dyn ConnectionRepository>,
     /// The OS-keychain credential store.
     pub secrets: Arc<dyn CredentialStore>,
+    /// P6.16: receives a `()` for every activation request from a second
+    /// `conman` launch (delivered by `cm_platform::single_instance`). `run`
+    /// spawns a small listener thread that brings the window forward on the
+    /// UI thread for each message. `None` when the composition root could not
+    /// acquire the single-instance lock (see `AcquireOutcome::Unavailable`) —
+    /// the app still starts, it just has no activation channel.
+    ///
+    /// Deliberately typed as a plain `std::sync::mpsc::Receiver` rather than a
+    /// `cm-platform` type so `cm-ui` does not need a dependency on
+    /// `cm-platform` for this one hook.
+    pub activation_rx: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 impl std::fmt::Debug for AppConfig {

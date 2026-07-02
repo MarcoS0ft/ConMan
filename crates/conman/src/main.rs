@@ -8,12 +8,20 @@
 //! `cm-platform::app_db_path()`.  On the very first launch (empty DB) a small
 //! demo dataset is seeded; subsequent launches open and migrate the existing
 //! DB without touching the user's data.
+//!
+//! P6.16: before touching storage or the keyring, tries to become the single
+//! primary instance (`cm_platform::single_instance`). A second launch that
+//! finds a primary already running asks it to activate and exits immediately;
+//! a squatted lock port degrades to a normal (unlocked) launch rather than
+//! blocking startup.
 
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 
 use cm_core::ConnectionRepository as _;
 use cm_platform::app_db_path;
+use cm_platform::single_instance::{self, AcquireOutcome};
 use cm_secrets::KeyringStore;
 use cm_storage::{SettingsService, SqliteRepository};
 use cm_ui::AppConfig;
@@ -22,13 +30,30 @@ use cm_ui::AppConfig;
 use slint as _;
 
 fn main() -> ExitCode {
+    // ── Single-instance guard (P6.16) — first, before storage/keyring ──────
+    let activation_rx: Option<Receiver<()>> = match single_instance::acquire() {
+        AcquireOutcome::AlreadyRunning => {
+            println!(
+                "conman: another instance is already running; it has been asked to come to the foreground."
+            );
+            return ExitCode::SUCCESS;
+        }
+        AcquireOutcome::Acquired(guard) => Some(guard.listen()),
+        AcquireOutcome::Unavailable(reason) => {
+            eprintln!(
+                "conman: warning: single-instance guard unavailable ({reason}); continuing without it."
+            );
+            None
+        }
+    };
+
     // Install the platform-native keyring backend before any KeyringStore is
     // constructed.  Falls back to the in-memory mock backend if the native
     // backend is unavailable (headless CI, missing daemon, etc.) so startup
     // never fails due to keychain issues.
     init_keyring();
 
-    let config = match build_config() {
+    let config = match build_config(activation_rx) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("conman: fatal: failed to initialise storage: {e}");
@@ -72,7 +97,12 @@ fn init_keyring() {
 /// returned by `cm-platform`.  On an empty / brand-new DB a small demo
 /// dataset is seeded once; existing DBs are opened as-is (migrations run
 /// automatically on open).
-fn build_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
+///
+/// `activation_rx` (P6.16) is threaded straight through from the
+/// single-instance guard acquired in `main` into the returned [`AppConfig`].
+fn build_config(
+    activation_rx: Option<Receiver<()>>,
+) -> Result<AppConfig, Box<dyn std::error::Error>> {
     // ── Resolve DB path ────────────────────────────────────────────────────
     let db_path = app_db_path()?;
 
@@ -102,7 +132,11 @@ fn build_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     // ── Credential store (OS keychain) ─────────────────────────────────────
     let secrets: Arc<dyn cm_core::CredentialStore> = Arc::new(KeyringStore::new());
 
-    Ok(AppConfig { repo, secrets })
+    Ok(AppConfig {
+        repo,
+        secrets,
+        activation_rx,
+    })
 }
 
 /// Populate the in-memory database with demo groups, connections, credential

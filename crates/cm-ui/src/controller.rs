@@ -537,6 +537,7 @@ fn is_ancestor_or_self(target: GroupId, candidate_parent: GroupId, groups: &[Gro
 pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     let repo = config.repo;
     let secrets = config.secrets;
+    let activation_rx = config.activation_rx;
 
     let ui = AppWindow::new()?;
     let scale = ui.window().scale_factor();
@@ -2424,6 +2425,29 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
 
     if std::env::var("CONMAN_AUTOBROADCAST").as_deref() == Ok("1") {
         ui.set_broadcast_active(true);
+    }
+
+    // P6.16: single-instance activation — a second `conman` launch asked us to
+    // come to the foreground. The composition root already validated the
+    // handshake (see `cm_platform::single_instance`); here we just react to
+    // each `()` on a background thread and hop onto the UI thread to un-
+    // minimize and (re)show the window. Actually raising the window above
+    // others is best-effort and OS/window-manager dependent — Slint's public
+    // `Window` API has no direct "bring to front"/focus primitive, so
+    // `set_minimized(false)` + `show()` is the most we can portably do.
+    if let Some(rx) = activation_rx {
+        let weak = ui.as_weak();
+        std::thread::spawn(move || {
+            while rx.recv().is_ok() {
+                let weak = weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let win = ui.window();
+                    win.set_minimized(false);
+                    let _ = win.show();
+                });
+            }
+        });
     }
 
     ui.run()
