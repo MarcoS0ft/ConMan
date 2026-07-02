@@ -1375,6 +1375,299 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // verify_cert TOFU decision paths (P6.2, gap 23)
+    //
+    // A full in-process RDP server that completes the X.224/MCS negotiation and
+    // a real TLS accept is out of scope without a new dependency (rcgen for
+    // self-signed cert generation, or ironrdp-server for full protocol
+    // fidelity) — see the P6.2 new-dep memo
+    // (docs/devel/memos/p6.2-rdp-loopback-new-dep.md). `verify_cert` is exactly
+    // the decision function that new dep would let us exercise inside a live
+    // `connect()`; calling it directly against two real (throwaway,
+    // pre-generated) self-signed certs exercises the identical TOFU logic —
+    // Unknown/Match/Mismatch × Accept/Reject — without needing a live socket.
+    // ---------------------------------------------------------------------------
+
+    /// Real, throwaway self-signed ed25519 certificates (DER), generated once
+    /// via `openssl req -x509` for these tests (not CA-trusted, so
+    /// `verify_cert` always falls through to TOFU — exactly the case these
+    /// tests target).
+    const TEST_CERT_A_DER: &[u8] = include_bytes!("../tests/fixtures/test_cert_a.der");
+    const TEST_CERT_B_DER: &[u8] = include_bytes!("../tests/fixtures/test_cert_b.der");
+
+    fn parse_test_cert(der: &[u8]) -> x509_cert::Certificate {
+        use x509_cert::der::Decode as _;
+        x509_cert::Certificate::from_der(der).expect("parse fixture cert")
+    }
+
+    fn cert_fingerprint(cert: &x509_cert::Certificate) -> String {
+        use x509_cert::der::Encode as _;
+        sha256_fingerprint(&cert.to_der().expect("encode fixture cert"))
+    }
+
+    /// Records every [`CertInfo`] it is asked to decide, then returns a fixed
+    /// decision. Lets tests assert *which* situation `verify_cert` presented
+    /// (Unknown vs Mismatch), not just the outcome.
+    struct RecordingCertVerifier {
+        decision: CertDecision,
+        seen: Mutex<Vec<CertInfo>>,
+    }
+
+    impl RecordingCertVerifier {
+        fn new(decision: CertDecision) -> Self {
+            Self {
+                decision,
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CertVerifier for RecordingCertVerifier {
+        fn decide(&self, info: &CertInfo) -> CertDecision {
+            self.seen.lock().unwrap().push(info.clone());
+            self.decision
+        }
+    }
+
+    #[test]
+    fn verify_cert_unknown_accept_stores_fingerprint() {
+        // `verify_cert` first tries CA validation, which needs the process-level
+        // rustls crypto provider installed (normally done once by `drive_inner`
+        // before any TLS call); do it here too since these tests call
+        // `verify_cert` directly, independent of test execution order.
+        install_ring_provider();
+        let cert = parse_test_cert(TEST_CERT_A_DER);
+        let store = CertStore::new();
+        let verifier = RecordingCertVerifier::new(CertDecision::AcceptAndRemember);
+
+        let key = verify_cert(&cert, "host.test", 3389, &verifier, &store).expect("accept");
+
+        assert!(!key.is_empty(), "server public key must be returned");
+        assert_eq!(
+            store.lookup("host.test", 3389).as_deref(),
+            Some(cert_fingerprint(&cert).as_str())
+        );
+        assert_eq!(verifier.seen.lock().unwrap().len(), 1);
+        assert_eq!(
+            verifier.seen.lock().unwrap()[0].situation,
+            CertSituation::Unknown
+        );
+    }
+
+    #[test]
+    fn verify_cert_unknown_reject_returns_cert_rejected_and_stores_nothing() {
+        install_ring_provider();
+        let cert = parse_test_cert(TEST_CERT_A_DER);
+        let store = CertStore::new();
+        let verifier = RecordingCertVerifier::new(CertDecision::Reject);
+
+        let err = verify_cert(&cert, "host.test", 3389, &verifier, &store).unwrap_err();
+
+        assert!(matches!(err, RdpError::CertRejected(_)), "got: {err:?}");
+        assert!(store.lookup("host.test", 3389).is_none());
+    }
+
+    #[test]
+    fn verify_cert_exact_match_accepts_silently_without_prompting() {
+        install_ring_provider();
+        let cert = parse_test_cert(TEST_CERT_A_DER);
+        let store = CertStore::new();
+        store.store("host.test", 3389, &cert_fingerprint(&cert));
+        let verifier = RecordingCertVerifier::new(CertDecision::Reject); // would fail the test if consulted
+
+        let key = verify_cert(&cert, "host.test", 3389, &verifier, &store).expect("silent accept");
+
+        assert!(!key.is_empty());
+        assert!(
+            verifier.seen.lock().unwrap().is_empty(),
+            "an exact TOFU match must not prompt the verifier"
+        );
+    }
+
+    #[test]
+    fn verify_cert_mismatch_presents_mismatch_situation_and_can_reject() {
+        install_ring_provider();
+        let cert_a = parse_test_cert(TEST_CERT_A_DER);
+        let cert_b = parse_test_cert(TEST_CERT_B_DER);
+        let store = CertStore::new();
+        store.store("host.test", 3389, &cert_fingerprint(&cert_a));
+        let verifier = RecordingCertVerifier::new(CertDecision::Reject);
+
+        let err = verify_cert(&cert_b, "host.test", 3389, &verifier, &store).unwrap_err();
+
+        assert!(matches!(err, RdpError::CertRejected(_)), "got: {err:?}");
+        match &verifier.seen.lock().unwrap()[0].situation {
+            CertSituation::Mismatch {
+                source,
+                stored_fingerprint,
+            } => {
+                assert_eq!(*source, KnownCertSource::ConManStore);
+                assert_eq!(*stored_fingerprint, cert_fingerprint(&cert_a));
+            }
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
+        // Rejecting a mismatch must not overwrite the store.
+        assert_eq!(
+            store.lookup("host.test", 3389).as_deref(),
+            Some(cert_fingerprint(&cert_a).as_str())
+        );
+    }
+
+    #[test]
+    fn verify_cert_mismatch_accept_replaces_stored_fingerprint() {
+        install_ring_provider();
+        let cert_a = parse_test_cert(TEST_CERT_A_DER);
+        let cert_b = parse_test_cert(TEST_CERT_B_DER);
+        let store = CertStore::new();
+        store.store("host.test", 3389, &cert_fingerprint(&cert_a));
+        let verifier = RecordingCertVerifier::new(CertDecision::AcceptAndRemember);
+
+        verify_cert(&cert_b, "host.test", 3389, &verifier, &store).expect("accept mismatch");
+
+        assert_eq!(
+            store.lookup("host.test", 3389).as_deref(),
+            Some(cert_fingerprint(&cert_b).as_str())
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Connection-failure surfacing over a real socket (P6.2, gap 23)
+    //
+    // No in-process RDP protocol responder exists (see the new-dep memo above),
+    // so these exercise the client-side failure path — refused connection,
+    // abrupt close, and garbage bytes where the X.224 Connection Confirm is
+    // expected — proving `RdpSession::connect` always fails soft (typed
+    // `Failed` status, never a panic) exactly as CONVENTIONS §2 requires for
+    // untrusted transport input.
+    // ---------------------------------------------------------------------------
+
+    fn test_rdp_settings(port: u16) -> cm_core::RdpSettings {
+        cm_core::RdpSettings {
+            host: "127.0.0.1".to_owned(),
+            port,
+            domain: None,
+            username: Some("tester".to_owned()),
+            width: 800,
+            height: 600,
+            color_depth: 32,
+        }
+    }
+
+    fn test_rdp_auth() -> RdpAuthInput {
+        RdpAuthInput {
+            username: "tester".to_owned(),
+            password: Secret::from_string("pw".to_owned()),
+            domain: None,
+        }
+    }
+
+    fn wait_for_rdp_terminal_status(
+        session: &RdpSession,
+        timeout: std::time::Duration,
+    ) -> SessionStatus {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let status = session.status();
+            if !matches!(status, SessionStatus::Connecting) {
+                return status;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "RDP session did not reach a terminal status within {timeout:?} (stuck at {status:?})"
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn rdp_connect_refused_surfaces_failed_no_panic() {
+        // Bind then immediately drop: reserves a port with nothing listening.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+            l.local_addr().unwrap().port()
+        };
+
+        let verifier = FixedCertVerifier::new(CertDecision::AcceptAndRemember);
+        let session = RdpSession::connect(
+            &test_rdp_settings(port),
+            test_rdp_auth(),
+            verifier,
+            CertStore::new(),
+        )
+        .expect("spawn rdp session (connect failure is async)");
+
+        let status = wait_for_rdp_terminal_status(&session, std::time::Duration::from_secs(5));
+        assert!(
+            matches!(status, SessionStatus::Failed(_)),
+            "expected Failed, got {status:?}"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn rdp_immediate_close_fails_soft_no_panic() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            // Accept then drop: the client sent its X.224 Connection Request
+            // but the socket closes with zero bytes back.
+            let _ = listener.accept();
+        });
+
+        let verifier = FixedCertVerifier::new(CertDecision::AcceptAndRemember);
+        let session = RdpSession::connect(
+            &test_rdp_settings(port),
+            test_rdp_auth(),
+            verifier,
+            CertStore::new(),
+        )
+        .expect("spawn rdp session");
+
+        let status = wait_for_rdp_terminal_status(&session, std::time::Duration::from_secs(5));
+        assert!(
+            matches!(status, SessionStatus::Failed(_)),
+            "expected Failed, got {status:?}"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn rdp_garbage_response_fails_soft_no_panic() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 256];
+                // Consume (some of) the client's X.224 Connection Request…
+                let _ = stream.read(&mut buf);
+                // …then answer with bytes that are not a valid X.224
+                // Connection Confirm / RDP Negotiation Response.
+                let _ = stream.write_all(b"\x00\x11\x22NOT-A-VALID-X224-RESPONSE\xff\xfe");
+                let _ = stream.flush();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+
+        let verifier = FixedCertVerifier::new(CertDecision::AcceptAndRemember);
+        let session = RdpSession::connect(
+            &test_rdp_settings(port),
+            test_rdp_auth(),
+            verifier,
+            CertStore::new(),
+        )
+        .expect("spawn rdp session");
+
+        let status = wait_for_rdp_terminal_status(&session, std::time::Duration::from_secs(5));
+        assert!(
+            matches!(status, SessionStatus::Failed(_)),
+            "expected Failed, got {status:?}"
+        );
+        session.shutdown();
+    }
+
+    // ---------------------------------------------------------------------------
     // Integration test (real host, gated)
     // ---------------------------------------------------------------------------
 
