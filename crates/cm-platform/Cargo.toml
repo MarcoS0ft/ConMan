@@ -7,8 +7,10 @@ publish.workspace = true
 
 [dependencies]
 # Resolves per-OS standard user directories (data, config, cache).
-# Approved by P1.5 spec — no memo required.
-directories = "5"
+# P6.3 (gap 29): consolidated on `dirs` — the same crate already used by
+# cm-session and cm-ui — replacing `directories`, which only had this one
+# call site here. No memo required (dep already approved/present workspace-wide).
+dirs = "6"
 thiserror = "2"
 
 [lints]

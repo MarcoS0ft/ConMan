@@ -6,7 +6,8 @@
 //!
 //! # Current scope
 //!
-//! - [`app_db_path`]: OS-standard per-user data directory resolution (P1.5).
+//! - [`app_db_path`] / [`app_log_dir`]: OS-standard per-user data directory
+//!   resolution (P1.5, extended for logging in P6.3).
 //! - [`single_instance`]: the single-instance guard (P6.16) — a `std`-only
 //!   loopback-TCP lock + activation handshake; see the module docs for the
 //!   protocol. Clipboard access and DPI helpers remain unimplemented (not yet
@@ -19,11 +20,25 @@ pub use error::PlatformError;
 
 use std::path::PathBuf;
 
+/// Returns `<OS data dir>/conman`, creating it if it does not exist.
+///
+/// Shared by [`app_db_path`] and [`app_log_dir`]. Uses the `dirs` crate (P6.3:
+/// consolidated with `cm-session`/`cm-ui`, which already depended on it — see
+/// gap 29 / `memos/P6.3-*`; the prior `directories`-crate resolution here had
+/// the smaller call-site footprint to move).
+fn conman_data_dir() -> Result<PathBuf, PlatformError> {
+    let base = dirs::data_dir().ok_or(PlatformError::NoDataDir)?;
+    let dir = base.join("conman");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| PlatformError::DataDirCreate(dir.clone(), e.to_string()))?;
+    Ok(dir)
+}
+
 /// Returns the path to the application SQLite database file.
 ///
 /// Resolution order:
 /// 1. `CONMAN_DB_PATH` environment variable (useful for tests and CI).
-/// 2. `<OS data dir>/conman/conman.sqlite` via the `directories` crate.
+/// 2. `<OS data dir>/conman/conman.sqlite`.
 ///
 /// The parent directory is created if it does not exist.
 ///
@@ -41,11 +56,20 @@ pub fn app_db_path() -> Result<PathBuf, PlatformError> {
         return Ok(path);
     }
 
-    // Use the OS-standard per-user data directory.
-    let proj =
-        directories::ProjectDirs::from("io", "ConMan", "conman").ok_or(PlatformError::NoDataDir)?;
-    let data_dir = proj.data_dir();
-    std::fs::create_dir_all(data_dir)
-        .map_err(|e| PlatformError::DataDirCreate(data_dir.to_path_buf(), e.to_string()))?;
-    Ok(data_dir.join("conman.sqlite"))
+    Ok(conman_data_dir()?.join("conman.sqlite"))
+}
+
+/// Returns `<OS data dir>/conman/logs`, the directory the release-build
+/// rotating file log layer writes into (P6.3 — `windows_subsystem = "windows"`
+/// swallows stderr in release, so this is the only place release diagnostics
+/// land). Created if it does not exist.
+///
+/// # Errors
+/// Returns [`PlatformError`] when no data directory can be determined or the
+/// directory cannot be created.
+pub fn app_log_dir() -> Result<PathBuf, PlatformError> {
+    let dir = conman_data_dir()?.join("logs");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| PlatformError::DataDirCreate(dir.clone(), e.to_string()))?;
+    Ok(dir)
 }
