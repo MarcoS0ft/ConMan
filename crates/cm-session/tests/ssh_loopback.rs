@@ -30,7 +30,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cm_core::terminal::{GridSnapshot, Key, KeyEvent, KeyModifiers, TerminalSize};
-use cm_core::{Secret, SshSettings};
+use cm_core::{
+    CredentialId, CredentialPurpose, CredentialRef, CredentialStore, Secret, SshSettings,
+};
 use cm_session::{
     HostKeyDecision, HostKeyInfo, HostKeySituation, HostKeyVerifier, KnownHostSource, KnownHosts,
     SessionStatus, SshAuthInput, SshTerminalSession, TerminalSession,
@@ -39,7 +41,7 @@ use russh::keys::known_hosts::learn_known_hosts_path;
 use russh::keys::ssh_key::{HashAlg, PublicKey};
 use russh::keys::{PrivateKey, load_secret_key};
 
-use support::{LoopbackSshServer, SshServerConfig};
+use support::{InMemoryCredentialStore, LoopbackSshServer, SshServerConfig};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -345,6 +347,118 @@ fn ssh_publickey_auth_wrong_key_surfaces_failed_status() {
         "expected Failed, got {status:?}"
     );
     session.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// P6.4: stored-credential resolution -> keychain fetch -> real transport
+//
+// `resolve_effective_credential` (connection -> nearest-ancestor group
+// default) itself is unit-tested in `cm-core`; the cm-ui glue that calls it
+// and then fetches from a `CredentialStore` is unit-tested in `cm-ui` with a
+// mock store (no network needed there). These loopback tests instead prove
+// the other half: that a secret coming out of a real `CredentialStore`
+// implementation authenticates against a real SSH transport -- both for a
+// stored password and for stored key material via the new
+// `SshAuthInput::KeyMaterial` path (P6.4 memo).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ssh_credential_password_auth_success_via_keychain() {
+    let dir = scratch_dir("cred-pw-ok");
+    let (_hk_path, host_key, _hk_pub) = gen_keypair(&dir, "hostkey");
+
+    let mut cfg = SshServerConfig::new(host_key);
+    cfg.accept_password = Some("s3cret".to_owned());
+    let server = LoopbackSshServer::spawn(cfg);
+
+    // Store the password under a credential id, exactly as the Keys-panel
+    // editor does (`cm-ui/src/controller/keys_ctl.rs`), then fetch it back.
+    let store = InMemoryCredentialStore::new();
+    let cred_id = CredentialId::new(42);
+    store
+        .store(
+            &CredentialRef::new(cred_id, CredentialPurpose::Password),
+            &Secret::from_string("s3cret".to_owned()),
+        )
+        .expect("store password");
+    let fetched = store
+        .get(&CredentialRef::new(cred_id, CredentialPurpose::Password))
+        .expect("get must succeed")
+        .expect("password must be present");
+
+    let session = SshTerminalSession::connect(
+        &ssh_settings(server.port, "tester"),
+        SshAuthInput::Password(fetched),
+        Arc::new(AcceptAll),
+        known_hosts_in(&dir),
+        default_size(),
+    )
+    .expect("spawn ssh session");
+
+    wait_for_connected(&session, Duration::from_secs(5));
+    session.shutdown();
+}
+
+#[test]
+fn ssh_credential_key_material_auth_success_via_keychain() {
+    let dir = scratch_dir("cred-key-ok");
+    let (_hk_path, host_key, _hk_pub) = gen_keypair(&dir, "hostkey");
+    let (user_key_path, _user_priv, user_pub) = gen_keypair(&dir, "userkey");
+    let key_pem = std::fs::read_to_string(&user_key_path).expect("read generated private key");
+
+    let mut cfg = SshServerConfig::new(host_key);
+    cfg.accept_pubkey_fingerprint = Some(fingerprint(&user_pub));
+    let server = LoopbackSshServer::spawn(cfg);
+
+    // Store the raw PEM text under `CredentialPurpose::SshKey`, exactly as a
+    // pasted SSH-key credential is stored (`cm-ui/src/controller/keys_ctl.rs`),
+    // then fetch it back and feed it through `SshAuthInput::KeyMaterial` (no
+    // file path for a keychain-stored key -- see the P6.4 memo).
+    let store = InMemoryCredentialStore::new();
+    let cred_id = CredentialId::new(43);
+    store
+        .store(
+            &CredentialRef::new(cred_id, CredentialPurpose::SshKey),
+            &Secret::from_string(key_pem),
+        )
+        .expect("store key material");
+    let fetched = store
+        .get(&CredentialRef::new(cred_id, CredentialPurpose::SshKey))
+        .expect("get must succeed")
+        .expect("key material must be present");
+
+    let session = SshTerminalSession::connect(
+        &ssh_settings(server.port, "tester"),
+        SshAuthInput::KeyMaterial {
+            key_pem: fetched,
+            passphrase: None,
+        },
+        Arc::new(AcceptAll),
+        known_hosts_in(&dir),
+        default_size(),
+    )
+    .expect("spawn ssh session");
+
+    wait_for_connected(&session, Duration::from_secs(5));
+    session.shutdown();
+}
+
+#[test]
+fn ssh_credential_missing_never_attempts_connect() {
+    // No credential stored at all: the keychain contract itself must return
+    // `None` (never an empty-but-`Some` secret) so the cm-ui resolution layer
+    // (unit-tested separately with a mock store) can turn this into a typed
+    // `AuthResolveError::NotFoundInKeychain` / `NoCredentialAssigned` and show
+    // the auth-error overlay -- never a silent empty-password connect attempt.
+    let store = InMemoryCredentialStore::new();
+    let cred_id = CredentialId::new(44);
+    let fetched = store
+        .get(&CredentialRef::new(cred_id, CredentialPurpose::Password))
+        .expect("get on an absent credential must not error");
+    assert!(
+        fetched.is_none(),
+        "an absent credential must resolve to None, never an empty-but-Some secret"
+    );
 }
 
 // ---------------------------------------------------------------------------

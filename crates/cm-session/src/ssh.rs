@@ -24,7 +24,7 @@ use russh::keys::known_hosts::{
     check_known_hosts_path, known_host_keys_path, learn_known_hosts_path,
 };
 use russh::keys::ssh_key::{HashAlg, PublicKey};
-use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
+use russh::keys::{PrivateKeyWithHashAlg, decode_secret_key, load_secret_key};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::engine_owner::{Msg, Transport, run_engine_owner};
@@ -70,9 +70,19 @@ pub enum SshError {
 pub enum SshAuthInput {
     /// Password authentication.
     Password(Secret),
-    /// Public-key authentication from a key file with an optional passphrase.
+    /// Public-key authentication from a key file on disk, with an optional
+    /// passphrase (quick-connect: the user types/picks a local path).
     Key {
         path: PathBuf,
+        passphrase: Option<Secret>,
+    },
+    /// Public-key authentication from key material held in memory (P6.4: a
+    /// stored `Credential`'s private-key text fetched from the keychain —
+    /// there is no file on disk to point `Key` at). `key_pem` is the
+    /// OpenSSH/PEM-encoded private key text, decoded via
+    /// [`russh::keys::decode_secret_key`] instead of [`load_secret_key`].
+    KeyMaterial {
+        key_pem: Secret,
         passphrase: Option<Secret>,
     },
     /// ssh-agent authentication (uses `SSH_AUTH_SOCK`).
@@ -662,6 +672,25 @@ async fn authenticate(
                 .as_ref()
                 .map(|s| String::from_utf8_lossy(s.expose()).into_owned());
             let key = load_secret_key(&path, pass.as_deref())
+                .map_err(|e| SshError::Key(e.to_string()))?;
+            let key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+            let res = handle
+                .authenticate_publickey(user, key)
+                .await
+                .map_err(|e| SshError::Auth(e.to_string()))?;
+            Ok(res.success())
+        }
+        // P6.4: a stored credential's key material, fetched from the keychain
+        // (no path on disk — decode the PEM text directly).
+        SshAuthInput::KeyMaterial {
+            key_pem,
+            passphrase,
+        } => {
+            let pem = String::from_utf8_lossy(key_pem.expose()).into_owned();
+            let pass = passphrase
+                .as_ref()
+                .map(|s| String::from_utf8_lossy(s.expose()).into_owned());
+            let key = decode_secret_key(&pem, pass.as_deref())
                 .map_err(|e| SshError::Key(e.to_string()))?;
             let key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
             let res = handle
