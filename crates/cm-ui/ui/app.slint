@@ -1299,9 +1299,14 @@ export component AppWindow inherits Window {
                     alignment: center;
                     StatusPill {
                         state: session-status;
-                        text: session-identity != ""
-                            ? "Connected · " + session-identity
-                            : "No active session";
+                        // P6.9 (gap 13): the label now tracks the live status instead
+                        // of a hardcoded "Connected · " prefix — a Failed/Disconnected
+                        // tab used to read "Connected · host" while showing a red dot.
+                        text: session-identity == "" ? "No active session"
+                            : (session-status == "connecting" ? "Connecting · "
+                                : session-status == "connected" ? "Connected · "
+                                : session-status == "error" ? "Failed · "
+                                : "Disconnected · ") + session-identity;
                     }
                 }
                 Rectangle { horizontal-stretch: 1; }
