@@ -344,7 +344,8 @@ fn wire_qc_connect(ctx: &Ctx) {
                 pending: hk_pending.clone(),
                 auto_accept,
             });
-            open_ssh_tab(&state, &tab_model, &ui, settings, auth, verifier);
+            // Quick-connect has no originating stored profile to edit on failure.
+            open_ssh_tab(&state, &tab_model, &ui, settings, auth, verifier, None);
         }
     });
 }
@@ -496,6 +497,9 @@ fn wire_row_activated(ctx: &Ctx) {
                 tabs::open_local_tab(&state, &tab_model, &ui);
                 return;
             };
+            // P6.9 (gap 16): remember which stored profile this tab came from so
+            // the ErrorOverlay "Edit…" button can reopen it on failure.
+            let origin_connection_id = Some(conn.id.get() as i32);
             match conn.settings {
                 ConnectionSettings::Local(_) => tabs::open_local_tab(&state, &tab_model, &ui),
                 ConnectionSettings::Ssh(s) => {
@@ -506,7 +510,15 @@ fn wire_row_activated(ctx: &Ctx) {
                         pending: hk_pending.clone(),
                         auto_accept,
                     });
-                    open_ssh_tab(&state, &tab_model, &ui, s, auth, verifier);
+                    open_ssh_tab(
+                        &state,
+                        &tab_model,
+                        &ui,
+                        s,
+                        auth,
+                        verifier,
+                        origin_connection_id,
+                    );
                 }
                 ConnectionSettings::Rdp(s) => {
                     let auto_accept = util::rdp_auto_accept_certs();
@@ -521,7 +533,15 @@ fn wire_row_activated(ctx: &Ctx) {
                         password: cm_core::Secret::from_string(String::new()),
                         domain: None,
                     };
-                    open_rdp_tab(&state, &tab_model, &ui, s, auth, verifier);
+                    open_rdp_tab(
+                        &state,
+                        &tab_model,
+                        &ui,
+                        s,
+                        auth,
+                        verifier,
+                        origin_connection_id,
+                    );
                 }
             }
         }
@@ -686,6 +706,7 @@ pub(super) fn open_ssh_tab(
     settings: SshSettings,
     auth: SshAuthInput,
     verifier: Arc<dyn HostKeyVerifier>,
+    origin_connection_id: Option<i32>,
 ) {
     let size = state.borrow().current_grid();
     let identity = format!("{}@{}:{}", settings.username, settings.host, settings.port);
@@ -709,13 +730,14 @@ pub(super) fn open_ssh_tab(
                     rdp_clipboard: None,
                     title,
                     initial_status: "connecting",
+                    origin_connection_id,
                 },
             );
             ui.set_session_identity(SharedString::from(identity));
             ui.set_overlay_connecting(true);
             ui.set_overlay_error(false);
             ui.set_launchpad_open(false);
-            ui.set_connecting_step(0);
+            ui.set_connecting_kind(SharedString::from("SSH"));
             ui.set_rdp_active(false);
         }
         Err(e) => {
@@ -733,6 +755,7 @@ pub(super) fn open_ssh_tab(
                     rdp_clipboard: None,
                     title,
                     initial_status: "error",
+                    origin_connection_id,
                 },
             );
             ui.set_session_identity(SharedString::from(identity));
@@ -753,6 +776,7 @@ pub(super) fn open_rdp_tab(
     settings: RdpSettings,
     auth: RdpAuthInput,
     verifier: Arc<dyn CertVerifier>,
+    origin_connection_id: Option<i32>,
 ) {
     let title = format!("RDP {}", settings.host);
     let identity = format!("{}@{}:{}", auth.username, settings.host, settings.port);
@@ -784,13 +808,14 @@ pub(super) fn open_rdp_tab(
             rdp_clipboard,
             title,
             initial_status: "connecting",
+            origin_connection_id,
         },
     );
     ui.set_session_identity(SharedString::from(identity));
     ui.set_overlay_connecting(true);
     ui.set_overlay_error(false);
     ui.set_launchpad_open(false);
-    ui.set_connecting_step(0);
+    ui.set_connecting_kind(SharedString::from("RDP"));
     ui.set_rdp_active(true);
 }
 
@@ -828,7 +853,7 @@ pub(super) fn reconnect_ssh_tab(
             ui.set_session_identity(SharedString::from(identity));
             ui.set_overlay_connecting(true);
             ui.set_overlay_error(false);
-            ui.set_connecting_step(0);
+            ui.set_connecting_kind(SharedString::from("SSH"));
         }
         Err(e) => {
             tracing::warn!("SSH reconnect error: {e}");

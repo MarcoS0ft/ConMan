@@ -8,14 +8,24 @@ import { Theme } from "../theme.slint";
 import { PrimaryButton, SecondaryButton } from "../components.slint";
 
 // ── ConnectingOverlay ─────────────────────────────────────────────────────────
-// 8-dot orbital spinner + "Connecting to user@host…" + a step checklist driven by Rust.
-//   step: 0 resolving · 1 tcp · 2 auth  (steps below `step` show done, `step` is active)
+// 8-dot orbital spinner + "Connecting to user@host…" + one live status line.
+//
+// P6.9 (gap 16): this used to be a 3-step checklist ("Resolving host" / "TCP
+// handshake · :22" / "Authenticating · ed25519") driven by a `step` index that
+// Rust never advanced past 0 — the labels were fiction dressed up as progress.
+// `cm_session::SessionStatus` only reports coarse state (Connecting/Connected/
+// Failed/Disconnected/Exited) with no auth-stage sub-events to drive real
+// per-step transitions, and inventing a new session-layer event protocol is
+// out of scope here (see the task spec's "Out" section). So this overlay now
+// shows exactly what is true: we are waiting on a `kind` (SSH/RDP) handshake
+// for `identity`, nothing more specific.
 //
 // Spinner note: rotation-angle is only valid on Image in Slint 1.17; we use an
 // 8-dot-on-ring approach driven by a Timer-cycled integer (0-7) instead.
 export component ConnectingOverlay inherits Rectangle {
     in property <string> identity: "ops@web-prod-01";
-    in property <int>    step: 2;
+    // Protocol label for the one honest status line below (e.g. "SSH", "RDP").
+    in property <string> kind: "session";
     // Spinner state: 0-7 cycles clockwise through eight orbital dot positions.
     property <int> spin-tick: 0;
 
@@ -86,21 +96,24 @@ export component ConnectingOverlay inherits Rectangle {
             font-weight: 600;
             horizontal-alignment: center;
         }
-        // Steps.
-        for s[i] in ["Resolving host", "TCP handshake · :22", "Authenticating · ed25519"]: HorizontalLayout {
+        // One honest, always-active status line (see the type-level comment above
+        // for why this is no longer a fake multi-step checklist).
+        HorizontalLayout {
             alignment: center;
             spacing: Theme.space-2;
             Text {
-                text: i < root.step ? "\u{F012C}" : (i == root.step ? "\u{EB19}" : "\u{F0130}");  // done / active / pending
+                text: "\u{EB19}";  // active-step glyph (same one the old checklist used)
                 font-family: Theme.font-family-icons;
-                // Step-state glyph — Theme.icon-sm token (was 12px literal).
                 font-size: Theme.icon-sm;
-                color: i < root.step ? Theme.color-connected
-                     : i == root.step ? Theme.color-accent : Theme.color-text-disabled;
+                color: Theme.color-accent;
                 vertical-alignment: center;
             }
-            Text { text: s; color: i <= root.step ? Theme.color-text : Theme.color-text-secondary;
-                font-size: Theme.font-mono; font-family: Theme.font-family-mono; }
+            Text {
+                text: "Establishing " + (root.kind == "" ? "the" : "the " + root.kind) + " connection…";
+                color: Theme.color-text;
+                font-size: Theme.font-mono;
+                font-family: Theme.font-family-mono;
+            }
         }
     }
 }

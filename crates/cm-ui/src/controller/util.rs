@@ -164,6 +164,7 @@ fn wire_ssh_autoinit(ctx: &Ctx) {
                 settings,
                 auth,
                 verifier,
+                None,
             );
         }
     }
@@ -206,6 +207,7 @@ fn wire_rdp_autoinit(ctx: &Ctx) {
                 settings,
                 auth,
                 verifier,
+                None,
             );
         }
     }
