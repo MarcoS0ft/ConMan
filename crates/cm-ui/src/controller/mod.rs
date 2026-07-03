@@ -225,6 +225,14 @@ impl State {
 /// front, so no sender is ever clobbered by a subsequent connection.
 type HkQueue = Arc<Mutex<std::collections::VecDeque<Sender<HostKeyDecision>>>>;
 
+/// Per-connection reply queue for the keyboard-interactive dialog (P6.13),
+/// modeled on [`HkQueue`]: each pending challenge round pushes its own
+/// sender; submit/cancel pops the front so no sender is ever clobbered by a
+/// subsequent round or connection. `None` means the user cancelled the
+/// prompt (aborts that auth attempt); `Some(answers)` carries one [`Secret`]
+/// per prompt, in order.
+type KbdQueue = Arc<Mutex<std::collections::VecDeque<Sender<Option<Vec<cm_core::Secret>>>>>>;
+
 /// Bundles the handles every `wire_*` setup function needs: the live
 /// `AppWindow`, shared `State`, the Slint list models, the storage/secrets
 /// adapters, and the pending-decision queues for the host-key/cert dialogs.
@@ -246,6 +254,7 @@ struct Ctx {
     secrets: Arc<dyn cm_core::CredentialStore>,
     hk_pending: HkQueue,
     cert_pending: Arc<Mutex<Option<Sender<CertDecision>>>>,
+    kbd_pending: KbdQueue,
     resize_debounce: Rc<Timer>,
 }
 
@@ -350,6 +359,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
 
     let hk_pending: HkQueue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let cert_pending: Arc<Mutex<Option<Sender<CertDecision>>>> = Arc::new(Mutex::new(None));
+    let kbd_pending: KbdQueue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let resize_debounce = Rc::new(Timer::default());
 
     tabs::open_local_tab(&state, &tab_model, &ui);
@@ -367,6 +377,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         secrets: secrets.clone(),
         hk_pending: hk_pending.clone(),
         cert_pending: cert_pending.clone(),
+        kbd_pending: kbd_pending.clone(),
         resize_debounce: resize_debounce.clone(),
     };
 

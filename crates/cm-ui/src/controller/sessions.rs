@@ -14,13 +14,14 @@ use cm_core::{
 };
 use cm_session::{
     CertDecision, CertInfo, CertStore, CertVerifier, FailedSession, FrameUpdate, HostKeyDecision,
-    HostKeyInfo, HostKeyVerifier, KnownHosts, PaneLayout, RdpAuthInput, RdpSession, SessionInput,
-    SessionStatus, SshAuthInput, SshTerminalSession, Surface,
+    HostKeyInfo, HostKeyVerifier, KbdInteractiveChallenge, KbdInteractiveHandler, KnownHosts,
+    PaneLayout, RdpAuthInput, RdpSession, SessionInput, SessionStatus, SshAuthInput,
+    SshTerminalSession, Surface,
 };
 use slint::{ComponentHandle, Image, Model, SharedString, Timer, TimerMode, VecModel};
 
 use crate::input;
-use crate::{AppWindow, TabItem, ToastEntry};
+use crate::{AppWindow, KbdPromptRow, TabItem, ToastEntry};
 
 use super::*;
 
@@ -35,6 +36,9 @@ pub(super) fn wire_sessions(ctx: &Ctx) {
     wire_host_key_reject(ctx);
     wire_cert_accept(ctx);
     wire_cert_reject(ctx);
+    wire_kbd_answer_edited(ctx);
+    wire_kbd_submit(ctx);
+    wire_kbd_cancel(ctx);
     wire_rdp_key_down(ctx);
     wire_rdp_key_up(ctx);
     wire_row_activated(ctx);
@@ -503,6 +507,7 @@ fn wire_qc_connect(ctx: &Ctx) {
         let tab_model = ctx.tab_model.clone();
         let weak = ctx.ui.as_weak();
         let hk_pending = ctx.hk_pending.clone();
+        let kbd_pending = ctx.kbd_pending.clone();
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let host = ui.get_qc_host().trim().to_owned();
@@ -525,6 +530,15 @@ fn wire_qc_connect(ctx: &Ctx) {
                     },
                 },
                 1 => SshAuthInput::Password(Secret::from_string(secret_raw)),
+                // P6.13: auth-method 3 is "Keyboard interactive" — no upfront
+                // secret; the handler prompts live once the server issues its
+                // first challenge round.
+                3 => SshAuthInput::KeyboardInteractive {
+                    handler: Arc::new(UiKbdInteractiveHandler {
+                        weak_ui: weak.clone(),
+                        pending: kbd_pending.clone(),
+                    }),
+                },
                 _ => SshAuthInput::Agent,
             };
             let settings = SshSettings {
@@ -625,6 +639,109 @@ fn wire_cert_reject(ctx: &Ctx) {
             }
         }
     });
+}
+
+/// The user edited one answer field in the keyboard-interactive dialog
+/// (P6.13). Mutates the live `kbd-prompts` model in place — the value is only
+/// ever read back out of it at submit time, never re-displayed or logged.
+fn wire_kbd_answer_edited(ctx: &Ctx) {
+    ctx.ui.on_kbd_answer_edited({
+        let weak = ctx.ui.as_weak();
+        move |idx, text| {
+            let Some(ui) = weak.upgrade() else { return };
+            let model = ui.get_kbd_prompts();
+            let Ok(idx) = usize::try_from(idx) else {
+                return;
+            };
+            if let Some(mut row) = model.row_data(idx) {
+                row.value = text;
+                model.set_row_data(idx, row);
+            }
+        }
+    });
+}
+
+fn wire_kbd_submit(ctx: &Ctx) {
+    ctx.ui.on_kbd_submit({
+        let pending = ctx.kbd_pending.clone();
+        let weak = ctx.ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let model = ui.get_kbd_prompts();
+            let answers: Vec<Secret> = (0..model.row_count())
+                .map(|i| {
+                    let value = model.row_data(i).map(|r| r.value.to_string());
+                    Secret::from_string(value.unwrap_or_default())
+                })
+                .collect();
+            if let Ok(mut q) = pending.lock()
+                && let Some(tx) = q.pop_front()
+            {
+                let _ = tx.send(Some(answers));
+            }
+            ui.set_kbd_open(false);
+            ui.set_kbd_prompts(ModelRc::from(Rc::new(VecModel::<KbdPromptRow>::default())));
+        }
+    });
+}
+
+fn wire_kbd_cancel(ctx: &Ctx) {
+    ctx.ui.on_kbd_cancel({
+        let pending = ctx.kbd_pending.clone();
+        let weak = ctx.ui.as_weak();
+        move || {
+            if let Ok(mut q) = pending.lock()
+                && let Some(tx) = q.pop_front()
+            {
+                let _ = tx.send(None);
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_kbd_open(false);
+                ui.set_kbd_prompts(ModelRc::from(Rc::new(VecModel::<KbdPromptRow>::default())));
+            }
+        }
+    });
+}
+
+/// Realizes the P6.13 [`KbdInteractiveHandler`] round trip: shows
+/// [`KbdInteractiveDialog`](crate) and blocks the calling (session driver)
+/// thread until the user submits or cancels. Modeled directly on
+/// [`UiHostKeyVerifier`] below — same pending-queue + `invoke_from_event_loop`
+/// pattern, just carrying answers instead of a host-key decision.
+pub(super) struct UiKbdInteractiveHandler {
+    pub(super) weak_ui: slint::Weak<AppWindow>,
+    pub(super) pending: KbdQueue,
+}
+
+impl KbdInteractiveHandler for UiKbdInteractiveHandler {
+    fn respond(&self, challenge: &KbdInteractiveChallenge) -> Option<Vec<Secret>> {
+        let (tx, rx) = std::sync::mpsc::channel::<Option<Vec<Secret>>>();
+        if let Ok(mut q) = self.pending.lock() {
+            q.push_back(tx);
+        }
+        let name = challenge.name.clone();
+        let instructions = challenge.instructions.clone();
+        let prompts: Vec<KbdPromptRow> = challenge
+            .prompts
+            .iter()
+            .map(|p| KbdPromptRow {
+                text: p.text.clone().into(),
+                echo: p.echo,
+                value: Default::default(),
+            })
+            .collect();
+        let weak = self.weak_ui.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_kbd_name(name.into());
+            ui.set_kbd_instructions(instructions.into());
+            ui.set_kbd_prompts(ModelRc::from(Rc::new(VecModel::from(prompts))));
+            ui.set_kbd_open(true);
+        });
+        // A closed channel (UI gone before responding) fails soft to an
+        // abort, same as an explicit cancel — never hangs the auth attempt.
+        rx.recv().unwrap_or(None)
+    }
 }
 
 fn wire_rdp_key_down(ctx: &Ctx) {

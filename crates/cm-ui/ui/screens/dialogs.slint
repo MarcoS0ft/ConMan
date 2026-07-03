@@ -1,10 +1,11 @@
 // ConMan — Modal base + feature dialogs (GUI_DESIGN §4).
-//   Modal            — scrim + centered card; Esc cancels (wire at the window level).
-//   QuickConnectForm — host/port/username + auth SegmentedControl + conditional secret (P3.2).
-//   HostKeyDialog    — TOFU accept (unknown) and the loud mismatch warning (P3.1 policy).
-//   CertDialog       — RDP TOFU accept (unknown/self-signed) and the loud mismatch warning (P4.2).
+//   Modal                — scrim + centered card; Esc cancels (wire at the window level).
+//   QuickConnectForm     — host/port/username + auth SegmentedControl + conditional secret (P3.2).
+//   HostKeyDialog        — TOFU accept (unknown) and the loud mismatch warning (P3.1 policy).
+//   CertDialog           — RDP TOFU accept (unknown/self-signed) and the loud mismatch warning (P4.2).
+//   KbdInteractiveDialog — SSH keyboard-interactive challenge/response prompt (P6.13).
 //
-//   import { Modal, QuickConnectForm, HostKeyDialog, CertDialog } from "screens/dialogs.slint";
+//   import { Modal, QuickConnectForm, HostKeyDialog, CertDialog, KbdInteractiveDialog, KbdPromptRow } from "screens/dialogs.slint";
 
 import { Theme } from "../theme.slint";
 import { PrimaryButton, SecondaryButton, SegmentedControl, FormField, StatusDot } from "../components.slint";
@@ -35,7 +36,9 @@ export component Modal inherits Rectangle {
 
 // ── QuickConnectForm ──────────────────────────────────────────────────────────
 // Spawns an SshTerminalSession into a tab. Secrets are held in memory only and never
-// logged. auth-method: 0 Public key · 1 Password · 2 Agent (conditional field below).
+// logged. auth-method: 0 Public key · 1 Password · 2 Agent · 3 Keyboard interactive
+// (conditional field below; P6.13 adds option 3, no upfront secret — the challenge
+// is answered live via KbdInteractiveDialog once the server asks for it).
 export component QuickConnectForm inherits Rectangle {
     in-out property <string> host;
     in-out property <string> port: "22";
@@ -90,7 +93,7 @@ export component QuickConnectForm inherits Rectangle {
             Text { text: "AUTH METHOD"; color: Theme.color-text-secondary;
                 font-size: Theme.font-sm; font-family: Theme.font-family; font-weight: 600; }
             SegmentedControl {
-                options: ["Public key", "Password", "Agent"];
+                options: ["Public key", "Password", "Agent", "Keyboard interactive"];
                 selected <=> root.auth-method;
             }
         }
@@ -104,6 +107,13 @@ export component QuickConnectForm inherits Rectangle {
             color: Theme.color-text-secondary;
             font-size: Theme.font-sm;
             font-family: Theme.font-family;
+        }
+        if auth-method == 3 : Text {
+            text: "The server will prompt you for credentials (e.g. a password and a one-time code) after connecting.";
+            color: Theme.color-text-secondary;
+            font-size: Theme.font-sm;
+            font-family: Theme.font-family;
+            wrap: word-wrap;
         }
 
         // Footer.
@@ -340,6 +350,73 @@ export component CertDialog inherits Rectangle {
                 if mismatch  : PrimaryButton { text: "Accept & replace"; destructive: true; clicked => { root.accept(); } }
                 if !mismatch : PrimaryButton { text: "Accept & remember"; clicked => { root.accept(); } }
             }
+        }
+    }
+}
+
+// ── KbdInteractiveDialog ─────────────────────────────────────────────────────
+// Realizes the P6.13 KbdInteractiveHandler round trip for SSH keyboard-
+// interactive auth: the server sends a name/instructions plus N prompts (each
+// with an echo flag); this dialog collects one answer per prompt and submits
+// them all together. The server may issue several rounds in sequence (e.g. a
+// password prompt, then a one-time code) — each round re-opens this same
+// dialog with a fresh prompt set. Answers never leave this form as anything
+// but the plain `edited` callback payload the controller forwards straight
+// into a `Secret` — never logged, never re-displayed.
+export struct KbdPromptRow {
+    text: string,
+    echo: bool,
+    value: string,
+}
+
+export component KbdInteractiveDialog inherits Rectangle {
+    in property <string> name: "";
+    in property <string> instructions: "";
+    in property <[KbdPromptRow]> prompts: [];
+    callback answer-edited(int, string);
+    callback submit();
+    callback cancel();
+
+    width: 460px;
+    background: Theme.color-base;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.color-stroke;
+
+    TouchArea {}
+
+    VerticalLayout {
+        padding: Theme.space-6;
+        spacing: Theme.space-4;
+
+        Text {
+            text: name == "" ? "Keyboard-interactive authentication" : name;
+            color: Theme.color-text;
+            font-size: Theme.font-lg;
+            font-family: Theme.font-family;
+            font-weight: 700;
+        }
+
+        if instructions != "" : Text {
+            text: instructions;
+            color: Theme.color-text-secondary;
+            font-size: Theme.font-base;
+            font-family: Theme.font-family;
+            wrap: word-wrap;
+        }
+
+        for row[idx] in prompts : FormField {
+            label: row.text;
+            password: !row.echo;
+            text: row.value;
+            edited(t) => { root.answer-edited(idx, t); }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            Rectangle { horizontal-stretch: 1; }
+            SecondaryButton { text: "Cancel"; clicked => { root.cancel(); } }
+            PrimaryButton { text: "Submit"; clicked => { root.submit(); } }
         }
     }
 }

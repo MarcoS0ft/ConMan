@@ -18,7 +18,7 @@ import {
     PrimaryButton, SecondaryButton, EmptyState, Toast
 } from "components.slint";
 import { ListView, Palette, LineEdit } from "std-widgets.slint";
-import { Modal, QuickConnectForm, HostKeyDialog, CertDialog } from "screens/dialogs.slint";
+import { Modal, QuickConnectForm, HostKeyDialog, CertDialog, KbdInteractiveDialog, KbdPromptRow } from "screens/dialogs.slint";
 import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
 import { SettingsPanel } from "screens/settings_panel.slint";
 import { ConnectingOverlay, ErrorOverlay } from "screens/session_overlays.slint";
@@ -718,6 +718,15 @@ export component AppWindow inherits Window {
     in property <string>     cert-dialog-stored-fp: "";
     callback cert-accept();
     callback cert-reject();
+
+    // ── SSH keyboard-interactive dialog (P6.13) ───────────────────────
+    in-out property <bool>          kbd-open: false;
+    in property <string>            kbd-name: "";
+    in property <string>            kbd-instructions: "";
+    in property <[KbdPromptRow]>    kbd-prompts: [];
+    callback kbd-answer-edited(int, string);
+    callback kbd-submit();
+    callback kbd-cancel();
 
     // ── Appearance (P5.2: full settings exposed here) ────────────────
     in-out property <int>   theme-mode: 2;
@@ -1435,6 +1444,20 @@ export component AppWindow inherits Window {
             stored-fingerprint: root.cert-dialog-stored-fp;
             reject => { root.cert-reject(); }
             accept => { root.cert-accept(); }
+        }
+    }
+
+    // ── SSH keyboard-interactive dialog (P6.13) ───────────────────────────
+    Modal {
+        open: root.kbd-open;
+        dismissed => {}
+        KbdInteractiveDialog {
+            name:         root.kbd-name;
+            instructions: root.kbd-instructions;
+            prompts:      root.kbd-prompts;
+            answer-edited(idx, t) => { root.kbd-answer-edited(idx, t); }
+            submit => { root.kbd-submit(); }
+            cancel => { root.kbd-cancel(); }
         }
     }
 
