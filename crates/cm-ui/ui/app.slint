@@ -21,7 +21,7 @@ import { ListView, Palette, LineEdit } from "std-widgets.slint";
 import { Modal, QuickConnectForm, HostKeyDialog, CertDialog, KbdInteractiveDialog, KbdPromptRow } from "screens/dialogs.slint";
 import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
 import { SettingsPanel } from "screens/settings_panel.slint";
-import { ConnectingOverlay, ErrorOverlay } from "screens/session_overlays.slint";
+import { ConnectingOverlay, ErrorOverlay, SearchOverlay } from "screens/session_overlays.slint";
 import { Launchpad, RecentItem } from "screens/launchpad.slint";
 import {
     ConnProfile, GroupForm, ProfileEditor, GroupEditor
@@ -814,6 +814,19 @@ export component AppWindow inherits Window {
     in-out property <string>         palette-query: "";
     in property <[PaletteAction]>    palette-actions;
     in-out property <int>            palette-selected: 0;
+
+    // ── Terminal search overlay (P6.7, Ctrl⇧F) ─────────────────────────
+    in-out property <bool>   terminal-search-open: false;
+    in-out property <string> terminal-search-query: "";
+    // Total hits in the active tab's buffer, and the 0-based index of the
+    // current one (`-1` when there are no matches) — the overlay renders
+    // "current+1 / match-count".
+    in property <int>        terminal-search-match-count: 0;
+    in property <int>        terminal-search-current-index: -1;
+    callback search-edited(string);
+    callback search-next();
+    callback search-prev();
+    callback search-close();
 
     // ── Session overlays ──────────────────────────────────────────────
     in-out property <bool>   overlay-connecting: false;
@@ -1687,6 +1700,20 @@ export component AppWindow inherits Window {
                 open-recent(i) => { root.open-recent(i); }
                 quick-connect => { root.quick-connect(); }
                 open-group-split => { root.open-group-split(); }
+            }
+            // ── P6.7: terminal search overlay ────────────────────────────────
+            // Floats over the live terminal (top-right), not full-bleed like the
+            // overlays above — the terminal underneath stays visible/live.
+            if terminal-search-open : SearchOverlay {
+                x: parent.width - self.width - Theme.space-4;
+                y: Theme.space-3;
+                query <=> terminal-search-query;
+                match-count: terminal-search-match-count;
+                current-index: terminal-search-current-index;
+                edited(q) => { root.search-edited(q); }
+                next => { root.search-next(); }
+                prev => { root.search-prev(); }
+                close => { root.search-close(); }
             }
             }
         }

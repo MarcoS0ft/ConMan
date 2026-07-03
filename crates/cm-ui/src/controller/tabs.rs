@@ -160,6 +160,7 @@ pub(super) fn push_tab(
         is_empty,
         broadcast_target: panes::BroadcastTarget::default(),
         broadcast_saved_groups: Vec::new(),
+        search: super::search::SearchState::default(),
     });
     st.active = st.tabs.len() - 1;
     let active = st.active;

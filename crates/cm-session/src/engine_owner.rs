@@ -50,7 +50,64 @@ pub(crate) enum Msg {
     Mouse(MouseEvent),
     Paste(Vec<u8>),
     Resize(TerminalSize),
+    /// P6.7: set the viewport's scroll offset (lines above the live tail,
+    /// `0` = tail/follow — see [`ScrollState`]). The offset is the caller's
+    /// (`cm-ui`'s) best absolute guess computed from the last `GridSnapshot`
+    /// it saw; the owner loop clamps/tracks it from here. A fresh snapshot at
+    /// the new position is pushed immediately so a scroll action is not
+    /// delayed until the next PTY byte.
+    SetScroll(u32),
+    /// P6.7: request the full retained buffer as plain-text lines (search).
+    /// The owner loop replies on `reply` rather than blocking the sender —
+    /// see `TerminalEngine::buffer_text`'s "can be expensive" note.
+    QueryBuffer(Sender<Vec<String>>),
     Shutdown,
+}
+
+/// P6.7 follow-tail / freeze scroll bookkeeping for the engine-owner loop.
+///
+/// `Tail` always resolves to the live bottom (offset `0`), so new output
+/// naturally keeps showing the tail with no compensation needed. `Frozen`
+/// pins the view at the buffer growth-point distance it had when the user
+/// last scrolled: as more lines are fed, `scrollback_len()` grows by the same
+/// amount the tail does, so `offset0 + (scrollback_len_now -
+/// scrollback_len0)` keeps the *same absolute content* on screen instead of
+/// drifting forward with the tail. See `docs/devel/memos/
+/// P6.7-scrollback-port.md` for the trade-off discussion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollState {
+    Tail,
+    Frozen { offset0: u32, scrollback_len0: u32 },
+}
+
+impl ScrollState {
+    /// The `scroll_offset` to pass to `TerminalEngine::snapshot` right now,
+    /// given the engine's current `scrollback_len`.
+    fn effective_offset(self, scrollback_len_now: u32) -> u32 {
+        match self {
+            ScrollState::Tail => 0,
+            ScrollState::Frozen {
+                offset0,
+                scrollback_len0,
+            } => offset0.saturating_add(scrollback_len_now.saturating_sub(scrollback_len0)),
+        }
+    }
+
+    /// Transition on a user-requested absolute offset-from-tail (already
+    /// clamped by the caller against `scrollback_len_now`). `0` always means
+    /// "resume following the tail," never a `Frozen` pin at distance zero
+    /// (which would otherwise drift away from the tail as output arrives).
+    fn set(scrollback_len_now: u32, requested: u32) -> Self {
+        let clamped = requested.min(scrollback_len_now);
+        if clamped == 0 {
+            ScrollState::Tail
+        } else {
+            ScrollState::Frozen {
+                offset0: clamped,
+                scrollback_len0: scrollback_len_now,
+            }
+        }
+    }
 }
 
 /// The transport-specific sink for the engine owner: where encoded input and
@@ -87,6 +144,10 @@ pub(crate) fn run_engine_owner<T: Transport>(
     timing(start, "owner: engine ready");
     let mut logged_feed = false;
     let mut logged_nonempty = false;
+    // P6.7: scroll position lives here (not on the engine — see `ScrollState`'s
+    // doc comment / the port memo) because this loop is the only place that
+    // cheaply knows `scrollback_len()` at the moment new bytes are fed.
+    let mut scroll = ScrollState::Tail;
 
     while let Ok(msg) = control_rx.recv() {
         match msg {
@@ -100,7 +161,8 @@ pub(crate) fn run_engine_owner<T: Transport>(
                 // DSR cursor-position report). ConPTY blocks ~3 s at startup waiting
                 // for these (B7); remote shells benefit from the same prompt reply.
                 transport.write(&engine.take_responses());
-                let snap = engine.snapshot();
+                let offset = scroll.effective_offset(engine.scrollback_len());
+                let snap = engine.snapshot(offset);
                 if !logged_nonempty && snap.cells.iter().any(|c| !c.grapheme.is_empty()) {
                     timing(start, "owner: first NON-EMPTY snapshot");
                     logged_nonempty = true;
@@ -118,7 +180,19 @@ pub(crate) fn run_engine_owner<T: Transport>(
             Msg::Resize(new_size) => {
                 transport.resize(new_size);
                 engine.resize(new_size);
-                let _ = snapshot_tx.send(engine.snapshot());
+                // A pinned pre-resize scroll position has no well-defined
+                // meaning against a reflowed grid (same rationale cm-ui uses
+                // to clear a selection on resize) — snap back to the tail.
+                scroll = ScrollState::Tail;
+                let _ = snapshot_tx.send(engine.snapshot(0));
+            }
+            Msg::SetScroll(requested) => {
+                scroll = ScrollState::set(engine.scrollback_len(), requested);
+                let offset = scroll.effective_offset(engine.scrollback_len());
+                let _ = snapshot_tx.send(engine.snapshot(offset));
+            }
+            Msg::QueryBuffer(reply) => {
+                let _ = reply.send(engine.buffer_text());
             }
             Msg::Shutdown => break,
         }
@@ -240,5 +314,116 @@ mod tests {
             Msg::Paste(b"two".to_vec()),
         ]);
         assert_eq!(out, b"\x1b[200~one\x1b[201~two".to_vec());
+    }
+
+    // ── P6.7: Msg::SetScroll / Msg::QueryBuffer via a fresh engine-owner ────
+
+    /// Like `drive`, but on a caller-chosen `rows x cols` grid (small, so
+    /// scrollback fills quickly) and returns every [`GridSnapshot`] pushed to
+    /// `snapshot_tx`, in order.
+    fn drive_snapshots(rows: u16, cols: u16, messages: Vec<Msg>) -> Vec<GridSnapshot> {
+        let (control_tx, control_rx) = std::sync::mpsc::channel();
+        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let transport = RecordingTransport::default();
+
+        for m in messages {
+            control_tx.send(m).unwrap();
+        }
+        control_tx.send(Msg::Shutdown).unwrap();
+
+        run_engine_owner(
+            TerminalSize { rows, cols },
+            transport,
+            &control_rx,
+            &snapshot_tx,
+            &ready_tx,
+            Instant::now(),
+        );
+        ready_rx.try_recv().unwrap().expect("engine init");
+        snapshot_rx.try_iter().collect()
+    }
+
+    /// `Msg::Bytes` for 10 numbered lines ("L0".."L9"), each on its own row —
+    /// enough to scroll a 4-row grid.
+    fn ten_numbered_lines() -> Vec<Msg> {
+        (0..10)
+            .map(|i| Msg::Bytes(format!("L{i}\r\n").into_bytes()))
+            .collect()
+    }
+
+    #[test]
+    fn set_scroll_pushes_a_snapshot_immediately_at_the_requested_offset() {
+        let mut msgs = ten_numbered_lines();
+        msgs.push(Msg::SetScroll(3));
+        let snaps = drive_snapshots(4, 10, msgs);
+        assert_eq!(snaps.last().unwrap().scroll_offset, 3);
+    }
+
+    #[test]
+    fn set_scroll_zero_resumes_tail_follow() {
+        let mut msgs = ten_numbered_lines();
+        msgs.push(Msg::SetScroll(3));
+        msgs.push(Msg::Bytes(b"more\r\n".to_vec()));
+        msgs.push(Msg::SetScroll(0));
+        msgs.push(Msg::Bytes(b"tail\r\n".to_vec()));
+        let snaps = drive_snapshots(4, 10, msgs);
+        assert_eq!(snaps.last().unwrap().scroll_offset, 0);
+    }
+
+    #[test]
+    fn frozen_scroll_does_not_drift_when_new_output_arrives() {
+        // Scroll back (clamped to the max available), then feed one more
+        // line: the pinned offset must grow by exactly the scrollback growth
+        // so the same absolute content stays on screen (follow-tail semantics
+        // are the caller's problem only at offset 0 — see `ScrollState`).
+        let mut msgs = ten_numbered_lines();
+        msgs.push(Msg::SetScroll(9_999)); // clamps to whatever is available
+        let before = drive_snapshots(4, 10, msgs);
+        let before_last = before.last().unwrap();
+
+        let mut msgs2 = ten_numbered_lines();
+        msgs2.push(Msg::SetScroll(9_999));
+        msgs2.push(Msg::Bytes(b"L10\r\n".to_vec()));
+        let after = drive_snapshots(4, 10, msgs2);
+        let after_last = after.last().unwrap();
+
+        assert_eq!(after_last.scrollback_len, before_last.scrollback_len + 1);
+        assert_eq!(
+            after_last.scroll_offset,
+            before_last.scroll_offset + 1,
+            "the pinned view should track buffer growth 1:1, not reset or drift with the tail"
+        );
+    }
+
+    #[test]
+    fn resize_resets_scroll_to_tail() {
+        let mut msgs = ten_numbered_lines();
+        msgs.push(Msg::SetScroll(3));
+        msgs.push(Msg::Resize(TerminalSize { rows: 4, cols: 10 }));
+        let snaps = drive_snapshots(4, 10, msgs);
+        assert_eq!(snaps.last().unwrap().scroll_offset, 0);
+    }
+
+    #[test]
+    fn query_buffer_replies_with_the_full_text_oldest_first() {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let mut msgs: Vec<Msg> = (0..5)
+            .map(|i| Msg::Bytes(format!("L{i}\r\n").into_bytes()))
+            .collect();
+        msgs.push(Msg::QueryBuffer(reply_tx));
+        let _ = drive_snapshots(4, 10, msgs);
+        let lines = reply_rx.try_recv().expect("buffer reply");
+        assert_eq!(lines[0], "L0");
+        assert!(lines.iter().any(|l| l == "L4"));
+    }
+
+    #[test]
+    fn query_buffer_on_empty_terminal_replies_without_blocking() {
+        // Empty-input edge case (CONVENTIONS §2): no bytes fed at all.
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let _ = drive_snapshots(4, 10, vec![Msg::QueryBuffer(reply_tx)]);
+        let lines = reply_rx.try_recv().expect("buffer reply");
+        assert_eq!(lines.len(), 4);
     }
 }

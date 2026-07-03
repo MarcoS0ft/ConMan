@@ -27,9 +27,9 @@ use libghostty_vt::style::{Style as VtStyle, StyleColor, Underline};
 use libghostty_vt::terminal::{Mode, Options, Point, PointCoordinate, Terminal};
 use libghostty_vt::{key, mouse};
 
-/// Scrollback retained by the engine. Scrollback navigation is out of P2.1
-/// scope; the snapshot only exposes the visible viewport, but a buffer is kept
-/// so future scrollback work has history available.
+/// Scrollback retained by the engine, in lines. Exposed for viewport-offset
+/// rendering and whole-buffer search since P6.7 (`TerminalEngine::snapshot`'s
+/// `scroll_offset` param, `scrollback_len`, `buffer_text`).
 const DEFAULT_MAX_SCROLLBACK: usize = 10_000;
 
 /// Nominal cell pixel size used for `resize` (libghostty wants pixel metrics
@@ -94,8 +94,11 @@ impl LibghosttyEngine {
         })
     }
 
-    fn read_cell(&self, x: u16, y: u32) -> Cell {
-        let Ok(grid) = self.term.grid_ref(Point::Active(PointCoordinate { x, y })) else {
+    /// Read one cell at `point` (P6.7: generalized from the P2.1
+    /// `Point::Active`-only form so [`snapshot`](TerminalEngine::snapshot) can
+    /// address `Point::Screen` rows for a scrolled-back view too).
+    fn read_cell(&self, point: Point) -> Cell {
+        let Ok(grid) = self.term.grid_ref(point) else {
             return Cell::default();
         };
 
@@ -197,18 +200,47 @@ impl TerminalEngine for LibghosttyEngine {
         }
     }
 
-    fn snapshot(&self) -> GridSnapshot {
+    fn snapshot(&self, scroll_offset: u32) -> GridSnapshot {
+        let scrollback_len = self.scrollback_len();
+        let offset = scroll_offset.min(scrollback_len);
+
         let mut cells = Vec::with_capacity(self.size.cell_count());
-        for y in 0..self.size.rows {
-            for x in 0..self.size.cols {
-                cells.push(self.read_cell(x, u32::from(y)));
+        if offset == 0 {
+            // Live tail: identical to the pre-P6.7 `Point::Active` reads, kept
+            // as its own branch so the well-exercised P2.1 behavior/tests are
+            // untouched when nobody has scrolled.
+            for y in 0..self.size.rows {
+                for x in 0..self.size.cols {
+                    cells.push(
+                        self.read_cell(Point::Active(PointCoordinate { x, y: u32::from(y) })),
+                    );
+                }
+            }
+        } else {
+            // Scrolled back: address the full screen (scrollback + active).
+            // `top` is the absolute row (oldest-first) of the viewport's first
+            // visible row; `total_rows` already accounts for scrollback +
+            // the active region, so this is exactly `scrollback_len - offset`.
+            let total_rows = u32::try_from(self.term.total_rows().unwrap_or(0)).unwrap_or(0);
+            let top = total_rows
+                .saturating_sub(u32::from(self.size.rows))
+                .saturating_sub(offset);
+            for y in 0..self.size.rows {
+                for x in 0..self.size.cols {
+                    cells.push(self.read_cell(Point::Screen(PointCoordinate {
+                        x,
+                        y: top + u32::from(y),
+                    })));
+                }
             }
         }
 
         let cursor = CursorState {
             row: self.term.cursor_y().unwrap_or(0),
             col: self.term.cursor_x().unwrap_or(0),
-            visible: self.term.is_cursor_visible().unwrap_or(true),
+            // The active-area cursor is off-screen whenever the viewport is
+            // scrolled back; DECTCEM visibility only matters at the tail.
+            visible: offset == 0 && self.term.is_cursor_visible().unwrap_or(true),
             // DECSCUSR cursor shape is exposed via libghostty's render-state
             // API, wired with the renderer in P2.3; default to Block for now.
             shape: CursorShape::Block,
@@ -218,7 +250,28 @@ impl TerminalEngine for LibghosttyEngine {
             size: self.size,
             cells,
             cursor,
+            scrollback_len,
+            scroll_offset: offset,
+            mouse_tracking: self.term.is_mouse_tracking().unwrap_or(false),
         }
+    }
+
+    fn scrollback_len(&self) -> u32 {
+        u32::try_from(self.term.scrollback_rows().unwrap_or(0)).unwrap_or(u32::MAX)
+    }
+
+    fn buffer_text(&self) -> Vec<String> {
+        let total_rows = u32::try_from(self.term.total_rows().unwrap_or(0)).unwrap_or(0);
+        let mut lines = Vec::with_capacity(total_rows as usize);
+        for y in 0..total_rows {
+            let mut line = String::new();
+            for x in 0..self.size.cols {
+                let cell = self.read_cell(Point::Screen(PointCoordinate { x, y }));
+                line.push_str(&cell.grapheme);
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        lines
     }
 
     fn encode_key(&self, ev: &KeyEvent) -> Vec<u8> {
@@ -447,7 +500,7 @@ mod tests {
     fn plain_text_and_cursor() {
         let mut e = engine(6, 20);
         e.feed(b"Hello");
-        let snap = e.snapshot();
+        let snap = e.snapshot(0);
         assert_eq!(cell_at(&snap, 0, 0).grapheme, "H");
         assert_eq!(cell_at(&snap, 0, 4).grapheme, "o");
         assert_eq!(snap.cursor.row, 0);
@@ -460,7 +513,7 @@ mod tests {
         let mut e = engine(4, 20);
         // bold + italic + underline + reverse + truecolor fg, one char.
         e.feed(b"\x1b[1;3;4;7m\x1b[38;2;10;20;30mX\x1b[0m");
-        let c = e.snapshot();
+        let c = e.snapshot(0);
         let cell = cell_at(&c, 0, 0);
         assert_eq!(cell.grapheme, "X");
         assert!(cell.attrs.bold());
@@ -481,16 +534,16 @@ mod tests {
     fn clears_ed_el() {
         let mut e = engine(4, 10);
         e.feed(b"abc\x1b[1;1H\x1b[K"); // write, home, erase-to-EOL
-        assert_eq!(cell_at(&e.snapshot(), 0, 0).grapheme, "");
+        assert_eq!(cell_at(&e.snapshot(0), 0, 0).grapheme, "");
         e.feed(b"xyz\x1b[2J"); // write, erase display
-        assert_eq!(cell_at(&e.snapshot(), 0, 0).grapheme, "");
+        assert_eq!(cell_at(&e.snapshot(0), 0, 0).grapheme, "");
     }
 
     #[test]
     fn line_wrap() {
         let mut e = engine(4, 8);
         e.feed(b"ABCDEFGHIJKL"); // 12 chars into 8 cols
-        let s = e.snapshot();
+        let s = e.snapshot(0);
         assert_eq!(cell_at(&s, 0, 7).grapheme, "H");
         assert_eq!(cell_at(&s, 1, 0).grapheme, "I");
         assert_eq!(cell_at(&s, 1, 3).grapheme, "L");
@@ -500,7 +553,7 @@ mod tests {
     fn cjk_wide_and_emoji() {
         let mut e = engine(4, 20);
         e.feed("中a😀".as_bytes());
-        let s = e.snapshot();
+        let s = e.snapshot(0);
         let wide = cell_at(&s, 0, 0);
         assert_eq!(wide.grapheme, "中");
         assert_eq!(wide.width, 2);
@@ -516,10 +569,10 @@ mod tests {
     fn resize_reflow_lossless() {
         let mut e = engine(6, 20);
         e.feed(b"0123456789ABCDEFGHIJ"); // exactly 20 cols
-        assert_eq!(cell_at(&e.snapshot(), 0, 19).grapheme, "J");
+        assert_eq!(cell_at(&e.snapshot(0), 0, 19).grapheme, "J");
 
         e.resize(TerminalSize { rows: 6, cols: 10 });
-        let s = e.snapshot();
+        let s = e.snapshot(0);
         assert_eq!(s.size.cols, 10);
         assert_eq!(cell_at(&s, 0, 0).grapheme, "0");
         assert_eq!(cell_at(&s, 0, 9).grapheme, "9");
@@ -527,7 +580,7 @@ mod tests {
         assert_eq!(cell_at(&s, 1, 9).grapheme, "J");
 
         e.resize(TerminalSize { rows: 6, cols: 20 });
-        let s = e.snapshot();
+        let s = e.snapshot(0);
         assert_eq!(cell_at(&s, 0, 0).grapheme, "0");
         assert_eq!(cell_at(&s, 0, 19).grapheme, "J");
     }
@@ -596,5 +649,102 @@ mod tests {
         assert!(e.bracketed_paste_enabled());
         e.feed(b"\x1b[?2004l");
         assert!(!e.bracketed_paste_enabled());
+    }
+
+    // ── P6.7: scrollback offset / follow-tail / search text ────────────────
+
+    /// Feed `n` numbered lines ("L0".."L{n-1}"), each on its own row.
+    fn feed_numbered_lines(e: &mut LibghosttyEngine, n: usize) {
+        for i in 0..n {
+            e.feed(format!("L{i}\r\n").as_bytes());
+        }
+    }
+
+    #[test]
+    fn snapshot_zero_offset_matches_tail_and_reports_no_scrollback_yet() {
+        let mut e = engine(4, 10);
+        e.feed(b"hi");
+        let s = e.snapshot(0);
+        assert_eq!(s.scrollback_len, 0);
+        assert_eq!(s.scroll_offset, 0);
+        assert_eq!(cell_at(&s, 0, 0).grapheme, "h");
+        assert!(s.cursor.visible);
+    }
+
+    #[test]
+    fn snapshot_at_offset_shows_scrolled_history() {
+        // 4 rows: enough lines scroll old content into history.
+        let mut e = engine(4, 10);
+        feed_numbered_lines(&mut e, 10);
+
+        let tail = e.snapshot(0);
+        assert!(
+            tail.scrollback_len > 0,
+            "10 lines into a 4-row grid must scroll"
+        );
+        assert_eq!(tail.scroll_offset, 0);
+
+        // Scroll all the way back: the oldest retained line ("L0") is visible.
+        let max = tail.scrollback_len;
+        let scrolled = e.snapshot(max);
+        assert_eq!(scrolled.scroll_offset, max);
+        assert_eq!(cell_at(&scrolled, 0, 0).grapheme, "L");
+        assert_eq!(cell_at(&scrolled, 0, 1).grapheme, "0");
+    }
+
+    #[test]
+    fn snapshot_offset_clamps_beyond_available_scrollback() {
+        let mut e = engine(4, 10);
+        feed_numbered_lines(&mut e, 10);
+        let scrollback_len = e.snapshot(0).scrollback_len;
+        // A wildly out-of-range request clamps rather than erroring/panicking.
+        let far = e.snapshot(9_999);
+        assert_eq!(far.scroll_offset, scrollback_len);
+    }
+
+    #[test]
+    fn cursor_hidden_while_scrolled_back_visible_at_tail() {
+        let mut e = engine(4, 10);
+        feed_numbered_lines(&mut e, 10);
+        let tail = e.snapshot(0);
+        assert!(tail.cursor.visible);
+        let scrolled = e.snapshot(tail.scrollback_len);
+        assert!(
+            !scrolled.cursor.visible,
+            "the active-area cursor is off-screen once scrolled back"
+        );
+    }
+
+    #[test]
+    fn mouse_tracking_flag_tracks_decset_1000() {
+        let mut e = engine(10, 40);
+        assert!(!e.snapshot(0).mouse_tracking, "off by default");
+        e.feed(b"\x1b[?1000h");
+        assert!(e.snapshot(0).mouse_tracking);
+        e.feed(b"\x1b[?1000l");
+        assert!(!e.snapshot(0).mouse_tracking);
+    }
+
+    #[test]
+    fn buffer_text_covers_scrollback_and_active_oldest_first() {
+        let mut e = engine(4, 10);
+        feed_numbered_lines(&mut e, 10);
+        let lines = e.buffer_text();
+        assert!(lines.len() >= 10, "expected at least the 10 fed lines");
+        assert_eq!(lines[0], "L0", "oldest retained line comes first");
+        assert!(
+            lines.iter().any(|l| l == "L9"),
+            "the newest line is included"
+        );
+    }
+
+    #[test]
+    fn buffer_text_on_empty_terminal_is_all_blank_lines() {
+        // Maximal/empty-input edge case (CONVENTIONS §2): no scrollback yet,
+        // buffer_text degrades to just the blank active rows, never panics.
+        let e = engine(4, 10);
+        let lines = e.buffer_text();
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().all(String::is_empty));
     }
 }

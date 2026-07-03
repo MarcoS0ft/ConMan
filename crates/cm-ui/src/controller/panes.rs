@@ -1110,6 +1110,7 @@ pub(super) fn reattach_session(
             is_empty: false,
             broadcast_target: BroadcastTarget::default(),
             broadcast_saved_groups: Vec::new(),
+            search: super::search::SearchState::default(),
         });
         st.active = st.tabs.len() - 1;
         let active = st.active;
@@ -1251,6 +1252,7 @@ mod tests {
             is_empty: false,
             broadcast_target: BroadcastTarget::default(),
             broadcast_saved_groups: Vec::new(),
+            search: super::search::SearchState::default(),
         };
         (tab, sinks)
     }

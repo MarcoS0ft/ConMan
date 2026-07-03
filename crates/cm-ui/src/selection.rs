@@ -90,16 +90,38 @@ pub(crate) fn line_bounds(cols: u16) -> (u16, u16) {
     (0, cols.saturating_sub(1))
 }
 
+/// The absolute buffer row of `snap`'s viewport row 0 (P6.7). See
+/// `terminal_renderer::SelectionPoint`'s doc comment for the address space —
+/// `0` for a snapshot with no scrollback fields set (pre-P6.7-shaped test
+/// fixtures), which is also the correct value for a live tail view.
+fn viewport_top(snap: &GridSnapshot) -> u32 {
+    snap.scrollback_len.saturating_sub(snap.scroll_offset)
+}
+
+/// Convert an absolute buffer row to a viewport-relative row into
+/// `snap.cells`, or `None` if that row is not part of the currently
+/// displayed window (scrolled elsewhere — the selection/match is simply not
+/// visible right now, not an error).
+fn viewport_row(snap: &GridSnapshot, abs_row: u16) -> Option<u16> {
+    let rel = u32::from(abs_row).checked_sub(viewport_top(snap))?;
+    (rel < u32::from(snap.size.rows)).then_some(rel as u16)
+}
+
 /// The cells covered by `sel` against `snap`, in row-major reading order —
 /// shared by [`extract_text`] and the staleness check in
 /// [`PaneSelectionState::invalidate_if_stale`] so both agree on exactly what
-/// "the content currently under the selection" means.
+/// "the content currently under the selection" means. `sel`'s rows are
+/// absolute buffer lines (P6.7); rows outside `snap`'s current viewport
+/// window contribute nothing (the selection has scrolled out of view).
 fn selected_cells(snap: &GridSnapshot, sel: &Selection) -> Vec<Cell> {
     let cols = snap.size.cols;
     let (start, end) = sel.normalized();
     let mut out = Vec::new();
-    for row in start.row..=end.row {
-        let Some((from, to)) = sel.row_span(row, cols) else {
+    for abs_row in start.row..=end.row {
+        let Some((from, to)) = sel.row_span(abs_row, cols) else {
+            continue;
+        };
+        let Some(row) = viewport_row(snap, abs_row) else {
             continue;
         };
         let row_start = usize::from(row) * usize::from(cols);
@@ -114,24 +136,27 @@ fn selected_cells(snap: &GridSnapshot, sel: &Selection) -> Vec<Cell> {
 
 /// Extract the selected text from `snap`, one line per selected row (trailing
 /// blanks trimmed per line, matching the usual "copy from a terminal" feel),
-/// joined with `\n`.
-///
-/// P6.7 seam: this walks `sel`'s viewport-relative rows against the live
-/// snapshot only — there is no scrollback to read from yet (see
-/// `terminal_renderer::SelectionPoint`'s doc comment).
+/// joined with `\n`. `sel`'s rows are absolute buffer lines (P6.7); a row
+/// outside `snap`'s current viewport window contributes an empty line (rather
+/// than being skipped) so a selection spanning partly off-screen content
+/// still copies with the right line count — the common case is the whole
+/// selection being visible, since it clears once scrolled fully out of view
+/// (see [`PaneSelectionState::invalidate_if_stale`]).
 pub(crate) fn extract_text(snap: &GridSnapshot, sel: &Selection) -> String {
     let cols = snap.size.cols;
     let (start, end) = sel.normalized();
     let mut lines = Vec::with_capacity(usize::from(end.row.saturating_sub(start.row)) + 1);
-    for row in start.row..=end.row {
-        let Some((from, to)) = sel.row_span(row, cols) else {
+    for abs_row in start.row..=end.row {
+        let Some((from, to)) = sel.row_span(abs_row, cols) else {
             continue;
         };
-        let row_start = usize::from(row) * usize::from(cols);
         let mut line = String::new();
-        for col in from..=to {
-            if let Some(cell) = snap.cells.get(row_start + usize::from(col)) {
-                line.push_str(&cell.grapheme);
+        if let Some(row) = viewport_row(snap, abs_row) {
+            let row_start = usize::from(row) * usize::from(cols);
+            for col in from..=to {
+                if let Some(cell) = snap.cells.get(row_start + usize::from(col)) {
+                    line.push_str(&cell.grapheme);
+                }
             }
         }
         lines.push(line.trim_end().to_string());
@@ -207,6 +232,14 @@ impl PaneSelectionState {
         snap: Option<&GridSnapshot>,
         now: Instant,
     ) -> bool {
+        // P6.7: `cell.0` from `renderer.cell_at()` is viewport-relative; a
+        // `Selection`'s stored rows are absolute buffer lines, so translate
+        // once here via the snapshot's current scroll position. No `snap` ->
+        // no scrollback context -> the row is used as-is (matches the
+        // pre-P6.7 degenerate "no snapshot yet" behavior).
+        let abs_row = snap.map_or(cell.0, |s| {
+            u16::try_from(viewport_top(s) + u32::from(cell.0)).unwrap_or(u16::MAX)
+        });
         match (button, kind) {
             (BTN_LEFT, KIND_PRESS) => {
                 let n = self.click.register(cell, now);
@@ -216,11 +249,11 @@ impl PaneSelectionState {
                         self.dragging = false;
                         Selection::new(
                             SelectionPoint {
-                                row: cell.0,
+                                row: abs_row,
                                 col: from,
                             },
                             SelectionPoint {
-                                row: cell.0,
+                                row: abs_row,
                                 col: to,
                             },
                         )
@@ -230,11 +263,11 @@ impl PaneSelectionState {
                         self.dragging = false;
                         Selection::new(
                             SelectionPoint {
-                                row: cell.0,
+                                row: abs_row,
                                 col: from,
                             },
                             SelectionPoint {
-                                row: cell.0,
+                                row: abs_row,
                                 col: to,
                             },
                         )
@@ -243,11 +276,11 @@ impl PaneSelectionState {
                         self.dragging = true;
                         Selection::new(
                             SelectionPoint {
-                                row: cell.0,
+                                row: abs_row,
                                 col: cell.1,
                             },
                             SelectionPoint {
-                                row: cell.0,
+                                row: abs_row,
                                 col: cell.1,
                             },
                         )
@@ -261,7 +294,7 @@ impl PaneSelectionState {
             }
             (BTN_LEFT, KIND_MOVE) if self.dragging => {
                 let new_cursor = SelectionPoint {
-                    row: cell.0,
+                    row: abs_row,
                     col: cell.1,
                 };
                 let changed = match &mut self.selection {
@@ -331,6 +364,19 @@ mod tests {
     }
 
     fn row_snap(rows: &[&str], cols: u16) -> GridSnapshot {
+        row_snap_at(rows, cols, 0, 0)
+    }
+
+    /// Like `row_snap`, but at a given scrollback position (P6.7): `rows` is
+    /// the *visible viewport* content, and `scrollback_len`/`scroll_offset`
+    /// place it within a larger absolute-row address space, matching what a
+    /// real scrolled-back `GridSnapshot` reports.
+    fn row_snap_at(
+        rows: &[&str],
+        cols: u16,
+        scrollback_len: u32,
+        scroll_offset: u32,
+    ) -> GridSnapshot {
         let mut cells = Vec::new();
         for row in rows {
             let chars: Vec<char> = row.chars().collect();
@@ -351,6 +397,9 @@ mod tests {
                 visible: false,
                 shape: CursorShape::Block,
             },
+            scrollback_len,
+            scroll_offset,
+            mouse_tracking: false,
         }
     }
 
@@ -641,5 +690,74 @@ mod tests {
         let t0 = Instant::now();
         s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0);
         assert!(!s.on_pointer(BTN_LEFT, KIND_RELEASE, (0, 0), Some(&snap), t0));
+    }
+
+    // ── P6.7: selection survives scrollback (offset-aware) ──────────────────
+
+    #[test]
+    fn selection_made_while_scrolled_back_stores_absolute_row() {
+        // 100 lines of scrollback, scrolled 40 lines back from the tail: the
+        // viewport's row 0 is absolute line 60.
+        let snap = row_snap_at(&["hello world"], 11, 100, 40);
+        let mut s = PaneSelectionState::default();
+        let t0 = Instant::now();
+        s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0);
+        s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 4), Some(&snap), t0);
+        let sel = s.selection().unwrap();
+        assert_eq!(sel.anchor.row, 60);
+        assert_eq!(sel.cursor.row, 60);
+    }
+
+    #[test]
+    fn copy_text_at_offset_k_returns_the_right_text() {
+        // Spec wording (P6.7 verification): "a selection made at offset K
+        // copies the right text."
+        let snap = row_snap_at(&["hello world"], 11, 100, 40);
+        let mut s = PaneSelectionState::default();
+        let t0 = Instant::now();
+        s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 6), Some(&snap), t0);
+        s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 10), Some(&snap), t0);
+        assert_eq!(s.copy_text(&snap).as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn selection_survives_when_still_within_the_scrolled_viewport() {
+        // Selection made at absolute row 60 (offset 40, 1-row viewport).
+        let snap1 = row_snap_at(&["hello"], 5, 100, 40);
+        let mut s = PaneSelectionState::default();
+        let t0 = Instant::now();
+        s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap1), t0);
+        s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 4), Some(&snap1), t0);
+        assert!(s.selection().is_some());
+
+        // Scroll slightly further back (offset 41, 2-row viewport): absolute
+        // top is now 59, so the window covers rows 59-60 — row 60 ("hello",
+        // unchanged content) is still visible, just no longer at row 0.
+        let snap2 = row_snap_at(&["prev", "hello"], 5, 100, 41);
+        s.invalidate_if_stale(&snap2);
+        assert!(
+            s.selection().is_some(),
+            "selection should survive a scroll that keeps it in view"
+        );
+    }
+
+    #[test]
+    fn selection_clears_on_tail_follow_jump_scrolling_it_out_of_view() {
+        // Made 40 lines back (absolute row 60); then the view snaps to the
+        // tail (offset 0) -- the selection's absolute row is no longer part
+        // of the displayed window at all, so it must clear.
+        let snap1 = row_snap_at(&["hello"], 5, 100, 40);
+        let mut s = PaneSelectionState::default();
+        let t0 = Instant::now();
+        s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap1), t0);
+        s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 4), Some(&snap1), t0);
+        assert!(s.selection().is_some());
+
+        let tail_snap = row_snap_at(&["prompt$ "], 8, 100, 0);
+        s.invalidate_if_stale(&tail_snap);
+        assert!(
+            s.selection().is_none(),
+            "a tail-follow jump must clear a selection scrolled out of view"
+        );
     }
 }

@@ -619,6 +619,8 @@ impl Session for RdpSession {
             }
             // Terminal inputs are not applicable to RDP.
             SessionInput::Key(_) | SessionInput::Mouse(_) | SessionInput::Paste(_) => {}
+            // P6.7: scrollback is a terminal-surface concept; RDP has none.
+            SessionInput::Scroll(_) => {}
         }
     }
 }
