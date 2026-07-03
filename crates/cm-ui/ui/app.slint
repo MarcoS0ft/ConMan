@@ -1291,9 +1291,17 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Session area.
-            VerticalLayout {
+            // Session area (P6.10 / P6.17 R2: wrapped in a plain Rectangle so the
+            // session-state overlays below can be layered ABOVE the surface/broadcast
+            // bar but stay confined to this cell — they no longer paint over the tab
+            // strip or status bar, which used to happen when they were mounted as
+            // 100%x100% siblings of the whole AppWindow (app.slint:1372-1389 pre-P6.10).
+            session-area := Rectangle {
                 horizontal-stretch: 1;
+                clip: true;
+
+            VerticalLayout {
+                width: 100%; height: 100%;
                 spacing: 0px;
 
                 // ── Single-pane terminal (P2.4; FROZEN — pane-layout == 0, no RDP) ──
@@ -1433,6 +1441,36 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+
+            // ── Session-state overlays (P6.10 / P6.17 R2) ──────────────────
+            // Moved from window-level 100%x100% siblings (which painted over the
+            // tab strip and status bar — shots 21/25/34/38 in the P6.17 memo) to
+            // this cell: still full-bleed over the surface/broadcast bar, but the
+            // tab strip above and the status bar below stay visible and honest
+            // while a tab is connecting/failed/empty.
+            if overlay-connecting : ConnectingOverlay {
+                x: 0; y: 0; width: 100%; height: 100%;
+                identity: session-identity;
+                kind: connecting-kind;
+            }
+            if overlay-error : ErrorOverlay {
+                x: 0; y: 0; width: 100%; height: 100%;
+                identity: session-identity;
+                reason: error-reason;
+                detail: error-detail;
+                reconnect => { root.reconnect(); }
+                edit => { root.edit-failed-profile(); }
+            }
+            if launchpad-open : Launchpad {
+                x: 0; y: 0; width: 100%; height: 100%;
+                recents: launchpad-recents;
+                query <=> launchpad-query;
+                edited(q) => { root.launchpad-edited(q); }
+                open-recent(i) => { root.open-recent(i); }
+                quick-connect => { root.quick-connect(); }
+                open-group-split => { root.open-group-split(); }
+            }
+            }
         }
 
         // Status bar.
@@ -1503,30 +1541,6 @@ export component AppWindow inherits Window {
                 }
             }
         }
-    }
-
-    // ── Session-state overlays ────────────────────────────────────────────
-    if overlay-connecting : ConnectingOverlay {
-        x: 0; y: 0; width: 100%; height: 100%;
-        identity: session-identity;
-        kind: connecting-kind;
-    }
-    if overlay-error : ErrorOverlay {
-        x: 0; y: 0; width: 100%; height: 100%;
-        identity: session-identity;
-        reason: error-reason;
-        detail: error-detail;
-        reconnect => { root.reconnect(); }
-        edit => { root.edit-failed-profile(); }
-    }
-    if launchpad-open : Launchpad {
-        x: 0; y: 0; width: 100%; height: 100%;
-        recents: launchpad-recents;
-        query <=> launchpad-query;
-        edited(q) => { root.launchpad-edited(q); }
-        open-recent(i) => { root.open-recent(i); }
-        quick-connect => { root.quick-connect(); }
-        open-group-split => { root.open-group-split(); }
     }
 
     // ── Quick-connect modal ───────────────────────────────────────────────
