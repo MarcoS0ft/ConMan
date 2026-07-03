@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cm_core::terminal::{GridSnapshot, TerminalSize};
-use cm_core::{LocalSettings, SshSettings};
-use cm_session::{CertDecision, HostKeyDecision, PaneGroup, Session, SshAuthInput};
+use cm_core::{LocalSettings, RdpSettings, SshSettings};
+use cm_session::{CertDecision, HostKeyDecision, PaneGroup, RdpAuthInput, Session, SshAuthInput};
 use cm_storage::SettingsService;
 use slint::{ComponentHandle, Image, ModelRc, SharedString, Timer, VecModel};
 
@@ -92,6 +92,33 @@ struct SshConnectInfo {
     auth_source: SshAuthSource,
 }
 
+/// Mirrors [`SshAuthSource`] for RDP tabs (P6.12, gap 19): `Direct`
+/// (quick-connect / debug autoinit) caches the typed [`RdpAuthInput`]
+/// verbatim; `Credential` (tree-launched) caches only the
+/// [`cm_core::ConnectionId`], so a reconnect re-resolves the password fresh
+/// via [`sessions::resolve_rdp_auth`] rather than caching plaintext in `Tab`
+/// state -- the same rule P6.4 established for SSH.
+enum RdpAuthSource {
+    Direct(RdpAuthInput),
+    Credential(cm_core::ConnectionId),
+}
+
+struct RdpConnectInfo {
+    settings: RdpSettings,
+    auth_source: RdpAuthSource,
+}
+
+/// What a remote tab was launched with, for the error/disconnect overlay's
+/// Reconnect button (P6.4 added the SSH side; P6.12 gap 19 adds RDP). A tab
+/// is either an SSH or an RDP remote session (or neither, for local shells)
+/// -- never both -- so this is a plain sum type rather than two `Option`
+/// fields on [`Tab`]. [`sessions::wire_reconnect`] matches on this to pick
+/// the SSH or RDP reconnect path.
+enum ConnectInfo {
+    Ssh(SshConnectInfo),
+    Rdp(RdpConnectInfo),
+}
+
 /// State for an additional (non-primary) pane within a split tab.
 struct ExtraPaneState {
     session: Box<dyn Session>,
@@ -142,8 +169,10 @@ struct Tab {
     // Common:
     scale: f32,
     num: u32,
-    /// Present for remote sessions (SSH + RDP) — enables error overlay + SSH reconnect.
-    connect_info: Option<SshConnectInfo>,
+    /// Present for remote sessions (SSH + RDP) — enables the error overlay's
+    /// Reconnect button. The `Ssh`/`Rdp` variant (P6.12, gap 19) determines
+    /// which reconnect path [`sessions::wire_reconnect`] takes.
+    connect_info: Option<ConnectInfo>,
     /// True for any remote session (SSH or RDP) — drives the error overlay.
     is_remote: bool,
     /// The stored connection profile this tab was launched from (tree-launched

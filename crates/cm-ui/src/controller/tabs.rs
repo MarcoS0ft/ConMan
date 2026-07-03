@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use cm_core::LocalSettings;
 use cm_session::{LocalTerminalSession, PaneGroup, Session, SessionStatus, Surface};
 use slint::{ComponentHandle, Model, SharedString, TimerMode, VecModel};
 
@@ -92,7 +93,7 @@ pub(super) fn lowest_free_number(used: &[u32]) -> u32 {
 
 pub(super) struct PushTabArgs {
     pub(super) session: Box<dyn Session>,
-    pub(super) connect_info: Option<SshConnectInfo>,
+    pub(super) connect_info: Option<ConnectInfo>,
     pub(super) is_remote: bool,
     /// RDP only: Arc to the drive thread's remote-clipboard slot (for CLIPRDR sync).
     pub(super) rdp_clipboard: Option<Arc<Mutex<Option<String>>>>,
@@ -213,6 +214,33 @@ fn open_local_tab_inner(
         let st = state.borrow();
         (st.current_grid(), st.local_settings.clone())
     };
+    spawn_local_tab(state, tab_model, ui, ls, size, is_empty);
+}
+
+/// P6.12 (gap 20): opens a local-shell tab for the quick-connect dialog's
+/// "Local" kind, using the settings typed directly into the dialog instead
+/// of the app-wide `local_settings` default. Never persisted -- mirrors how
+/// quick-connect SSH/RDP auth is `Direct`-provenance, in-memory only.
+pub(super) fn open_local_tab_quick(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    ls: LocalSettings,
+) {
+    let size = state.borrow().current_grid();
+    spawn_local_tab(state, tab_model, ui, ls, size, false);
+}
+
+/// Shared tail of [`open_local_tab_inner`] / [`open_local_tab_quick`]: spawn
+/// the local shell and push its tab.
+fn spawn_local_tab(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    ls: LocalSettings,
+    size: TerminalSize,
+    is_empty: bool,
+) {
     let session = match LocalTerminalSession::spawn(&ls, size) {
         Ok(s) => s,
         Err(e) => {

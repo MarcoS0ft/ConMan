@@ -855,14 +855,24 @@ export component AppWindow inherits Window {
     callback open-recent(int);
     callback open-group-split();
 
-    // ── Quick-connect form (P3.2) ─────────────────────────────────────
+    // ── Quick-connect form (P3.2; P6.12 gap 20 adds the kind selector) ──
     in-out property <bool>   quick-connect-open: false;
+    // 0 = SSH · 1 = RDP · 2 = Local.
+    in-out property <int>    qc-kind: 0;
     in-out property <string> qc-host: "";
     in-out property <string> qc-port: "22";
     in-out property <string> qc-username: "";
     in-out property <int>    qc-auth-method: 1;
+    // SSH: private-key path / password (per qc-auth-method). RDP: password.
     in-out property <string> qc-secret: "";
     in-out property <string> qc-passphrase: "";
+    // RDP-only fields.
+    in-out property <string> qc-rdp-domain: "";
+    in-out property <string> qc-rdp-resolution: "1280x720";
+    // Local-only fields.
+    in-out property <string> qc-local-program: "";
+    in-out property <string> qc-local-args: "";
+    in-out property <string> qc-local-cwd: "";
     callback qc-connect();
 
     // ── Host-key dialog (P3.2) ────────────────────────────────────────
@@ -1796,12 +1806,18 @@ export component AppWindow inherits Window {
         open: root.quick-connect-open;
         dismissed => { root.quick-connect-open = false; }
         QuickConnectForm {
+            kind <=> root.qc-kind;
             host <=> root.qc-host;
             port <=> root.qc-port;
             username <=> root.qc-username;
             auth-method <=> root.qc-auth-method;
             secret <=> root.qc-secret;
             passphrase <=> root.qc-passphrase;
+            rdp-domain <=> root.qc-rdp-domain;
+            rdp-resolution <=> root.qc-rdp-resolution;
+            local-program <=> root.qc-local-program;
+            local-args <=> root.qc-local-args;
+            local-cwd <=> root.qc-local-cwd;
             connect => { root.qc-connect(); }
             cancel  => { root.quick-connect-open = false; }
         }

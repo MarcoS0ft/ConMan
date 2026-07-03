@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use cm_core::terminal::GridSnapshot;
 use cm_core::{
-    Connection, ConnectionSettings, CredentialPurpose, CredentialRef, Group, RdpSettings, Secret,
-    SshAuthMethod, SshSettings,
+    Connection, ConnectionSettings, CredentialPurpose, CredentialRef, Group, LocalSettings,
+    RdpSettings, Secret, SshAuthMethod, SshSettings,
 };
 use cm_session::{
     CertDecision, CertInfo, CertStore, CertVerifier, FailedSession, FocusDir, FrameUpdate,
@@ -621,74 +621,268 @@ fn wire_quick_connect(ctx: &Ctx) {
     });
 }
 
+/// P6.12 (gap 20): the quick-connect dialog's kind selector — `qc-kind` in
+/// `app.slint` (`QuickConnectForm`'s `kind` property, plumbed straight
+/// through). Kept as a real enum (rather than matching the raw `i32` at every
+/// call site) so an out-of-range value has one obvious fallback (`Ssh`,
+/// matching the dialog's own default `kind: 0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QcKind {
+    Ssh,
+    Rdp,
+    Local,
+}
+
+impl From<i32> for QcKind {
+    fn from(v: i32) -> Self {
+        match v {
+            1 => QcKind::Rdp,
+            2 => QcKind::Local,
+            _ => QcKind::Ssh,
+        }
+    }
+}
+
 fn wire_qc_connect(ctx: &Ctx) {
     ctx.ui.on_qc_connect({
         let state = ctx.state.clone();
         let tab_model = ctx.tab_model.clone();
         let weak = ctx.ui.as_weak();
         let hk_pending = ctx.hk_pending.clone();
+        let cert_pending = ctx.cert_pending.clone();
         let kbd_pending = ctx.kbd_pending.clone();
         move || {
             let Some(ui) = weak.upgrade() else { return };
-            let host = ui.get_qc_host().trim().to_owned();
-            let port_str = ui.get_qc_port().trim().to_owned();
-            let username = ui.get_qc_username().trim().to_owned();
-            let auth_method = ui.get_qc_auth_method();
-            let secret_raw = ui.get_qc_secret().to_string();
-            let pass_raw = ui.get_qc_passphrase().to_string();
-            if host.is_empty() || username.is_empty() {
-                return;
+            match QcKind::from(ui.get_qc_kind()) {
+                QcKind::Ssh => {
+                    qc_connect_ssh(&state, &tab_model, &ui, &weak, &hk_pending, &kbd_pending)
+                }
+                QcKind::Rdp => qc_connect_rdp(&state, &tab_model, &ui, &weak, &cert_pending),
+                QcKind::Local => qc_connect_local(&state, &tab_model, &ui),
             }
-            let port = port_str.parse::<u16>().unwrap_or(22);
-            let auth = match auth_method {
-                0 => SshAuthInput::Key {
-                    path: PathBuf::from(secret_raw),
-                    passphrase: if pass_raw.is_empty() {
-                        None
-                    } else {
-                        Some(Secret::from_string(pass_raw))
-                    },
-                },
-                1 => SshAuthInput::Password(Secret::from_string(secret_raw)),
-                // P6.13: auth-method 3 is "Keyboard interactive" — no upfront
-                // secret; the handler prompts live once the server issues its
-                // first challenge round.
-                3 => SshAuthInput::KeyboardInteractive {
-                    handler: Arc::new(UiKbdInteractiveHandler {
-                        weak_ui: weak.clone(),
-                        pending: kbd_pending.clone(),
-                    }),
-                },
-                _ => SshAuthInput::Agent,
-            };
-            let settings = SshSettings {
-                host,
-                port,
-                username,
-                auth_method: SshAuthMethod::Password,
-            };
-            ui.set_quick_connect_open(false);
-            ui.set_qc_secret(Default::default());
-            ui.set_qc_passphrase(Default::default());
-            let auto_accept = util::ssh_auto_accept_keys();
-            let verifier = Arc::new(UiHostKeyVerifier {
-                weak_ui: weak.clone(),
-                pending: hk_pending.clone(),
-                auto_accept,
-            });
-            // Quick-connect has no originating stored profile to edit on failure.
-            open_ssh_tab(
-                &state,
-                &tab_model,
-                &ui,
-                settings,
-                auth,
-                AuthProvenance::Direct,
-                verifier,
-                None,
-            );
         }
     });
+}
+
+/// Closes the quick-connect dialog and clears every secret-bearing field.
+/// Shared by all three per-kind dispatchers (P6.12) so a typed password/
+/// passphrase never lingers in the dialog's in-memory Slint properties past
+/// the connect attempt that used it -- the pre-P6.12 SSH-only behavior,
+/// generalized.
+fn close_and_clear_qc_secrets(ui: &AppWindow) {
+    ui.set_quick_connect_open(false);
+    ui.set_qc_secret(Default::default());
+    ui.set_qc_passphrase(Default::default());
+}
+
+/// Pure builder behind the SSH arm of quick-connect (P6.12): turns the raw
+/// dialog fields into `SshSettings`, or `None` if the connect is invalid
+/// (host/username empty) -- the same guard `wire_qc_connect`'s SSH path has
+/// always had, just made independently testable.
+fn qc_ssh_settings(host: &str, port: &str, username: &str) -> Option<SshSettings> {
+    let host = host.trim();
+    let username = username.trim();
+    if host.is_empty() || username.is_empty() {
+        return None;
+    }
+    Some(SshSettings {
+        host: host.to_owned(),
+        port: port.trim().parse().unwrap_or(SshSettings::DEFAULT_PORT),
+        username: username.to_owned(),
+        auth_method: SshAuthMethod::Password,
+    })
+}
+
+fn qc_connect_ssh(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    weak: &slint::Weak<AppWindow>,
+    hk_pending: &HkQueue,
+    kbd_pending: &KbdQueue,
+) {
+    let host = ui.get_qc_host().to_string();
+    let port_str = ui.get_qc_port().to_string();
+    let username = ui.get_qc_username().to_string();
+    let auth_method = ui.get_qc_auth_method();
+    let secret_raw = ui.get_qc_secret().to_string();
+    let pass_raw = ui.get_qc_passphrase().to_string();
+    let Some(settings) = qc_ssh_settings(&host, &port_str, &username) else {
+        return;
+    };
+    let auth = match auth_method {
+        0 => SshAuthInput::Key {
+            path: PathBuf::from(secret_raw),
+            passphrase: if pass_raw.is_empty() {
+                None
+            } else {
+                Some(Secret::from_string(pass_raw))
+            },
+        },
+        1 => SshAuthInput::Password(Secret::from_string(secret_raw)),
+        // P6.13: auth-method 3 is "Keyboard interactive" — no upfront
+        // secret; the handler prompts live once the server issues its
+        // first challenge round.
+        3 => SshAuthInput::KeyboardInteractive {
+            handler: Arc::new(UiKbdInteractiveHandler {
+                weak_ui: weak.clone(),
+                pending: kbd_pending.clone(),
+            }),
+        },
+        _ => SshAuthInput::Agent,
+    };
+    close_and_clear_qc_secrets(ui);
+    let auto_accept = util::ssh_auto_accept_keys();
+    let verifier = Arc::new(UiHostKeyVerifier {
+        weak_ui: weak.clone(),
+        pending: hk_pending.clone(),
+        auto_accept,
+    });
+    // Quick-connect has no originating stored profile to edit on failure.
+    open_ssh_tab(
+        state,
+        tab_model,
+        ui,
+        settings,
+        auth,
+        AuthProvenance::Direct,
+        verifier,
+        None,
+    );
+}
+
+/// P6.12: parses a "WIDTHxHEIGHT" quick-connect resolution field (e.g.
+/// "1920x1080") into RDP width/height. Falls back to
+/// `RdpSettings::DEFAULT_WIDTH`/`DEFAULT_HEIGHT` for anything that doesn't
+/// parse cleanly -- empty field, garbage text, or a zero dimension -- so a
+/// malformed typed value can never turn into a zero-sized desktop request.
+fn parse_qc_resolution(s: &str) -> (u16, u16) {
+    let defaults = (RdpSettings::DEFAULT_WIDTH, RdpSettings::DEFAULT_HEIGHT);
+    let Some((w, h)) = s.split_once(['x', 'X']) else {
+        return defaults;
+    };
+    let w: u16 = w.trim().parse().unwrap_or(0);
+    let h: u16 = h.trim().parse().unwrap_or(0);
+    if w == 0 || h == 0 { defaults } else { (w, h) }
+}
+
+/// Pure builder behind the RDP arm of quick-connect (P6.12, gap 20): turns
+/// the raw dialog fields into `RdpSettings`, or `None` if the connect is
+/// invalid (host/username empty) -- mirrors [`qc_ssh_settings`].
+fn qc_rdp_settings(
+    host: &str,
+    port: &str,
+    username: &str,
+    domain: &str,
+    resolution: &str,
+) -> Option<RdpSettings> {
+    let host = host.trim();
+    let username = username.trim();
+    if host.is_empty() || username.is_empty() {
+        return None;
+    }
+    let domain = domain.trim();
+    let (width, height) = parse_qc_resolution(resolution);
+    Some(RdpSettings {
+        host: host.to_owned(),
+        port: port.trim().parse().unwrap_or(RdpSettings::DEFAULT_PORT),
+        domain: if domain.is_empty() {
+            None
+        } else {
+            Some(domain.to_owned())
+        },
+        username: Some(username.to_owned()),
+        width,
+        height,
+        color_depth: RdpSettings::default().color_depth,
+    })
+}
+
+fn qc_connect_rdp(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    weak: &slint::Weak<AppWindow>,
+    cert_pending: &Arc<Mutex<Option<Sender<CertDecision>>>>,
+) {
+    let host = ui.get_qc_host().to_string();
+    let port_str = ui.get_qc_port().to_string();
+    let username = ui.get_qc_username().to_string();
+    let domain_raw = ui.get_qc_rdp_domain().to_string();
+    let resolution_raw = ui.get_qc_rdp_resolution().to_string();
+    let password_raw = ui.get_qc_secret().to_string();
+    let Some(settings) = qc_rdp_settings(&host, &port_str, &username, &domain_raw, &resolution_raw)
+    else {
+        return;
+    };
+    let auth = RdpAuthInput {
+        username: settings.username.clone().unwrap_or_default(),
+        password: Secret::from_string(password_raw),
+        domain: settings.domain.clone(),
+    };
+    close_and_clear_qc_secrets(ui);
+    let auto_accept = util::rdp_auto_accept_certs();
+    let verifier = Arc::new(UiCertVerifier {
+        weak_ui: weak.clone(),
+        pending: cert_pending.clone(),
+        auto_accept,
+    });
+    // Quick-connect has no originating stored profile to edit on failure.
+    open_rdp_tab(
+        state,
+        tab_model,
+        ui,
+        settings,
+        auth,
+        AuthProvenance::Direct,
+        verifier,
+        None,
+    );
+}
+
+/// Pure builder behind the Local arm of quick-connect (P6.12, gap 20): a
+/// local quick-connect just spawns a shell, so unlike the SSH/RDP builders
+/// this never fails (an empty program falls back to the OS default shell,
+/// same as the Settings panel's own local-shell defaults --
+/// `settings_ctl::local_settings_from_app`, which this mirrors).
+fn qc_local_settings(program: &str, args: &str, cwd: &str) -> LocalSettings {
+    let program = program.trim();
+    let cwd = cwd.trim();
+    LocalSettings {
+        program: if program.is_empty() {
+            None
+        } else {
+            Some(program.to_owned())
+        },
+        args: if args.trim().is_empty() {
+            Vec::new()
+        } else {
+            args.split_whitespace().map(String::from).collect()
+        },
+        working_dir: if cwd.is_empty() {
+            None
+        } else {
+            Some(cwd.to_owned())
+        },
+        env: Vec::new(),
+    }
+}
+
+/// `pub(super)` (rather than private, like the SSH/RDP dispatchers) so
+/// `util::wire_local_qc_autoconnect`'s headless QA hook can drive the exact
+/// same dispatch a real "Connect" click would (P6.12 xvfb screenshot gate:
+/// "a Local quick-connect reaching a live shell").
+pub(super) fn qc_connect_local(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+) {
+    let program = ui.get_qc_local_program().to_string();
+    let args = ui.get_qc_local_args().to_string();
+    let cwd = ui.get_qc_local_cwd().to_string();
+    let ls = qc_local_settings(&program, &args, &cwd);
+    ui.set_quick_connect_open(false);
+    tabs::open_local_tab_quick(state, tab_model, ui, ls);
 }
 
 fn wire_host_key_accept(ctx: &Ctx) {
@@ -1059,6 +1253,7 @@ pub(super) fn launch_saved_connection(
                         ui,
                         s.clone(),
                         auth,
+                        AuthProvenance::Credential(conn_id),
                         verifier,
                         origin_connection_id,
                     );
@@ -1082,52 +1277,115 @@ pub(super) fn launch_saved_connection(
     }
 }
 
+/// What [`wire_reconnect`] resolved for the active tab, before the old
+/// session is shut down and the corresponding `reconnect_*_tab` is called.
+/// Kept as one enum (rather than branching twice) so the "shut down the old
+/// session, then reconnect" sequencing is written once regardless of kind.
+enum ReconnectPlan {
+    Ssh(
+        SshSettings,
+        AuthProvenance,
+        Result<SshAuthInput, AuthResolveError>,
+    ),
+    Rdp(
+        RdpSettings,
+        AuthProvenance,
+        Result<RdpAuthInput, AuthResolveError>,
+    ),
+}
+
+/// Resolves the provenance + auth material for reconnecting an SSH tab
+/// (P6.4): `Direct` (quick-connect) clones the cached [`SshAuthInput`]
+/// verbatim; `Credential` (tree-launched) re-resolves fresh via
+/// [`resolve_ssh_auth`] against the live credential store -- the fetched
+/// secret never lingers in `Tab` state longer than one connect attempt.
+/// Pure and mock-testable (no live `AppWindow`/session needed) -- extracted
+/// from [`wire_reconnect`]'s inline match (P6.12 prep, no behavior change).
+fn resolve_ssh_reconnect(
+    ci: &SshConnectInfo,
+    connections: &[Connection],
+    groups: &[Group],
+    secrets: &dyn cm_core::CredentialStore,
+) -> (AuthProvenance, Result<SshAuthInput, AuthResolveError>) {
+    match &ci.auth_source {
+        SshAuthSource::Direct(a) => (AuthProvenance::Direct, Ok(a.clone())),
+        SshAuthSource::Credential(conn_id) => {
+            let result = connections
+                .iter()
+                .find(|c| c.id == *conn_id)
+                .ok_or(AuthResolveError::NoCredentialAssigned)
+                .and_then(|c| resolve_ssh_auth(c, groups, &ci.settings, secrets));
+            (AuthProvenance::Credential(*conn_id), result)
+        }
+    }
+}
+
+/// RDP counterpart to [`resolve_ssh_reconnect`] (P6.12, gap 19) -- same
+/// `Direct`-clones / `Credential`-re-resolves-fresh rule, via
+/// [`resolve_rdp_auth`].
+fn resolve_rdp_reconnect(
+    ci: &RdpConnectInfo,
+    connections: &[Connection],
+    groups: &[Group],
+    secrets: &dyn cm_core::CredentialStore,
+) -> (AuthProvenance, Result<RdpAuthInput, AuthResolveError>) {
+    match &ci.auth_source {
+        RdpAuthSource::Direct(a) => (AuthProvenance::Direct, Ok(a.clone())),
+        RdpAuthSource::Credential(conn_id) => {
+            let result = connections
+                .iter()
+                .find(|c| c.id == *conn_id)
+                .ok_or(AuthResolveError::NoCredentialAssigned)
+                .and_then(|c| resolve_rdp_auth(c, groups, &ci.settings, secrets));
+            (AuthProvenance::Credential(*conn_id), result)
+        }
+    }
+}
+
 fn wire_reconnect(ctx: &Ctx) {
     ctx.ui.on_reconnect({
         let state = ctx.state.clone();
         let tab_model = ctx.tab_model.clone();
         let weak = ctx.ui.as_weak();
         let hk_pending = ctx.hk_pending.clone();
+        let cert_pending = ctx.cert_pending.clone();
         let secrets = ctx.secrets.clone();
         move || {
             let Some(ui) = weak.upgrade() else { return };
-            // P6.4: `Credential`-sourced auth is re-resolved fresh here (never
-            // cached as plaintext in `Tab` state) — `Direct` (quick-connect)
-            // just clones the typed input as before.
-            let resolved = {
+            let active_idx = state.borrow().active;
+            // P6.4/P6.12: `Credential`-sourced auth is re-resolved fresh here
+            // (never cached as plaintext in `Tab` state) — `Direct`
+            // (quick-connect) just clones the typed input as before. SSH and
+            // RDP each carry their own settings/auth types, so the two kinds
+            // build a `ReconnectPlan` variant rather than sharing one tuple
+            // shape.
+            let plan = {
                 let st = state.borrow();
-                let idx = st.active;
                 st.tabs
-                    .get(idx)
+                    .get(active_idx)
                     .and_then(|t| t.connect_info.as_ref())
-                    .map(|ci| {
-                        let settings = ci.settings.clone();
-                        let (provenance, auth_result) = match &ci.auth_source {
-                            SshAuthSource::Direct(a) => (AuthProvenance::Direct, Ok(a.clone())),
-                            SshAuthSource::Credential(conn_id) => {
-                                let result = st
-                                    .conn_tree
-                                    .connections()
-                                    .iter()
-                                    .find(|c| c.id == *conn_id)
-                                    .ok_or(AuthResolveError::NoCredentialAssigned)
-                                    .and_then(|c| {
-                                        resolve_ssh_auth(
-                                            c,
-                                            st.conn_tree.groups(),
-                                            &settings,
-                                            secrets.as_ref(),
-                                        )
-                                    });
-                                (AuthProvenance::Credential(*conn_id), result)
-                            }
-                        };
-                        (idx, settings, provenance, auth_result)
+                    .map(|ci| match ci {
+                        ConnectInfo::Ssh(ssh_ci) => {
+                            let (provenance, auth_result) = resolve_ssh_reconnect(
+                                ssh_ci,
+                                st.conn_tree.connections(),
+                                st.conn_tree.groups(),
+                                secrets.as_ref(),
+                            );
+                            ReconnectPlan::Ssh(ssh_ci.settings.clone(), provenance, auth_result)
+                        }
+                        ConnectInfo::Rdp(rdp_ci) => {
+                            let (provenance, auth_result) = resolve_rdp_reconnect(
+                                rdp_ci,
+                                st.conn_tree.connections(),
+                                st.conn_tree.groups(),
+                                secrets.as_ref(),
+                            );
+                            ReconnectPlan::Rdp(rdp_ci.settings.clone(), provenance, auth_result)
+                        }
                     })
             };
-            let Some((active_idx, settings, provenance, auth_result)) = resolved else {
-                return;
-            };
+            let Some(plan) = plan else { return };
             // Either way the old session is done — shut it down before
             // deciding whether a fresh connect attempt or the auth-error
             // overlay follows.
@@ -1137,21 +1395,41 @@ fn wire_reconnect(ctx: &Ctx) {
                     tab.session.shutdown();
                 }
             }
-            match auth_result {
-                Ok(auth) => {
-                    let auto_accept = util::ssh_auto_accept_keys();
-                    let verifier = Arc::new(UiHostKeyVerifier {
-                        weak_ui: weak.clone(),
-                        pending: hk_pending.clone(),
-                        auto_accept,
-                    });
-                    reconnect_ssh_tab(
-                        &state, &tab_model, &ui, active_idx, settings, auth, provenance, verifier,
-                    );
-                }
-                Err(e) => {
-                    fail_reconnect_in_place(&state, &tab_model, &ui, active_idx, e.to_string());
-                }
+            match plan {
+                ReconnectPlan::Ssh(settings, provenance, auth_result) => match auth_result {
+                    Ok(auth) => {
+                        let auto_accept = util::ssh_auto_accept_keys();
+                        let verifier = Arc::new(UiHostKeyVerifier {
+                            weak_ui: weak.clone(),
+                            pending: hk_pending.clone(),
+                            auto_accept,
+                        });
+                        reconnect_ssh_tab(
+                            &state, &tab_model, &ui, active_idx, settings, auth, provenance,
+                            verifier,
+                        );
+                    }
+                    Err(e) => {
+                        fail_reconnect_in_place(&state, &tab_model, &ui, active_idx, e.to_string());
+                    }
+                },
+                ReconnectPlan::Rdp(settings, provenance, auth_result) => match auth_result {
+                    Ok(auth) => {
+                        let auto_accept = util::rdp_auto_accept_certs();
+                        let verifier = Arc::new(UiCertVerifier {
+                            weak_ui: weak.clone(),
+                            pending: cert_pending.clone(),
+                            auto_accept,
+                        });
+                        reconnect_rdp_tab(
+                            &state, &tab_model, &ui, active_idx, settings, auth, provenance,
+                            verifier,
+                        );
+                    }
+                    Err(e) => {
+                        fail_reconnect_in_place(&state, &tab_model, &ui, active_idx, e.to_string());
+                    }
+                },
             }
         }
     });
@@ -1519,7 +1797,7 @@ pub(super) fn open_ssh_tab(
                 ui,
                 tabs::PushTabArgs {
                     session: Box::new(session),
-                    connect_info: Some(ci),
+                    connect_info: Some(ConnectInfo::Ssh(ci)),
                     is_remote: true,
                     rdp_clipboard: None,
                     title,
@@ -1552,41 +1830,72 @@ pub(super) fn open_ssh_tab(
     }
 }
 
+/// Persistent RDP cert-trust store in the OS app-data dir, so accepted certs
+/// survive restarts. Shared by [`open_rdp_tab`] and [`reconnect_rdp_tab`]
+/// (P6.12) -- both must trust against the exact same on-disk store so a
+/// reconnect never re-prompts for a cert the initial connect already
+/// accepted.
+fn default_cert_store() -> Arc<CertStore> {
+    let path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("conman")
+        .join("cert_trust.json");
+    CertStore::new_persistent(path)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn open_rdp_tab(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,
     ui: &AppWindow,
     settings: RdpSettings,
     auth: RdpAuthInput,
+    provenance: AuthProvenance,
     verifier: Arc<dyn CertVerifier>,
     origin_connection_id: Option<i32>,
 ) {
     let title = format!("RDP {}", settings.host);
     let identity = format!("{}@{}:{}", auth.username, settings.host, settings.port);
-    // Use a persistent cert store in the OS app-data dir so accepted certs survive restarts.
-    let cert_store = {
-        let path = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("conman")
-            .join("cert_trust.json");
-        CertStore::new_persistent(path)
+    // Only `Direct` (quick-connect / debug autoinit) clones the auth for
+    // reconnect -- `Credential`-sourced auth is re-resolved fresh each time
+    // (P6.4/P6.12: never cache the fetched secret in `Tab` state).
+    let auth_source = match provenance {
+        AuthProvenance::Direct => RdpAuthSource::Direct(auth.clone()),
+        AuthProvenance::Credential(id) => RdpAuthSource::Credential(id),
     };
+    let cert_store = default_cert_store();
     let session = match RdpSession::connect(&settings, auth, verifier, cert_store) {
         Ok(s) => s,
         Err(e) => {
+            // P6.12: mirrors open_ssh_tab's synchronous-setup-error handling
+            // -- surface it as a Failed tab with the error overlay instead of
+            // silently doing nothing (the pre-P6.12 behavior here).
             tracing::warn!("RDP connect error: {e}");
+            push_auth_failed_tab(
+                state,
+                tab_model,
+                ui,
+                title,
+                identity,
+                e.to_string(),
+                origin_connection_id,
+            );
             return;
         }
     };
     // Retain a reference to the drive thread's clipboard slot for remote→local sync.
     let rdp_clipboard = Some(Arc::clone(&session.remote_clipboard));
+    let ci = RdpConnectInfo {
+        settings,
+        auth_source,
+    };
     tabs::push_tab(
         state,
         tab_model,
         ui,
         tabs::PushTabArgs {
             session: Box::new(session),
-            connect_info: None,
+            connect_info: Some(ConnectInfo::Rdp(ci)),
             is_remote: true,
             rdp_clipboard,
             title,
@@ -1601,6 +1910,60 @@ pub(super) fn open_rdp_tab(
     ui.set_launchpad_open(false);
     ui.set_connecting_kind(SharedString::from("RDP"));
     ui.set_rdp_active(true);
+}
+
+/// RDP counterpart to [`reconnect_ssh_tab`] (P6.12, gap 19): replaces the
+/// active tab's session in place after the caller has already shut down the
+/// old one. Reuses the exact same persistent cert store [`open_rdp_tab`]
+/// uses, so an already-trusted cert never re-prompts on reconnect.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reconnect_rdp_tab(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    tab_idx: usize,
+    settings: RdpSettings,
+    auth: RdpAuthInput,
+    provenance: AuthProvenance,
+    verifier: Arc<dyn CertVerifier>,
+) {
+    let identity = format!("{}@{}:{}", auth.username, settings.host, settings.port);
+    let auth_source = match provenance {
+        AuthProvenance::Direct => RdpAuthSource::Direct(auth.clone()),
+        AuthProvenance::Credential(id) => RdpAuthSource::Credential(id),
+    };
+    let cert_store = default_cert_store();
+    match RdpSession::connect(&settings, auth, verifier, cert_store) {
+        Ok(new_session) => {
+            let rdp_clipboard = Some(Arc::clone(&new_session.remote_clipboard));
+            let ci = RdpConnectInfo {
+                settings,
+                auth_source,
+            };
+            {
+                let mut st = state.borrow_mut();
+                if let Some(tab) = st.tabs.get_mut(tab_idx) {
+                    tab.session = Box::new(new_session);
+                    tab.connect_info = Some(ConnectInfo::Rdp(ci));
+                    tab.last_frame = None;
+                    tab.rdp_clipboard = rdp_clipboard;
+                }
+            }
+            if let Some(mut item) = tab_model.row_data(tab_idx) {
+                item.status = SharedString::from("connecting");
+                tab_model.set_row_data(tab_idx, item);
+            }
+            ui.set_session_identity(SharedString::from(identity));
+            ui.set_overlay_connecting(true);
+            ui.set_overlay_error(false);
+            ui.set_connecting_kind(SharedString::from("RDP"));
+            ui.set_rdp_active(true);
+        }
+        Err(e) => {
+            tracing::warn!("RDP reconnect error: {e}");
+            ui.set_error_reason(SharedString::from(e.to_string()));
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1631,7 +1994,7 @@ pub(super) fn reconnect_ssh_tab(
                 let mut st = state.borrow_mut();
                 if let Some(tab) = st.tabs.get_mut(tab_idx) {
                     tab.session = Box::new(new_session);
-                    tab.connect_info = Some(ci);
+                    tab.connect_info = Some(ConnectInfo::Ssh(ci));
                     tab.last = None;
                 }
             }
@@ -2464,5 +2827,216 @@ mod tests {
         let err = resolve_rdp_auth(&conn, &[], &settings, &store)
             .expect_err("should fail: keychain has no entry");
         assert_eq!(err, AuthResolveError::NotFoundInKeychain);
+    }
+
+    // ── P6.12 gap 20: quick-connect kind selector → settings mapping ────────
+
+    #[test]
+    fn qc_kind_from_int_maps_the_three_kinds() {
+        assert_eq!(QcKind::from(0), QcKind::Ssh);
+        assert_eq!(QcKind::from(1), QcKind::Rdp);
+        assert_eq!(QcKind::from(2), QcKind::Local);
+    }
+
+    #[test]
+    fn qc_kind_from_int_falls_back_to_ssh() {
+        // Out-of-range values fall back to the dialog's own default (kind 0).
+        assert_eq!(QcKind::from(-1), QcKind::Ssh);
+        assert_eq!(QcKind::from(99), QcKind::Ssh);
+    }
+
+    #[test]
+    fn qc_ssh_settings_builds_from_fields() {
+        let s = qc_ssh_settings("web-prod-01", "2222", "ops").expect("valid fields");
+        assert_eq!(s.host, "web-prod-01");
+        assert_eq!(s.port, 2222);
+        assert_eq!(s.username, "ops");
+        assert_eq!(s.auth_method, SshAuthMethod::Password);
+    }
+
+    #[test]
+    fn qc_ssh_settings_rejects_empty_host_or_username() {
+        assert!(qc_ssh_settings("", "22", "ops").is_none());
+        assert!(qc_ssh_settings("host", "22", "").is_none());
+        assert!(qc_ssh_settings("  ", "22", "  ").is_none());
+    }
+
+    #[test]
+    fn qc_ssh_settings_falls_back_to_default_port_on_bad_input() {
+        let s = qc_ssh_settings("host", "not-a-port", "ops").expect("valid");
+        assert_eq!(s.port, SshSettings::DEFAULT_PORT);
+        let s = qc_ssh_settings("host", "", "ops").expect("valid");
+        assert_eq!(s.port, SshSettings::DEFAULT_PORT);
+    }
+
+    #[test]
+    fn parse_qc_resolution_parses_widthxheight() {
+        assert_eq!(parse_qc_resolution("1920x1080"), (1920, 1080));
+        assert_eq!(parse_qc_resolution("800X600"), (800, 600));
+        assert_eq!(parse_qc_resolution(" 1280 x 720 "), (1280, 720));
+    }
+
+    #[test]
+    fn parse_qc_resolution_falls_back_on_garbage() {
+        let defaults = (RdpSettings::DEFAULT_WIDTH, RdpSettings::DEFAULT_HEIGHT);
+        assert_eq!(parse_qc_resolution(""), defaults);
+        assert_eq!(parse_qc_resolution("garbage"), defaults);
+        assert_eq!(parse_qc_resolution("0x0"), defaults);
+        assert_eq!(parse_qc_resolution("1920x0"), defaults);
+        assert_eq!(parse_qc_resolution("x"), defaults);
+    }
+
+    #[test]
+    fn qc_rdp_settings_builds_from_fields() {
+        let s = qc_rdp_settings("win-01", "3390", "administrator", "CORP", "1920x1080")
+            .expect("valid fields");
+        assert_eq!(s.host, "win-01");
+        assert_eq!(s.port, 3390);
+        assert_eq!(s.username.as_deref(), Some("administrator"));
+        assert_eq!(s.domain.as_deref(), Some("CORP"));
+        assert_eq!(s.width, 1920);
+        assert_eq!(s.height, 1080);
+    }
+
+    #[test]
+    fn qc_rdp_settings_empty_domain_is_none() {
+        let s = qc_rdp_settings("win-01", "3389", "admin", "", "1280x720").expect("valid");
+        assert!(s.domain.is_none());
+    }
+
+    #[test]
+    fn qc_rdp_settings_rejects_empty_host_or_username() {
+        assert!(qc_rdp_settings("", "3389", "admin", "", "1280x720").is_none());
+        assert!(qc_rdp_settings("win-01", "3389", "", "", "1280x720").is_none());
+    }
+
+    #[test]
+    fn qc_rdp_settings_falls_back_to_default_port_on_bad_input() {
+        let s = qc_rdp_settings("win-01", "nope", "admin", "", "1280x720").expect("valid");
+        assert_eq!(s.port, RdpSettings::DEFAULT_PORT);
+    }
+
+    #[test]
+    fn qc_local_settings_splits_args_on_whitespace() {
+        let ls = qc_local_settings("/bin/bash", "-l  -i", "/tmp");
+        assert_eq!(ls.program.as_deref(), Some("/bin/bash"));
+        assert_eq!(ls.args, vec!["-l".to_owned(), "-i".to_owned()]);
+        assert_eq!(ls.working_dir.as_deref(), Some("/tmp"));
+        assert!(ls.env.is_empty());
+    }
+
+    #[test]
+    fn qc_local_settings_empty_fields_fall_back_to_defaults() {
+        let ls = qc_local_settings("", "", "");
+        assert_eq!(ls.program, None);
+        assert!(ls.args.is_empty());
+        assert_eq!(ls.working_dir, None);
+    }
+
+    // ── P6.12 gap 19: RDP reconnect reuses stored RdpConnectInfo + creds ────
+
+    #[test]
+    fn resolve_ssh_reconnect_direct_clones_the_cached_auth() {
+        let ci = SshConnectInfo {
+            settings: ssh_settings(SshAuthMethod::Password),
+            auth_source: SshAuthSource::Direct(SshAuthInput::Password(Secret::from_string(
+                "typed-pw".to_owned(),
+            ))),
+        };
+        let store = MockCredentialStore::new();
+        let (provenance, auth) = resolve_ssh_reconnect(&ci, &[], &[], &store);
+        assert!(matches!(provenance, AuthProvenance::Direct));
+        match auth.expect("direct auth always resolves") {
+            SshAuthInput::Password(s) => assert_eq!(s.expose(), b"typed-pw"),
+            other => panic!("expected Password, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_ssh_reconnect_credential_reresolves_fresh() {
+        let conn = make_ssh_conn(None, Some(1), SshAuthMethod::Password);
+        let ci = SshConnectInfo {
+            settings: ssh_settings(SshAuthMethod::Password),
+            auth_source: SshAuthSource::Credential(conn.id),
+        };
+        let store = MockCredentialStore::new().with(
+            CredentialId::new(1),
+            CredentialPurpose::Password,
+            "fresh-pw",
+        );
+        let (provenance, auth) = resolve_ssh_reconnect(&ci, &[conn], &[], &store);
+        assert!(matches!(provenance, AuthProvenance::Credential(_)));
+        match auth.expect("credential resolves from the mock store") {
+            SshAuthInput::Password(s) => assert_eq!(s.expose(), b"fresh-pw"),
+            other => panic!("expected Password, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_ssh_reconnect_credential_missing_connection_fails() {
+        let ci = SshConnectInfo {
+            settings: ssh_settings(SshAuthMethod::Password),
+            auth_source: SshAuthSource::Credential(ConnectionId::new(404)),
+        };
+        let store = MockCredentialStore::new();
+        let (_, auth) = resolve_ssh_reconnect(&ci, &[], &[], &store);
+        assert_eq!(
+            auth.expect_err("connection no longer exists"),
+            AuthResolveError::NoCredentialAssigned
+        );
+    }
+
+    #[test]
+    fn resolve_rdp_reconnect_direct_clones_the_cached_auth() {
+        let ci = RdpConnectInfo {
+            settings: RdpSettings::default(),
+            auth_source: RdpAuthSource::Direct(RdpAuthInput {
+                username: "admin".to_owned(),
+                password: Secret::from_string("typed-rdp-pw".to_owned()),
+                domain: None,
+            }),
+        };
+        let store = MockCredentialStore::new();
+        let (provenance, auth) = resolve_rdp_reconnect(&ci, &[], &[], &store);
+        assert!(matches!(provenance, AuthProvenance::Direct));
+        let auth = auth.expect("direct auth always resolves");
+        assert_eq!(auth.username, "admin");
+        assert_eq!(auth.password.expose(), b"typed-rdp-pw");
+    }
+
+    #[test]
+    fn resolve_rdp_reconnect_credential_reresolves_fresh() {
+        let conn = make_rdp_conn(None, Some(6));
+        let ci = RdpConnectInfo {
+            settings: RdpSettings {
+                host: "10.0.0.2".to_owned(),
+                username: Some("admin".to_owned()),
+                ..RdpSettings::default()
+            },
+            auth_source: RdpAuthSource::Credential(conn.id),
+        };
+        let store = MockCredentialStore::new().with(
+            CredentialId::new(6),
+            CredentialPurpose::Password,
+            "fresh-rdp-pw",
+        );
+        let (provenance, auth) = resolve_rdp_reconnect(&ci, &[conn], &[], &store);
+        assert!(matches!(provenance, AuthProvenance::Credential(_)));
+        let auth = auth.expect("credential resolves from the mock store");
+        assert_eq!(auth.password.expose(), b"fresh-rdp-pw");
+    }
+
+    #[test]
+    fn resolve_rdp_reconnect_credential_missing_connection_fails() {
+        let ci = RdpConnectInfo {
+            settings: RdpSettings::default(),
+            auth_source: RdpAuthSource::Credential(ConnectionId::new(404)),
+        };
+        let store = MockCredentialStore::new();
+        let (_, auth) = resolve_rdp_reconnect(&ci, &[], &[], &store);
+        assert_eq!(
+            auth.expect_err("connection no longer exists"),
+            AuthResolveError::NoCredentialAssigned
+        );
     }
 }
