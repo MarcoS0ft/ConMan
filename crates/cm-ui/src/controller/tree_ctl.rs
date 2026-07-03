@@ -23,6 +23,7 @@ pub(super) fn wire_tree_ctl(ctx: &Ctx) {
     wire_new_group(ctx);
     wire_edit_conn(ctx);
     wire_edit_group(ctx);
+    wire_duplicate_conn_row(ctx);
     wire_delete_conn_row(ctx);
     wire_profile_save(ctx);
     wire_group_save(ctx);
@@ -187,6 +188,62 @@ fn wire_edit_group(ctx: &Ctx) {
             drop(st);
             ui.set_group_form(form);
             ui.set_group_editor_open(true);
+        }
+    });
+}
+
+// P6.10 (gap 15): "Duplicate" from the tree context menu. Builds a fresh (id == 0)
+// `Connection` cloned from `src`, ready for the exact same `upsert_connection` repo
+// call the profile editor's "New Connection" path already makes (form.id == 0 in
+// `wire_profile_save`) — no new repo/port surface, just a second UI-side caller of
+// the existing insert path with a cloned settings blob. Pulled out as a pure
+// function so the mapping is unit-testable without a live Slint window (cm-ui's
+// tests stay backend-free — see Cargo.toml).
+pub(super) fn duplicate_connection(
+    src: &Connection,
+    sort: i64,
+    now: i64,
+) -> Result<Connection, cm_core::DomainError> {
+    Connection::new(
+        ConnectionId::new(0),
+        src.group_id,
+        format!("{} (copy)", src.name),
+        src.kind,
+        src.settings.clone(),
+        src.credential,
+        sort,
+        now,
+        now,
+    )
+}
+
+fn wire_duplicate_conn_row(ctx: &Ctx) {
+    ctx.ui.on_duplicate_conn_row({
+        let state = ctx.state.clone();
+        let conn_model = ctx.conn_model.clone();
+        let repo_dup = ctx.repo.clone();
+        move |id| {
+            let mut st = state.borrow_mut();
+            let Some(src) = st.conn_tree.conn_by_id(id as i64).cloned() else {
+                return;
+            };
+            let sort = st.conn_tree.next_sort_in_group(src.group_id);
+            let now = crate::tree::now_secs();
+            let conn = match duplicate_connection(&src, sort, now) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("duplicate connection validation error: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = repo_dup.upsert_connection(&conn) {
+                tracing::warn!("duplicate connection failed: {e}");
+                return;
+            }
+            if let Err(e) = st.conn_tree.reload(repo_dup.as_ref()) {
+                tracing::warn!("reload after duplicate failed: {e}");
+            }
+            refresh_conn_model(&st, &conn_model);
         }
     });
 }
@@ -711,6 +768,43 @@ mod tests {
             _ => SshAuthInput::Agent,
         };
         assert!(matches!(auth, SshAuthInput::Agent));
+    }
+
+    // P6.10 (gap 15): the tree context menu's "Duplicate" item and
+    // `wire_duplicate_conn_row` share this exact mapping — this is the one piece of
+    // genuinely new (if tiny) UI-orchestration logic the context-menu task adds, so
+    // it gets a real test per CONVENTIONS §2 ("tests accompany behavior").
+    #[test]
+    fn duplicate_connection_clones_settings_with_new_id_and_copy_suffix() {
+        let src = Connection::new(
+            ConnectionId::new(42),
+            Some(GroupId::new(7)),
+            "prod-web-01".to_owned(),
+            ConnectionKind::Ssh,
+            ConnectionSettings::Ssh(SshSettings {
+                host: "10.0.0.5".to_owned(),
+                port: 22,
+                username: "deploy".to_owned(),
+                auth_method: SshAuthMethod::Agent,
+            }),
+            Some(CredentialId::new(9)),
+            3,
+            1_000,
+            1_000,
+        )
+        .unwrap();
+
+        let dup = duplicate_connection(&src, 4, 2_000).unwrap();
+
+        assert_eq!(dup.id, ConnectionId::new(0)); // fresh id — repo assigns on insert
+        assert_eq!(dup.name, "prod-web-01 (copy)");
+        assert_eq!(dup.group_id, src.group_id);
+        assert_eq!(dup.kind, src.kind);
+        assert_eq!(dup.settings, src.settings);
+        assert_eq!(dup.credential, src.credential);
+        assert_eq!(dup.sort, 4);
+        assert_eq!(dup.created_at, 2_000);
+        assert_eq!(dup.updated_at, 2_000);
     }
 
     #[test]

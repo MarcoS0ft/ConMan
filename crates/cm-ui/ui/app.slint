@@ -333,6 +333,7 @@ component ConnectionRow inherits Rectangle {
     callback toggled();         // expand / collapse group
     callback edit-clicked();    // open profile / group editor
     callback new-sub();         // new child item under this group
+    callback duplicate-clicked(); // P6.10: clone this connection (leaf only)
     callback delete-clicked();
     callback move-up();         // reorder: move one step up within same parent
     callback move-down();       // reorder: move one step down within same parent
@@ -356,6 +357,47 @@ component ConnectionRow inherits Rectangle {
         clicked => {
             if (data.is-group) { root.toggled(); }
             else { root.activated(); }
+        }
+    }
+
+    // P6.10 (gap 15): right-click (or the keyboard Menu key, via the shared
+    // tree-level ContextMenuArea in AppWindow) opens this row's menu. Items
+    // reuse the EXACT SAME callbacks as the hover CRUD buttons above — no new
+    // backend beyond `duplicate-clicked` (P6.10 bundled: clone via the
+    // existing `upsert_connection` repo call, see tree_ctl.rs).
+    ContextMenuArea {
+        Menu {
+            if !data.is-group : MenuItem {
+                title: "Connect";
+                activated => { root.activated(); }
+            }
+            if data.is-group : MenuItem {
+                title: "New child";
+                activated => { root.new-sub(); }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: data.is-group ? "Edit group" : "Edit";
+                activated => { root.edit-clicked(); }
+            }
+            if !data.is-group : MenuItem {
+                title: "Duplicate";
+                activated => { root.duplicate-clicked(); }
+            }
+            if !data.is-group : MenuSeparator {}
+            if !data.is-group : MenuItem {
+                title: "Move up";
+                activated => { root.move-up(); }
+            }
+            if !data.is-group : MenuItem {
+                title: "Move down";
+                activated => { root.move-down(); }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: "Delete";
+                activated => { root.delete-clicked(); }
+            }
         }
     }
 
@@ -463,6 +505,26 @@ component CredTreeRow inherits Rectangle {
         clicked => {
             if (data.is-folder) { root.toggled(); }
             else { root.activated(); }
+        }
+    }
+
+    // P6.10 (gap 15): right-click / keyboard Menu key context menu, reusing
+    // the exact same callbacks as the hover buttons — no new backend.
+    ContextMenuArea {
+        Menu {
+            if data.is-folder : MenuItem {
+                title: "New credential";
+                activated => { root.new-sub(); }
+            }
+            if !data.is-folder : MenuItem {
+                title: "Edit";
+                activated => { root.activated(); }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: "Delete";
+                activated => { root.delete-clicked(); }
+            }
         }
     }
 
@@ -778,6 +840,7 @@ export component AppWindow inherits Window {
     callback new-group(int);             // parent group_id (0=root)
     callback edit-conn(int);             // connection id → profile editor
     callback edit-group(int);            // group id → group editor
+    callback duplicate-conn-row(int);    // connection id (P6.10 gap 15)
     callback delete-conn-row(int, bool); // id, is_group
     // P1.4 — Reorder (up/down within the same parent) + move-between-groups.
     // Reorder is wired from hover ↑/↓ buttons; move-between-groups is exposed
@@ -922,55 +985,102 @@ export component AppWindow inherits Window {
                     // P5.3b: FocusScope for keyboard navigation in the connection tree.
                     // Clicking inside the tree area gives focus to this scope so
                     // arrow keys navigate rows without disturbing the terminal.
-                    conn-tree-focus := FocusScope {
+                    //
+                    // P6.10 (gap 15): wrapped in a `ContextMenuArea` so the keyboard
+                    // Menu key (Slint fires it natively once an inner `FocusScope`
+                    // holds focus — no key detection code needed here) opens a menu
+                    // for the arrow-key-highlighted row, and a right-click that lands
+                    // on empty tree space (i.e. not consumed by a row's own
+                    // `ContextMenuArea`, which wins first for on-row clicks) offers
+                    // "New connection" / "New group".
+                    ContextMenuArea {
                         vertical-stretch: 1;
-                        property <int> kb-idx: -1;
-                        key-pressed(e) => {
-                            if (e.text == Key.UpArrow) {
-                                self.kb-idx = max(0, self.kb-idx - 1);
-                                accept
-                            } else if (e.text == Key.DownArrow) {
-                                self.kb-idx = min(connections.length - 1, self.kb-idx + 1);
-                                accept
-                            } else if (e.text == Key.Return) {
-                                if (self.kb-idx >= 0 && self.kb-idx < connections.length) {
-                                    root.row-activated(self.kb-idx);
-                                }
-                                accept
-                            } else if (e.text == Key.Escape) {
-                                self.kb-idx = -1;
-                                accept
-                            } else {
-                                reject
+                        Menu {
+                            if conn-tree-focus.kb-idx >= 0 && conn-tree-focus.kb-idx < connections.length && !connections[conn-tree-focus.kb-idx].is-group : MenuItem {
+                                title: "Connect";
+                                activated => { root.row-activated(conn-tree-focus.kb-idx); }
                             }
+                            if conn-tree-focus.kb-idx >= 0 && conn-tree-focus.kb-idx < connections.length && connections[conn-tree-focus.kb-idx].is-group : MenuItem {
+                                title: "New child";
+                                activated => { root.new-connection(connections[conn-tree-focus.kb-idx].id); }
+                            }
+                            if conn-tree-focus.kb-idx >= 0 && conn-tree-focus.kb-idx < connections.length : MenuItem {
+                                title: connections[conn-tree-focus.kb-idx].is-group ? "Edit group" : "Edit";
+                                activated => {
+                                    if (connections[conn-tree-focus.kb-idx].is-group) {
+                                        root.edit-group(connections[conn-tree-focus.kb-idx].id);
+                                    } else {
+                                        root.edit-conn(connections[conn-tree-focus.kb-idx].id);
+                                    }
+                                }
+                            }
+                            if conn-tree-focus.kb-idx >= 0 && conn-tree-focus.kb-idx < connections.length && !connections[conn-tree-focus.kb-idx].is-group : MenuItem {
+                                title: "Duplicate";
+                                activated => { root.duplicate-conn-row(connections[conn-tree-focus.kb-idx].id); }
+                            }
+                            if conn-tree-focus.kb-idx >= 0 && conn-tree-focus.kb-idx < connections.length : MenuItem {
+                                title: "Delete";
+                                activated => {
+                                    root.delete-conn-row(
+                                        connections[conn-tree-focus.kb-idx].id,
+                                        connections[conn-tree-focus.kb-idx].is-group);
+                                }
+                            }
+                            MenuSeparator {}
+                            MenuItem { title: "New connection"; activated => { root.new-connection(0); } }
+                            MenuItem { title: "New group"; activated => { root.new-group(0); } }
                         }
-                        TouchArea {
-                            // Click anywhere in the list area to give keyboard focus.
+                        conn-tree-focus := FocusScope {
                             width: 100%; height: 100%;
-                            clicked => { conn-tree-focus.focus(); }
-                        }
-                        ListView {
-                            width: 100%; height: 100%;
-                            for conn[idx] in connections: ConnectionRow {
-                                data: conn;
-                                highlighted: idx == conn-tree-focus.kb-idx;
-                                activated     => { root.row-activated(idx); }
-                                toggled       => { root.toggle-conn-row(idx); }
-                                edit-clicked  => {
-                                    if (conn.is-group) { root.edit-group(conn.id); }
-                                    else { root.edit-conn(conn.id); }
+                            property <int> kb-idx: -1;
+                            key-pressed(e) => {
+                                if (e.text == Key.UpArrow) {
+                                    self.kb-idx = max(0, self.kb-idx - 1);
+                                    accept
+                                } else if (e.text == Key.DownArrow) {
+                                    self.kb-idx = min(connections.length - 1, self.kb-idx + 1);
+                                    accept
+                                } else if (e.text == Key.Return) {
+                                    if (self.kb-idx >= 0 && self.kb-idx < connections.length) {
+                                        root.row-activated(self.kb-idx);
+                                    }
+                                    accept
+                                } else if (e.text == Key.Escape) {
+                                    self.kb-idx = -1;
+                                    accept
+                                } else {
+                                    reject
                                 }
-                                new-sub => { root.new-connection(conn.id); }
-                                delete-clicked => {
-                                    root.delete-conn-row(conn.id, conn.is-group);
-                                }
-                                move-up => {
-                                    if (conn.is-group) { root.reorder-group-row(conn.id, -1); }
-                                    else { root.reorder-conn-row(conn.id, -1); }
-                                }
-                                move-down => {
-                                    if (conn.is-group) { root.reorder-group-row(conn.id, 1); }
-                                    else { root.reorder-conn-row(conn.id, 1); }
+                            }
+                            TouchArea {
+                                // Click anywhere in the list area to give keyboard focus.
+                                width: 100%; height: 100%;
+                                clicked => { conn-tree-focus.focus(); }
+                            }
+                            ListView {
+                                width: 100%; height: 100%;
+                                for conn[idx] in connections: ConnectionRow {
+                                    data: conn;
+                                    highlighted: idx == conn-tree-focus.kb-idx;
+                                    activated     => { root.row-activated(idx); }
+                                    toggled       => { root.toggle-conn-row(idx); }
+                                    edit-clicked  => {
+                                        if (conn.is-group) { root.edit-group(conn.id); }
+                                        else { root.edit-conn(conn.id); }
+                                    }
+                                    new-sub => { root.new-connection(conn.id); }
+                                    duplicate-clicked => { root.duplicate-conn-row(conn.id); }
+                                    delete-clicked => {
+                                        root.delete-conn-row(conn.id, conn.is-group);
+                                    }
+                                    move-up => {
+                                        if (conn.is-group) { root.reorder-group-row(conn.id, -1); }
+                                        else { root.reorder-conn-row(conn.id, -1); }
+                                    }
+                                    move-down => {
+                                        if (conn.is-group) { root.reorder-group-row(conn.id, 1); }
+                                        else { root.reorder-conn-row(conn.id, 1); }
+                                    }
                                 }
                             }
                         }
@@ -1047,42 +1157,69 @@ export component AppWindow inherits Window {
                     }
 
                     // P5.3b: FocusScope for keyboard navigation in the keys tree.
-                    cred-tree-focus := FocusScope {
+                    // P6.10 (gap 15): wrapped in a `ContextMenuArea` — same rationale
+                    // as the connections tree above (keyboard Menu key on the
+                    // highlighted row; empty-area right-click → New credential/folder).
+                    ContextMenuArea {
                         vertical-stretch: 1;
-                        property <int> kb-idx: -1;
-                        key-pressed(e) => {
-                            if (e.text == Key.UpArrow) {
-                                self.kb-idx = max(0, self.kb-idx - 1);
-                                accept
-                            } else if (e.text == Key.DownArrow) {
-                                self.kb-idx = min(credentials.length - 1, self.kb-idx + 1);
-                                accept
-                            } else if (e.text == Key.Return) {
-                                if (self.kb-idx >= 0 && self.kb-idx < credentials.length) {
-                                    root.edit-cred(credentials[self.kb-idx].id);
-                                }
-                                accept
-                            } else if (e.text == Key.Escape) {
-                                self.kb-idx = -1;
-                                accept
-                            } else {
-                                reject
+                        Menu {
+                            if cred-tree-focus.kb-idx >= 0 && cred-tree-focus.kb-idx < credentials.length && credentials[cred-tree-focus.kb-idx].is-folder : MenuItem {
+                                title: "New credential";
+                                activated => { root.new-cred(credentials[cred-tree-focus.kb-idx].id); }
                             }
+                            if cred-tree-focus.kb-idx >= 0 && cred-tree-focus.kb-idx < credentials.length && !credentials[cred-tree-focus.kb-idx].is-folder : MenuItem {
+                                title: "Edit";
+                                activated => { root.edit-cred(credentials[cred-tree-focus.kb-idx].id); }
+                            }
+                            if cred-tree-focus.kb-idx >= 0 && cred-tree-focus.kb-idx < credentials.length : MenuItem {
+                                title: "Delete";
+                                activated => {
+                                    root.delete-cred-row(
+                                        credentials[cred-tree-focus.kb-idx].id,
+                                        credentials[cred-tree-focus.kb-idx].is-folder);
+                                }
+                            }
+                            MenuSeparator {}
+                            MenuItem { title: "New credential"; activated => { root.new-cred(0); } }
+                            MenuItem { title: "New folder"; activated => { root.new-cred-folder(0); } }
                         }
-                        TouchArea {
+                        cred-tree-focus := FocusScope {
                             width: 100%; height: 100%;
-                            clicked => { cred-tree-focus.focus(); }
-                        }
-                        ListView {
-                            width: 100%; height: 100%;
-                            for cred[idx] in credentials: CredTreeRow {
-                                data: cred;
-                                highlighted: idx == cred-tree-focus.kb-idx;
-                                activated      => { root.edit-cred(cred.id); }
-                                toggled        => { root.toggle-cred-row(idx); }
-                                new-sub        => { root.new-cred(cred.id); }
-                                delete-clicked => {
-                                    root.delete-cred-row(cred.id, cred.is-folder);
+                            property <int> kb-idx: -1;
+                            key-pressed(e) => {
+                                if (e.text == Key.UpArrow) {
+                                    self.kb-idx = max(0, self.kb-idx - 1);
+                                    accept
+                                } else if (e.text == Key.DownArrow) {
+                                    self.kb-idx = min(credentials.length - 1, self.kb-idx + 1);
+                                    accept
+                                } else if (e.text == Key.Return) {
+                                    if (self.kb-idx >= 0 && self.kb-idx < credentials.length) {
+                                        root.edit-cred(credentials[self.kb-idx].id);
+                                    }
+                                    accept
+                                } else if (e.text == Key.Escape) {
+                                    self.kb-idx = -1;
+                                    accept
+                                } else {
+                                    reject
+                                }
+                            }
+                            TouchArea {
+                                width: 100%; height: 100%;
+                                clicked => { cred-tree-focus.focus(); }
+                            }
+                            ListView {
+                                width: 100%; height: 100%;
+                                for cred[idx] in credentials: CredTreeRow {
+                                    data: cred;
+                                    highlighted: idx == cred-tree-focus.kb-idx;
+                                    activated      => { root.edit-cred(cred.id); }
+                                    toggled        => { root.toggle-cred-row(idx); }
+                                    new-sub        => { root.new-cred(cred.id); }
+                                    delete-clicked => {
+                                        root.delete-cred-row(cred.id, cred.is-folder);
+                                    }
                                 }
                             }
                         }
