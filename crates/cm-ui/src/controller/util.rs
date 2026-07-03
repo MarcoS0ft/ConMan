@@ -9,7 +9,7 @@ use cm_session::{PaneLayout, RdpAuthInput, SessionInput, SshAuthInput};
 use slint::{ComponentHandle, Timer, TimerMode};
 
 use crate::AppWindow;
-use crate::terminal_renderer::TerminalRenderer;
+use crate::terminal_renderer::{TerminalRenderer, TerminalTheme};
 
 use super::*;
 
@@ -54,6 +54,20 @@ pub(super) fn rdp_auto_accept_certs() -> bool {
 #[cfg(not(debug_assertions))]
 pub(super) fn rdp_auto_accept_certs() -> bool {
     false
+}
+
+/// The [`TerminalTheme`] a newly-constructed (or live-switched) terminal renderer
+/// should use, derived from the live `Theme.dark-mode` Slint global (P6.8, gap 9):
+/// dark chrome gets the dark terminal palette, light chrome gets the light one.
+/// Reading `ui.get_dark_mode()` at call time (rather than caching it) is what makes
+/// this correct for both "pick the initial theme at spawn" and "re-push on a live
+/// theme switch" call sites.
+pub(super) fn terminal_theme_for(ui: &AppWindow) -> TerminalTheme {
+    if ui.get_dark_mode() {
+        TerminalTheme::dark()
+    } else {
+        TerminalTheme::light()
+    }
 }
 
 pub(super) fn grid_for(

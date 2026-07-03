@@ -175,12 +175,17 @@ export component SettingsPanel inherits Rectangle {
                         options: ["Dark", "Light", "System"];
                         selected <=> root.theme-mode;
                         changed(i) => {
-                            root.theme-changed(i);
+                            // P6.8 (gap 9): `Theme.dark-mode` must already hold the
+                            // NEW value before `root.theme-changed(i)` fires --
+                            // the Rust handler re-pushes the terminal palette from
+                            // `ui.get_dark_mode()` synchronously inside that call,
+                            // so the write order here matters (was reversed pre-P6.8).
                             if (i == 0) { Theme.dark-mode = true; }
                             else if (i == 1) { Theme.dark-mode = false; }
                             else {
                                 Theme.dark-mode = (Palette.color-scheme == ColorScheme.dark);
                             }
+                            root.theme-changed(i);
                         }
                     }
                 }

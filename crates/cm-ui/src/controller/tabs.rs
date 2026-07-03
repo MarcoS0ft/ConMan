@@ -7,7 +7,7 @@ use cm_session::{LocalTerminalSession, PaneGroup, Session, SessionStatus, Surfac
 use slint::{ComponentHandle, Model, SharedString, TimerMode, VecModel};
 
 use crate::selection::PaneSelectionState;
-use crate::terminal_renderer::{TerminalRenderer, TerminalTheme};
+use crate::terminal_renderer::TerminalRenderer;
 use crate::{AppWindow, TabItem};
 
 use super::*;
@@ -124,7 +124,9 @@ pub(super) fn push_tab(
         st.fonts.clone(),
         st.font_size_px,
         scale,
-        TerminalTheme::dark(),
+        // P6.8 (gap 9): pick dark/light from the live app theme at spawn time
+        // instead of always hardcoding dark.
+        util::terminal_theme_for(ui),
     );
     let size = if st.surface_w > 0.0 && st.surface_h > 0.0 {
         util::grid_for(&renderer, st.surface_w, st.surface_h, scale)

@@ -23,10 +23,20 @@ pub(super) fn wire_settings_ctl(ctx: &Ctx) {
 fn wire_theme_changed(ctx: &Ctx) {
     ctx.ui.on_theme_changed({
         let repo_s = ctx.repo.clone();
+        let state_tc = ctx.state.clone();
+        let weak_tc = ctx.ui.as_weak();
         move |idx| {
             let svc = SettingsService::new(repo_s.as_ref());
             if let Err(e) = svc.save_theme_mode(idx) {
                 tracing::warn!("save theme_mode: {e}");
+            }
+            // P6.8 (gap 9): re-push the terminal palette to every open renderer so
+            // the grid recolors together with the chrome. The `.slint` handler
+            // (`settings_panel.slint`'s Theme segmented control) writes
+            // `Theme.dark-mode` *before* invoking this callback, so
+            // `ui.get_dark_mode()` here already reflects the new mode.
+            if let Some(ui) = weak_tc.upgrade() {
+                sessions::apply_terminal_theme_to_all(&state_tc, &ui);
             }
         }
     });

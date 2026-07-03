@@ -160,8 +160,14 @@ impl Selection {
 }
 
 /// Terminal color theme: default fg/bg, the 16 ANSI base colors (extended to 256 via the
-/// standard color-cube/grayscale formula), and the cursor color. One dark default ships;
-/// a theming UI is P5.
+/// standard color-cube/grayscale formula), and the cursor color.
+///
+/// P6.8 (gap 9): both [`dark`](Self::dark) and [`light`](Self::light) exist, so the
+/// terminal can follow the app's light/dark mode (`Theme.dark-mode` in Slint) instead of
+/// always rendering dark chrome content. Default fg/bg are pinned to the
+/// `Theme.color-terminal-bg` / `Theme.color-terminal-fg` tokens (`ui/theme.slint`) — kept
+/// as literal RGB here (Rust has no access to the compiled `.slint` token values) but
+/// must be kept in sync with that file if either changes.
 #[derive(Debug, Clone)]
 pub struct TerminalTheme {
     pub fg: Rgb,
@@ -175,13 +181,16 @@ pub struct TerminalTheme {
 }
 
 impl TerminalTheme {
-    /// A reasonable dark default (close to the common VS Code dark palette).
+    /// The dark default. fg/bg pinned to `Theme.color-terminal-bg`/`color-terminal-fg`'s
+    /// dark values (`#0a0c10`/`#c9ccd1`); the 16-color ANSI cube keeps its original
+    /// VS-Code-dark-like values (not a token in `theme.slint` — P6.8 scope is default
+    /// fg/bg, not a full palette redesign).
     #[must_use]
     pub fn dark() -> Self {
         Self {
-            fg: (0xd4, 0xd4, 0xd4),
-            bg: (0x1e, 0x1e, 0x1e),
-            cursor: (0xd4, 0xd4, 0xd4),
+            fg: (0xc9, 0xcc, 0xd1),
+            bg: (0x0a, 0x0c, 0x10),
+            cursor: (0xc9, 0xcc, 0xd1),
             // VS Code dark's default editor selection blue.
             selection_bg: (0x26, 0x4f, 0x78),
             ansi: [
@@ -201,6 +210,41 @@ impl TerminalTheme {
                 (0xd6, 0x70, 0xd6), // 13 bright magenta
                 (0x29, 0xb8, 0xdb), // 14 bright cyan
                 (0xff, 0xff, 0xff), // 15 bright white
+            ],
+        }
+    }
+
+    /// The light counterpart (P6.8, gap 9 / closes P6.17 finding V1). fg/bg pinned to
+    /// `Theme.color-terminal-bg`/`color-terminal-fg`'s light values (`#ffffff`/`#2b2f36`).
+    /// The ANSI cube is a reasonable light-background default (close to VS Code's Light+
+    /// terminal palette) — darkened/desaturated versions of the dark palette so text stays
+    /// legible on a white background; bright-white in particular is toned down to a mid
+    /// gray instead of pure white, which would be invisible on `bg`.
+    #[must_use]
+    pub fn light() -> Self {
+        Self {
+            fg: (0x2b, 0x2f, 0x36),
+            bg: (0xff, 0xff, 0xff),
+            cursor: (0x2b, 0x2f, 0x36),
+            // A pale blue selection tint that reads clearly on a white background.
+            selection_bg: (0xad, 0xd6, 0xff),
+            ansi: [
+                (0x00, 0x00, 0x00), // 0 black
+                (0xcd, 0x31, 0x31), // 1 red
+                (0x00, 0xbc, 0x00), // 2 green
+                (0x94, 0x98, 0x00), // 3 yellow
+                (0x04, 0x51, 0xa5), // 4 blue
+                (0xbc, 0x05, 0xbc), // 5 magenta
+                (0x05, 0x98, 0xbc), // 6 cyan
+                (0x55, 0x55, 0x55), // 7 white
+                (0x66, 0x66, 0x66), // 8 bright black
+                (0xcd, 0x31, 0x31), // 9 bright red
+                (0x14, 0xce, 0x14), // 10 bright green
+                (0xb5, 0xba, 0x00), // 11 bright yellow
+                (0x04, 0x51, 0xa5), // 12 bright blue
+                (0xbc, 0x05, 0xbc), // 13 bright magenta
+                (0x05, 0x98, 0xbc), // 14 bright cyan
+                (0xa5, 0xa5, 0xa5), // 15 bright white
             ],
         }
     }
@@ -416,6 +460,16 @@ impl TerminalRenderer {
             (row.min(u32::from(max_row))) as u16,
             (col.min(u32::from(max_col))) as u16,
         )
+    }
+
+    /// Swap the color theme in place (P6.8: following the app's light/dark mode).
+    ///
+    /// No cache invalidation is needed: the glyph cache holds only grayscale coverage
+    /// bitmaps (`GlyphBitmap`) — color is resolved from `self.theme` at composite time in
+    /// `render_to_selected`, never baked into a cached glyph. The very next
+    /// `render`/`render_to` call paints with the new palette.
+    pub fn set_theme(&mut self, theme: TerminalTheme) {
+        self.theme = theme;
     }
 
     /// Re-set the logical font size / scale factor and re-rasterize the atlas (the glyph
@@ -1206,6 +1260,39 @@ mod tests {
         let a = FontSet::bundled();
         let b = FontSet::bundled();
         assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    // ── P6.8: light theme + live theme switch ───────────────────────────────
+
+    #[test]
+    fn light_and_dark_themes_have_distinct_default_fg_bg() {
+        // Sanity: light() isn't just dark() renamed, and each is pinned to its
+        // matching `Theme.color-terminal-bg`/`color-terminal-fg` token value
+        // (ui/theme.slint) rather than an arbitrary color.
+        let dark = TerminalTheme::dark();
+        let light = TerminalTheme::light();
+        assert_eq!(dark.bg, (0x0a, 0x0c, 0x10));
+        assert_eq!(dark.fg, (0xc9, 0xcc, 0xd1));
+        assert_eq!(light.bg, (0xff, 0xff, 0xff));
+        assert_eq!(light.fg, (0x2b, 0x2f, 0x36));
+        assert_ne!(dark.bg, light.bg);
+        assert_ne!(dark.fg, light.fg);
+    }
+
+    #[test]
+    fn set_theme_recolors_the_very_next_render() {
+        // A renderer built dark, then switched live to light (P6.8: "re-push the
+        // palette to all open terminal renderers on a live theme switch"), must
+        // paint the new bg on the next render call -- no cache-invalidation step
+        // required by the caller.
+        let mut r = TerminalRenderer::new(16.0, 1.0, TerminalTheme::dark());
+        let cells = vec![Cell::default(); 2];
+        let before = r.render(&snap(1, 2, cells.clone(), blank_cursor()));
+        assert_eq!(px_at(&before, 0, 0), TerminalTheme::dark().bg);
+
+        r.set_theme(TerminalTheme::light());
+        let after = r.render(&snap(1, 2, cells, blank_cursor()));
+        assert_eq!(px_at(&after, 0, 0), TerminalTheme::light().bg);
     }
 
     /// B4 profiling aid (run with `--ignored --nocapture`): old per-tab cost was parsing

@@ -1651,6 +1651,25 @@ pub(super) fn tick(
     }
 }
 
+/// Re-push the light/dark terminal palette to every open renderer (primary pane +
+/// extra panes, across all tabs) on a live app theme switch (P6.8, gap 9 — closes
+/// P6.17 finding V1: "theme switch recolors both chrome and terminal").
+///
+/// Every renderer's `theme` field is updated so a *background* tab picks up the
+/// right palette the next time it renders (tab switch, new output); only the
+/// currently visible pane(s) need (and get) an immediate re-render here.
+pub(super) fn apply_terminal_theme_to_all(state: &Rc<RefCell<State>>, ui: &AppWindow) {
+    let theme = util::terminal_theme_for(ui);
+    let mut st = state.borrow_mut();
+    for tab in &mut st.tabs {
+        tab.renderer.set_theme(theme.clone());
+        for ep in &mut tab.extra_panes {
+            ep.renderer.set_theme(theme.clone());
+        }
+    }
+    render_active(&mut st, ui);
+}
+
 pub(super) fn render_active(st: &mut State, ui: &AppWindow) {
     let active = st.active;
     let target = st.target_px();

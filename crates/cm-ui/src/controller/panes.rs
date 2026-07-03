@@ -7,7 +7,7 @@ use cm_session::{LocalTerminalSession, PaneGroup, PaneLayout, SessionStatus, Sur
 use slint::{ComponentHandle, Model, SharedString, TimerMode, VecModel};
 
 use crate::selection::PaneSelectionState;
-use crate::terminal_renderer::{TerminalRenderer, TerminalTheme};
+use crate::terminal_renderer::TerminalRenderer;
 use crate::{AppWindow, TabItem};
 
 use super::*;
@@ -177,7 +177,9 @@ pub(super) fn do_split(
     };
 
     // Spawn a new local terminal for the extra pane (half the width for H-split).
-    let renderer = TerminalRenderer::with_fonts(fonts, font_size_px, scale, TerminalTheme::dark());
+    // P6.8 (gap 9): follow the live app theme rather than hardcoding dark.
+    let renderer =
+        TerminalRenderer::with_fonts(fonts, font_size_px, scale, util::terminal_theme_for(ui));
     let pane_w = match layout {
         PaneLayout::HSplit => (surface_w / 2.0).max(1.0),
         PaneLayout::VSplit => surface_w,
@@ -346,7 +348,9 @@ pub(super) fn reattach_session(
         let st = state.borrow();
         (st.scale, st.fonts.clone(), st.font_size_px)
     };
-    let renderer = TerminalRenderer::with_fonts(fonts, font_size_px, scale, TerminalTheme::dark());
+    // P6.8 (gap 9): follow the live app theme rather than hardcoding dark.
+    let renderer =
+        TerminalRenderer::with_fonts(fonts, font_size_px, scale, util::terminal_theme_for(ui));
     let status_dot = match session.status() {
         SessionStatus::Connected => "connected",
         SessionStatus::Connecting => "connecting",
