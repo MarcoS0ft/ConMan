@@ -20,9 +20,11 @@ use cm_core::{CredentialError, CredentialRef, CredentialStore, Secret};
 use russh::keys::PrivateKey;
 use russh::keys::ssh_key::{HashAlg, PublicKey};
 use russh::server::{
-    Auth, Handler, Msg, RunningServerHandle, Server as ServerTrait, Session as ServerSession,
+    Auth, Handler, Msg, Response, RunningServerHandle, Server as ServerTrait,
+    Session as ServerSession,
 };
 use russh::{ChannelId, Pty};
+use std::borrow::Cow;
 use tokio::net::TcpListener;
 
 /// A minimal in-memory [`CredentialStore`] for P6.4 loopback tests: proves
@@ -71,6 +73,24 @@ impl CredentialStore for InMemoryCredentialStore {
     }
 }
 
+/// One scripted keyboard-interactive round: the prompts to send (`text`,
+/// `echo`) and the exact answers required to advance past it.
+#[derive(Clone)]
+pub(crate) struct KbdRound {
+    pub prompts: Vec<(&'static str, bool)>,
+    pub expected_answers: Vec<String>,
+}
+
+/// Server-side scripted keyboard-interactive challenge (P6.13): a sequence of
+/// rounds. A round with zero prompts is valid (tests the malformed/empty-
+/// challenge fail-soft path on both ends).
+#[derive(Clone)]
+pub(crate) struct KbdInteractiveTestConfig {
+    pub name: &'static str,
+    pub instructions: &'static str,
+    pub rounds: Vec<KbdRound>,
+}
+
 /// Behavior knobs for [`LoopbackSshServer`]. Every test configures exactly the
 /// bits it needs; everything else stays at the (rejecting) default so a
 /// misconfigured test fails loudly instead of silently accepting.
@@ -87,6 +107,9 @@ pub(crate) struct SshServerConfig {
     /// When true, the shell request handler aborts the connection instead of
     /// granting a shell — simulates a server-side abrupt close after auth.
     pub abrupt_close: bool,
+    /// `Some(cfg)` drives the keyboard-interactive challenge/response script
+    /// (P6.13); `None` rejects all keyboard-interactive attempts.
+    pub kbd_interactive: Option<KbdInteractiveTestConfig>,
 }
 
 impl SshServerConfig {
@@ -97,6 +120,7 @@ impl SshServerConfig {
             accept_password: None,
             accept_pubkey_fingerprint: None,
             abrupt_close: false,
+            kbd_interactive: None,
         }
     }
 }
@@ -182,6 +206,7 @@ impl ServerTrait for TestServer {
     fn new_client(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> TestHandler {
         TestHandler {
             cfg: self.cfg.clone(),
+            kbd_round: 0,
         }
     }
 }
@@ -191,6 +216,28 @@ impl ServerTrait for TestServer {
 /// "echo probe").
 struct TestHandler {
     cfg: SshServerConfig,
+    /// Index into `cfg.kbd_interactive`'s `rounds` (P6.13) — advances only on
+    /// a correctly-answered round.
+    kbd_round: usize,
+}
+
+/// Builds the `Auth::Partial` reply for one scripted keyboard-interactive
+/// round, or a reject if the script has no such round (misconfigured test).
+fn kbd_partial_for_round(cfg: &KbdInteractiveTestConfig, round: usize) -> Auth {
+    let Some(round) = cfg.rounds.get(round) else {
+        return Auth::reject();
+    };
+    Auth::Partial {
+        name: Cow::Borrowed(cfg.name),
+        instructions: Cow::Borrowed(cfg.instructions),
+        prompts: Cow::Owned(
+            round
+                .prompts
+                .iter()
+                .map(|(text, echo)| (Cow::Borrowed(*text), *echo))
+                .collect(),
+        ),
+    }
 }
 
 impl Handler for TestHandler {
@@ -208,6 +255,42 @@ impl Handler for TestHandler {
         match &self.cfg.accept_pubkey_fingerprint {
             Some(expected) if *expected == fp => Ok(Auth::Accept),
             _ => Ok(Auth::reject()),
+        }
+    }
+
+    /// Drives the scripted keyboard-interactive challenge (P6.13):
+    /// `response == None` is the initial request (send the current round's
+    /// prompts); `Some(response)` carries the client's answers to that round.
+    /// A wrong answer rejects outright; a correct answer on the last round
+    /// accepts, otherwise advances to the next round's prompts.
+    async fn auth_keyboard_interactive<'a>(
+        &'a mut self,
+        _user: &str,
+        _submethods: &str,
+        response: Option<Response<'a>>,
+    ) -> Result<Auth, Self::Error> {
+        let Some(cfg) = self.cfg.kbd_interactive.clone() else {
+            return Ok(Auth::reject());
+        };
+        match response {
+            None => Ok(kbd_partial_for_round(&cfg, self.kbd_round)),
+            Some(resp) => {
+                let answers: Vec<String> = resp
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .collect();
+                let Some(round) = cfg.rounds.get(self.kbd_round) else {
+                    return Ok(Auth::reject());
+                };
+                if answers != round.expected_answers {
+                    return Ok(Auth::reject());
+                }
+                self.kbd_round += 1;
+                if self.kbd_round >= cfg.rounds.len() {
+                    Ok(Auth::Accept)
+                } else {
+                    Ok(kbd_partial_for_round(&cfg, self.kbd_round))
+                }
+            }
         }
     }
 

@@ -34,14 +34,17 @@ use cm_core::{
     CredentialId, CredentialPurpose, CredentialRef, CredentialStore, Secret, SshSettings,
 };
 use cm_session::{
-    HostKeyDecision, HostKeyInfo, HostKeySituation, HostKeyVerifier, KnownHostSource, KnownHosts,
-    SessionStatus, SshAuthInput, SshTerminalSession, TerminalSession,
+    HostKeyDecision, HostKeyInfo, HostKeySituation, HostKeyVerifier, KbdInteractiveChallenge,
+    KbdInteractiveHandler, KnownHostSource, KnownHosts, SessionStatus, SshAuthInput,
+    SshTerminalSession, TerminalSession,
 };
 use russh::keys::known_hosts::learn_known_hosts_path;
 use russh::keys::ssh_key::{HashAlg, PublicKey};
 use russh::keys::{PrivateKey, load_secret_key};
 
-use support::{InMemoryCredentialStore, LoopbackSshServer, SshServerConfig};
+use support::{
+    InMemoryCredentialStore, KbdInteractiveTestConfig, KbdRound, LoopbackSshServer, SshServerConfig,
+};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -85,6 +88,41 @@ impl HostKeyVerifier for FixedVerifier {
     fn decide(&self, info: &HostKeyInfo) -> HostKeyDecision {
         self.seen.lock().unwrap().push(info.clone());
         self.decision
+    }
+}
+
+/// A scripted client-side [`KbdInteractiveHandler`] for the loopback tests
+/// (P6.13): returns the next queued round's answers in order, recording every
+/// challenge it was shown; returns `None` (abort) once the script is
+/// exhausted so a test can never hang waiting on an unscripted round.
+struct ScriptedKbdHandler {
+    rounds: Mutex<std::collections::VecDeque<Vec<String>>>,
+    seen: Mutex<Vec<KbdInteractiveChallenge>>,
+}
+
+impl ScriptedKbdHandler {
+    fn new(rounds: Vec<Vec<&str>>) -> Arc<Self> {
+        Arc::new(Self {
+            rounds: Mutex::new(
+                rounds
+                    .into_iter()
+                    .map(|round| round.into_iter().map(str::to_owned).collect())
+                    .collect(),
+            ),
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn seen_rounds(&self) -> Vec<KbdInteractiveChallenge> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl KbdInteractiveHandler for ScriptedKbdHandler {
+    fn respond(&self, challenge: &KbdInteractiveChallenge) -> Option<Vec<Secret>> {
+        self.seen.lock().unwrap().push(challenge.clone());
+        let answers = self.rounds.lock().unwrap().pop_front()?;
+        Some(answers.into_iter().map(Secret::from_string).collect())
     }
 }
 
@@ -335,6 +373,254 @@ fn ssh_publickey_auth_wrong_key_surfaces_failed_status() {
             path: presented_path,
             passphrase: None,
         },
+        Arc::new(AcceptAll),
+        known_hosts_in(&dir),
+        default_size(),
+    )
+    .expect("spawn ssh session");
+
+    let status = wait_for_terminal_status(&session, Duration::from_secs(5));
+    assert!(
+        matches!(status, SessionStatus::Failed(_)),
+        "expected Failed, got {status:?}"
+    );
+    session.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard-interactive auth (P6.13)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ssh_kbd_interactive_single_round_success() {
+    let dir = scratch_dir("kbd-ok");
+    let (_hk_path, host_key, _hk_pub) = gen_keypair(&dir, "hostkey");
+
+    let mut cfg = SshServerConfig::new(host_key);
+    cfg.kbd_interactive = Some(KbdInteractiveTestConfig {
+        name: "Password",
+        instructions: "Enter your password",
+        rounds: vec![KbdRound {
+            prompts: vec![("Password: ", false)],
+            expected_answers: vec!["s3cret".to_owned()],
+        }],
+    });
+    let server = LoopbackSshServer::spawn(cfg);
+
+    let handler = ScriptedKbdHandler::new(vec![vec!["s3cret"]]);
+    let session = SshTerminalSession::connect(
+        &ssh_settings(server.port, "tester"),
+        SshAuthInput::KeyboardInteractive {
+            handler: handler.clone(),
+        },
+        Arc::new(AcceptAll),
+        known_hosts_in(&dir),
+        default_size(),
+    )
+    .expect("spawn ssh session");
+
+    wait_for_connected(&session, Duration::from_secs(5));
+
+    let seen = handler.seen_rounds();
+    assert_eq!(seen.len(), 1, "expected exactly one challenge round");
+    assert_eq!(seen[0].prompts.len(), 1);
+    assert!(!seen[0].prompts[0].echo, "password prompt must not echo");
+
+    session.shutdown();
+}
+
+#[test]
+fn ssh_kbd_interactive_wrong_answer_surfaces_failed_status() {
+    let dir = scratch_dir("kbd-bad");
+    let (_hk_path, host_key, _hk_pub) = gen_keypair(&dir, "hostkey");
+
+    let mut cfg = SshServerConfig::new(host_key);
+    cfg.kbd_interactive = Some(KbdInteractiveTestConfig {
+        name: "Password",
+        instructions: "Enter your password",
+        rounds: vec![KbdRound {
+            prompts: vec![("Password: ", false)],
+            expected_answers: vec!["correct".to_owned()],
+        }],
+    });
+    let server = LoopbackSshServer::spawn(cfg);
+
+    let handler = ScriptedKbdHandler::new(vec![vec!["wrong"]]);
+    let session = SshTerminalSession::connect(
+        &ssh_settings(server.port, "tester"),
+        SshAuthInput::KeyboardInteractive { handler },
+        Arc::new(AcceptAll),
+        known_hosts_in(&dir),
+        default_size(),
+    )
+    .expect("spawn ssh session");
+
+    let status = wait_for_terminal_status(&session, Duration::from_secs(5));
+    match status {
+        SessionStatus::Failed(reason) => {
+            assert!(
+                reason.to_lowercase().contains("auth"),
+                "expected an auth-flavoured reason, got: {reason}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    session.shutdown();
+}
+
+#[test]
+fn ssh_kbd_interactive_multi_prompt_round_success() {
+    let dir = scratch_dir("kbd-multi");
+    let (_hk_path, host_key, _hk_pub) = gen_keypair(&dir, "hostkey");
+
+    let mut cfg = SshServerConfig::new(host_key);
+    cfg.kbd_interactive = Some(KbdInteractiveTestConfig {
+        name: "Two-factor",
+        instructions: "Enter your password and one-time code",
+        // A single round carrying TWO prompts (not two separate rounds).
+        rounds: vec![KbdRound {
+            prompts: vec![("Password: ", false), ("Code: ", true)],
+            expected_answers: vec!["s3cret".to_owned(), "424242".to_owned()],
+        }],
+    });
+    let server = LoopbackSshServer::spawn(cfg);
+
+    let handler = ScriptedKbdHandler::new(vec![vec!["s3cret", "424242"]]);
+    let session = SshTerminalSession::connect(
+        &ssh_settings(server.port, "tester"),
+        SshAuthInput::KeyboardInteractive {
+            handler: handler.clone(),
+        },
+        Arc::new(AcceptAll),
+        known_hosts_in(&dir),
+        default_size(),
+    )
+    .expect("spawn ssh session");
+
+    wait_for_connected(&session, Duration::from_secs(5));
+
+    let seen = handler.seen_rounds();
+    assert_eq!(seen.len(), 1, "expected a single round with 2 prompts");
+    assert_eq!(seen[0].prompts.len(), 2);
+    assert!(!seen[0].prompts[0].echo);
+    assert!(seen[0].prompts[1].echo);
+
+    session.shutdown();
+}
+
+#[test]
+fn ssh_kbd_interactive_two_rounds_success() {
+    let dir = scratch_dir("kbd-rounds");
+    let (_hk_path, host_key, _hk_pub) = gen_keypair(&dir, "hostkey");
+
+    let mut cfg = SshServerConfig::new(host_key);
+    cfg.kbd_interactive = Some(KbdInteractiveTestConfig {
+        name: "Two-factor",
+        instructions: "Enter your password, then your one-time code",
+        rounds: vec![
+            KbdRound {
+                prompts: vec![("Password: ", false)],
+                expected_answers: vec!["s3cret".to_owned()],
+            },
+            KbdRound {
+                prompts: vec![("Code: ", true)],
+                expected_answers: vec!["424242".to_owned()],
+            },
+        ],
+    });
+    let server = LoopbackSshServer::spawn(cfg);
+
+    let handler = ScriptedKbdHandler::new(vec![vec!["s3cret"], vec!["424242"]]);
+    let session = SshTerminalSession::connect(
+        &ssh_settings(server.port, "tester"),
+        SshAuthInput::KeyboardInteractive {
+            handler: handler.clone(),
+        },
+        Arc::new(AcceptAll),
+        known_hosts_in(&dir),
+        default_size(),
+    )
+    .expect("spawn ssh session");
+
+    wait_for_connected(&session, Duration::from_secs(5));
+    assert_eq!(
+        handler.seen_rounds().len(),
+        2,
+        "expected two separate challenge rounds"
+    );
+
+    session.shutdown();
+}
+
+/// Malformed/empty challenge: a round with **zero** prompts is a valid (if
+/// unusual) server behavior — the client must answer with zero responses and
+/// keep going rather than treat it as an error, and it must never panic.
+#[test]
+fn ssh_kbd_interactive_empty_challenge_round_fails_soft() {
+    let dir = scratch_dir("kbd-empty");
+    let (_hk_path, host_key, _hk_pub) = gen_keypair(&dir, "hostkey");
+
+    let mut cfg = SshServerConfig::new(host_key);
+    cfg.kbd_interactive = Some(KbdInteractiveTestConfig {
+        name: "",
+        instructions: "",
+        rounds: vec![
+            KbdRound {
+                prompts: vec![],
+                expected_answers: vec![],
+            },
+            KbdRound {
+                prompts: vec![("Password: ", false)],
+                expected_answers: vec!["s3cret".to_owned()],
+            },
+        ],
+    });
+    let server = LoopbackSshServer::spawn(cfg);
+
+    let handler = ScriptedKbdHandler::new(vec![vec![], vec!["s3cret"]]);
+    let session = SshTerminalSession::connect(
+        &ssh_settings(server.port, "tester"),
+        SshAuthInput::KeyboardInteractive {
+            handler: handler.clone(),
+        },
+        Arc::new(AcceptAll),
+        known_hosts_in(&dir),
+        default_size(),
+    )
+    .expect("spawn ssh session");
+
+    wait_for_connected(&session, Duration::from_secs(5));
+    let seen = handler.seen_rounds();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[0].prompts.is_empty(), "first round has zero prompts");
+
+    session.shutdown();
+}
+
+/// The user dismissing the prompt (`respond` returning `None`) aborts
+/// authentication cleanly — `Failed`, never a hang or a panic.
+#[test]
+fn ssh_kbd_interactive_handler_abort_surfaces_failed_status() {
+    let dir = scratch_dir("kbd-abort");
+    let (_hk_path, host_key, _hk_pub) = gen_keypair(&dir, "hostkey");
+
+    let mut cfg = SshServerConfig::new(host_key);
+    cfg.kbd_interactive = Some(KbdInteractiveTestConfig {
+        name: "Password",
+        instructions: "Enter your password",
+        rounds: vec![KbdRound {
+            prompts: vec![("Password: ", false)],
+            expected_answers: vec!["s3cret".to_owned()],
+        }],
+    });
+    let server = LoopbackSshServer::spawn(cfg);
+
+    // Empty script: the first `respond()` call finds nothing queued and
+    // returns `None` (abort), exactly like a user dismissing the dialog.
+    let handler = ScriptedKbdHandler::new(vec![]);
+    let session = SshTerminalSession::connect(
+        &ssh_settings(server.port, "tester"),
+        SshAuthInput::KeyboardInteractive { handler },
         Arc::new(AcceptAll),
         known_hosts_in(&dir),
         default_size(),

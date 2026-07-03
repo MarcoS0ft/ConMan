@@ -66,7 +66,12 @@ pub enum SshError {
 ///
 /// `Clone` is derived so the controller can store a copy for reconnect.
 /// `Secret::clone` produces a fresh zeroized-on-drop copy — no hygiene regression.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written (not derived) because [`Self::KeyboardInteractive`]
+/// carries a handler trait object that cannot derive `Debug`; the manual impl
+/// also gives every variant the same "never print secret material" guarantee
+/// [`Secret`] itself provides.
+#[derive(Clone)]
 pub enum SshAuthInput {
     /// Password authentication.
     Password(Secret),
@@ -85,8 +90,84 @@ pub enum SshAuthInput {
         key_pem: Secret,
         passphrase: Option<Secret>,
     },
-    /// ssh-agent authentication (uses `SSH_AUTH_SOCK`).
+    /// ssh-agent authentication. Unix: `SSH_AUTH_SOCK`. Windows (P6.13): the
+    /// OpenSSH agent named pipe `\\.\pipe\openssh-ssh-agent`.
     Agent,
+    /// Keyboard-interactive authentication (P6.13): the server drives one or
+    /// more challenge/response rounds (e.g. a password prompt, then a TOTP
+    /// code); `handler` collects the user's answers for each round. Modeled
+    /// on [`HostKeyVerifier`] — a UI prompt flow round-tripped synchronously
+    /// from the session's driver thread.
+    KeyboardInteractive {
+        handler: Arc<dyn KbdInteractiveHandler>,
+    },
+}
+
+impl std::fmt::Debug for SshAuthInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Password(_) => f.write_str("Password(<redacted>)"),
+            Self::Key { path, .. } => f
+                .debug_struct("Key")
+                .field("path", path)
+                .finish_non_exhaustive(),
+            Self::KeyMaterial { .. } => f.write_str("KeyMaterial(<redacted>)"),
+            Self::Agent => f.write_str("Agent"),
+            Self::KeyboardInteractive { .. } => f.write_str("KeyboardInteractive(<handler>)"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard-interactive auth (P6.13)
+// ---------------------------------------------------------------------------
+
+/// A single keyboard-interactive prompt from the server: the text to show and
+/// whether the terminal should echo the typed characters.
+#[derive(Debug, Clone)]
+pub struct KbdInteractivePrompt {
+    pub text: String,
+    pub echo: bool,
+}
+
+/// One keyboard-interactive challenge round: optional name/instructions text
+/// plus the prompts to answer. A server may issue several rounds in sequence
+/// (e.g. a password prompt, then a one-time code) before it reports success
+/// or failure.
+#[derive(Debug, Clone)]
+pub struct KbdInteractiveChallenge {
+    pub name: String,
+    pub instructions: String,
+    pub prompts: Vec<KbdInteractivePrompt>,
+}
+
+/// Collects the user's answers for one keyboard-interactive challenge round.
+///
+/// The UI prompt flow is modeled on [`HostKeyVerifier`]: implementations
+/// block the calling (session driver) thread while they round-trip through
+/// the host UI event loop. Return `None` to abort authentication (e.g. the
+/// user dismissed the prompt) or `Some(answers)` with exactly
+/// `challenge.prompts.len()` entries, in order. Answers are [`Secret`] and
+/// must never be logged, `Debug`-formatted, or otherwise stringified outside
+/// the auth exchange itself (CONVENTIONS §2).
+pub trait KbdInteractiveHandler: Send + Sync {
+    fn respond(&self, challenge: &KbdInteractiveChallenge) -> Option<Vec<Secret>>;
+}
+
+/// Hard cap on keyboard-interactive challenge rounds within a single auth
+/// attempt — guards against a hostile/broken server looping the client
+/// forever (CONVENTIONS §2, parser/loop safety: every loop must be bounded).
+const MAX_KBD_INTERACTIVE_ROUNDS: u32 = 16;
+
+/// Pads or truncates `answers` to exactly `expected` entries. Defensive: a
+/// misbehaving [`KbdInteractiveHandler`] must never desync the protocol
+/// exchange or panic the auth attempt — it just answers empty for any prompt
+/// it didn't cover.
+fn align_answers(expected: usize, mut answers: Vec<Secret>) -> Vec<Secret> {
+    if answers.len() != expected {
+        answers.resize_with(expected, || Secret::from_string(String::new()));
+    }
+    answers
 }
 
 // ---------------------------------------------------------------------------
@@ -699,36 +780,128 @@ async fn authenticate(
                 .map_err(|e| SshError::Auth(e.to_string()))?;
             Ok(res.success())
         }
-        // ssh-agent is reached via the Unix domain socket in `SSH_AUTH_SOCK`.
-        // Windows agents (Pageant / OpenSSH named pipe) use different stream
-        // types; that plumbing is deferred (password + public key work on both).
+        // ssh-agent: Unix reaches it via the domain socket in `SSH_AUTH_SOCK`;
+        // Windows (P6.13) via the OpenSSH agent named pipe. Either way, an
+        // absent/unreachable agent fails soft to `SshError::Auth` — never a
+        // panic — so the caller sees a clear error instead of a hang.
         #[cfg(unix)]
         SshAuthInput::Agent => {
             let mut agent = russh::keys::agent::client::AgentClient::connect_env()
                 .await
                 .map_err(|e| SshError::Auth(format!("agent: {e}")))?;
-            let identities = agent
-                .request_identities()
-                .await
-                .map_err(|e| SshError::Auth(format!("agent identities: {e}")))?;
-            for id in identities {
-                if let russh::keys::agent::AgentIdentity::PublicKey { key, .. } = id {
-                    let res = handle
-                        .authenticate_publickey_with(user, key, None, &mut agent)
-                        .await
-                        .map_err(|e| SshError::Auth(format!("agent auth: {e}")))?;
-                    if res.success() {
-                        return Ok(true);
-                    }
-                }
-            }
-            Ok(false)
+            try_agent_identities(handle, user, &mut agent).await
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        SshAuthInput::Agent => {
+            let mut agent = russh::keys::agent::client::AgentClient::connect_named_pipe(
+                WINDOWS_OPENSSH_AGENT_PIPE,
+            )
+            .await
+            .map_err(|e| SshError::Auth(format!("agent: {e}")))?;
+            try_agent_identities(handle, user, &mut agent).await
+        }
+        #[cfg(not(any(unix, windows)))]
         SshAuthInput::Agent => Err(SshError::Auth(
             "ssh-agent authentication is not yet supported on this platform".to_owned(),
         )),
+        SshAuthInput::KeyboardInteractive { handler } => {
+            keyboard_interactive_auth(handle, user, handler.as_ref()).await
+        }
     }
+}
+
+/// The Windows OpenSSH agent's well-known named pipe path (P6.13). The
+/// service listens here when `ssh-agent` is running (Services.msc /
+/// `Set-Service ssh-agent -StartupType Automatic`).
+#[cfg(windows)]
+const WINDOWS_OPENSSH_AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+
+/// Walk the agent's identities, trying each against the server in turn.
+/// Shared between the Unix (`SSH_AUTH_SOCK`) and Windows (named-pipe)
+/// transports — only how `agent` was connected differs.
+async fn try_agent_identities<S>(
+    handle: &mut russh::client::Handle<ClientHandler>,
+    user: &str,
+    agent: &mut russh::keys::agent::client::AgentClient<S>,
+) -> Result<bool, SshError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
+    let identities = agent
+        .request_identities()
+        .await
+        .map_err(|e| SshError::Auth(format!("agent identities: {e}")))?;
+    for id in identities {
+        if let russh::keys::agent::AgentIdentity::PublicKey { key, .. } = id {
+            let res = handle
+                .authenticate_publickey_with(user, key, None, agent)
+                .await
+                .map_err(|e| SshError::Auth(format!("agent auth: {e}")))?;
+            if res.success() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Drive the keyboard-interactive challenge/response exchange: start the
+/// method, then answer each `InfoRequest` round via `handler` until the
+/// server reports success/failure or the round cap is hit. A round with zero
+/// prompts (a valid but unusual server behavior) is answered with zero
+/// responses rather than treated as an error — fail soft, never panic, on
+/// malformed/empty challenges (CONVENTIONS §2).
+async fn keyboard_interactive_auth(
+    handle: &mut russh::client::Handle<ClientHandler>,
+    user: &str,
+    handler: &dyn KbdInteractiveHandler,
+) -> Result<bool, SshError> {
+    use russh::client::KeyboardInteractiveAuthResponse as Resp;
+
+    let mut response = handle
+        .authenticate_keyboard_interactive_start(user, None)
+        .await
+        .map_err(|e| SshError::Auth(format!("keyboard-interactive: {e}")))?;
+
+    for _ in 0..MAX_KBD_INTERACTIVE_ROUNDS {
+        match response {
+            Resp::Success => return Ok(true),
+            Resp::Failure { .. } => return Ok(false),
+            Resp::InfoRequest {
+                name,
+                instructions,
+                prompts,
+            } => {
+                let challenge = KbdInteractiveChallenge {
+                    name,
+                    instructions,
+                    prompts: prompts
+                        .into_iter()
+                        .map(|p| KbdInteractivePrompt {
+                            text: p.prompt,
+                            echo: p.echo,
+                        })
+                        .collect(),
+                };
+                let Some(answers) = handler.respond(&challenge) else {
+                    // The user aborted the prompt: fail this auth method
+                    // cleanly rather than sending a bogus response.
+                    return Ok(false);
+                };
+                let responses: Vec<String> = align_answers(challenge.prompts.len(), answers)
+                    .into_iter()
+                    .map(|s| String::from_utf8_lossy(s.expose()).into_owned())
+                    .collect();
+                response = handle
+                    .authenticate_keyboard_interactive_respond(responses)
+                    .await
+                    .map_err(|e| SshError::Auth(format!("keyboard-interactive: {e}")))?;
+            }
+        }
+    }
+    Err(SshError::Auth(
+        "keyboard-interactive: too many challenge rounds".to_owned(),
+    ))
 }
 
 /// Bidirectional pump: channel data → engine owner; outbound → channel.
@@ -888,5 +1061,74 @@ mod tests {
             other => panic!("expected mismatch, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- P6.13: keyboard-interactive prompt-collection model ----------------
+
+    /// N prompts (with echo flags preserved) map to N answers, and a
+    /// mismatched-length handler response is padded/truncated rather than
+    /// desyncing the exchange or panicking.
+    #[test]
+    fn kbd_interactive_prompts_map_to_one_answer_each() {
+        let challenge = KbdInteractiveChallenge {
+            name: "Two-factor".to_owned(),
+            instructions: "Enter your password and code".to_owned(),
+            prompts: vec![
+                KbdInteractivePrompt {
+                    text: "Password: ".to_owned(),
+                    echo: false,
+                },
+                KbdInteractivePrompt {
+                    text: "Verification code: ".to_owned(),
+                    echo: true,
+                },
+            ],
+        };
+        assert_eq!(challenge.prompts.len(), 2);
+        assert!(!challenge.prompts[0].echo, "password prompt must not echo");
+        assert!(challenge.prompts[1].echo, "OTP prompt may echo");
+
+        // Exact-length answers pass through unchanged.
+        let exact = align_answers(
+            challenge.prompts.len(),
+            vec![
+                Secret::from_string("hunter2".to_owned()),
+                Secret::from_string("123456".to_owned()),
+            ],
+        );
+        assert_eq!(exact.len(), 2);
+
+        // A short handler response is padded with empty secrets, never panics.
+        let short = align_answers(3, vec![Secret::from_string("only-one".to_owned())]);
+        assert_eq!(short.len(), 3);
+        assert_eq!(short[1].expose(), b"");
+        assert_eq!(short[2].expose(), b"");
+
+        // A long handler response is truncated to the expected count.
+        let long = align_answers(
+            1,
+            vec![
+                Secret::from_string("a".to_owned()),
+                Secret::from_string("b".to_owned()),
+            ],
+        );
+        assert_eq!(long.len(), 1);
+
+        // Zero prompts (a malformed/empty challenge) map to zero answers,
+        // never a panic.
+        let empty = align_answers(0, vec![]);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn ssh_auth_input_debug_never_prints_secret_material() {
+        let password = SshAuthInput::Password(Secret::from_string("hunter2".to_owned()));
+        assert!(!format!("{password:?}").contains("hunter2"));
+
+        let key_material = SshAuthInput::KeyMaterial {
+            key_pem: Secret::from_string("-----BEGIN OPENSSH PRIVATE KEY-----".to_owned()),
+            passphrase: None,
+        };
+        assert!(!format!("{key_material:?}").contains("BEGIN OPENSSH"));
     }
 }
