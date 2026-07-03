@@ -365,6 +365,25 @@ component ConnectionRow inherits Rectangle {
     // reuse the EXACT SAME callbacks as the hover CRUD buttons above — no new
     // backend beyond `duplicate-clicked` (P6.10 bundled: clone via the
     // existing `upsert_connection` repo call, see tree_ctl.rs).
+    //
+    // DESCOPE (P6.10, pending coordinator sign-off): the spec's Scope In.1
+    // enumerates "Connect, Connect in split, Edit, Duplicate, Delete, Move"
+    // for connection rows. "Connect in split" is intentionally NOT wired
+    // here. `controller/panes.rs::do_split()` unconditionally spawns a new
+    // LOCAL terminal into the second pane (`LocalTerminalSession::spawn`) —
+    // there is no code path that launches an arbitrary stored connection
+    // (SSH/RDP, with P6.4 credential resolution, host-key/cert prompts) into
+    // a pane slot. Building that is the pane-generalization P6.11 ("N-way
+    // panes & broadcast targeting") is scoped to build, not a thin wiring
+    // change, and would contradict this task's own "(no new backend)"
+    // qualifier. Full rationale:
+    // docs/devel/memos/P6.10-connect-in-split-deferred.md (repo convention:
+    // docs/devel/ is intentionally untracked infra, canonical disk only —
+    // see every prior `P*-*.md` memo reference in this file's git history
+    // for the same pattern, e.g. P6.5/P6.6/P6.8/P6.14). This is a PROPOSED
+    // descope, not a unilateral one: it requires coordinator sign-off per
+    // CONVENTIONS §3/§5 before P6.10 is fully done against its own spec;
+    // until then this item stays open in the task's Definition of Done.
     ContextMenuArea {
         Menu {
             if !data.is-group : MenuItem {
@@ -993,6 +1012,13 @@ export component AppWindow inherits Window {
                     // on empty tree space (i.e. not consumed by a row's own
                     // `ContextMenuArea`, which wins first for on-row clicks) offers
                     // "New connection" / "New group".
+                    //
+                    // DESCOPE (P6.10, pending coordinator sign-off): "Connect in
+                    // split" is intentionally omitted here too, same rationale as
+                    // the per-row ConnectionRow menu above (see its comment) —
+                    // do_split() only spawns a local shell; launching an arbitrary
+                    // stored connection into a pane needs P6.11's pane
+                    // generalization. Not a unilateral descope; needs sign-off.
                     ContextMenuArea {
                         vertical-stretch: 1;
                         Menu {
