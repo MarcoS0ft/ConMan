@@ -43,8 +43,7 @@ use russh::keys::ssh_key::{HashAlg, PublicKey};
 use russh::keys::{PrivateKey, load_secret_key};
 
 use support::{
-    InMemoryCredentialStore, KbdInteractiveTestConfig, KbdRound, LoopbackSshServer,
-    SshServerConfig,
+    InMemoryCredentialStore, KbdInteractiveTestConfig, KbdRound, LoopbackSshServer, SshServerConfig,
 };
 
 // ---------------------------------------------------------------------------
