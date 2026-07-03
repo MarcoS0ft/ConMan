@@ -547,6 +547,10 @@ impl TerminalSession for SshTerminalSession {
         let _ = self.control_tx.send(Msg::Resize(size));
     }
 
+    fn set_scroll(&self, offset: u32) {
+        let _ = self.control_tx.send(Msg::SetScroll(offset));
+    }
+
     fn status(&self) -> SessionStatus {
         self.status
             .lock()
@@ -626,8 +630,15 @@ impl Session for SshTerminalSession {
             SessionInput::Paste(bytes) => {
                 <Self as TerminalSession>::paste(self, bytes);
             }
+            SessionInput::Scroll(offset) => {
+                <Self as TerminalSession>::set_scroll(self, offset);
+            }
             SessionInput::Rdp(_) | SessionInput::RdpPaste(_) => {}
         }
+    }
+
+    fn request_search_text(&self, reply: Sender<Vec<String>>) {
+        let _ = self.control_tx.send(Msg::QueryBuffer(reply));
     }
 }
 

@@ -202,6 +202,10 @@ impl TerminalSession for LocalTerminalSession {
         let _ = self.control_tx.send(Msg::Resize(size));
     }
 
+    fn set_scroll(&self, offset: u32) {
+        let _ = self.control_tx.send(Msg::SetScroll(offset));
+    }
+
     fn status(&self) -> SessionStatus {
         match self.exit_status() {
             Some(status) => SessionStatus::Exited(status),
@@ -291,9 +295,16 @@ impl Session for LocalTerminalSession {
             SessionInput::Paste(bytes) => {
                 <Self as TerminalSession>::paste(self, bytes);
             }
+            SessionInput::Scroll(offset) => {
+                <Self as TerminalSession>::set_scroll(self, offset);
+            }
             // RDP inputs are not applicable to terminal sessions.
             SessionInput::Rdp(_) | SessionInput::RdpPaste(_) => {}
         }
+    }
+
+    fn request_search_text(&self, reply: Sender<Vec<String>>) {
+        let _ = self.control_tx.send(Msg::QueryBuffer(reply));
     }
 }
 

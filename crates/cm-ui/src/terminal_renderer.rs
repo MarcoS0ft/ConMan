@@ -62,20 +62,24 @@ pub struct CellMetrics {
     pub descent: f32,
 }
 
-/// A single endpoint of a terminal text selection: a cell position within the
-/// **currently rendered** [`GridSnapshot`].
+/// A single endpoint of a terminal text selection: a cell position addressed
+/// in **absolute buffer-line** coordinates.
 ///
-/// **P6.7 seam.** `row` here is viewport-relative — an index into the grid the
-/// engine currently renders, not an absolute scrollback-buffer line. P6.5's
-/// pinned lifecycle rule (a selection clears the instant new output changes the
-/// content it covers — see [`Selection::row_span`]'s callers in
-/// `cm-ui/src/selection.rs`) means a *live* selection is always valid against
-/// the viewport it was made in; it never needs to survive a scroll, so a
-/// viewport-relative row is sufficient today. When P6.7 adds scrollback
-/// viewing, replace `row`'s meaning with an absolute buffer-line index and
-/// translate to a viewport row at render/copy time (`viewport_row = line -
-/// viewport_offset`) — the geometry below (`normalized`/`row_span`/`contains`)
-/// does not need to change, only what populates `row`.
+/// **P6.7 resolves the P6.5 seam** this doc comment used to describe: `row`
+/// is now an absolute line index in the same address space as
+/// [`cm_core::GridSnapshot::scrollback_len`]/`scroll_offset` (`0` = the
+/// oldest retained line; the live tail is always the highest indices). As
+/// promised by the seam, the geometry below (`normalized`/`row_span`/
+/// `contains`) is unchanged — only what populates/consumes `row` moved:
+/// callers convert to/from a viewport-relative row via `abs_top =
+/// snap.scrollback_len - snap.scroll_offset` (`cm-ui/src/selection.rs`'s
+/// `selected_cells`/`extract_text`, and this module's draw pass, both do
+/// this at their read boundary). A selection made while scrolled back now
+/// survives further scrolling as long as its rows stay within whatever
+/// window is currently displayed; it "clears on new output that scrolls the
+/// region" via the existing `invalidate_if_stale` staleness check — once its
+/// absolute rows fall outside the displayed window, no cells match, the
+/// baseline comparison fails, and it clears (including on a tail-follow jump).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelectionPoint {
     pub row: u16,
@@ -159,6 +163,25 @@ impl Selection {
     }
 }
 
+/// A single search-match span within one row (P6.7), in the same absolute
+/// buffer-line address space as [`SelectionPoint::row`]. `col_start`/`col_end`
+/// are inclusive. Produced by `cm-ui`'s search logic (`controller/search.rs`)
+/// scanning `TerminalEngine::buffer_text`'s plain-text lines — never by this
+/// module, which only draws whatever spans it is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub row: u16,
+    pub col_start: u16,
+    pub col_end: u16,
+}
+
+impl SearchMatch {
+    #[must_use]
+    pub fn contains(&self, row: u16, col: u16) -> bool {
+        self.row == row && col >= self.col_start && col <= self.col_end
+    }
+}
+
 /// Terminal color theme: default fg/bg, the 16 ANSI base colors (extended to 256 via the
 /// standard color-cube/grayscale formula), and the cursor color.
 ///
@@ -176,6 +199,16 @@ pub struct TerminalTheme {
     /// Background tint painted over a selected cell (P6.5), instead of its
     /// normal resolved background. Text color is left as-is on top of it.
     pub selection_bg: Rgb,
+    /// Background tint for a non-current search match (P6.7).
+    pub search_bg: Rgb,
+    /// Background tint for the *current* search match (P6.7) — brighter than
+    /// `search_bg` so next/prev navigation is visually obvious.
+    pub search_current_bg: Rgb,
+    /// Scrollbar track color (P6.7 position indicator), drawn only when
+    /// `GridSnapshot::scrollback_len > 0`.
+    pub scrollbar_track: Rgb,
+    /// Scrollbar thumb color (P6.7 position indicator).
+    pub scrollbar_thumb: Rgb,
     /// The 16 ANSI colors (0-7 normal, 8-15 bright).
     pub ansi: [Rgb; 16],
 }
@@ -193,6 +226,13 @@ impl TerminalTheme {
             cursor: (0xc9, 0xcc, 0xd1),
             // VS Code dark's default editor selection blue.
             selection_bg: (0x26, 0x4f, 0x78),
+            // A muted amber for "other matches," a brighter amber for "current."
+            search_bg: (0x5a, 0x4a, 0x1a),
+            search_current_bg: (0xb8, 0x86, 0x0a),
+            // Subtle on dark: a faint lightening of the bg for the track, a
+            // clearly visible mid-gray for the thumb.
+            scrollbar_track: (0x1a, 0x1d, 0x23),
+            scrollbar_thumb: (0x45, 0x4a, 0x54),
             ansi: [
                 (0x1e, 0x1e, 0x1e), // 0 black
                 (0xcd, 0x31, 0x31), // 1 red
@@ -228,6 +268,13 @@ impl TerminalTheme {
             cursor: (0x2b, 0x2f, 0x36),
             // A pale blue selection tint that reads clearly on a white background.
             selection_bg: (0xad, 0xd6, 0xff),
+            // A pale yellow for "other matches," a saturated yellow-orange for "current."
+            search_bg: (0xfa, 0xf0, 0xb0),
+            search_current_bg: (0xf5, 0xb8, 0x2e),
+            // Subtle on light: a faint darkening of the bg for the track, a
+            // clearly visible mid-gray for the thumb.
+            scrollbar_track: (0xe8, 0xe8, 0xe8),
+            scrollbar_thumb: (0xa8, 0xa8, 0xa8),
             ansi: [
                 (0x00, 0x00, 0x00), // 0 black
                 (0xcd, 0x31, 0x31), // 1 red
@@ -580,6 +627,31 @@ impl TerminalRenderer {
         target_h: u32,
         selection: Option<&Selection>,
     ) -> SharedPixelBuffer<Rgba8Pixel> {
+        self.render_to_full(snap, target_w, target_h, selection, &[], None)
+    }
+
+    /// [`render_to_selected`](Self::render_to_selected) with P6.7 search
+    /// highlighting: `matches` are tinted with [`TerminalTheme::search_bg`]
+    /// (or `search_current_bg` for `matches[current_match]`), and a
+    /// scrollbar position indicator is drawn on the right edge whenever
+    /// `snap.scrollback_len > 0`. `selection` takes priority over a match
+    /// tint on any cell covered by both.
+    ///
+    /// Callers should pre-filter `matches` to ones visible in the current
+    /// viewport window (the row range `snap.scrollback_len -
+    /// snap.scroll_offset` through that plus `snap.size.rows`). This pass
+    /// does a linear scan per cell and is not sized for the full match list
+    /// of a common single-character query across a 10k-line buffer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_to_full(
+        &mut self,
+        snap: &GridSnapshot,
+        target_w: u32,
+        target_h: u32,
+        selection: Option<&Selection>,
+        matches: &[SearchMatch],
+        current_match: Option<usize>,
+    ) -> SharedPixelBuffer<Rgba8Pixel> {
         self.last_size = snap.size;
         let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(target_w.max(1), target_h.max(1));
         let w = buf.width();
@@ -596,13 +668,20 @@ impl TerminalRenderer {
         let rows = usize::from(snap.size.rows);
         let cw = self.metrics.cell_w as usize;
         let ch_h = self.metrics.cell_h as usize;
+        // P6.7: absolute buffer row of this snapshot's viewport row 0 — see
+        // `SelectionPoint`'s doc comment. Saturates to 0 for a pre-P6.7-style
+        // snapshot that never set these fields (all-zero is indistinguishable
+        // from "at the tail with no scrollback," which is the correct fallback).
+        let abs_top = snap.scrollback_len.saturating_sub(snap.scroll_offset);
 
         for row in 0..rows {
+            let abs_row = u16::try_from(abs_top + row as u32).unwrap_or(u16::MAX);
             for col in 0..cols {
                 let idx = row * cols + col;
                 let Some(cell) = snap.cells.get(idx) else {
                     continue;
                 };
+                let col_u16 = col as u16;
 
                 // Resolve colors, applying reverse / dim / hidden.
                 let mut fg = self.theme.resolve(cell.fg, true);
@@ -619,11 +698,23 @@ impl TerminalRenderer {
                 }
                 // P6.5: a selected cell's background is overridden with the
                 // theme's selection tint (fg — and any reverse/dim already
-                // applied above — is left as-is on top of it).
+                // applied above — is left as-is on top of it). P6.7: a search
+                // match tints similarly when there is no selection covering
+                // the cell (selection wins on overlap — the two are not
+                // expected to coexist in practice, but selection is the more
+                // deliberate user action).
                 if let Some(sel) = selection
-                    && sel.contains(row as u16, col as u16, snap.size.cols)
+                    && sel.contains(abs_row, col_u16, snap.size.cols)
                 {
                     bg = self.theme.selection_bg;
+                } else if let Some(m_idx) =
+                    matches.iter().position(|m| m.contains(abs_row, col_u16))
+                {
+                    bg = if current_match == Some(m_idx) {
+                        self.theme.search_current_bg
+                    } else {
+                        self.theme.search_bg
+                    };
                 }
                 let draw_glyph = !cell.attrs.hidden() && !cell.grapheme.is_empty();
 
@@ -656,7 +747,52 @@ impl TerminalRenderer {
         }
 
         self.draw_cursor(bytes, stride, w, h, snap, cw, ch_h);
+        self.draw_scrollbar(bytes, stride, w, h, snap);
         buf
+    }
+
+    /// P6.7 scroll-position indicator: a thin vertical scrollbar on the right
+    /// edge, drawn only when there is scrollback to show a position within
+    /// (`snap.scrollback_len == 0` draws nothing — nothing to indicate).
+    /// Thumb position/height are proportional to `(scrollback_len -
+    /// scroll_offset) / total_rows` and `size.rows / total_rows`.
+    fn draw_scrollbar(&self, bytes: &mut [u8], stride: usize, w: u32, h: u32, snap: &GridSnapshot) {
+        if snap.scrollback_len == 0 {
+            return;
+        }
+        let total_rows = snap.scrollback_len + u32::from(snap.size.rows);
+        if total_rows == 0 {
+            return;
+        }
+        const BAR_W: usize = 4;
+        let w_px = w as usize;
+        let h_px = h as usize;
+        let track_x = w_px.saturating_sub(BAR_W);
+        fill_rect(
+            bytes,
+            stride,
+            track_x,
+            0,
+            BAR_W,
+            h_px,
+            self.theme.scrollbar_track,
+        );
+
+        let abs_top = snap.scrollback_len.saturating_sub(snap.scroll_offset);
+        let thumb_y = ((f64::from(abs_top) / f64::from(total_rows)) * h_px as f64).round() as usize;
+        let thumb_h = (((f64::from(snap.size.rows) / f64::from(total_rows)) * h_px as f64).round()
+            as usize)
+            .max(6)
+            .min(h_px);
+        fill_rect(
+            bytes,
+            stride,
+            track_x,
+            thumb_y.min(h_px.saturating_sub(thumb_h)),
+            BAR_W,
+            thumb_h,
+            self.theme.scrollbar_thumb,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -800,6 +936,9 @@ mod tests {
             size: TerminalSize { rows, cols },
             cells,
             cursor,
+            scrollback_len: 0,
+            scroll_offset: 0,
+            mouse_tracking: false,
         }
     }
 
@@ -1202,6 +1341,150 @@ mod tests {
         let (c1x, c1y) = cell_center(&r, 0, 1);
         assert_eq!(px_at(&buf, c0x, c0y), TerminalTheme::dark().selection_bg);
         assert_eq!(px_at(&buf, c1x, c1y), (10, 10, 10));
+    }
+
+    // ── P6.7: search-match highlighting + selection-vs-offset seam ──────────
+
+    #[test]
+    fn search_match_tints_only_the_matched_cell() {
+        let mut r = TerminalRenderer::new(14.0, 1.0, TerminalTheme::dark());
+        let bg = Color::Rgb {
+            r: 10,
+            g: 10,
+            b: 10,
+        };
+        let cells = vec![
+            mk("", Color::Default, bg, CellAttrs::empty(), 1),
+            mk("", Color::Default, bg, CellAttrs::empty(), 1),
+        ];
+        let m = SearchMatch {
+            row: 0,
+            col_start: 0,
+            col_end: 0,
+        };
+        let s = snap(1, 2, cells, blank_cursor());
+        let (w, h) = r.pixel_size(s.size);
+        let buf = r.render_to_full(&s, w, h, None, &[m], None);
+        let (c0x, c0y) = cell_center(&r, 0, 0);
+        let (c1x, c1y) = cell_center(&r, 0, 1);
+        assert_eq!(px_at(&buf, c0x, c0y), TerminalTheme::dark().search_bg);
+        assert_eq!(px_at(&buf, c1x, c1y), (10, 10, 10));
+    }
+
+    #[test]
+    fn current_search_match_uses_the_brighter_current_color() {
+        let mut r = TerminalRenderer::new(14.0, 1.0, TerminalTheme::dark());
+        let bg = Color::Rgb {
+            r: 10,
+            g: 10,
+            b: 10,
+        };
+        let cells = vec![
+            mk("", Color::Default, bg, CellAttrs::empty(), 1),
+            mk("", Color::Default, bg, CellAttrs::empty(), 1),
+        ];
+        let matches = [
+            SearchMatch {
+                row: 0,
+                col_start: 0,
+                col_end: 0,
+            },
+            SearchMatch {
+                row: 0,
+                col_start: 1,
+                col_end: 1,
+            },
+        ];
+        let s = snap(1, 2, cells, blank_cursor());
+        let (w, h) = r.pixel_size(s.size);
+        let buf = r.render_to_full(&s, w, h, None, &matches, Some(1));
+        let (c0x, c0y) = cell_center(&r, 0, 0);
+        let (c1x, c1y) = cell_center(&r, 0, 1);
+        assert_eq!(px_at(&buf, c0x, c0y), TerminalTheme::dark().search_bg);
+        assert_eq!(
+            px_at(&buf, c1x, c1y),
+            TerminalTheme::dark().search_current_bg
+        );
+    }
+
+    #[test]
+    fn selection_wins_over_a_search_match_on_the_same_cell() {
+        let mut r = TerminalRenderer::new(14.0, 1.0, TerminalTheme::dark());
+        let bg = Color::Rgb {
+            r: 10,
+            g: 10,
+            b: 10,
+        };
+        let cell = mk("", Color::Default, bg, CellAttrs::empty(), 1);
+        let sel = Selection::new(pt(0, 0), pt(0, 0));
+        let m = SearchMatch {
+            row: 0,
+            col_start: 0,
+            col_end: 0,
+        };
+        let s = snap(1, 1, vec![cell], blank_cursor());
+        let (w, h) = r.pixel_size(s.size);
+        let buf = r.render_to_full(&s, w, h, Some(&sel), &[m], Some(0));
+        let (cx, cy) = cell_center(&r, 0, 0);
+        assert_eq!(px_at(&buf, cx, cy), TerminalTheme::dark().selection_bg);
+    }
+
+    #[test]
+    fn scrollback_translates_selection_row_to_the_right_viewport_row() {
+        // A 2-row snapshot, 10 lines of scrollback, scrolled back 8 (so the
+        // viewport's absolute top row is 2): a selection stored at absolute
+        // row 3 must highlight viewport row 1, not row 0.
+        let mut r = TerminalRenderer::new(14.0, 1.0, TerminalTheme::dark());
+        let bg = Color::Rgb {
+            r: 10,
+            g: 10,
+            b: 10,
+        };
+        let cells = vec![
+            mk("", Color::Default, bg, CellAttrs::empty(), 1),
+            mk("", Color::Default, bg, CellAttrs::empty(), 1),
+        ];
+        let mut s = snap(2, 1, cells, blank_cursor());
+        s.scrollback_len = 10;
+        s.scroll_offset = 8;
+        let sel = Selection::new(pt(3, 0), pt(3, 0));
+        let (w, h) = r.pixel_size(s.size);
+        let buf = r.render_to_selected(&s, w, h, Some(&sel));
+        let (r0x, r0y) = cell_center(&r, 0, 0);
+        let (r1x, r1y) = cell_center(&r, 1, 0);
+        assert_eq!(
+            px_at(&buf, r0x, r0y),
+            (10, 10, 10),
+            "row 0 (abs line 2) unselected"
+        );
+        assert_eq!(
+            px_at(&buf, r1x, r1y),
+            TerminalTheme::dark().selection_bg,
+            "row 1 (abs line 3) is the selected one"
+        );
+    }
+
+    #[test]
+    fn scrollbar_absent_with_no_scrollback() {
+        let mut r = TerminalRenderer::new(14.0, 1.0, TerminalTheme::dark());
+        let cell = mk("", Color::Default, Color::Default, CellAttrs::empty(), 1);
+        let buf = r.render(&snap(4, 20, vec![cell; 80], blank_cursor()));
+        let w = buf.width();
+        // Rightmost column should be plain background, not the track color.
+        assert_eq!(px_at(&buf, w - 1, 0), TerminalTheme::dark().bg);
+    }
+
+    #[test]
+    fn scrollbar_present_when_scrolled_back() {
+        let mut r = TerminalRenderer::new(14.0, 1.0, TerminalTheme::dark());
+        let cell = mk("", Color::Default, Color::Default, CellAttrs::empty(), 1);
+        let mut s = snap(4, 20, vec![cell; 80], blank_cursor());
+        s.scrollback_len = 100;
+        s.scroll_offset = 50;
+        let buf = r.render(&s);
+        let w = buf.width();
+        // The scrollbar track occupies the rightmost few pixels.
+        assert_ne!(px_at(&buf, w - 1, 0), TerminalTheme::dark().bg);
     }
 
     #[test]

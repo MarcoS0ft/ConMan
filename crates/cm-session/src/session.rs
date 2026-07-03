@@ -17,7 +17,7 @@
 //! live here because they must be shared between the `Session` trait definition
 //! and the `rdp` module (which imports them) without creating a circular dep.
 
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 
 use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalSize};
 
@@ -126,6 +126,9 @@ pub enum SessionInput {
     Mouse(MouseEvent),
     /// Paste raw bytes into the terminal (e.g. clipboard paste via bracketed-paste).
     Paste(Vec<u8>),
+    /// P6.7: set the terminal viewport's scroll offset (lines above the live
+    /// tail; `0` = tail/follow). Terminal sessions only — RDP ignores it.
+    Scroll(u32),
     /// RDP input events (keyboard / mouse / scroll).
     Rdp(Vec<RdpInputEvent>),
     /// Paste text into the RDP session via the CLIPRDR channel.
@@ -226,6 +229,17 @@ pub trait Session: Send {
     /// Each implementor handles the variants it supports and silently ignores
     /// the rest. Default: no-op.
     fn send_input(&self, _input: SessionInput) {}
+
+    // ── P6.7 addition ────────────────────────────────────────────────────────
+
+    /// Request the full retained buffer as plain-text lines (search) be sent
+    /// to `reply`, asynchronously — the caller polls `reply` rather than
+    /// blocking on it (the read can be expensive for large scrollback; see
+    /// `cm_core::terminal::TerminalEngine::buffer_text`). Terminal sessions
+    /// forward this to their engine-owner thread; RDP and other non-terminal
+    /// sessions inherit this default no-op (the reply sender is simply
+    /// dropped, so the caller's receiver just never resolves).
+    fn request_search_text(&self, _reply: Sender<Vec<String>>) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +312,9 @@ pub trait TerminalSession {
     fn paste(&self, bytes: Vec<u8>);
     /// Resize the grid (engine + transport).
     fn resize(&self, size: TerminalSize);
+    /// P6.7: set the viewport's scroll offset (lines above the live tail;
+    /// `0` = tail/follow — see `cm_session::engine_owner::ScrollState`).
+    fn set_scroll(&self, offset: u32);
     /// Current lifecycle state.
     fn status(&self) -> SessionStatus;
     /// Signal shutdown and release the session's resources.

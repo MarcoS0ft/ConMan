@@ -12,6 +12,12 @@
 //!
 //! Scope (P2.1): the snapshot is the **visible viewport only** — scrollback,
 //! selection, and search are out of scope and will extend this surface later.
+//!
+//! P6.7 extends the above: [`TerminalEngine::snapshot`] now takes a caller-supplied
+//! scroll offset (lines above the live tail) so a [`GridSnapshot`] can render any
+//! window into the engine's retained scrollback, not just the tail. See
+//! `docs/devel/memos/P6.7-scrollback-port.md` for the signature discussion and
+//! `docs/devel/tasks/P6.7-scrollback-search.md` for the feature spec.
 
 use std::ops::{BitOr, BitOrAssign};
 
@@ -183,17 +189,38 @@ pub struct CursorState {
     pub shape: CursorShape,
 }
 
-/// An owned snapshot of the **visible viewport** for rendering.
+/// An owned snapshot of a **viewport window** into the engine's grid, for
+/// rendering.
 ///
 /// Row-major: `cells[row * size.cols + col]`, with `cells.len() == size.rows *
 /// size.cols`. This type is deliberately `Send` (it owns only plain data and
 /// `String`s): it crosses from the engine-owner thread to the renderer/UI
 /// bridge, while the engine itself — being `!Send` — never moves.
+///
+/// P6.7: the window need not be the live tail — [`TerminalEngine::snapshot`]
+/// takes a `scroll_offset` (lines above the tail) and echoes back the
+/// resolved position via `scroll_offset`/`scrollback_len` below, so callers
+/// can render a scroll-position indicator and address absolute buffer lines
+/// (`scrollback_len - scroll_offset + row`) without a second round trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GridSnapshot {
     pub size: TerminalSize,
     pub cells: Vec<Cell>,
     pub cursor: CursorState,
+    /// Lines of scrollback currently retained above the live tail, independent
+    /// of `scroll_offset` (i.e. how far back the user *could* scroll right now).
+    pub scrollback_len: u32,
+    /// The scroll offset actually used to produce this snapshot (lines above
+    /// the tail; `0` = the live/tail view, `snapshot`'s pre-P6.7 sole
+    /// behavior). Always `<= scrollback_len` — implementations clamp rather
+    /// than erroring on an out-of-range request.
+    pub scroll_offset: u32,
+    /// Whether the application has enabled a mouse-tracking mode (DECSET
+    /// 1000/1002/1003 and friends). `cm-ui`'s wheel handler uses this to
+    /// decide whether a wheel notch should scroll *our* scrollback viewport
+    /// (tracking off — the common case) or be forwarded to the app as a
+    /// wheel-button mouse event (tracking on — e.g. `less`/`vim`/`htop`).
+    pub mouse_tracking: bool,
 }
 
 /// Keyboard modifier state accompanying a [`KeyEvent`]/[`MouseEvent`].
@@ -281,8 +308,34 @@ pub trait TerminalEngine {
     /// Resize the grid to `size`.
     fn resize(&mut self, size: TerminalSize);
 
-    /// Produce an owned snapshot of the visible viewport.
-    fn snapshot(&self) -> GridSnapshot;
+    /// Produce an owned snapshot of the viewport starting `scroll_offset`
+    /// lines above the live tail (`0` = the tail — the pre-P6.7 sole
+    /// behavior). Implementations **clamp** `scroll_offset` to the available
+    /// scrollback (never error on an out-of-range request — CONVENTIONS §2,
+    /// untrusted/derived input fails soft); the clamped value actually used
+    /// is echoed back via [`GridSnapshot::scroll_offset`].
+    fn snapshot(&self, scroll_offset: u32) -> GridSnapshot;
+
+    /// Lines of scrollback currently retained above the live tail. Cheap —
+    /// does not build a snapshot — so callers (the engine-owner loop) can
+    /// clamp/derive scroll positions without paying for a full grid read on
+    /// every byte chunk. Default `0` for an engine with no scrollback.
+    fn scrollback_len(&self) -> u32 {
+        0
+    }
+
+    /// Plain-text rows spanning the full retained buffer (scrollback +
+    /// active screen), oldest first, for whole-buffer search (P6.7). Row `i`
+    /// is `i` lines above the buffer's origin — the same address space as
+    /// `GridSnapshot::scrollback_len`/`scroll_offset` (`scrollback_len -
+    /// scroll_offset` is the absolute row of the snapshot's first visible
+    /// row). Trailing blank cells per line are trimmed. Reading the full
+    /// buffer can be expensive for a large scrollback, so callers should call
+    /// this only on an explicit search action, not on every keystroke.
+    /// Default: empty (no scrollback / not implemented).
+    fn buffer_text(&self) -> Vec<String> {
+        Vec::new()
+    }
 
     /// Encode a key event into bytes, honoring active terminal modes (e.g.
     /// application-cursor mode).
