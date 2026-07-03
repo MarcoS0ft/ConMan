@@ -93,7 +93,7 @@ pub(super) fn lowest_free_number(used: &[u32]) -> u32 {
 
 pub(super) struct PushTabArgs {
     pub(super) session: Box<dyn Session>,
-    pub(super) connect_info: Option<SshConnectInfo>,
+    pub(super) connect_info: Option<ConnectInfo>,
     pub(super) is_remote: bool,
     /// RDP only: Arc to the drive thread's remote-clipboard slot (for CLIPRDR sync).
     pub(super) rdp_clipboard: Option<Arc<Mutex<Option<String>>>>,
@@ -214,9 +214,22 @@ fn open_local_tab_inner(
     spawn_local_tab(state, tab_model, ui, ls, size, is_empty);
 }
 
-/// Shared tail of [`open_local_tab_inner`]. Pure code extraction (P6.12 prep)
-/// -- no behavior change for its one current caller; a second caller lands
-/// in a follow-up change.
+/// P6.12 (gap 20): opens a local-shell tab for the quick-connect dialog's
+/// "Local" kind, using the settings typed directly into the dialog instead
+/// of the app-wide `local_settings` default. Never persisted -- mirrors how
+/// quick-connect SSH/RDP auth is `Direct`-provenance, in-memory only.
+pub(super) fn open_local_tab_quick(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    ls: LocalSettings,
+) {
+    let size = state.borrow().current_grid();
+    spawn_local_tab(state, tab_model, ui, ls, size, false);
+}
+
+/// Shared tail of [`open_local_tab_inner`] / [`open_local_tab_quick`]: spawn
+/// the local shell and push its tab.
 fn spawn_local_tab(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,

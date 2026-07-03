@@ -35,17 +35,27 @@ export component Modal inherits Rectangle {
 }
 
 // ── QuickConnectForm ──────────────────────────────────────────────────────────
-// Spawns an SshTerminalSession into a tab. Secrets are held in memory only and never
-// logged. auth-method: 0 Public key · 1 Password · 2 Agent · 3 Keyboard interactive
+// Kind selector (P6.12, gap 20): 0 SSH · 1 RDP · 2 Local — swaps the fields below
+// to the per-kind set and dispatches to the matching open-*-tab in Rust
+// (`sessions::wire_qc_connect`). Secrets are held in memory only and never logged;
+// a local quick-connect has no secret at all, it just spawns a shell.
+//
+// SSH auth-method: 0 Public key · 1 Password · 2 Agent · 3 Keyboard interactive
 // (conditional field below; P6.13 adds option 3, no upfront secret — the challenge
 // is answered live via KbdInteractiveDialog once the server asks for it).
 export component QuickConnectForm inherits Rectangle {
+    in-out property <int>    kind: 0;
     in-out property <string> host;
     in-out property <string> port: "22";
     in-out property <string> username;
     in-out property <int>    auth-method: 0;
-    in-out property <string> secret;        // password OR key path (per auth-method)
-    in-out property <string> passphrase;
+    in-out property <string> secret;        // SSH: password OR key path. RDP: password.
+    in-out property <string> passphrase;    // SSH public-key only.
+    in-out property <string> rdp-domain;
+    in-out property <string> rdp-resolution: "1280x720";
+    in-out property <string> local-program;
+    in-out property <string> local-args;
+    in-out property <string> local-cwd;
     callback connect();
     callback cancel();
 
@@ -58,6 +68,17 @@ export component QuickConnectForm inherits Rectangle {
     // Absorb clicks so the Modal scrim behind doesn't dismiss on inner clicks.
     TouchArea {}
 
+    // A quick-connect for RDP almost never wants port 22, and vice versa —
+    // keep the pre-filled default in step with the kind so leaving the field
+    // untouched still connects to the right port.
+    changed kind => {
+        if (root.kind == 1 && root.port == "22") {
+            root.port = "3389";
+        } else if (root.kind != 1 && root.port == "3389") {
+            root.port = "22";
+        }
+    }
+
     VerticalLayout {
         padding: Theme.space-6;
         spacing: Theme.space-4;
@@ -65,7 +86,9 @@ export component QuickConnectForm inherits Rectangle {
         // Title.
         HorizontalLayout {
             Text {
-                text: "New SSH connection";
+                text: root.kind == 0 ? "New SSH connection"
+                    : root.kind == 1 ? "New RDP connection"
+                    : "New local shell";
                 color: Theme.color-text;
                 font-size: Theme.font-lg;
                 font-family: Theme.font-family;
@@ -74,21 +97,37 @@ export component QuickConnectForm inherits Rectangle {
             }
         }
 
-        // Host + port.
-        HorizontalLayout {
+        // Kind selector.
+        VerticalLayout {
+            spacing: Theme.space-2;
+            Text { text: "TYPE"; color: Theme.color-text-secondary;
+                font-size: Theme.font-sm; font-family: Theme.font-family; font-weight: 600; }
+            SegmentedControl {
+                options: ["SSH", "RDP", "Local"];
+                selected <=> root.kind;
+            }
+        }
+
+        // ── Host + port (SSH + RDP) ────────────────────────────────────
+        if root.kind != 2 : HorizontalLayout {
             spacing: Theme.space-3;
             VerticalLayout { horizontal-stretch: 1;
                 FormField { label: "HOST"; placeholder: "web-prod-01.lab"; text <=> root.host; }
             }
             Rectangle { width: 100px;
-                FormField { label: "PORT"; placeholder: "22"; text <=> root.port; }
+                FormField { label: "PORT"; placeholder: root.kind == 0 ? "22" : "3389"; text <=> root.port; }
             }
         }
 
-        FormField { label: "USERNAME"; placeholder: "ops"; text <=> root.username; }
+        // ── Username (SSH + RDP) ────────────────────────────────────────
+        if root.kind != 2 : FormField {
+            label: "USERNAME";
+            placeholder: root.kind == 0 ? "ops" : "administrator";
+            text <=> root.username;
+        }
 
-        // Auth method.
-        VerticalLayout {
+        // ── SSH auth method ──────────────────────────────────────────────
+        if root.kind == 0 : VerticalLayout {
             spacing: Theme.space-2;
             Text { text: "AUTH METHOD"; color: Theme.color-text-secondary;
                 font-size: Theme.font-sm; font-family: Theme.font-family; font-weight: 600; }
@@ -97,24 +136,32 @@ export component QuickConnectForm inherits Rectangle {
                 selected <=> root.auth-method;
             }
         }
-
-        // Conditional secret field.
-        if auth-method == 0 : FormField { label: "PRIVATE KEY"; placeholder: "~/.ssh/id_ed25519"; text <=> root.secret; }
-        if auth-method == 0 : FormField { label: "PASSPHRASE"; placeholder: ""; password: true; text <=> root.passphrase; }
-        if auth-method == 1 : FormField { label: "PASSWORD"; placeholder: ""; password: true; text <=> root.secret; }
-        if auth-method == 2 : Text {
+        if root.kind == 0 && auth-method == 0 : FormField { label: "PRIVATE KEY"; placeholder: "~/.ssh/id_ed25519"; text <=> root.secret; }
+        if root.kind == 0 && auth-method == 0 : FormField { label: "PASSPHRASE"; placeholder: ""; password: true; text <=> root.passphrase; }
+        if root.kind == 0 && auth-method == 1 : FormField { label: "PASSWORD"; placeholder: ""; password: true; text <=> root.secret; }
+        if root.kind == 0 && auth-method == 2 : Text {
             text: "Uses the running SSH agent. No secret stored.";
             color: Theme.color-text-secondary;
             font-size: Theme.font-sm;
             font-family: Theme.font-family;
         }
-        if auth-method == 3 : Text {
+        if root.kind == 0 && auth-method == 3 : Text {
             text: "The server will prompt you for credentials (e.g. a password and a one-time code) after connecting.";
             color: Theme.color-text-secondary;
             font-size: Theme.font-sm;
             font-family: Theme.font-family;
             wrap: word-wrap;
         }
+
+        // ── RDP-only fields ──────────────────────────────────────────────
+        if root.kind == 1 : FormField { label: "DOMAIN"; placeholder: "(optional, e.g. CORP)"; text <=> root.rdp-domain; }
+        if root.kind == 1 : FormField { label: "RESOLUTION"; placeholder: "1280x720"; text <=> root.rdp-resolution; }
+        if root.kind == 1 : FormField { label: "PASSWORD"; placeholder: ""; password: true; text <=> root.secret; }
+
+        // ── Local-only fields ────────────────────────────────────────────
+        if root.kind == 2 : FormField { label: "PROGRAM"; placeholder: "(default shell)"; text <=> root.local-program; }
+        if root.kind == 2 : FormField { label: "ARGUMENTS"; placeholder: "(space-separated)"; text <=> root.local-args; }
+        if root.kind == 2 : FormField { label: "WORKING DIRECTORY"; placeholder: "(default)"; text <=> root.local-cwd; }
 
         // Footer.
         HorizontalLayout {

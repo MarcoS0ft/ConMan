@@ -129,6 +129,8 @@ pub(super) fn apply_early_env_overrides(ui: &AppWindow) {
 pub(super) fn wire_env_hooks(ctx: &Ctx, hooks: &mut Vec<Timer>) {
     wire_ssh_autoinit(ctx);
     wire_rdp_autoinit(ctx);
+    wire_open_quickconnect(ctx);
+    wire_local_qc_autoconnect(ctx);
     wire_tree_autolaunch(ctx);
     wire_autodrive(ctx, hooks);
     wire_autoresize(ctx, hooks);
@@ -272,10 +274,42 @@ fn wire_rdp_autoinit(ctx: &Ctx) {
                 &ctx.ui,
                 settings,
                 auth,
+                AuthProvenance::Direct,
                 verifier,
                 None,
             );
         }
+    }
+}
+
+// P6.12 (gap 20) headless test hook: CONMAN_OPEN_QUICKCONNECT=ssh|rdp|local —
+// opens the quick-connect dialog pre-set to the given kind, without
+// submitting it. No existing hook opens this dialog headlessly (mirrors
+// CONMAN_SHOW_KEYS's plain property-set style); exists so the xvfb screenshot
+// gate can capture each kind's per-kind fields without synthesizing a
+// pixel-precise click on the SegmentedControl.
+fn wire_open_quickconnect(ctx: &Ctx) {
+    let Ok(kind) = std::env::var("CONMAN_OPEN_QUICKCONNECT") else {
+        return;
+    };
+    let qc_kind = match kind.trim().to_ascii_lowercase().as_str() {
+        "rdp" => 1,
+        "local" => 2,
+        _ => 0,
+    };
+    ctx.ui.set_qc_kind(qc_kind);
+    ctx.ui.set_quick_connect_open(true);
+}
+
+// P6.12 (gap 20) headless test hook: CONMAN_LOCAL_QC_AUTOCONNECT=1 — drives
+// the quick-connect dialog's Local kind through the exact same
+// `sessions::qc_connect_local` dispatch a real "Connect" click uses (reading
+// whatever `qc-local-*` fields are already set, empty by default -> the OS
+// default shell). Exists so the xvfb screenshot gate can prove "a Local
+// quick-connect reaching a live shell" without synthesizing clicks.
+fn wire_local_qc_autoconnect(ctx: &Ctx) {
+    if std::env::var("CONMAN_LOCAL_QC_AUTOCONNECT").as_deref() == Ok("1") {
+        sessions::qc_connect_local(&ctx.state, &ctx.tab_model, &ctx.ui);
     }
 }
 
