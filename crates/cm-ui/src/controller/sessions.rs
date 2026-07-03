@@ -13,9 +13,9 @@ use cm_core::{
     SshAuthMethod, SshSettings,
 };
 use cm_session::{
-    CertDecision, CertInfo, CertStore, CertVerifier, FailedSession, FrameUpdate, HostKeyDecision,
-    HostKeyInfo, HostKeyVerifier, KbdInteractiveChallenge, KbdInteractiveHandler, KnownHosts,
-    PaneLayout, RdpAuthInput, RdpSession, SessionInput, SessionStatus, SshAuthInput,
+    CertDecision, CertInfo, CertStore, CertVerifier, FailedSession, FocusDir, FrameUpdate,
+    HostKeyDecision, HostKeyInfo, HostKeyVerifier, KbdInteractiveChallenge, KbdInteractiveHandler,
+    KnownHosts, PaneLayout, RdpAuthInput, RdpSession, SessionInput, SessionStatus, SshAuthInput,
     SshTerminalSession, Surface,
 };
 use slint::{ComponentHandle, Image, Model, SharedString, Timer, TimerMode, VecModel};
@@ -91,61 +91,22 @@ fn wire_key_input(ctx: &Ctx) {
                         ui.set_broadcast_active(!ui.get_broadcast_active());
                         return;
                     }
-                    // Ctrl+Shift+Up → focus pane up (prev; intuitive for VSplit).
+                    // Ctrl+Shift+Up/Down/Left/Right → move focus using real
+                    // pane geometry (P6.11: `focus_dir` picks the nearest
+                    // pane in that screen direction, not merely "prev/next
+                    // id" — correct once panes are arranged in more than one
+                    // row/column, which a plain delta could not do).
                     (5, _) => {
-                        let new_focus = {
-                            let mut st = state.borrow_mut();
-                            let active = st.active;
-                            if let Some(tab) = st.tabs.get_mut(active) {
-                                tab.pane_group.focus_move(-1)
-                            } else {
-                                return;
-                            }
-                        };
-                        ui.set_active_pane(new_focus as i32);
-                        return;
+                        return dispatch_focus_dir(&state, &ui, FocusDir::Up);
                     }
-                    // Ctrl+Shift+Down → focus pane down (next; intuitive for VSplit).
                     (6, _) => {
-                        let new_focus = {
-                            let mut st = state.borrow_mut();
-                            let active = st.active;
-                            if let Some(tab) = st.tabs.get_mut(active) {
-                                tab.pane_group.focus_move(1)
-                            } else {
-                                return;
-                            }
-                        };
-                        ui.set_active_pane(new_focus as i32);
-                        return;
+                        return dispatch_focus_dir(&state, &ui, FocusDir::Down);
                     }
-                    // Ctrl+Shift+Left → focus pane left (prev; intuitive for HSplit).
                     (7, _) => {
-                        let new_focus = {
-                            let mut st = state.borrow_mut();
-                            let active = st.active;
-                            if let Some(tab) = st.tabs.get_mut(active) {
-                                tab.pane_group.focus_move(-1)
-                            } else {
-                                return;
-                            }
-                        };
-                        ui.set_active_pane(new_focus as i32);
-                        return;
+                        return dispatch_focus_dir(&state, &ui, FocusDir::Left);
                     }
-                    // Ctrl+Shift+Right → focus pane right (next; intuitive for HSplit).
                     (8, _) => {
-                        let new_focus = {
-                            let mut st = state.borrow_mut();
-                            let active = st.active;
-                            if let Some(tab) = st.tabs.get_mut(active) {
-                                tab.pane_group.focus_move(1)
-                            } else {
-                                return;
-                            }
-                        };
-                        ui.set_active_pane(new_focus as i32);
-                        return;
+                        return dispatch_focus_dir(&state, &ui, FocusDir::Right);
                     }
                     // Ctrl+Shift+W → close focused pane (detach = false → shutdown).
                     (0, "w" | "W") => {
@@ -211,18 +172,15 @@ fn wire_key_input(ctx: &Ctx) {
                 if evs.is_empty() {
                     return;
                 }
-                // ── Broadcast: fan to ALL pane sessions ──────────────────────
+                // ── Broadcast: fan to the targeted pane sessions ─────────────
+                // P6.11 (gap 14): targeted, not always "all panes" — resolves
+                // `Tab::broadcast_target` (Visible/Custom) against the tab's
+                // *current* pane count so a stale custom selection never
+                // sends to a closed pane. Defaults to `Visible` (every pane),
+                // identical to the pre-P6.11 "always all panes" behavior. See
+                // `panes::broadcast_fan_out` for the (unit-tested) targeting logic.
                 if ui.get_broadcast_active() {
-                    // Send to primary + every extra pane.  The focused pane is
-                    // already covered here, so we return to avoid a double-send.
-                    for ev in &evs {
-                        tab.session.send_input(ev.clone());
-                    }
-                    for ep in &tab.extra_panes {
-                        for ev in &evs {
-                            ep.session.send_input(ev.clone());
-                        }
-                    }
+                    panes::broadcast_fan_out(tab, &evs);
                     return;
                 }
                 // Not broadcasting — send only to the focused pane.
@@ -242,6 +200,20 @@ fn wire_key_input(ctx: &Ctx) {
             }
         }
     });
+}
+
+/// P6.11: move focus in the active tab's pane group by screen direction
+/// (`Ctrl⇧Arrows`) and push the new focused pane id to the UI.
+fn dispatch_focus_dir(state: &Rc<RefCell<State>>, ui: &AppWindow, dir: FocusDir) {
+    let new_focus = {
+        let mut st = state.borrow_mut();
+        let active = st.active;
+        let Some(tab) = st.tabs.get_mut(active) else {
+            return;
+        };
+        tab.pane_group.focus_dir(dir)
+    };
+    ui.set_active_pane(new_focus as i32);
 }
 
 /// The new P6.9 (gap 17) Ctrl+Shift shortcuts, as a pure `(special, text)` ->
@@ -430,12 +402,30 @@ fn wire_pointer(ctx: &Ctx) {
             } else {
                 let ep_idx = focused - 1;
                 let ep = &mut tab.extra_panes[ep_idx];
-                if matches!(ep.session.surface(), Surface::TerminalGrid(_)) {
-                    let (row, col) = ep.renderer.cell_at(x * ep.scale, y * ep.scale);
-                    let snap = ep.last.as_ref();
-                    selection_changed = ep.sel.on_pointer(button, kind, (row, col), snap, now);
-                    if let Some(ev) = input::map_mouse(button, kind, row, col, mods) {
-                        ep.session.send_input(SessionInput::Mouse(ev));
+                match ep.session.surface() {
+                    Surface::TerminalGrid(_) => {
+                        let (row, col) = ep.renderer.cell_at(x * ep.scale, y * ep.scale);
+                        let snap = ep.last.as_ref();
+                        selection_changed = ep.sel.on_pointer(button, kind, (row, col), snap, now);
+                        if let Some(ev) = input::map_mouse(button, kind, row, col, mods) {
+                            ep.session.send_input(SessionInput::Mouse(ev));
+                        }
+                    }
+                    // P6.11: RDP-in-pane pointer routing (lifts P6.10's
+                    // deferral) — same coordinate mapping `wire_pointer` uses
+                    // for a primary-pane RDP surface, scoped to this pane's
+                    // own reported size instead of the whole window's.
+                    Surface::Framebuffer(_) => {
+                        let coords = input::RdpCoords {
+                            surface_w: ep.surface_w,
+                            surface_h: ep.surface_h,
+                            rdp_w: ep.rdp_w,
+                            rdp_h: ep.rdp_h,
+                        };
+                        let events = input::map_rdp_mouse(button, kind, x, y, &coords);
+                        if !events.is_empty() {
+                            ep.session.send_input(SessionInput::Rdp(events));
+                        }
                     }
                 }
             }
@@ -476,23 +466,40 @@ fn wire_rdp_scroll(ctx: &Ctx) {
         let state = ctx.state.clone();
         move |x, y, _dx, dy| {
             let st = state.borrow();
-            if let Some(tab) = st.tabs.get(st.active)
-                && matches!(tab.session.surface(), Surface::Framebuffer(_))
-            {
-                let w = st.surface_w;
-                let h = st.surface_h;
-                let rdp_w = tab.rdp_w;
-                let rdp_h = tab.rdp_h;
-                let coords = input::RdpCoords {
-                    surface_w: w,
-                    surface_h: h,
-                    rdp_w,
-                    rdp_h,
+            let (surface_w, surface_h) = (st.surface_w, st.surface_h);
+            let Some(tab) = st.tabs.get(st.active) else {
+                return;
+            };
+            let focused = tab.pane_group.focused();
+            let (surf, coords) = if focused == 0 {
+                (
+                    tab.session.surface(),
+                    input::RdpCoords {
+                        surface_w,
+                        surface_h,
+                        rdp_w: tab.rdp_w,
+                        rdp_h: tab.rdp_h,
+                    },
+                )
+            } else {
+                let Some(ep) = tab.extra_panes.get(focused - 1) else {
+                    return;
                 };
+                (
+                    ep.session.surface(),
+                    input::RdpCoords {
+                        surface_w: ep.surface_w,
+                        surface_h: ep.surface_h,
+                        rdp_w: ep.rdp_w,
+                        rdp_h: ep.rdp_h,
+                    },
+                )
+            };
+            if matches!(surf, Surface::Framebuffer(_)) {
                 // Use actual pointer position instead of surface centre.
                 let events = input::map_rdp_scroll(dy, x, y, &coords);
                 if !events.is_empty() {
-                    tab.session.send_input(SessionInput::Rdp(events));
+                    send_to_focused_pane(tab, SessionInput::Rdp(events));
                 }
             }
         }
@@ -753,6 +760,21 @@ impl KbdInteractiveHandler for UiKbdInteractiveHandler {
     }
 }
 
+/// Send transport-neutral input to whichever pane is focused in `tab` (id 0
+/// = the primary session; id 1+ = `extra_panes[id - 1]`). P6.11: RDP-in-pane
+/// means the RDP key/scroll callbacks (fired from *any* pane's `RdpSurface`,
+/// not just a whole-tab-is-RDP primary) must route by focus like the
+/// terminal key-input path already does, instead of always assuming the
+/// primary session is the RDP one.
+fn send_to_focused_pane(tab: &Tab, input: SessionInput) {
+    let focused = tab.pane_group.focused();
+    if focused == 0 {
+        tab.session.send_input(input);
+    } else if let Some(ep) = tab.extra_panes.get(focused - 1) {
+        ep.session.send_input(input);
+    }
+}
+
 fn wire_rdp_key_down(ctx: &Ctx) {
     ctx.ui.on_rdp_key_down({
         let state = ctx.state.clone();
@@ -763,8 +785,7 @@ fn wire_rdp_key_down(ctx: &Ctx) {
                 if let Some(text_to_paste) = paste_text {
                     let st = state.borrow();
                     if let Some(tab) = st.tabs.get(st.active) {
-                        tab.session
-                            .send_input(SessionInput::RdpPaste(text_to_paste));
+                        send_to_focused_pane(tab, SessionInput::RdpPaste(text_to_paste));
                     }
                 }
                 // Fall through: also send the Ctrl+V scancodes so the remote app triggers
@@ -774,7 +795,7 @@ fn wire_rdp_key_down(ctx: &Ctx) {
             if let Some(tab) = st.tabs.get(st.active) {
                 let events = input::map_rdp_key_down(text.as_str(), special, mods);
                 if !events.is_empty() {
-                    tab.session.send_input(SessionInput::Rdp(events));
+                    send_to_focused_pane(tab, SessionInput::Rdp(events));
                 }
             }
         }
@@ -789,7 +810,7 @@ fn wire_rdp_key_up(ctx: &Ctx) {
             if let Some(tab) = st.tabs.get(st.active) {
                 let events = input::map_rdp_key_up(text.as_str(), special, mods);
                 if !events.is_empty() {
-                    tab.session.send_input(SessionInput::Rdp(events));
+                    send_to_focused_pane(tab, SessionInput::Rdp(events));
                 }
             }
         }
@@ -1530,6 +1551,11 @@ fn tick_tab(
         st.tabs[i].last_focused_pane = focused_now;
     }
 
+    // P6.11: whether anything this tab's currently-visible panes render
+    // changed this tick — gates the (only-when-split) `pane-cells` rebuild
+    // below so a single-pane tab (the common case) never pays for it.
+    let mut panes_updated = false;
+
     // Drain the latest update for this tab's primary surface.
     match st.tabs[i].session.surface() {
         Surface::TerminalGrid(rx) => {
@@ -1540,6 +1566,7 @@ fn tick_tab(
                 if i == active {
                     let img = render_frame(&mut st.tabs[i], &snap, target);
                     ui.set_frame(img);
+                    panes_updated = true;
                 }
                 st.tabs[i].last = Some(snap);
             }
@@ -1549,6 +1576,7 @@ fn tick_tab(
                 let img = frame_to_image(&frame);
                 if i == active {
                     ui.set_rdp_frame(img.clone());
+                    panes_updated = true;
                 }
                 st.tabs[i].last_frame = Some(img);
                 st.tabs[i].rdp_w = frame.width;
@@ -1564,7 +1592,7 @@ fn tick_tab(
         }
     }
 
-    // P5.1: Drain extra pane surfaces (pane 1+).
+    // Drain extra pane surfaces (pane 1+; P5.1, generalized to N in P6.11).
     // Carry-over fix (f): collect extra panes that have Exited/Failed for collapse.
     let mut extra_panes_to_close: Vec<usize> = Vec::new();
     for ep_idx in 0..st.tabs[i].extra_panes.len() {
@@ -1574,28 +1602,25 @@ fn tick_tab(
                     st.tabs[i].extra_panes[ep_idx]
                         .sel
                         .invalidate_if_stale(&snap);
-                    if i == active {
-                        // ep_idx 0 = pane 1 → pane-frame-2.
-                        if ep_idx == 0 {
-                            let ep = &mut st.tabs[i].extra_panes[ep_idx];
-                            let ep_target = if ep.surface_w > 0.0 && ep.surface_h > 0.0 {
-                                Some((
-                                    (ep.surface_w * ep.scale).round().max(1.0) as u32,
-                                    (ep.surface_h * ep.scale).round().max(1.0) as u32,
-                                ))
-                            } else {
-                                None
-                            };
-                            let img = render_frame_ep(ep, &snap, ep_target);
-                            ui.set_pane_frame_2(img);
-                        }
-                    }
                     st.tabs[i].extra_panes[ep_idx].last = Some(snap);
+                    if i == active {
+                        panes_updated = true;
+                    }
                 }
             }
+            // P6.11: RDP-in-pane (lifts P6.10's deferral) — decode into this
+            // pane's own `last_frame`/`rdp_w`/`rdp_h`, mirroring the primary
+            // pane's `Surface::Framebuffer` arm above.
             Surface::Framebuffer(rx) => {
-                // Drain but discard (RDP-in-pane is an unimplemented edge case; noted).
-                drain_latest(rx);
+                if let Some(frame) = drain_latest(rx) {
+                    let img = frame_to_image(&frame);
+                    st.tabs[i].extra_panes[ep_idx].last_frame = Some(img);
+                    st.tabs[i].extra_panes[ep_idx].rdp_w = frame.width;
+                    st.tabs[i].extra_panes[ep_idx].rdp_h = frame.height;
+                    if i == active {
+                        panes_updated = true;
+                    }
+                }
             }
         }
         // Auto-collapse extra pane when its local shell exits/fails (fix f).
@@ -1616,6 +1641,10 @@ fn tick_tab(
         // PaneGroup::close_focused requires us to focus the pane first.
         st.tabs[i].pane_group.set_focused(ep_idx + 1);
         st.tabs[i].pane_group.close_focused();
+        panes_updated = true;
+    }
+    if i == active && panes_updated && st.tabs[i].pane_group.count() > 1 {
+        panes::rebuild_pane_cells_for_state(st);
     }
     if !extra_panes_to_close.is_empty() {
         // Tab-strip badge update applies to ALL tabs whose pane count changed,
@@ -1830,25 +1859,12 @@ pub(super) fn render_active(st: &mut State, ui: &AppWindow) {
                 ui.set_rdp_active(true);
             }
         }
-        // P5.1: Render extra pane(s).
-        for (ep_idx, ep) in tab.extra_panes.iter_mut().enumerate() {
-            if ep_idx == 0 {
-                // pane 1 → pane-frame-2
-                if let Some(snap) = ep.last.clone() {
-                    let ep_target = if ep.surface_w > 0.0 && ep.surface_h > 0.0 {
-                        Some((
-                            (ep.surface_w * ep.scale).round().max(1.0) as u32,
-                            (ep.surface_h * ep.scale).round().max(1.0) as u32,
-                        ))
-                    } else {
-                        None
-                    };
-                    let img = render_frame_ep(ep, &snap, ep_target);
-                    ui.set_pane_frame_2(img);
-                }
-            }
-        }
     }
+    // P6.11: N-way pane repeater — rebuilds `pane-cells` (geometry + every
+    // pane's current frame) when the active tab has more than one pane; a
+    // no-op (clears the model) otherwise, so single-pane tabs never pay for
+    // this beyond the `count()` check.
+    panes::rebuild_pane_cells_for_state(st);
 }
 
 pub(super) fn render_frame_ep(

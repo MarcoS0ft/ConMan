@@ -44,6 +44,22 @@ export struct TabItem {
     pane-count: int,
 }
 
+// P6.11: one entry per pane in the active tab's N-way split, computed in Rust
+// from `PaneGroup::rects()` (fractional geometry) plus that pane's current
+// frame image and surface kind. Drives the `pane-cells` repeater in the
+// session area — only populated (non-empty) when the active tab has more
+// than one pane; a single-pane tab keeps using `frame`/`rdp-frame`/
+// `rdp-active` directly (unchanged since P2.4/P4.2).
+export struct PaneCell {
+    pane: int,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    frame: image,
+    is-rdp: bool,
+}
+
 // Flattened connection-tree row.  `depth` drives left-indent (16 px per level).
 // Rust flattens the group/connection tree into this list honouring expand/collapse.
 export struct ConnRow {
@@ -334,9 +350,9 @@ component ConnectionRow inherits Rectangle {
     callback edit-clicked();    // open profile / group editor
     callback new-sub();         // new child item under this group
     callback duplicate-clicked(); // P6.10: clone this connection (leaf only)
-    // P6.10: open this connection into the active tab's second pane
-    // (leaf only; SSH/Local — RDP has no per-pane framebuffer surface yet,
-    // see the ContextMenuArea comment below, so this is never shown for it).
+    // P6.10 / P6.11: open this connection into the active tab's next pane
+    // slot (leaf only). SSH/Local/RDP all supported since P6.11 lifted the
+    // RDP-in-pane deferral — see the ContextMenuArea comment below.
     callback connect-in-split-clicked();
     callback delete-clicked();
     callback move-up();         // reorder: move one step up within same parent
@@ -371,29 +387,23 @@ component ConnectionRow inherits Rectangle {
     // existing `upsert_connection` repo call, see tree_ctl.rs) and
     // `connect-in-split-clicked` (P6.10 fix round 2, see below).
     //
-    // "Connect in split" (fix round 2): reuses the SAME 2-pane machinery
-    // `do_split()` already had (`PaneGroup::split`, `ExtraPaneState`,
-    // `Box<dyn Session>` — see `controller/panes.rs::connect_in_split`).
-    // Local profiles delegate straight to `do_split`; SSH profiles resolve
-    // credentials via the existing P6.4 path (`sessions::resolve_ssh_auth`)
-    // and spawn a real `SshTerminalSession` into the pane slot. RDP is
-    // excluded here (`data.kind != "RDP"`): `ExtraPaneState` only carries a
-    // `TerminalRenderer` + `GridSnapshot` grid, the shape SSH/local sessions
-    // (`Surface::TerminalGrid`) produce; RDP produces `Surface::Framebuffer`
-    // (a decoded RGBA image), which has no per-pane home today — only
-    // `Tab`'s primary-pane fields (`last_frame`/`rdp_w`/`rdp_h`) support it.
-    // Adding framebuffer-capable extra panes is real pane-generalization
-    // work and stays with P6.11 ("N-way panes & broadcast targeting"); full
-    // rationale in `docs/devel/memos/P6.10-connect-in-split-deferred.md`
-    // (repo convention: docs/devel/ is intentionally untracked infra,
-    // canonical disk only).
+    // "Connect in split" (P6.10 fix round 2 / P6.11): reuses the SAME
+    // N-way-pane machinery `do_split()` already has (`PaneGroup::split`,
+    // `ExtraPaneState`, `Box<dyn Session>` — see
+    // `controller/panes.rs::connect_in_split`). Local profiles delegate
+    // straight to `do_split`; SSH/RDP profiles resolve credentials via the
+    // existing P6.4 paths (`sessions::resolve_ssh_auth`/`resolve_rdp_auth`)
+    // and spawn a real session into the pane slot. RDP is no longer excluded
+    // here (P6.11 lifted the P6.10 deferral): `ExtraPaneState` now carries
+    // the `last_frame`/`rdp_w`/`rdp_h` fields a `Surface::Framebuffer`
+    // session needs, mirroring `Tab`'s primary-pane fields.
     ContextMenuArea {
         Menu {
             if !data.is-group : MenuItem {
                 title: "Connect";
                 activated => { root.activated(); }
             }
-            if !data.is-group && data.kind != "RDP" : MenuItem {
+            if !data.is-group : MenuItem {
                 title: "Connect in split";
                 activated => { root.connect-in-split-clicked(); }
             }
@@ -639,27 +649,36 @@ component CredTreeRow inherits Rectangle {
     }
 }
 
-// ── PaneSlot (P5.1) ────────────────────────────────────────────────────────
-// Wraps TerminalSurface with pane-index identity so multi-pane layouts can
-// track focus and route events per pane.  TerminalSurface internals are
-// FROZEN (P2.4); PaneSlot adds only an outer border + `pane-focused` routing.
+// ── PaneSlot (P5.1; generalized to N panes + RDP-in-pane in P6.11) ─────────
+// Wraps either a TerminalSurface or an RdpSurface (picked by `is-rdp`) with
+// pane-index identity so multi-pane layouts can track focus and route events
+// per pane. TerminalSurface/RdpSurface internals are FROZEN (P2.4/P4.2);
+// PaneSlot adds only an outer border + `pane-focused` routing + the
+// terminal/RDP callback forwarding, unified under one set of names.
 component PaneSlot inherits Rectangle {
     in property <image>  frame;
     in property <bool>   is-focused;
     in property <int>    pane-index;
+    in property <bool>   is-rdp;
     callback pane-focused(int);   // tell the parent which pane was clicked
-    callback key-input(string, int, int);
+    callback key-input(string, int, int);   // terminal panes
+    callback key-down(string, int, int);    // RDP panes
+    callback key-up(string, int, int);      // RDP panes
     callback pointer(int, int, length, length, int);
-    callback scroll(length, length);
+    callback scroll(length, length);                        // terminal panes
+    callback rdp-scroll(length, length, length, length);    // RDP panes
     callback resized(length, length);
     callback toggle-palette();
 
-    // Accent border on the focused pane; invisible otherwise.
-    border-width: root.is-focused ? 1.5px : 0px;
-    border-color: Theme.color-accent;
+    // Hairline border always visible (panes are placed edge-to-edge with no
+    // separate divider rectangle — P6.11's absolutely-positioned N-way
+    // layout replaces the old HorizontalLayout/VerticalLayout dividers);
+    // accent + thicker when focused.
+    border-width: root.is-focused ? 1.5px : 1px;
+    border-color: root.is-focused ? Theme.color-accent : Theme.color-stroke;
     clip: true;
 
-    TerminalSurface {
+    if !root.is-rdp : TerminalSurface {
         width: 100%; height: 100%;
         frame: root.frame;
         key-input(t, s, m) => { root.key-input(t, s, m); }
@@ -670,6 +689,19 @@ component PaneSlot inherits Rectangle {
         scroll(dx, dy) => { root.scroll(dx, dy); }
         resized(w, h)  => { root.resized(w, h); }
         toggle-palette => { root.toggle-palette(); }
+    }
+
+    if root.is-rdp : RdpSurface {
+        width: 100%; height: 100%;
+        frame: root.frame;
+        key-down(t, s, m) => { root.key-down(t, s, m); }
+        key-up(t, s, m)   => { root.key-up(t, s, m); }
+        pointer(b, k, x, y, m) => {
+            root.pane-focused(root.pane-index);
+            root.pointer(b, k, x, y, m);
+        }
+        rdp-scroll(x, y, dx, dy) => { root.rdp-scroll(x, y, dx, dy); }
+        resized(w, h) => { root.resized(w, h); }
     }
 }
 
@@ -730,12 +762,18 @@ export component AppWindow inherits Window {
     in property <string>  session-identity: "";
     in-out property <bool> broadcast-active: false;
 
-    // ── P5.1: Split panes ─────────────────────────────────────────────
-    // pane-layout: 0=single, 1=H-split (side by side), 2=V-split (stacked).
+    // ── P5.1 / P6.11: Split panes (generalized 2-pane → N-pane) ────────
+    // pane-layout: legacy display value (0=single, 1=H-split, 2=V-split) --
+    // kept for the single-pane (0) case and informational display; N-way
+    // geometry (3+ panes, or any RDP-in-pane mix) is driven entirely by
+    // `pane-cells` below instead.
     in property <int>    pane-layout: 0;
-    // Frame for the second pane (pane index 1); ignored when pane-layout==0.
-    in property <image>  pane-frame-2;
-    // Which pane is currently focused (0-based).
+    // P6.11: one entry per pane in the active tab (empty/1 entry when the
+    // tab isn't split — see `PaneCell`'s doc comment). Renders via the N-way
+    // repeater in the session area, replacing the old fixed 2-pane
+    // HSplit/VSplit branches.
+    in property <[PaneCell]> pane-cells;
+    // Which pane is currently focused (0-based pane id).
     in-out property <int> active-pane: 0;
     // Number of detached (background) sessions — shown in palette.
     in property <int> detached-count: 0;
@@ -746,6 +784,30 @@ export component AppWindow inherits Window {
     callback detach-session();
     callback pane-focused(int);
     callback pane-resized(int, length, length);
+    // RDP-in-pane (P6.11): key/scroll callbacks fired from ANY pane's
+    // RdpSurface, not only a whole-tab-is-RDP primary. Reuses the exact same
+    // names the primary RDP surface already had (`rdp-key-down` etc., see
+    // below) — the Rust handler routes by focused-pane id either way.
+
+    // ── P6.11 (gap 14): broadcast targeting menu ────────────────────────
+    // Never-silent status/broadcast-bar label naming the active target set
+    // ("all panes" / "2 of 4 panes" / "group: <name>").
+    in property <string> broadcast-target-label: "all panes";
+    in-out property <bool> broadcast-target-open: false;
+    // One entry per pane in the active tab (parallel to `pane-cells`'
+    // indexing): `true` if that pane id is checked in the in-progress custom
+    // selection.
+    in property <[bool]> broadcast-pane-checks;
+    // Names of this tab's saved custom selections ("named groups").
+    in property <[string]> broadcast-saved-groups;
+    in-out property <string> broadcast-group-name-draft: "";
+    callback open-broadcast-target();
+    callback close-broadcast-target();
+    callback select-broadcast-visible();
+    callback toggle-broadcast-pane-check(int);
+    callback apply-broadcast-custom();
+    callback save-broadcast-group();
+    callback select-broadcast-group(int);
 
     // ── Command palette ───────────────────────────────────────────────
     in-out property <bool>           palette-open: false;
@@ -895,9 +957,8 @@ export component AppWindow inherits Window {
     callback edit-conn(int);             // connection id → profile editor
     callback edit-group(int);            // group id → group editor
     callback duplicate-conn-row(int);    // connection id (P6.10 gap 15)
-    // Connection id → open into the active tab's 2nd pane (P6.10 fix round 2).
-    // SSH/Local only; RDP rows never fire this (menu item hidden, see
-    // ConnectionRow's ContextMenuArea comment).
+    // Connection id → open into the active tab's next pane slot (P6.10 fix
+    // round 2 / P6.11). SSH/Local/RDP all supported since P6.11.
     callback connect-in-split-row(int);
     callback delete-conn-row(int, bool); // id, is_group
     // P1.4 — Reorder (up/down within the same parent) + move-between-groups.
@@ -1052,9 +1113,10 @@ export component AppWindow inherits Window {
                     // `ContextMenuArea`, which wins first for on-row clicks) offers
                     // "New connection" / "New group".
                     //
-                    // "Connect in split" (fix round 2): same callback + same
-                    // RDP exclusion as the per-row ConnectionRow menu above —
-                    // see its comment for the full rationale.
+                    // "Connect in split" (P6.10 fix round 2 / P6.11): same
+                    // callback as the per-row ConnectionRow menu above — see
+                    // its comment for the full rationale (SSH/Local/RDP all
+                    // supported since P6.11).
                     ContextMenuArea {
                         vertical-stretch: 1;
                         Menu {
@@ -1062,7 +1124,7 @@ export component AppWindow inherits Window {
                                 title: "Connect";
                                 activated => { root.row-activated(conn-tree-focus.kb-idx); }
                             }
-                            if conn-tree-focus.kb-idx >= 0 && conn-tree-focus.kb-idx < connections.length && !connections[conn-tree-focus.kb-idx].is-group && connections[conn-tree-focus.kb-idx].kind != "RDP" : MenuItem {
+                            if conn-tree-focus.kb-idx >= 0 && conn-tree-focus.kb-idx < connections.length && !connections[conn-tree-focus.kb-idx].is-group : MenuItem {
                                 title: "Connect in split";
                                 activated => { root.connect-in-split-row(connections[conn-tree-focus.kb-idx].id); }
                             }
@@ -1371,8 +1433,8 @@ export component AppWindow inherits Window {
                 width: 100%; height: 100%;
                 spacing: 0px;
 
-                // ── Single-pane terminal (P2.4; FROZEN — pane-layout == 0, no RDP) ──
-                if !rdp-active && pane-layout == 0 : TerminalSurface {
+                // ── Single-pane terminal (P2.4; FROZEN — no split, no RDP) ──────
+                if !rdp-active && pane-cells.length <= 1 : TerminalSurface {
                     vertical-stretch: 1;
                     frame: root.frame;
                     key-input(t, s, m) => { root.key-input(t, s, m); }
@@ -1385,85 +1447,10 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // ── H-split: two panes side by side (P5.1) ──────────────────────
-                if !rdp-active && pane-layout == 1 : HorizontalLayout {
-                    spacing: 0px;
-                    vertical-stretch: 1;
-                    PaneSlot {
-                        horizontal-stretch: 1; vertical-stretch: 1;
-                        frame: root.frame;
-                        is-focused: root.active-pane == 0;
-                        pane-index: 0;
-                        pane-focused(i) => { root.pane-focused(i); }
-                        key-input(t, s, m) => { root.key-input(t, s, m); }
-                        pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
-                        scroll(dx, dy) => { root.scroll(dx, dy); }
-                        resized(w, h) => { root.pane-resized(0, w, h); }
-                        toggle-palette => {
-                            root.palette-open = !root.palette-open;
-                            if (!root.palette-open) { root.palette-selected = 0; }
-                        }
-                    }
-                    // Hairline divider.
-                    Rectangle { width: 1px; vertical-stretch: 1; background: Theme.color-stroke; }
-                    PaneSlot {
-                        horizontal-stretch: 1; vertical-stretch: 1;
-                        frame: root.pane-frame-2;
-                        is-focused: root.active-pane == 1;
-                        pane-index: 1;
-                        pane-focused(i) => { root.pane-focused(i); }
-                        key-input(t, s, m) => { root.key-input(t, s, m); }
-                        pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
-                        scroll(dx, dy) => { root.scroll(dx, dy); }
-                        resized(w, h) => { root.pane-resized(1, w, h); }
-                        toggle-palette => {
-                            root.palette-open = !root.palette-open;
-                            if (!root.palette-open) { root.palette-selected = 0; }
-                        }
-                    }
-                }
-
-                // ── V-split: two panes stacked (P5.1) ───────────────────────────
-                if !rdp-active && pane-layout == 2 : VerticalLayout {
-                    spacing: 0px;
-                    horizontal-stretch: 1;
-                    vertical-stretch: 1;
-                    PaneSlot {
-                        horizontal-stretch: 1; vertical-stretch: 1;
-                        frame: root.frame;
-                        is-focused: root.active-pane == 0;
-                        pane-index: 0;
-                        pane-focused(i) => { root.pane-focused(i); }
-                        key-input(t, s, m) => { root.key-input(t, s, m); }
-                        pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
-                        scroll(dx, dy) => { root.scroll(dx, dy); }
-                        resized(w, h) => { root.pane-resized(0, w, h); }
-                        toggle-palette => {
-                            root.palette-open = !root.palette-open;
-                            if (!root.palette-open) { root.palette-selected = 0; }
-                        }
-                    }
-                    // Hairline divider.
-                    Rectangle { horizontal-stretch: 1; height: 1px; background: Theme.color-stroke; }
-                    PaneSlot {
-                        horizontal-stretch: 1; vertical-stretch: 1;
-                        frame: root.pane-frame-2;
-                        is-focused: root.active-pane == 1;
-                        pane-index: 1;
-                        pane-focused(i) => { root.pane-focused(i); }
-                        key-input(t, s, m) => { root.key-input(t, s, m); }
-                        pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
-                        scroll(dx, dy) => { root.scroll(dx, dy); }
-                        resized(w, h) => { root.pane-resized(1, w, h); }
-                        toggle-palette => {
-                            root.palette-open = !root.palette-open;
-                            if (!root.palette-open) { root.palette-selected = 0; }
-                        }
-                    }
-                }
-
-                // ── RDP surface (P4.2; only shown when an RDP tab is active) ────
-                if rdp-active : RdpSurface {
+                // ── RDP surface (P4.2; only shown when an unsplit RDP tab is
+                // active — a split tab, even one containing an RDP pane,
+                // renders through the N-way repeater below instead) ────────
+                if rdp-active && pane-cells.length <= 1 : RdpSurface {
                     vertical-stretch: 1;
                     frame: root.rdp-frame;
                     key-down(t, s, m) => { root.rdp-key-down(t, s, m); }
@@ -1471,6 +1458,39 @@ export component AppWindow inherits Window {
                     pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
                     rdp-scroll(x, y, dx, dy) => { root.rdp-scroll(x, y, dx, dy); }
                     resized(w, h)     => { root.surface-resized(w, h); }
+                }
+
+                // ── N-way split (P6.11): one PaneSlot per `pane-cells` entry,
+                // absolutely positioned from Rust-computed fractional
+                // geometry (`PaneGroup::rects()`) — replaces the old fixed
+                // 2-pane HSplit/VSplit branches. Each cell carries its own
+                // `is-rdp` flag, so a split can freely mix terminal and RDP
+                // panes (RDP-in-pane, P6.11's second scope item).
+                if pane-cells.length > 1 : Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    for cell[idx] in root.pane-cells : PaneSlot {
+                        x: cell.x * parent.width;
+                        y: cell.y * parent.height;
+                        width: cell.w * parent.width;
+                        height: cell.h * parent.height;
+                        frame: cell.frame;
+                        is-rdp: cell.is-rdp;
+                        is-focused: root.active-pane == cell.pane;
+                        pane-index: cell.pane;
+                        pane-focused(i) => { root.pane-focused(i); }
+                        key-input(t, s, m) => { root.key-input(t, s, m); }
+                        key-down(t, s, m) => { root.rdp-key-down(t, s, m); }
+                        key-up(t, s, m) => { root.rdp-key-up(t, s, m); }
+                        pointer(b, k, px, py, m) => { root.pointer(b, k, px, py, m); }
+                        scroll(dx, dy) => { root.scroll(dx, dy); }
+                        rdp-scroll(px, py, dx, dy) => { root.rdp-scroll(px, py, dx, dy); }
+                        resized(w, h) => { root.pane-resized(cell.pane, w, h); }
+                        toggle-palette => {
+                            root.palette-open = !root.palette-open;
+                            if (!root.palette-open) { root.palette-selected = 0; }
+                        }
+                    }
                 }
 
                 // ── Broadcast bar (always visible when active; never silent) ────
@@ -1490,20 +1510,150 @@ export component AppWindow inherits Window {
                             font-weight: 600;
                             vertical-alignment: center;
                         }
-                        // Show target scope when split.
-                        if pane-layout != 0 : Text {
-                            text: "→ all panes";
-                            color: Theme.color-text-secondary;
-                            font-size: Theme.font-sm;
-                            font-family: Theme.font-family;
-                            vertical-alignment: center;
+                        // P6.11 (gap 14): targeting menu trigger — always shows
+                        // the active target ("never silent"), clickable to
+                        // change it. Implicit width from the HorizontalLayout
+                        // child (same pattern as the status-bar pills below);
+                        // the plain `TouchArea` sibling fills the Rectangle.
+                        Rectangle {
+                            HorizontalLayout {
+                                spacing: Theme.space-1;
+                                Text {
+                                    text: "→ " + root.broadcast-target-label;
+                                    color: bc-target-touch.has-hover ? Theme.color-accent : Theme.color-text-secondary;
+                                    font-size: Theme.font-sm;
+                                    font-family: Theme.font-family;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: "\u{25BE}"; // plain-Unicode chevron-down (not the icon font)
+                                    color: bc-target-touch.has-hover ? Theme.color-accent : Theme.color-text-secondary;
+                                    font-size: Theme.font-xs;
+                                    font-family: Theme.font-family;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            bc-target-touch := TouchArea { clicked => { root.open-broadcast-target(); } }
                         }
                         Rectangle { horizontal-stretch: 1; }
                         // Dismiss button.
                         IconButton {
                             glyph: "\u{EA76}";
                             size: 24px; glyph-size: Theme.icon-sm;
+                            tooltip: "Turn off broadcast";
                             clicked => { root.toggle-broadcast(); }
+                        }
+                    }
+                }
+            }
+
+            // ── Broadcast targeting popup (P6.11, gap 14) ────────────────────
+            // A small anchored popup off the broadcast-bar trigger (not a
+            // full-screen Modal — the spec calls for "a small popup off the
+            // broadcast affordance"). Mounted at the `session-area` level
+            // (like the overlays below) rather than nested inside the 46px
+            // broadcast-bar Rectangle: that bar sits at the very bottom of
+            // the clipped `session-area`, so a popup positioned *below* it
+            // (or only as tall as the bar's own local frame) gets clipped
+            // away or leaves most of the pane area uncovered by the
+            // click-out catcher. Full-bleed here guarantees both the popup
+            // and its click-out catcher are always inside the visible,
+            // unclipped region, regardless of window size.
+            if broadcast-target-open : Rectangle {
+                x: 0; y: 0; width: 100%; height: 100%;
+                TouchArea { clicked => { root.close-broadcast-target(); } }
+                Rectangle {
+                    x: Theme.space-4; y: parent.height - self.height - 46px - Theme.space-2;
+                    width: 260px;
+                    background: Theme.color-overlay;
+                    border-radius: Theme.radius-md;
+                    border-width: 1px;
+                    border-color: Theme.color-stroke;
+                    drop-shadow-blur: 16px;
+                    drop-shadow-color: Theme.color-scrim;
+                    VerticalLayout {
+                        padding: Theme.space-3;
+                        spacing: Theme.space-2;
+                        Text {
+                            text: "Broadcast target";
+                            color: Theme.color-text-disabled;
+                            font-size: Theme.font-xs;
+                            font-family: Theme.font-family;
+                            font-weight: 700;
+                            letter-spacing: 0.6px;
+                        }
+                        bc-visible-touch := TouchArea {
+                            height: 26px;
+                            clicked => { root.select-broadcast-visible(); }
+                            HorizontalLayout {
+                                Text {
+                                    text: (root.broadcast-target-label == "all panes" ? "\u{2713} " : "    ") + "All visible panes";
+                                    color: bc-visible-touch.has-hover ? Theme.color-accent : Theme.color-text;
+                                    font-size: Theme.font-sm;
+                                    font-family: Theme.font-family;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        if broadcast-saved-groups.length > 0 : Rectangle { height: 1px; background: Theme.color-stroke; }
+                        for grp[gi] in root.broadcast-saved-groups : TouchArea {
+                            height: 26px;
+                            clicked => { root.select-broadcast-group(gi); }
+                            HorizontalLayout {
+                                Text {
+                                    text: "\u{25B8} " + grp;
+                                    color: Theme.color-text;
+                                    font-size: Theme.font-sm;
+                                    font-family: Theme.font-family;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Rectangle { height: 1px; background: Theme.color-stroke; }
+                        Text {
+                            text: "Custom selection";
+                            color: Theme.color-text-disabled;
+                            font-size: Theme.font-xs;
+                            font-family: Theme.font-family;
+                            font-weight: 700;
+                            letter-spacing: 0.6px;
+                        }
+                        for chk[pi] in root.broadcast-pane-checks : TouchArea {
+                            height: 24px;
+                            clicked => { root.toggle-broadcast-pane-check(pi); }
+                            HorizontalLayout {
+                                spacing: Theme.space-1;
+                                Text {
+                                    text: chk ? "\u{2611}" : "\u{2610}";
+                                    color: chk ? Theme.color-accent : Theme.color-text-disabled;
+                                    font-size: Theme.font-sm;
+                                    font-family: Theme.font-family;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: "Pane " + (pi + 1);
+                                    color: Theme.color-text;
+                                    font-size: Theme.font-sm;
+                                    font-family: Theme.font-family;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: Theme.space-2;
+                            SecondaryButton {
+                                text: "Apply";
+                                clicked => { root.apply-broadcast-custom(); }
+                            }
+                        }
+                        LineEdit {
+                            placeholder-text: "Save selection as…";
+                            text <=> root.broadcast-group-name-draft;
+                            accepted => { root.save-broadcast-group(); }
+                        }
+                        SecondaryButton {
+                            text: "Save as named group";
+                            clicked => { root.save-broadcast-group(); }
                         }
                     }
                 }
@@ -1579,7 +1729,10 @@ export component AppWindow inherits Window {
                     }
                     TouchArea { clicked => { root.open-palette(); } }
                 }
-                // Broadcast indicator in the status bar (never silent).
+                // Broadcast indicator in the status bar (never silent — P6.11
+                // names the active target, not just "BC"). Click opens the
+                // targeting menu; the dedicated dismiss button in the
+                // broadcast bar above still turns broadcast fully off.
                 if broadcast-active : Rectangle {
                     y: (parent.height - self.height) / 2;
                     height: 18px;
@@ -1587,10 +1740,10 @@ export component AppWindow inherits Window {
                     background: Theme.color-broadcast-edge;
                     HorizontalLayout {
                         padding-left: Theme.space-2; padding-right: Theme.space-2;
-                        Text { text: "\u{EAAD} BC"; color: Theme.color-base; font-size: Theme.font-xs;
+                        Text { text: "\u{EAAD} BC · " + root.broadcast-target-label; color: Theme.color-base; font-size: Theme.font-xs;
                             font-family: Theme.font-family-mono; font-weight: 700; vertical-alignment: center; }
                     }
-                    TouchArea { clicked => { root.toggle-broadcast(); } }
+                    TouchArea { clicked => { root.open-broadcast-target(); } }
                 }
                 Rectangle {
                     y: (parent.height - self.height) / 2;

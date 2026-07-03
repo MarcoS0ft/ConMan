@@ -14,7 +14,7 @@
 //! `docs/devel/AI_GUIDANCE.md`.
 
 mod pane;
-pub use pane::{PaneGroup, PaneLayout};
+pub use pane::{FocusDir, MAX_PANES, PaneGroup, PaneLayout, PaneRect};
 
 mod session;
 pub use session::{

@@ -264,6 +264,7 @@ pub(super) fn dispatch_palette_action(
         "Close pane" => panes::do_close_pane(state, tab_model, ui, false),
         "Detach session" => panes::do_close_pane(state, tab_model, ui, true),
         "Toggle broadcast" => ui.set_broadcast_active(!ui.get_broadcast_active()),
+        "Broadcast target\u{2026}" => ui.invoke_open_broadcast_target(),
         // ── TABS (dynamic) ────────────────────────────────────────────────────
         // "Switch to: <title>" — find the first tab with the matching title.
         label if label.starts_with("Switch to: ") => {
@@ -454,9 +455,23 @@ pub(super) fn initial_palette_actions() -> Vec<PaletteAction> {
             category: SharedString::from("PANES"),
             first_in_group: false,
             label: SharedString::from("Toggle broadcast"),
-            detail: SharedString::from("Fan input to all visible panes"),
+            detail: SharedString::from("Fan input to the current broadcast target"),
             shortcut: SharedString::from("Ctrl+Shift+B"),
             glyph: SharedString::from("\u{EAAD}"), // cod-broadcast
+            status: SharedString::from(""),
+            selected: false,
+        },
+        // P6.11 (gap 14): keyboard-reachable entry point for the targeting
+        // menu (which is otherwise a click-only popup off the broadcast
+        // affordance) -- also gives the QA harness / xvfb-only test runs a
+        // way to open it without real X11 pointer injection.
+        PaletteAction {
+            category: SharedString::from("PANES"),
+            first_in_group: false,
+            label: SharedString::from("Broadcast target\u{2026}"),
+            detail: SharedString::from("Choose which panes receive broadcast input"),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{EAAD}"), // cod-broadcast (same family as "Toggle broadcast")
             status: SharedString::from(""),
             selected: false,
         },
