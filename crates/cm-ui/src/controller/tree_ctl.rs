@@ -250,12 +250,14 @@ fn wire_duplicate_conn_row(ctx: &Ctx) {
     });
 }
 
-// P6.10 (gap 15, fix round 2): "Connect in split" from the tree context menu
-// (both the per-row ConnectionRow menu and the keyboard-Menu-key tree-level
-// menu route here). Defaults to a horizontal (side-by-side) split — the same
-// default a user reaches via Ctrl+Shift+H / the "Split horizontal" palette
-// action. See `panes::connect_in_split` for the per-connection-kind dispatch
-// (Local/SSH wired, RDP toast-and-noop) and its full rationale.
+// P6.10 (gap 15, fix round 2)/P6.11: "Connect in split" from the tree context
+// menu (both the per-row ConnectionRow menu and the keyboard-Menu-key
+// tree-level menu route here). Defaults to a horizontal (side-by-side) split
+// — the same default a user reaches via Ctrl+Shift+\ / the "Split
+// horizontal" palette action. See `panes::connect_in_split` for the
+// per-connection-kind dispatch — Local/SSH/RDP all wired since P6.11 lifted
+// the RDP-in-pane deferral (`ExtraPaneState` now carries the
+// `last_frame`/`rdp_w`/`rdp_h` fields a `Surface::Framebuffer` pane needs).
 fn wire_connect_in_split_row(ctx: &Ctx) {
     ctx.ui.on_connect_in_split_row({
         let state = ctx.state.clone();
@@ -263,6 +265,7 @@ fn wire_connect_in_split_row(ctx: &Ctx) {
         let toast_model = ctx.toast_model.clone();
         let toast_next_id = ctx.toast_next_id.clone();
         let hk_pending = ctx.hk_pending.clone();
+        let cert_pending = ctx.cert_pending.clone();
         let secrets = ctx.secrets.clone();
         let weak = ctx.ui.as_weak();
         move |id| {
@@ -273,6 +276,7 @@ fn wire_connect_in_split_row(ctx: &Ctx) {
                 &ui,
                 &weak,
                 &hk_pending,
+                &cert_pending,
                 &secrets,
                 &toast_model,
                 &toast_next_id,

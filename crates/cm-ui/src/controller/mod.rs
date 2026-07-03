@@ -17,6 +17,7 @@
 //! move: no behavior change. See `docs/devel/tasks/P6.1-controller-decomposition.md`.
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -104,6 +105,14 @@ struct ExtraPaneState {
     surface_h: f32,
     /// P6.5: mouse-drag text selection + multi-click state for this pane.
     sel: PaneSelectionState,
+    /// P6.11: RDP-capable pane shape (lifts P6.10's deferral — see
+    /// `panes::connect_in_split`'s RDP arm). Populated when this pane's
+    /// `session.surface()` is `Surface::Framebuffer` instead of
+    /// `Surface::TerminalGrid`; mirrors the primary pane's
+    /// `Tab::last_frame`/`rdp_w`/`rdp_h` fields. `None`/`0` for terminal panes.
+    last_frame: Option<Image>,
+    rdp_w: u16,
+    rdp_h: u16,
 }
 
 /// A session that has been detached from its tab but is still running.
@@ -164,6 +173,15 @@ struct Tab {
     /// tab (never persisted into the restore-last-session snapshot -- see
     /// `startup::persist_session_tabs`).
     is_empty: bool,
+    /// P6.11 (gap 14): which of this tab's panes receive input while
+    /// broadcast is active. Defaults to `Visible` (every pane) — identical
+    /// to the pre-P6.11 "always all panes" behavior.
+    broadcast_target: panes::BroadcastTarget,
+    /// P6.11: custom pane selections the user has named for quick re-use via
+    /// the targeting menu. Session-only (not persisted -- cleared with the
+    /// tab): a "named group" here is a saved custom selection, not a new
+    /// persisted entity (see the P6.11 task report for the reasoning).
+    broadcast_saved_groups: Vec<(String, BTreeSet<usize>)>,
 }
 
 struct State {
@@ -206,6 +224,13 @@ struct State {
     /// callbacks (`launchpad.rs`) can refresh it without widening every
     /// intermediate function signature.
     launchpad_recents_model: Rc<VecModel<crate::RecentItem>>,
+    /// P6.11: the Slint list-model backing `pane-cells` (the N-way pane
+    /// repeater in `app.slint`). Lives on `State` (like `io`/
+    /// `launchpad_recents_model` above) rather than being threaded through
+    /// `render_active`/`tick_tab`'s many call sites. Only rebuilt when the
+    /// active tab's pane count is `> 1` — single-pane tabs (the common case)
+    /// never touch this model, keeping the feature zero-cost when unsplit.
+    pane_model: Rc<VecModel<crate::PaneCell>>,
 }
 
 impl State {
@@ -272,6 +297,14 @@ struct Ctx {
     cert_pending: Arc<Mutex<Option<Sender<CertDecision>>>>,
     kbd_pending: KbdQueue,
     resize_debounce: Rc<Timer>,
+    /// P6.11: broadcast-targeting-menu UI state (see `panes::wire_broadcast_target`).
+    /// `bc_check_model`/`bc_group_model` back the popup's per-pane checkbox
+    /// list and saved-group list; `bc_draft` is the in-progress custom
+    /// selection while the popup is open (applied into the active tab's
+    /// `Tab::broadcast_target` on "Apply"/"Save as group").
+    bc_check_model: Rc<VecModel<bool>>,
+    bc_group_model: Rc<VecModel<SharedString>>,
+    bc_draft: Rc<RefCell<BTreeSet<usize>>>,
 }
 
 /// Build and run the ConMan application.
@@ -315,6 +348,15 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     ui.set_toasts(ModelRc::from(toast_model.clone()));
     // Toast counter -- gives each toast a unique id so we can remove it by id.
     let toast_next_id: Rc<RefCell<i32>> = Rc::new(RefCell::new(0));
+
+    // P6.11: N-way pane repeater model + broadcast-targeting-menu models.
+    let pane_model: Rc<VecModel<crate::PaneCell>> = Rc::new(VecModel::default());
+    ui.set_pane_cells(ModelRc::from(pane_model.clone()));
+    let bc_check_model: Rc<VecModel<bool>> = Rc::new(VecModel::default());
+    ui.set_broadcast_pane_checks(ModelRc::from(bc_check_model.clone()));
+    let bc_group_model: Rc<VecModel<SharedString>> = Rc::new(VecModel::default());
+    ui.set_broadcast_saved_groups(ModelRc::from(bc_group_model.clone()));
+    let bc_draft: Rc<RefCell<BTreeSet<usize>>> = Rc::new(RefCell::new(BTreeSet::new()));
 
     // -- Load persisted settings (P5.2) --------------------------------------
     let stored_settings = {
@@ -376,6 +418,8 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         },
         // P6.14: see the field doc comment.
         launchpad_recents_model: launchpad_recents_model.clone(),
+        // P6.11: see the field doc comment.
+        pane_model: pane_model.clone(),
     }));
 
     {
@@ -435,6 +479,9 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         cert_pending: cert_pending.clone(),
         kbd_pending: kbd_pending.clone(),
         resize_debounce: resize_debounce.clone(),
+        bc_check_model: bc_check_model.clone(),
+        bc_group_model: bc_group_model.clone(),
+        bc_draft: bc_draft.clone(),
     };
 
     tabs::wire_tabs(&ctx);

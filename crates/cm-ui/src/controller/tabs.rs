@@ -158,6 +158,8 @@ pub(super) fn push_tab(
         sel: PaneSelectionState::default(),
         last_focused_pane: 0,
         is_empty,
+        broadcast_target: panes::BroadcastTarget::default(),
+        broadcast_saved_groups: Vec::new(),
     });
     st.active = st.tabs.len() - 1;
     let active = st.active;
@@ -264,6 +266,7 @@ pub(super) fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
     overlays::update_overlays_from_status(ui, tab, &status);
     sessions::render_active(&mut st, ui);
     drop(st);
+    panes::refresh_broadcast_label(state, ui);
     startup::persist_session_tabs(state);
 }
 
@@ -337,6 +340,7 @@ pub(super) fn close_tab(
     overlays::update_overlays_from_status(ui, &st.tabs[active], &status);
     sessions::render_active(&mut st, ui);
     drop(st);
+    panes::refresh_broadcast_label(state, ui);
     startup::persist_session_tabs(state);
 }
 
@@ -382,12 +386,21 @@ pub(super) fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {
                 ep.renderer.set_scale(font_size_px, scale);
                 ep.scale = scale;
             }
-            if matches!(ep.session.surface(), Surface::TerminalGrid(_)) {
-                let ep_size = util::grid_for(&ep.renderer, ep.surface_w, ep.surface_h, scale);
-                if ep_size.cols != ep.cols || ep_size.rows != ep.rows {
-                    ep.session.resize_cells(ep_size.cols, ep_size.rows);
-                    ep.cols = ep_size.cols;
-                    ep.rows = ep_size.rows;
+            match ep.session.surface() {
+                Surface::TerminalGrid(_) => {
+                    let ep_size = util::grid_for(&ep.renderer, ep.surface_w, ep.surface_h, scale);
+                    if ep_size.cols != ep.cols || ep_size.rows != ep.rows {
+                        ep.session.resize_cells(ep_size.cols, ep_size.rows);
+                        ep.cols = ep_size.cols;
+                        ep.rows = ep_size.rows;
+                    }
+                }
+                // P6.11: RDP-in-pane resize reactivation, mirroring the
+                // primary pane's `Framebuffer` arm above.
+                Surface::Framebuffer(_) => {
+                    let pw = (ep.surface_w * scale).round().max(1.0) as u32;
+                    let ph = (ep.surface_h * scale).round().max(1.0) as u32;
+                    ep.session.resize_px(pw, ph);
                 }
             }
         }

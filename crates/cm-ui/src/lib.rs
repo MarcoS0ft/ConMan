@@ -44,7 +44,8 @@ mod generated_ui {
 // cm-platform or tests.  `Theme` is internal and not re-exported here;
 // appearance is driven via the alias properties on `AppWindow` instead.
 pub use generated_ui::{
-    AppWindow, ConnRow, CredRow, KbdPromptRow, PaletteAction, RecentItem, TabItem, ToastEntry,
+    AppWindow, ConnRow, CredRow, KbdPromptRow, PaletteAction, PaneCell, RecentItem, TabItem,
+    ToastEntry,
 };
 
 pub use controller::run;
