@@ -334,6 +334,10 @@ component ConnectionRow inherits Rectangle {
     callback edit-clicked();    // open profile / group editor
     callback new-sub();         // new child item under this group
     callback duplicate-clicked(); // P6.10: clone this connection (leaf only)
+    // P6.10: open this connection into the active tab's second pane
+    // (leaf only; SSH/Local — RDP has no per-pane framebuffer surface yet,
+    // see the ContextMenuArea comment below, so this is never shown for it).
+    callback connect-in-split-clicked();
     callback delete-clicked();
     callback move-up();         // reorder: move one step up within same parent
     callback move-down();       // reorder: move one step down within same parent
@@ -364,31 +368,34 @@ component ConnectionRow inherits Rectangle {
     // tree-level ContextMenuArea in AppWindow) opens this row's menu. Items
     // reuse the EXACT SAME callbacks as the hover CRUD buttons above — no new
     // backend beyond `duplicate-clicked` (P6.10 bundled: clone via the
-    // existing `upsert_connection` repo call, see tree_ctl.rs).
+    // existing `upsert_connection` repo call, see tree_ctl.rs) and
+    // `connect-in-split-clicked` (P6.10 fix round 2, see below).
     //
-    // DESCOPE (P6.10, pending coordinator sign-off): the spec's Scope In.1
-    // enumerates "Connect, Connect in split, Edit, Duplicate, Delete, Move"
-    // for connection rows. "Connect in split" is intentionally NOT wired
-    // here. `controller/panes.rs::do_split()` unconditionally spawns a new
-    // LOCAL terminal into the second pane (`LocalTerminalSession::spawn`) —
-    // there is no code path that launches an arbitrary stored connection
-    // (SSH/RDP, with P6.4 credential resolution, host-key/cert prompts) into
-    // a pane slot. Building that is the pane-generalization P6.11 ("N-way
-    // panes & broadcast targeting") is scoped to build, not a thin wiring
-    // change, and would contradict this task's own "(no new backend)"
-    // qualifier. Full rationale:
-    // docs/devel/memos/P6.10-connect-in-split-deferred.md (repo convention:
-    // docs/devel/ is intentionally untracked infra, canonical disk only —
-    // see every prior `P*-*.md` memo reference in this file's git history
-    // for the same pattern, e.g. P6.5/P6.6/P6.8/P6.14). This is a PROPOSED
-    // descope, not a unilateral one: it requires coordinator sign-off per
-    // CONVENTIONS §3/§5 before P6.10 is fully done against its own spec;
-    // until then this item stays open in the task's Definition of Done.
+    // "Connect in split" (fix round 2): reuses the SAME 2-pane machinery
+    // `do_split()` already had (`PaneGroup::split`, `ExtraPaneState`,
+    // `Box<dyn Session>` — see `controller/panes.rs::connect_in_split`).
+    // Local profiles delegate straight to `do_split`; SSH profiles resolve
+    // credentials via the existing P6.4 path (`sessions::resolve_ssh_auth`)
+    // and spawn a real `SshTerminalSession` into the pane slot. RDP is
+    // excluded here (`data.kind != "RDP"`): `ExtraPaneState` only carries a
+    // `TerminalRenderer` + `GridSnapshot` grid, the shape SSH/local sessions
+    // (`Surface::TerminalGrid`) produce; RDP produces `Surface::Framebuffer`
+    // (a decoded RGBA image), which has no per-pane home today — only
+    // `Tab`'s primary-pane fields (`last_frame`/`rdp_w`/`rdp_h`) support it.
+    // Adding framebuffer-capable extra panes is real pane-generalization
+    // work and stays with P6.11 ("N-way panes & broadcast targeting"); full
+    // rationale in `docs/devel/memos/P6.10-connect-in-split-deferred.md`
+    // (repo convention: docs/devel/ is intentionally untracked infra,
+    // canonical disk only).
     ContextMenuArea {
         Menu {
             if !data.is-group : MenuItem {
                 title: "Connect";
                 activated => { root.activated(); }
+            }
+            if !data.is-group && data.kind != "RDP" : MenuItem {
+                title: "Connect in split";
+                activated => { root.connect-in-split-clicked(); }
             }
             if data.is-group : MenuItem {
                 title: "New child";
@@ -860,6 +867,10 @@ export component AppWindow inherits Window {
     callback edit-conn(int);             // connection id → profile editor
     callback edit-group(int);            // group id → group editor
     callback duplicate-conn-row(int);    // connection id (P6.10 gap 15)
+    // Connection id → open into the active tab's 2nd pane (P6.10 fix round 2).
+    // SSH/Local only; RDP rows never fire this (menu item hidden, see
+    // ConnectionRow's ContextMenuArea comment).
+    callback connect-in-split-row(int);
     callback delete-conn-row(int, bool); // id, is_group
     // P1.4 — Reorder (up/down within the same parent) + move-between-groups.
     // Reorder is wired from hover ↑/↓ buttons; move-between-groups is exposed
@@ -1013,18 +1024,19 @@ export component AppWindow inherits Window {
                     // `ContextMenuArea`, which wins first for on-row clicks) offers
                     // "New connection" / "New group".
                     //
-                    // DESCOPE (P6.10, pending coordinator sign-off): "Connect in
-                    // split" is intentionally omitted here too, same rationale as
-                    // the per-row ConnectionRow menu above (see its comment) —
-                    // do_split() only spawns a local shell; launching an arbitrary
-                    // stored connection into a pane needs P6.11's pane
-                    // generalization. Not a unilateral descope; needs sign-off.
+                    // "Connect in split" (fix round 2): same callback + same
+                    // RDP exclusion as the per-row ConnectionRow menu above —
+                    // see its comment for the full rationale.
                     ContextMenuArea {
                         vertical-stretch: 1;
                         Menu {
                             if conn-tree-focus.kb-idx >= 0 && conn-tree-focus.kb-idx < connections.length && !connections[conn-tree-focus.kb-idx].is-group : MenuItem {
                                 title: "Connect";
                                 activated => { root.row-activated(conn-tree-focus.kb-idx); }
+                            }
+                            if conn-tree-focus.kb-idx >= 0 && conn-tree-focus.kb-idx < connections.length && !connections[conn-tree-focus.kb-idx].is-group && connections[conn-tree-focus.kb-idx].kind != "RDP" : MenuItem {
+                                title: "Connect in split";
+                                activated => { root.connect-in-split-row(connections[conn-tree-focus.kb-idx].id); }
                             }
                             if conn-tree-focus.kb-idx >= 0 && conn-tree-focus.kb-idx < connections.length && connections[conn-tree-focus.kb-idx].is-group : MenuItem {
                                 title: "New child";
@@ -1096,6 +1108,7 @@ export component AppWindow inherits Window {
                                     }
                                     new-sub => { root.new-connection(conn.id); }
                                     duplicate-clicked => { root.duplicate-conn-row(conn.id); }
+                                    connect-in-split-clicked => { root.connect-in-split-row(conn.id); }
                                     delete-clicked => {
                                         root.delete-conn-row(conn.id, conn.is-group);
                                     }

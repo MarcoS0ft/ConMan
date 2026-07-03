@@ -2,14 +2,18 @@
 //! reattaching a previously-detached session.
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use cm_core::LocalSettings;
+use cm_core::terminal::TerminalSize;
 use cm_session::{LocalTerminalSession, PaneGroup, PaneLayout, SessionStatus, Surface};
 use slint::{ComponentHandle, Model, SharedString, TimerMode, VecModel};
 
 use crate::selection::PaneSelectionState;
-use crate::terminal_renderer::{TerminalRenderer, TerminalTheme};
-use crate::{AppWindow, TabItem};
+use crate::terminal_renderer::{FontSet, TerminalRenderer, TerminalTheme};
+use crate::{AppWindow, TabItem, ToastEntry};
 
+use super::HkQueue;
 use super::*;
 
 pub(super) fn wire_panes(ctx: &Ctx) {
@@ -149,35 +153,49 @@ pub(super) fn layout_to_int(layout: PaneLayout) -> i32 {
     }
 }
 
-/// Split the active tab's pane group, spawning a new local terminal in pane 1.
-pub(super) fn do_split(
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    ui: &AppWindow,
-    layout: PaneLayout,
-) {
-    let (new_pane_idx, scale, surface_w, surface_h, fonts, font_size_px, ls) = {
-        let mut st = state.borrow_mut();
-        let active = st.active;
-        let Some(tab) = st.tabs.get_mut(active) else {
-            return;
-        };
-        let Some(new_idx) = tab.pane_group.split(layout) else {
-            return; // already at max panes
-        };
-        (
-            new_idx,
-            st.scale,
-            st.surface_w,
-            st.surface_h,
-            st.fonts.clone(),
-            st.font_size_px,
-            st.local_settings.clone(),
-        )
-    };
+/// Everything a caller needs, once a pane slot has been reserved, to size and
+/// spawn whatever session goes into it.
+struct SplitSlot {
+    new_pane_idx: usize,
+    scale: f32,
+    surface_w: f32,
+    surface_h: f32,
+    fonts: Arc<FontSet>,
+    font_size_px: f32,
+    local_settings: LocalSettings,
+}
 
-    // Spawn a new local terminal for the extra pane (half the width for H-split).
-    let renderer = TerminalRenderer::with_fonts(fonts, font_size_px, scale, TerminalTheme::dark());
+/// Reserve a pane slot in the active tab's `PaneGroup`. Shared by [`do_split`]
+/// and [`connect_in_split`] (P6.10 fix round 2) — the 2-pane bookkeeping is
+/// identical regardless of what kind of session ends up filling the slot.
+fn reserve_split_slot(state: &Rc<RefCell<State>>, layout: PaneLayout) -> Option<SplitSlot> {
+    let mut st = state.borrow_mut();
+    let active = st.active;
+    let tab = st.tabs.get_mut(active)?;
+    let new_pane_idx = tab.pane_group.split(layout)?; // None: already at max panes
+    Some(SplitSlot {
+        new_pane_idx,
+        scale: st.scale,
+        surface_w: st.surface_w,
+        surface_h: st.surface_h,
+        fonts: st.fonts.clone(),
+        font_size_px: st.font_size_px,
+        local_settings: st.local_settings.clone(),
+    })
+}
+
+/// Undo a `reserve_split_slot` reservation after the session for it failed to
+/// spawn/connect — mirrors the pane-group state to before the split.
+fn rollback_split_slot(state: &Rc<RefCell<State>>) {
+    let mut st = state.borrow_mut();
+    let active = st.active;
+    if let Some(tab) = st.tabs.get_mut(active) {
+        let _ = tab.pane_group.close_focused();
+    }
+}
+
+/// Pixel size (logical) of the second pane for a given split layout.
+fn split_pane_dims(layout: PaneLayout, surface_w: f32, surface_h: f32) -> (f32, f32) {
     let pane_w = match layout {
         PaneLayout::HSplit => (surface_w / 2.0).max(1.0),
         PaneLayout::VSplit => surface_w,
@@ -187,33 +205,33 @@ pub(super) fn do_split(
         PaneLayout::VSplit => (surface_h / 2.0).max(1.0),
         _ => surface_h,
     };
-    let size = if pane_w > 0.0 && pane_h > 0.0 {
-        util::grid_for(&renderer, pane_w, pane_h, scale)
-    } else {
-        INITIAL_SIZE
-    };
+    (pane_w, pane_h)
+}
 
-    let session = match LocalTerminalSession::spawn(&ls, size) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("split pane spawn failed: {e}");
-            // Roll back the pane group change.
-            let mut st = state.borrow_mut();
-            let active = st.active;
-            if let Some(tab) = st.tabs.get_mut(active) {
-                // The split already happened in pane_group; close it back.
-                let _ = tab.pane_group.close_focused();
-            }
-            return;
-        }
-    };
-
+/// Commit a session into the pane slot reserved by `reserve_split_slot`:
+/// push `ExtraPaneState`, refresh the tab-strip pane-count badge, and update
+/// the UI's pane-layout/focus. Shared by [`do_split`] and
+/// [`connect_in_split`].
+#[allow(clippy::too_many_arguments)]
+fn commit_split_pane(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    layout: PaneLayout,
+    new_pane_idx: usize,
+    session: Box<dyn Session>,
+    renderer: TerminalRenderer,
+    size: TerminalSize,
+    pane_w: f32,
+    pane_h: f32,
+    scale: f32,
+) {
     {
         let mut st = state.borrow_mut();
         let active = st.active;
         if let Some(tab) = st.tabs.get_mut(active) {
             let ep = ExtraPaneState {
-                session: Box::new(session),
+                session,
                 renderer,
                 last: None,
                 cols: size.cols,
@@ -247,6 +265,203 @@ pub(super) fn do_split(
 
     ui.set_pane_layout(layout_to_int(layout));
     ui.set_active_pane(new_pane_idx as i32);
+}
+
+/// Split the active tab's pane group, spawning a new local terminal in pane 1.
+pub(super) fn do_split(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    layout: PaneLayout,
+) {
+    let Some(slot) = reserve_split_slot(state, layout) else {
+        return;
+    };
+
+    // Spawn a new local terminal for the extra pane (half the width for H-split).
+    let renderer = TerminalRenderer::with_fonts(
+        slot.fonts,
+        slot.font_size_px,
+        slot.scale,
+        TerminalTheme::dark(),
+    );
+    let (pane_w, pane_h) = split_pane_dims(layout, slot.surface_w, slot.surface_h);
+    let size = if pane_w > 0.0 && pane_h > 0.0 {
+        util::grid_for(&renderer, pane_w, pane_h, slot.scale)
+    } else {
+        INITIAL_SIZE
+    };
+
+    let session = match LocalTerminalSession::spawn(&slot.local_settings, size) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("split pane spawn failed: {e}");
+            rollback_split_slot(state);
+            return;
+        }
+    };
+
+    commit_split_pane(
+        state,
+        tab_model,
+        ui,
+        layout,
+        slot.new_pane_idx,
+        Box::new(session),
+        renderer,
+        size,
+        pane_w,
+        pane_h,
+        slot.scale,
+    );
+}
+
+/// P6.10 (gap 15, fix round 2): "Connect in split" — open a stored
+/// connection's session directly into the active tab's second pane, reusing
+/// the exact 2-pane machinery `do_split` already had (see
+/// `reserve_split_slot`/`commit_split_pane` above).
+///
+/// - **Local** profiles are identical to a plain split (always a local
+///   shell), so they delegate straight to [`do_split`].
+/// - **SSH** profiles resolve credentials via the same P6.4 path
+///   `launch_saved_connection` uses (`sessions::resolve_ssh_auth`) and spawn
+///   a real `SshTerminalSession` into the pane slot instead of a local shell.
+///   A resolution or connect failure surfaces as a toast and leaves the tab
+///   at its previous pane count (no half-open pane).
+/// - **RDP** profiles are not supported: `ExtraPaneState` only carries a
+///   `TerminalRenderer` + `GridSnapshot` grid — the shape `Surface::
+///   TerminalGrid` sessions (local + SSH) produce. RDP produces `Surface::
+///   Framebuffer` (a decoded RGBA `Image`), which has no per-pane home today
+///   — only `Tab`'s primary-pane fields (`last_frame`/`rdp_w`/`rdp_h`)
+///   support it. Adding framebuffer-capable extra panes is real
+///   pane-generalization work reserved for P6.11 ("N-way panes & broadcast
+///   targeting"). `app.slint` hides the menu item for `kind == "RDP"` rows;
+///   this match arm is a defensive fallback (toast, no-op) in case it's
+///   reached anyway (e.g. a future keyboard-dispatch path).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn connect_in_split(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    weak: &slint::Weak<AppWindow>,
+    hk_pending: &HkQueue,
+    secrets: &Arc<dyn cm_core::CredentialStore>,
+    toast_model: &Rc<VecModel<ToastEntry>>,
+    toast_next_id: &Rc<RefCell<i32>>,
+    conn_id: i64,
+    layout: PaneLayout,
+) {
+    let conn = {
+        let st = state.borrow();
+        st.conn_tree.conn_by_id(conn_id).cloned()
+    };
+    let Some(conn) = conn else { return };
+
+    match &conn.settings {
+        cm_core::ConnectionSettings::Local(_) => do_split(state, tab_model, ui, layout),
+        cm_core::ConnectionSettings::Rdp(_) => {
+            tracing::warn!(
+                "connect-in-split requested for RDP connection {} (menu should have hidden this)",
+                conn.name
+            );
+            push_toast(
+                toast_model,
+                toast_next_id,
+                format!(
+                    "{}: RDP connections can't open in a split pane yet",
+                    conn.name
+                ),
+            );
+        }
+        cm_core::ConnectionSettings::Ssh(s) => {
+            let resolved = {
+                let st = state.borrow();
+                sessions::resolve_ssh_auth(&conn, st.conn_tree.groups(), s, secrets.as_ref())
+            };
+            let auth = match resolved {
+                Ok(a) => a,
+                Err(e) => {
+                    push_toast(toast_model, toast_next_id, format!("{}: {e}", conn.name));
+                    return;
+                }
+            };
+
+            let Some(slot) = reserve_split_slot(state, layout) else {
+                return;
+            };
+
+            let renderer = TerminalRenderer::with_fonts(
+                slot.fonts,
+                slot.font_size_px,
+                slot.scale,
+                TerminalTheme::dark(),
+            );
+            let (pane_w, pane_h) = split_pane_dims(layout, slot.surface_w, slot.surface_h);
+            let size = if pane_w > 0.0 && pane_h > 0.0 {
+                util::grid_for(&renderer, pane_w, pane_h, slot.scale)
+            } else {
+                INITIAL_SIZE
+            };
+
+            let auto_accept = util::ssh_auto_accept_keys();
+            let verifier = Arc::new(sessions::UiHostKeyVerifier {
+                weak_ui: weak.clone(),
+                pending: hk_pending.clone(),
+                auto_accept,
+            });
+
+            let session = match cm_session::SshTerminalSession::connect(
+                s,
+                auth,
+                verifier,
+                cm_session::KnownHosts::with_defaults(),
+                size,
+            ) {
+                Ok(sess) => sess,
+                Err(e) => {
+                    tracing::warn!("connect-in-split SSH connect failed: {e}");
+                    rollback_split_slot(state);
+                    push_toast(toast_model, toast_next_id, format!("{}: {e}", conn.name));
+                    return;
+                }
+            };
+
+            commit_split_pane(
+                state,
+                tab_model,
+                ui,
+                layout,
+                slot.new_pane_idx,
+                Box::new(session),
+                renderer,
+                size,
+                pane_w,
+                pane_h,
+                slot.scale,
+            );
+        }
+    }
+}
+
+/// Push a toast (same shape the background-disconnect toast in `sessions.rs`
+/// uses) for a `connect_in_split` failure that must surface *somewhere* —
+/// there is no per-pane error overlay (that's Tab-primary-pane-only today).
+fn push_toast(
+    toast_model: &Rc<VecModel<ToastEntry>>,
+    toast_next_id: &Rc<RefCell<i32>>,
+    message: String,
+) {
+    let id = {
+        let mut n = toast_next_id.borrow_mut();
+        let id = *n;
+        *n += 1;
+        id
+    };
+    toast_model.push(ToastEntry {
+        id,
+        message: SharedString::from(message),
+        kind: 3, // error (mirrors sessions.rs's Failed-status toast kind)
+    });
 }
 
 /// Close the focused pane in the active tab.

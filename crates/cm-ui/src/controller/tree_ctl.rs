@@ -6,6 +6,7 @@ use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionSettings, CredentialId, CredentialPurpose,
     CredentialRef, Group, GroupId, LocalSettings, RdpSettings, SshAuthMethod, SshSettings,
 };
+use cm_session::PaneLayout;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::keys::KeysPanel;
@@ -24,6 +25,7 @@ pub(super) fn wire_tree_ctl(ctx: &Ctx) {
     wire_edit_conn(ctx);
     wire_edit_group(ctx);
     wire_duplicate_conn_row(ctx);
+    wire_connect_in_split_row(ctx);
     wire_delete_conn_row(ctx);
     wire_profile_save(ctx);
     wire_group_save(ctx);
@@ -244,6 +246,39 @@ fn wire_duplicate_conn_row(ctx: &Ctx) {
                 tracing::warn!("reload after duplicate failed: {e}");
             }
             refresh_conn_model(&st, &conn_model);
+        }
+    });
+}
+
+// P6.10 (gap 15, fix round 2): "Connect in split" from the tree context menu
+// (both the per-row ConnectionRow menu and the keyboard-Menu-key tree-level
+// menu route here). Defaults to a horizontal (side-by-side) split — the same
+// default a user reaches via Ctrl+Shift+H / the "Split horizontal" palette
+// action. See `panes::connect_in_split` for the per-connection-kind dispatch
+// (Local/SSH wired, RDP toast-and-noop) and its full rationale.
+fn wire_connect_in_split_row(ctx: &Ctx) {
+    ctx.ui.on_connect_in_split_row({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let toast_model = ctx.toast_model.clone();
+        let toast_next_id = ctx.toast_next_id.clone();
+        let hk_pending = ctx.hk_pending.clone();
+        let secrets = ctx.secrets.clone();
+        let weak = ctx.ui.as_weak();
+        move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            panes::connect_in_split(
+                &state,
+                &tab_model,
+                &ui,
+                &weak,
+                &hk_pending,
+                &secrets,
+                &toast_model,
+                &toast_next_id,
+                id as i64,
+                PaneLayout::HSplit,
+            );
         }
     });
 }
