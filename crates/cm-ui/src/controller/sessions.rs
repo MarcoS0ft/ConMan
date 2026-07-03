@@ -957,6 +957,33 @@ pub(super) fn launch_saved_connection(
     }
 }
 
+/// Resolves the provenance + auth material for reconnecting an SSH tab
+/// (P6.4): `Direct` (quick-connect) clones the cached [`SshAuthInput`]
+/// verbatim; `Credential` (tree-launched) re-resolves fresh via
+/// [`resolve_ssh_auth`] against the live credential store -- the fetched
+/// secret never lingers in `Tab` state longer than one connect attempt.
+/// Pure and mock-testable (no live `AppWindow`/session needed) -- extracted
+/// from [`wire_reconnect`]'s inline match (prep for an upcoming RDP
+/// reconnect counterpart; no behavior change here).
+fn resolve_ssh_reconnect(
+    ci: &SshConnectInfo,
+    connections: &[Connection],
+    groups: &[Group],
+    secrets: &dyn cm_core::CredentialStore,
+) -> (AuthProvenance, Result<SshAuthInput, AuthResolveError>) {
+    match &ci.auth_source {
+        SshAuthSource::Direct(a) => (AuthProvenance::Direct, Ok(a.clone())),
+        SshAuthSource::Credential(conn_id) => {
+            let result = connections
+                .iter()
+                .find(|c| c.id == *conn_id)
+                .ok_or(AuthResolveError::NoCredentialAssigned)
+                .and_then(|c| resolve_ssh_auth(c, groups, &ci.settings, secrets));
+            (AuthProvenance::Credential(*conn_id), result)
+        }
+    }
+}
+
 fn wire_reconnect(ctx: &Ctx) {
     ctx.ui.on_reconnect({
         let state = ctx.state.clone();
@@ -977,26 +1004,12 @@ fn wire_reconnect(ctx: &Ctx) {
                     .and_then(|t| t.connect_info.as_ref())
                     .map(|ci| {
                         let settings = ci.settings.clone();
-                        let (provenance, auth_result) = match &ci.auth_source {
-                            SshAuthSource::Direct(a) => (AuthProvenance::Direct, Ok(a.clone())),
-                            SshAuthSource::Credential(conn_id) => {
-                                let result = st
-                                    .conn_tree
-                                    .connections()
-                                    .iter()
-                                    .find(|c| c.id == *conn_id)
-                                    .ok_or(AuthResolveError::NoCredentialAssigned)
-                                    .and_then(|c| {
-                                        resolve_ssh_auth(
-                                            c,
-                                            st.conn_tree.groups(),
-                                            &settings,
-                                            secrets.as_ref(),
-                                        )
-                                    });
-                                (AuthProvenance::Credential(*conn_id), result)
-                            }
-                        };
+                        let (provenance, auth_result) = resolve_ssh_reconnect(
+                            ci,
+                            st.conn_tree.connections(),
+                            st.conn_tree.groups(),
+                            secrets.as_ref(),
+                        );
                         (idx, settings, provenance, auth_result)
                     })
             };
@@ -2287,5 +2300,58 @@ mod tests {
         let err = resolve_rdp_auth(&conn, &[], &settings, &store)
             .expect_err("should fail: keychain has no entry");
         assert_eq!(err, AuthResolveError::NotFoundInKeychain);
+    }
+
+    // -- resolve_ssh_reconnect (extracted from wire_reconnect's inline match) --
+
+    #[test]
+    fn resolve_ssh_reconnect_direct_clones_the_cached_auth() {
+        let ci = SshConnectInfo {
+            settings: ssh_settings(SshAuthMethod::Password),
+            auth_source: SshAuthSource::Direct(SshAuthInput::Password(Secret::from_string(
+                "typed-pw".to_owned(),
+            ))),
+        };
+        let store = MockCredentialStore::new();
+        let (provenance, auth) = resolve_ssh_reconnect(&ci, &[], &[], &store);
+        assert!(matches!(provenance, AuthProvenance::Direct));
+        match auth.expect("direct auth always resolves") {
+            SshAuthInput::Password(s) => assert_eq!(s.expose(), b"typed-pw"),
+            other => panic!("expected Password, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_ssh_reconnect_credential_reresolves_fresh() {
+        let conn = make_ssh_conn(None, Some(1), SshAuthMethod::Password);
+        let ci = SshConnectInfo {
+            settings: ssh_settings(SshAuthMethod::Password),
+            auth_source: SshAuthSource::Credential(conn.id),
+        };
+        let store = MockCredentialStore::new().with(
+            CredentialId::new(1),
+            CredentialPurpose::Password,
+            "fresh-pw",
+        );
+        let (provenance, auth) = resolve_ssh_reconnect(&ci, &[conn], &[], &store);
+        assert!(matches!(provenance, AuthProvenance::Credential(_)));
+        match auth.expect("credential resolves from the mock store") {
+            SshAuthInput::Password(s) => assert_eq!(s.expose(), b"fresh-pw"),
+            other => panic!("expected Password, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_ssh_reconnect_credential_missing_connection_fails() {
+        let ci = SshConnectInfo {
+            settings: ssh_settings(SshAuthMethod::Password),
+            auth_source: SshAuthSource::Credential(ConnectionId::new(404)),
+        };
+        let store = MockCredentialStore::new();
+        let (_, auth) = resolve_ssh_reconnect(&ci, &[], &[], &store);
+        assert_eq!(
+            auth.expect_err("connection no longer exists"),
+            AuthResolveError::NoCredentialAssigned
+        );
     }
 }

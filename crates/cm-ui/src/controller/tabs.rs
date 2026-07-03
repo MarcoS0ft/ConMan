@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use cm_core::LocalSettings;
 use cm_session::{LocalTerminalSession, PaneGroup, Session, SessionStatus, Surface};
 use slint::{ComponentHandle, Model, SharedString, TimerMode, VecModel};
 
@@ -210,6 +211,20 @@ fn open_local_tab_inner(
         let st = state.borrow();
         (st.current_grid(), st.local_settings.clone())
     };
+    spawn_local_tab(state, tab_model, ui, ls, size, is_empty);
+}
+
+/// Shared tail of [`open_local_tab_inner`]. Pure code extraction (P6.12 prep)
+/// -- no behavior change for its one current caller; a second caller lands
+/// in a follow-up change.
+fn spawn_local_tab(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    ls: LocalSettings,
+    size: TerminalSize,
+    is_empty: bool,
+) {
     let session = match LocalTerminalSession::spawn(&ls, size) {
         Ok(s) => s,
         Err(e) => {
