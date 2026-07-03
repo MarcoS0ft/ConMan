@@ -261,6 +261,11 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     let scale = ui.window().scale_factor();
 
+    // P6.8 (gap 10): push the real OS accent into `Theme.os-accent-color` before any
+    // persisted settings are applied, so a persisted "OS accent" selection resolves to
+    // a live color immediately rather than the compiled-in Slint default.
+    util::push_os_accent(&ui, cm_platform::accent::os_accent());
+
     let tab_model: Rc<VecModel<TabItem>> = Rc::new(VecModel::default());
     ui.set_tabs(ModelRc::from(tab_model.clone()));
 
@@ -389,6 +394,22 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     // -- P6.2b: in-app QA endpoint (feature-gated, off by default) ------------
     #[cfg(feature = "qa-harness")]
     qa_harness::wire_qa_harness(&ctx);
+
+    // P6.8 (gap 10): best-effort live OS accent-change watch. `watch_os_accent`
+    // is a no-op (returns `false`, spawns nothing) on platforms/desktops with no
+    // such signal (Windows in this pass, Linux without a portal) -- `os_accent()`
+    // above already covered the startup value for those.
+    {
+        let weak = ctx.ui.as_weak();
+        cm_platform::accent::watch_os_accent(move |color| {
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    util::push_os_accent(&ui, color);
+                }
+            });
+        });
+    }
 
     // P6.16: single-instance activation — a second `conman` launch asked us to
     // come to the foreground. The composition root already validated the

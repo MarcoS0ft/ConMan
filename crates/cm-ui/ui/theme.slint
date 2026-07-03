@@ -127,6 +127,18 @@ export global Theme {
   // Curated preset options shown in the Settings › Appearance accent picker.
   out property <[color]> accent-presets: [#3b82f6, #2dd4bf, #3fb950, #a78bfa];
 
+  // ── OS accent (P6.8, gap 10) ────────────────────────────────────────────
+  // The live OS accent color, written once at startup (and live, on the OS
+  // accent-change signal where the platform supports it) via
+  // `AppWindow.set-os-accent()` -- see `cm_platform::accent`. NOT folded into
+  // `accent-presets` because it isn't a fixed preset color, it tracks a
+  // runtime value. The reserved "OS accent" swatch in Settings sets `accent`
+  // to this; `os-accent-index` is the sentinel `accent-index` value that
+  // selection uses for it (one past the last preset, computed rather than a
+  // literal so it never drifts if presets are added/removed).
+  in-out property <color> os-accent-color: #3b82f6;
+  out property <int> os-accent-index: accent-presets.length;
+
   // Segoe UI = Windows system font (our primary platform); falls back elsewhere.
   out property <string> font-family:       "Segoe UI";
   // Mono = the bundled Nerd Font shared with the terminal renderer (P2.3).

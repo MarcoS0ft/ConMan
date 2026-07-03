@@ -70,6 +70,14 @@ pub(super) fn terminal_theme_for(ui: &AppWindow) -> TerminalTheme {
     }
 }
 
+/// Push an OS-read accent color (P6.8, gap 10; see `cm_platform::accent`) into
+/// the live `Theme.os-accent-color` Slint global via the `set-os-accent`
+/// callback — used both at startup and from the best-effort live accent-change
+/// watch.
+pub(super) fn push_os_accent(ui: &AppWindow, color: cm_platform::accent::AccentColor) {
+    ui.invoke_set_os_accent(slint::Color::from_rgb_u8(color.r, color.g, color.b));
+}
+
 pub(super) fn grid_for(
     r: &TerminalRenderer,
     logical_w: f32,
