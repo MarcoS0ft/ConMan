@@ -43,6 +43,7 @@ pub use libghostty::{EngineError, LibghosttyEngine};
 pub use local::{LocalTerminalSession, SessionError};
 #[cfg(feature = "engine-libghostty")]
 pub use ssh::{
-    HostKeyDecision, HostKeyInfo, HostKeySituation, HostKeyVerifier, KnownHostSource, KnownHosts,
-    SshAuthInput, SshError, SshTerminalSession,
+    HostKeyDecision, HostKeyInfo, HostKeySituation, HostKeyVerifier, KbdInteractiveChallenge,
+    KbdInteractiveHandler, KbdInteractivePrompt, KnownHostSource, KnownHosts, SshAuthInput,
+    SshError, SshTerminalSession,
 };
