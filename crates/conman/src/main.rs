@@ -28,10 +28,12 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use cm_core::ConnectionRepository as _;
+use cm_core::SettingsService;
 use cm_platform::app_db_path;
 use cm_platform::single_instance::{self, AcquireOutcome};
 use cm_secrets::KeyringStore;
-use cm_storage::{SettingsService, SqliteRepository};
+use cm_session::SessionProviderImpl;
+use cm_storage::SqliteRepository;
 use cm_ui::AppConfig;
 
 // Pull the backend/renderer features into the shared `slint` build.
@@ -149,9 +151,13 @@ fn build_config(
     // ── Credential store (OS keychain) ─────────────────────────────────────
     let secrets: Arc<dyn cm_core::CredentialStore> = Arc::new(KeyringStore::new());
 
+    // ── Session provider (P6.15, gap 27) ────────────────────────────────────
+    let session_provider: Arc<dyn cm_core::SessionProvider> = Arc::new(SessionProviderImpl::new());
+
     Ok(AppConfig {
         repo,
         secrets,
+        session_provider,
         activation_rx,
         first_launch,
     })

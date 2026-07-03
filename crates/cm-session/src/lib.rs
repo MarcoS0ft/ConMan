@@ -47,3 +47,13 @@ pub use ssh::{
     KbdInteractiveHandler, KbdInteractivePrompt, KnownHostSource, KnownHosts, SshAuthInput,
     SshError, SshTerminalSession,
 };
+
+// P6.15: the `SessionProvider` port adapter needs `LocalTerminalSession`
+// (local.rs) and `SshTerminalSession` (ssh.rs), both gated on
+// `engine-libghostty` — so the adapter is gated the same way (mirrors the
+// existing "zig-free build has no complete session story yet" shape; see
+// AI_GUIDANCE.md's `--no-default-features` note).
+#[cfg(feature = "engine-libghostty")]
+mod provider;
+#[cfg(feature = "engine-libghostty")]
+pub use provider::SessionProviderImpl;

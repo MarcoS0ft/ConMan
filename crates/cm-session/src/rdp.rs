@@ -77,10 +77,18 @@ use ironrdp_tokio::{TokioFramed, connect_begin, connect_finalize, mark_as_upgrad
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use cm_core::{RdpSettings, Secret};
+use cm_core::RdpSettings;
 
 use crate::session::{
     FrameUpdate, RdpInputEvent, RdpMouseButton, Session, SessionInput, SessionStatus, Surface,
+};
+// P6.15: the auth-input and cert-verifier *contract* types moved to
+// `cm_core::rdp` (needed by the `SessionProvider` port, which must be
+// nameable from `cm-core` without a cm-core -> cm-session dependency). Only
+// `CertStore` (real file I/O) stays here. Re-exported so external callers
+// (`cm-ui`) keep importing them as `cm_session::{...}` unchanged.
+pub use cm_core::rdp::{
+    CertDecision, CertInfo, CertSituation, CertVerifier, KnownCertSource, RdpAuthInput,
 };
 
 // ---------------------------------------------------------------------------
@@ -108,53 +116,6 @@ fn install_ring_provider() {
 // ---------------------------------------------------------------------------
 // Certificate verification
 // ---------------------------------------------------------------------------
-
-/// Which store a previously-seen RDP certificate came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KnownCertSource {
-    /// ConMan's own cert store.
-    ConManStore,
-}
-
-/// The situation presented to the verifier for a certificate needing a decision.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CertSituation {
-    /// No prior record for this host.
-    Unknown,
-    /// A prior record exists but the presented cert differs (possible MITM).
-    Mismatch {
-        stored_fingerprint: String,
-        source: KnownCertSource,
-    },
-}
-
-/// Details of a certificate awaiting user decision (prompt UI = P4.2).
-#[derive(Debug, Clone)]
-pub struct CertInfo {
-    pub host: String,
-    pub port: u16,
-    /// SHA-256 fingerprint (`SHA256:<hex>`).
-    pub fingerprint: String,
-    /// DER-encoded certificate subject.
-    pub subject: String,
-    pub situation: CertSituation,
-}
-
-/// The user's decision for an unknown or changed server certificate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CertDecision {
-    /// Accept and remember this certificate for future connections.
-    AcceptAndRemember,
-    /// Reject and abort the connection.
-    Reject,
-}
-
-/// Decides whether to trust an unknown/changed server certificate.
-///
-/// In P4.2 this is backed by the host-key dialog; in tests it is programmatic.
-pub trait CertVerifier: Send + Sync {
-    fn decide(&self, info: &CertInfo) -> CertDecision;
-}
 
 /// Programmatic verifier for tests: always returns a fixed decision.
 #[derive(Debug)]
@@ -262,36 +223,19 @@ impl CertStore {
 }
 
 // ---------------------------------------------------------------------------
-// Auth input
-// ---------------------------------------------------------------------------
-
-/// RDP authentication credentials.
-///
-/// The password is stored as [`Secret`] (zeroized on drop) mirroring the SSH
-/// session pattern. It is converted to `String` only at the IronRDP boundary
-/// inside `connect()`, immediately before being moved into
-/// [`ironrdp_connector::Credentials`].
-#[derive(Debug, Clone)]
-pub struct RdpAuthInput {
-    pub username: String,
-    pub password: Secret,
-    pub domain: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
 // RdpMouseButton → ironrdp-input MouseButton conversion (P4.1; types moved to
-// session.rs in P4.2 so SessionInput can reference them without circular deps)
+// cm-core in P6.15 — `RdpMouseButton` is no longer local to this crate, so a
+// trait impl of the foreign `From` for the foreign `MouseButton` would
+// violate the orphan rule (E0117); a local free function sidesteps that.)
 // ---------------------------------------------------------------------------
 
-impl From<RdpMouseButton> for MouseButton {
-    fn from(b: RdpMouseButton) -> Self {
-        match b {
-            RdpMouseButton::Left => MouseButton::Left,
-            RdpMouseButton::Middle => MouseButton::Middle,
-            RdpMouseButton::Right => MouseButton::Right,
-            RdpMouseButton::X1 => MouseButton::X1,
-            RdpMouseButton::X2 => MouseButton::X2,
-        }
+fn to_ironrdp_mouse_button(b: RdpMouseButton) -> MouseButton {
+    match b {
+        RdpMouseButton::Left => MouseButton::Left,
+        RdpMouseButton::Middle => MouseButton::Middle,
+        RdpMouseButton::Right => MouseButton::Right,
+        RdpMouseButton::X1 => MouseButton::X1,
+        RdpMouseButton::X2 => MouseButton::X2,
     }
 }
 
@@ -622,6 +566,13 @@ impl Session for RdpSession {
             // P6.7: scrollback is a terminal-surface concept; RDP has none.
             SessionInput::Scroll(_) => {}
         }
+    }
+
+    /// P6.15: was a public field (`RdpSession::remote_clipboard`) `cm-ui`
+    /// read directly; now a trait method so it's reachable through
+    /// `Box<dyn Session>` (the `SessionProvider` port's return type).
+    fn remote_clipboard(&self) -> Option<Arc<Mutex<Option<String>>>> {
+        Some(Arc::clone(&self.remote_clipboard))
     }
 }
 
@@ -1185,10 +1136,10 @@ fn rdp_event_to_operation(event: RdpInputEvent) -> InputOperation {
             // ironrdp-input's Database tracks cursor position from previous
             // MouseMove operations. Callers should send MouseMove before
             // MouseDown to position the click correctly.
-            InputOperation::MouseButtonPressed(MouseButton::from(button))
+            InputOperation::MouseButtonPressed(to_ironrdp_mouse_button(button))
         }
         RdpInputEvent::MouseUp { button, .. } => {
-            InputOperation::MouseButtonReleased(MouseButton::from(button))
+            InputOperation::MouseButtonReleased(to_ironrdp_mouse_button(button))
         }
         RdpInputEvent::Scroll {
             delta,
@@ -1222,6 +1173,9 @@ fn publish_frame(image: &DecodedImage, tx: &SyncSender<FrameUpdate>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only used to build `RdpAuthInput` values in these tests — the
+    // production path never converts a `Secret` outside `connect()` itself.
+    use cm_core::Secret;
 
     // ---------------------------------------------------------------------------
     // CertStore tests
@@ -1318,8 +1272,14 @@ mod tests {
 
     #[test]
     fn mouse_button_conversion() {
-        assert_eq!(MouseButton::from(RdpMouseButton::Left), MouseButton::Left);
-        assert_eq!(MouseButton::from(RdpMouseButton::Right), MouseButton::Right);
+        assert_eq!(
+            to_ironrdp_mouse_button(RdpMouseButton::Left),
+            MouseButton::Left
+        );
+        assert_eq!(
+            to_ironrdp_mouse_button(RdpMouseButton::Right),
+            MouseButton::Right
+        );
     }
 
     // ---------------------------------------------------------------------------

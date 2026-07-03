@@ -10,8 +10,20 @@
 //! - Values are stored as their `Display` string; parsing is infallible —
 //!   on parse failure the default is returned (untrusted DB content).
 //! - No `unwrap` / `panic` on I/O paths (CONVENTIONS §2.2).
+//!
+//! **P6.15:** moved here from `cm-storage::settings` — this module only ever
+//! depended on the [`ConnectionRepository`] *port*, never on the concrete
+//! SQLite adapter, so it belongs in `cm-core` with the rest of the port
+//! surface (gap 27 cont. — cuts the `cm-ui` → `cm-storage` concrete edge for
+//! `SettingsService`/`AppSettings`; see
+//! `docs/devel/memos/P6.15-sessionprovider-port.md`). Named `app_settings`
+//! (not `settings`) to avoid colliding with `cm-core`'s existing, unrelated
+//! private `settings` module (`ConnectionSettings`/`RdpSettings`/
+//! `SshSettings` — per-connection-kind settings, not app-wide preferences).
 
-use cm_core::{ConnectionId, ConnectionRepository, RepositoryError};
+use crate::error::RepositoryError;
+use crate::ids::ConnectionId;
+use crate::ports::ConnectionRepository;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -19,39 +31,39 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Theme mode: "0" dark, "1" light, "2" system.
-pub const KEY_THEME_MODE: &str = "ui.theme_mode";
+pub(crate) const KEY_THEME_MODE: &str = "ui.theme_mode";
 /// Accent preset index (into `Theme.accent-presets`).
-pub const KEY_ACCENT_INDEX: &str = "ui.accent_index";
+pub(crate) const KEY_ACCENT_INDEX: &str = "ui.accent_index";
 /// Density preset: "0" compact, "1" cosy.
-pub const KEY_DENSITY: &str = "ui.density";
+pub(crate) const KEY_DENSITY: &str = "ui.density";
 /// Terminal font size in pt (integer string).
-pub const KEY_FONT_SIZE: &str = "terminal.font_size";
+pub(crate) const KEY_FONT_SIZE: &str = "terminal.font_size";
 /// Default local shell executable path (may be empty).
-pub const KEY_SHELL_PATH: &str = "terminal.shell_path";
+pub(crate) const KEY_SHELL_PATH: &str = "terminal.shell_path";
 /// Extra shell arguments (space-separated; may be empty).
-pub const KEY_SHELL_ARGS: &str = "terminal.shell_args";
+pub(crate) const KEY_SHELL_ARGS: &str = "terminal.shell_args";
 /// Default working directory for local sessions (may be empty = home).
-pub const KEY_SHELL_CWD: &str = "terminal.shell_cwd";
+pub(crate) const KEY_SHELL_CWD: &str = "terminal.shell_cwd";
 /// Startup behavior: "0" clean start, "1" restore last session.
-pub const KEY_STARTUP_BEHAVIOR: &str = "ui.startup_behavior";
+pub(crate) const KEY_STARTUP_BEHAVIOR: &str = "ui.startup_behavior";
 /// Last active side-panel index (0 Connections, 1 Keys, 2 Settings).
-pub const KEY_ACTIVE_PANEL: &str = "ui.active_panel";
+pub(crate) const KEY_ACTIVE_PANEL: &str = "ui.active_panel";
 /// Sidebar collapsed: "0" visible, "1" collapsed.
-pub const KEY_SIDEBAR_COLLAPSED: &str = "ui.sidebar_collapsed";
+pub(crate) const KEY_SIDEBAR_COLLAPSED: &str = "ui.sidebar_collapsed";
 /// Side-panel width in logical px (integer string). P6.9 gap 11: the
 /// `side-panel-width` token comment promised this persistence since P5.2.
-pub const KEY_SIDE_PANEL_WIDTH: &str = "ui.side_panel_width";
+pub(crate) const KEY_SIDE_PANEL_WIDTH: &str = "ui.side_panel_width";
 /// First-run demo data seeded: "1" = already seeded, absent / "0" = not yet.
 /// Gating on this setting (rather than `list_groups().is_empty()`) prevents
 /// re-seeding when the user intentionally deletes all groups (CONVENTIONS §P1.5).
-pub const KEY_FIRST_RUN_SEEDED: &str = "app.first_run_seeded";
+pub(crate) const KEY_FIRST_RUN_SEEDED: &str = "app.first_run_seeded";
 /// Persisted "restore last session" tab snapshot (P6.14, gap 4) — a JSON
 /// [`SessionTabSnapshot`]. Absent, empty, or malformed all mean "nothing to
 /// restore" (see [`SettingsService::load_session_tabs`]). Reuses the existing
 /// `settings` key/value store rather than a new table: this is a single,
 /// wholesale-replaced blob (never queried/filtered in SQL), unlike `recents`
 /// which needs per-row upsert + ordering (see the schema memo).
-pub const KEY_SESSION_TABS: &str = "ui.session_tabs";
+pub(crate) const KEY_SESSION_TABS: &str = "ui.session_tabs";
 
 // ---------------------------------------------------------------------------
 // AppSettings — the loaded settings snapshot
@@ -308,10 +320,138 @@ impl<'a> SettingsService<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SqliteRepository;
+    use crate::connection::{Connection, Group};
+    use crate::credential::{Credential, CredentialFolder};
+    use crate::error::RepositoryError;
+    use crate::ids::{CredentialFolderId, CredentialId, GroupId};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
-    fn fresh() -> SqliteRepository {
-        SqliteRepository::open_in_memory().expect("in-memory repo")
+    /// Minimal in-memory [`ConnectionRepository`] fake, settings-only (P6.15:
+    /// `app_settings` moved from `cm-storage` to `cm-core`, which cannot
+    /// depend on `cm-storage::SqliteRepository` — that would be a
+    /// cm-core -> cm-storage dependency, the wrong direction). Every method
+    /// besides `get_setting`/`set_setting` is a harmless stub; nothing in
+    /// this test module calls them (mirrors the stub style already used by
+    /// `cm-core/tests/domain.rs`'s own `InMemoryRepo`).
+    #[derive(Default)]
+    struct FakeRepo {
+        settings: Mutex<HashMap<String, String>>,
+    }
+
+    impl ConnectionRepository for FakeRepo {
+        fn list_connections(&self) -> Result<Vec<Connection>, RepositoryError> {
+            Ok(Vec::new())
+        }
+        fn get_connection(&self, _id: ConnectionId) -> Result<Option<Connection>, RepositoryError> {
+            Ok(None)
+        }
+        fn upsert_connection(&self, _conn: &Connection) -> Result<ConnectionId, RepositoryError> {
+            Err(RepositoryError::Backend(
+                "not implemented in FakeRepo".into(),
+            ))
+        }
+        fn delete_connection(&self, _id: ConnectionId) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+        fn move_connection(
+            &self,
+            _id: ConnectionId,
+            _new_group: Option<GroupId>,
+            _new_sort: i64,
+        ) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+        fn list_groups(&self) -> Result<Vec<Group>, RepositoryError> {
+            Ok(Vec::new())
+        }
+        fn get_group(&self, _id: GroupId) -> Result<Option<Group>, RepositoryError> {
+            Ok(None)
+        }
+        fn upsert_group(&self, _group: &Group) -> Result<GroupId, RepositoryError> {
+            Err(RepositoryError::Backend(
+                "not implemented in FakeRepo".into(),
+            ))
+        }
+        fn delete_group(&self, _id: GroupId) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+        fn move_group(
+            &self,
+            _id: GroupId,
+            _new_parent: Option<GroupId>,
+            _new_sort: i64,
+        ) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+        fn list_credentials(&self) -> Result<Vec<Credential>, RepositoryError> {
+            Ok(Vec::new())
+        }
+        fn get_credential(&self, _id: CredentialId) -> Result<Option<Credential>, RepositoryError> {
+            Ok(None)
+        }
+        fn upsert_credential(&self, _cred: &Credential) -> Result<CredentialId, RepositoryError> {
+            Err(RepositoryError::Backend(
+                "not implemented in FakeRepo".into(),
+            ))
+        }
+        fn delete_credential(&self, _id: CredentialId) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+        fn list_credential_folders(&self) -> Result<Vec<CredentialFolder>, RepositoryError> {
+            Ok(Vec::new())
+        }
+        fn get_credential_folder(
+            &self,
+            _id: CredentialFolderId,
+        ) -> Result<Option<CredentialFolder>, RepositoryError> {
+            Ok(None)
+        }
+        fn upsert_credential_folder(
+            &self,
+            _folder: &CredentialFolder,
+        ) -> Result<CredentialFolderId, RepositoryError> {
+            Err(RepositoryError::Backend(
+                "not implemented in FakeRepo".into(),
+            ))
+        }
+        fn delete_credential_folder(&self, _id: CredentialFolderId) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+        fn move_credential_folder(
+            &self,
+            _id: CredentialFolderId,
+            _new_parent: Option<CredentialFolderId>,
+            _new_sort: i64,
+        ) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+        fn resolve_effective_credential(
+            &self,
+            _conn_id: ConnectionId,
+        ) -> Result<Option<CredentialId>, RepositoryError> {
+            Ok(None)
+        }
+        fn get_setting(&self, key: &str) -> Result<Option<String>, RepositoryError> {
+            Ok(self.settings.lock().unwrap().get(key).cloned())
+        }
+        fn set_setting(&self, key: &str, value: &str) -> Result<(), RepositoryError> {
+            self.settings
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+        fn record_recent(&self, _id: ConnectionId, _opened_at: i64) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+        fn list_recents(&self, _limit: usize) -> Result<Vec<(ConnectionId, i64)>, RepositoryError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn fresh() -> FakeRepo {
+        FakeRepo::default()
     }
 
     #[test]

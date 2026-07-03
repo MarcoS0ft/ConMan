@@ -24,9 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cm_core::terminal::{GridSnapshot, TerminalSize};
-use cm_core::{LocalSettings, RdpSettings, SshSettings};
+use cm_core::{LocalSettings, RdpSettings, SessionProvider, SettingsService, SshSettings};
 use cm_session::{CertDecision, HostKeyDecision, PaneGroup, RdpAuthInput, Session, SshAuthInput};
-use cm_storage::SettingsService;
 use slint::{ComponentHandle, Image, ModelRc, SharedString, Timer, VecModel};
 
 use crate::clipboard::Clipboard;
@@ -251,6 +250,11 @@ struct State {
     // outside this lane this wave — don't need to change. See
     // `import_export.rs`.
     io: import_export::ImportExportHandles,
+    /// P6.15 (gap 27): establishes live sessions for local/SSH/RDP tabs.
+    /// Lives on `State` (like `io` above) so every tab-open/reconnect
+    /// function — all of which already take `state: &Rc<RefCell<State>>`,
+    /// not the wider `Ctx` — can reach it without widening their signatures.
+    session_provider: Arc<dyn SessionProvider>,
     /// P6.14: the Slint list-model backing `launchpad-recents`. Lives on
     /// `State` (like `io` above) so both the tab-lifecycle code that shows
     /// the Launchpad (`tabs::open_local_tab_inner`) and the Launchpad's own
@@ -347,6 +351,7 @@ struct Ctx {
 pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     let repo = config.repo;
     let secrets = config.secrets;
+    let session_provider = config.session_provider;
     let activation_rx = config.activation_rx;
     let first_launch = config.first_launch;
 
@@ -398,7 +403,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("failed to load settings: {e}");
-                cm_storage::AppSettings::default()
+                cm_core::AppSettings::default()
             }
         }
     };
@@ -449,6 +454,8 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
             toast_model: toast_model.clone(),
             toast_next_id: toast_next_id.clone(),
         },
+        // P6.15: see the field doc comment.
+        session_provider,
         // P6.14: see the field doc comment.
         launchpad_recents_model: launchpad_recents_model.clone(),
         // P6.11: see the field doc comment.
