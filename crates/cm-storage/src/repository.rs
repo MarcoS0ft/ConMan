@@ -631,6 +631,41 @@ impl ConnectionRepository for SqliteRepository {
         .map_err(map_err)?;
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // Recents (P6.14 — Launchpad)
+    // -----------------------------------------------------------------------
+
+    fn record_recent(&self, id: ConnectionId, opened_at: i64) -> Result<(), RepositoryError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO recents (connection_id, opened_at) VALUES (?1, ?2) \
+             ON CONFLICT(connection_id) DO UPDATE SET opened_at = excluded.opened_at",
+            rusqlite::params![id.get(), opened_at],
+        )
+        .map_err(map_err)?;
+        Ok(())
+    }
+
+    fn list_recents(&self, limit: usize) -> Result<Vec<(ConnectionId, i64)>, RepositoryError> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT connection_id, opened_at FROM recents ORDER BY opened_at DESC LIMIT ?1",
+            )
+            .map_err(map_err)?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = stmt
+            .query_map(rusqlite::params![limit], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(map_err)?;
+        rows.map(|r| {
+            r.map(|(id, ts)| (ConnectionId::new(id), ts))
+                .map_err(map_err)
+        })
+        .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -971,5 +1006,72 @@ mod tests {
                 .expect("setting present");
             assert_eq!(val, "persist-value");
         }
+    }
+
+    // ── P6.14: recents ───────────────────────────────────────────────────
+
+    fn mk_local_conn(repo: &SqliteRepository, name: &str) -> ConnectionId {
+        use cm_core::{Connection, ConnectionKind, ConnectionSettings, LocalSettings};
+        let conn = Connection::new(
+            ConnectionId::UNSAVED,
+            None,
+            name.to_owned(),
+            ConnectionKind::LocalTerminal,
+            ConnectionSettings::Local(LocalSettings::default()),
+            None,
+            0,
+            0,
+            0,
+        )
+        .expect("build connection");
+        repo.upsert_connection(&conn).expect("upsert connection")
+    }
+
+    #[test]
+    fn list_recents_orders_most_recent_first() {
+        let repo = SqliteRepository::open_in_memory().expect("open");
+        let a = mk_local_conn(&repo, "a");
+        let b = mk_local_conn(&repo, "b");
+        let c = mk_local_conn(&repo, "c");
+
+        repo.record_recent(a, 100).expect("record a");
+        repo.record_recent(b, 300).expect("record b");
+        repo.record_recent(c, 200).expect("record c");
+
+        let recents = repo.list_recents(10).expect("list recents");
+        assert_eq!(recents, vec![(b, 300), (c, 200), (a, 100)]);
+    }
+
+    #[test]
+    fn record_recent_replaces_earlier_timestamp_not_duplicates() {
+        let repo = SqliteRepository::open_in_memory().expect("open");
+        let a = mk_local_conn(&repo, "a");
+
+        repo.record_recent(a, 100).expect("record a first");
+        repo.record_recent(a, 500).expect("record a again");
+
+        let recents = repo.list_recents(10).expect("list recents");
+        assert_eq!(recents, vec![(a, 500)], "one row, latest timestamp wins");
+    }
+
+    #[test]
+    fn list_recents_respects_limit() {
+        let repo = SqliteRepository::open_in_memory().expect("open");
+        for i in 0..5 {
+            let id = mk_local_conn(&repo, &format!("c{i}"));
+            repo.record_recent(id, i64::from(i)).expect("record");
+        }
+        let recents = repo.list_recents(2).expect("list recents");
+        assert_eq!(recents.len(), 2);
+    }
+
+    #[test]
+    fn deleting_a_connection_removes_its_recents_row() {
+        let repo = SqliteRepository::open_in_memory().expect("open");
+        let a = mk_local_conn(&repo, "a");
+        repo.record_recent(a, 100).expect("record a");
+        repo.delete_connection(a).expect("delete connection");
+        let recents = repo.list_recents(10).expect("list recents");
+        assert!(recents.is_empty(), "cascade-deleted recents row");
     }
 }

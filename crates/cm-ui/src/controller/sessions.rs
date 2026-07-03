@@ -854,6 +854,18 @@ pub(super) fn launch_saved_connection(
     conn: &Connection,
 ) {
     let conn_id = conn.id;
+    // P6.14: record this as a recently-opened connection for the Launchpad
+    // (recency only; best-effort -- a failure here never blocks or fails the
+    // connect attempt itself). This is the single shared entry point for
+    // every way of opening a saved connection (tree click,
+    // `CONMAN_TREE_AUTOLAUNCH`, the Launchpad's own "open recent", and
+    // session restore), so recording it here covers all of them once.
+    {
+        let repo = state.borrow().io.repo.clone();
+        if let Err(e) = repo.record_recent(conn_id, crate::tree::now_secs()) {
+            tracing::warn!("record_recent: {e}");
+        }
+    }
     // P6.9 (gap 16): remember which stored profile this tab came from so the
     // ErrorOverlay "Edit…" button can reopen it on failure.
     let origin_connection_id = Some(conn.id.get() as i32);
@@ -1273,6 +1285,7 @@ fn push_auth_failed_tab(
             title,
             initial_status: "error",
             origin_connection_id,
+            is_empty: false,
         },
     );
     ui.set_session_identity(SharedString::from(identity));
@@ -1346,6 +1359,7 @@ pub(super) fn open_ssh_tab(
                     title,
                     initial_status: "connecting",
                     origin_connection_id,
+                    is_empty: false,
                 },
             );
             ui.set_session_identity(SharedString::from(identity));
@@ -1412,6 +1426,7 @@ pub(super) fn open_rdp_tab(
             title,
             initial_status: "connecting",
             origin_connection_id,
+            is_empty: false,
         },
     );
     ui.set_session_identity(SharedString::from(identity));

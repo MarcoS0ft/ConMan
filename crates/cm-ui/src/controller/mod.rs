@@ -26,7 +26,7 @@ use cm_core::terminal::{GridSnapshot, TerminalSize};
 use cm_core::{LocalSettings, SshSettings};
 use cm_session::{CertDecision, HostKeyDecision, PaneGroup, Session, SshAuthInput};
 use cm_storage::SettingsService;
-use slint::{ComponentHandle, Image, ModelRc, Timer, VecModel};
+use slint::{ComponentHandle, Image, ModelRc, SharedString, Timer, VecModel};
 
 use crate::clipboard::Clipboard;
 use crate::keys::KeysPanel;
@@ -39,6 +39,7 @@ mod util;
 
 mod import_export;
 mod keys_ctl;
+mod launchpad;
 mod overlays;
 mod palette;
 mod panes;
@@ -46,6 +47,7 @@ mod panes;
 mod qa_harness;
 mod sessions;
 mod settings_ctl;
+mod startup;
 mod tabs;
 mod tree_ctl;
 
@@ -154,6 +156,14 @@ struct Tab {
     /// see `selection lifecycle` in `docs/devel/tasks/
     /// P6.5-terminal-selection-copy-paste.md`.
     last_focused_pane: usize,
+    /// P6.14 (gap 3): `true` for the Launchpad-fronted "home" tab -- a plain
+    /// local shell underneath, shown instead of a bare terminal until the
+    /// user picks something from the Launchpad. Set on the tab opened for a
+    /// non-first-launch empty workspace and for a tab created by closing the
+    /// last real tab ("explicitly emptied"); `false` for every real session
+    /// tab (never persisted into the restore-last-session snapshot -- see
+    /// `startup::persist_session_tabs`).
+    is_empty: bool,
 }
 
 struct State {
@@ -190,6 +200,12 @@ struct State {
     // outside this lane this wave — don't need to change. See
     // `import_export.rs`.
     io: import_export::ImportExportHandles,
+    /// P6.14: the Slint list-model backing `launchpad-recents`. Lives on
+    /// `State` (like `io` above) so both the tab-lifecycle code that shows
+    /// the Launchpad (`tabs::open_local_tab_inner`) and the Launchpad's own
+    /// callbacks (`launchpad.rs`) can refresh it without widening every
+    /// intermediate function signature.
+    launchpad_recents_model: Rc<VecModel<crate::RecentItem>>,
 }
 
 impl State {
@@ -266,6 +282,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     let repo = config.repo;
     let secrets = config.secrets;
     let activation_rx = config.activation_rx;
+    let first_launch = config.first_launch;
 
     let ui = AppWindow::new()?;
     let scale = ui.window().scale_factor();
@@ -282,6 +299,11 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     let palette_model: Rc<VecModel<PaletteAction>> =
         Rc::new(VecModel::from(palette::initial_palette_actions()));
     ui.set_palette_actions(ModelRc::from(palette_model.clone()));
+
+    // P6.14: the Launchpad's recents list.
+    let launchpad_recents_model: Rc<VecModel<crate::RecentItem>> = Rc::new(VecModel::default());
+    ui.set_launchpad_recents(ModelRc::from(launchpad_recents_model.clone()));
+    ui.set_launchpad_greeting(SharedString::from(launchpad::current_greeting()));
 
     // P5.3b: toast model.
     let toast_model: Rc<VecModel<ToastEntry>> = Rc::new(VecModel::default());
@@ -347,6 +369,8 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
             toast_model: toast_model.clone(),
             toast_next_id: toast_next_id.clone(),
         },
+        // P6.14: see the field doc comment.
+        launchpad_recents_model: launchpad_recents_model.clone(),
     }));
 
     {
@@ -362,7 +386,34 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     let kbd_pending: KbdQueue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let resize_debounce = Rc::new(Timer::default());
 
-    tabs::open_local_tab(&state, &tab_model, &ui);
+    // -- Initial tab(s) (P6.14: gap 3 empty/launchpad home + gap 4 restore) --
+    // The very first-ever launch always opens a plain local shell (nothing to
+    // restore, no recents yet) -- established design, unchanged. Otherwise,
+    // "restore last session" (when enabled and there is something to
+    // restore) takes priority; that needs `ctx` (the credentialed connect
+    // path), so it runs just below, after `ctx` exists. A clean start, or a
+    // restore attempt with nothing usable to restore, lands on the
+    // Launchpad-fronted empty/home tab instead of blindly opening a shell.
+    let restore_snapshot = if first_launch {
+        None
+    } else if stored_settings.startup_behavior == 1 {
+        match SettingsService::new(repo.as_ref()).load_session_tabs() {
+            Ok(snap) => snap,
+            Err(e) => {
+                tracing::warn!("failed to load session-tab snapshot: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if first_launch {
+        tabs::open_local_tab(&state, &tab_model, &ui);
+    } else if restore_snapshot.is_none() {
+        tabs::open_empty_tab(&state, &tab_model, &ui);
+    }
+    // else: restored below once `ctx` exists.
 
     let ctx = Ctx {
         ui,
@@ -389,9 +440,14 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     settings_ctl::wire_settings_ctl(&ctx);
     palette::wire_palette(&ctx);
     overlays::wire_overlays(&ctx);
+    launchpad::wire_launchpad(&ctx);
 
     // -- Redraw timer ---------------------------------------------------------
     let _redraw = sessions::wire_tick(&ctx);
+
+    if let Some(snap) = restore_snapshot {
+        startup::restore_session_tabs(&ctx, snap);
+    }
 
     // -- Optional headless test hooks -----------------------------------------
     let mut hooks: Vec<Timer> = Vec::new();

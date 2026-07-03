@@ -15,7 +15,6 @@ pub(super) fn wire_overlays(ctx: &Ctx) {
     wire_sidebar_width_changed(ctx);
     wire_edit_failed_profile(ctx);
     wire_toast_dismissed(ctx);
-    wire_stub_callbacks(ctx);
 }
 
 fn wire_select_panel(ctx: &Ctx) {
@@ -127,13 +126,20 @@ fn wire_toast_dismissed(ctx: &Ctx) {
     });
 }
 
-fn wire_stub_callbacks(ctx: &Ctx) {
-    ctx.ui.on_launchpad_edited(|_q| {});
-    ctx.ui.on_open_recent(|_i| {});
-    ctx.ui.on_open_group_split(|| {});
-}
-
 pub(super) fn update_overlays_from_status(ui: &AppWindow, tab: &Tab, status: &SessionStatus) {
+    // P6.14 (gap 3): an "empty" tab (the Launchpad-fronted local shell used
+    // for the home/new-tab-without-a-live-session state) shows the Launchpad
+    // instead of the terminal for as long as its underlying shell reports
+    // Connected -- the only status a fresh local shell should ever be in.
+    // If it somehow isn't (spawn raced into a weird state), fall through to
+    // the normal handling below so the tab is never stuck invisible.
+    if tab.is_empty && matches!(status, SessionStatus::Connected) {
+        ui.set_overlay_connecting(false);
+        ui.set_overlay_error(false);
+        ui.set_launchpad_open(true);
+        ui.set_session_status(SharedString::from("connected"));
+        return;
+    }
     match status {
         SessionStatus::Connecting => {
             ui.set_overlay_connecting(true);

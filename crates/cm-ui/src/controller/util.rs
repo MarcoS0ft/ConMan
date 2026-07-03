@@ -116,6 +116,7 @@ pub(super) fn wire_env_hooks(ctx: &Ctx, hooks: &mut Vec<Timer>) {
     wire_autobroadcast(ctx);
     wire_autosidebarwidth(ctx);
     wire_autoimport(ctx, hooks);
+    wire_autoexport(ctx, hooks);
 }
 
 // P6.9 (gap 11) headless test hook: CONMAN_SIDEBAR_WIDTH=<px> — updates the
@@ -393,6 +394,33 @@ fn wire_autoimport(ctx: &Ctx, hooks: &mut Vec<Timer>) {
                 if let Some(ui) = weak.upgrade() {
                     import_export::run_import(&io, &state, &ui, std::path::Path::new(&path));
                 }
+            },
+        );
+        hooks.push(t);
+    }
+}
+
+// P6.17 finding F3: CONMAN_AUTOEXPORT=<path> — export the current tree to
+// the given JSON file shortly after startup, bypassing the native
+// file-save dialog (`import_export::run_export`, the same dialog-free half
+// `export_via_dialog` calls once a path is chosen). Mirrors
+// `CONMAN_AUTOIMPORT` exactly: exists so a headless gate can capture the
+// real post-export success/error toast and assert the on-disk JSON (esp.
+// secret exclusion) without a display-dependent, blocking native file
+// picker in CI (closes the P6.17 J15 gap).
+fn wire_autoexport(ctx: &Ctx, hooks: &mut Vec<Timer>) {
+    if let Ok(path) = std::env::var("CONMAN_AUTOEXPORT") {
+        let io = ctx.state.borrow().io.clone();
+        let delay = std::env::var("CONMAN_AUTOEXPORT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(600);
+        let t = Timer::default();
+        t.start(
+            TimerMode::SingleShot,
+            Duration::from_millis(delay),
+            move || {
+                import_export::run_export(&io, std::path::Path::new(&path));
             },
         );
         hooks.push(t);

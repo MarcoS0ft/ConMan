@@ -11,7 +11,8 @@
 //!   on parse failure the default is returned (untrusted DB content).
 //! - No `unwrap` / `panic` on I/O paths (CONVENTIONS §2.2).
 
-use cm_core::{ConnectionRepository, RepositoryError};
+use cm_core::{ConnectionId, ConnectionRepository, RepositoryError};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Key constants (single source of truth)
@@ -44,6 +45,13 @@ pub const KEY_SIDE_PANEL_WIDTH: &str = "ui.side_panel_width";
 /// Gating on this setting (rather than `list_groups().is_empty()`) prevents
 /// re-seeding when the user intentionally deletes all groups (CONVENTIONS §P1.5).
 pub const KEY_FIRST_RUN_SEEDED: &str = "app.first_run_seeded";
+/// Persisted "restore last session" tab snapshot (P6.14, gap 4) — a JSON
+/// [`SessionTabSnapshot`]. Absent, empty, or malformed all mean "nothing to
+/// restore" (see [`SettingsService::load_session_tabs`]). Reuses the existing
+/// `settings` key/value store rather than a new table: this is a single,
+/// wholesale-replaced blob (never queried/filtered in SQL), unlike `recents`
+/// which needs per-row upsert + ordering (see the schema memo).
+pub const KEY_SESSION_TABS: &str = "ui.session_tabs";
 
 // ---------------------------------------------------------------------------
 // AppSettings — the loaded settings snapshot
@@ -94,6 +102,35 @@ impl Default for AppSettings {
             side_panel_width: 252, // matches Theme.side-panel-width (cm-ui/ui/theme.slint)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Session-tab restore (P6.14, gap 4)
+// ---------------------------------------------------------------------------
+
+/// One restorable tab slot. Carries only what's needed to *reopen* a session,
+/// never live state or secrets:
+/// - `Local` — a plain local shell; restores as a fresh shell.
+/// - `Connection` — a tree-launched, stored connection; restores through the
+///   same credential-resolving connect path used everywhere else (the secret
+///   is fetched fresh from the keychain, never cached here).
+///
+/// Any tab without a resolvable stored connection (quick-connect, reattached
+/// sessions) is recorded as `Local` on save — there is nothing safe to
+/// replay for those without either caching a secret or re-prompting, and the
+/// task spec only asks for the tree-launched case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionTabEntry {
+    Local,
+    Connection(ConnectionId),
+}
+
+/// The full "last session" snapshot: an ordered tab list plus which one was
+/// active. `active` is an index into `tabs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SessionTabSnapshot {
+    pub tabs: Vec<SessionTabEntry>,
+    pub active: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +248,33 @@ impl<'a> SettingsService<'a> {
         self.repo.set_setting(KEY_FIRST_RUN_SEEDED, "1")
     }
 
+    /// Persist the "restore last session" tab snapshot (P6.14). Always
+    /// writes, even an empty snapshot — [`load_session_tabs`] treats an
+    /// empty `tabs` list the same as "absent".
+    ///
+    /// [`load_session_tabs`]: Self::load_session_tabs
+    pub fn save_session_tabs(&self, snapshot: &SessionTabSnapshot) -> Result<(), RepositoryError> {
+        // Our own struct, our own serializer -- this can't fail in practice,
+        // but never panic on it (CONVENTIONS §2): fall back to an empty
+        // snapshot's JSON rather than unwrap.
+        let json = serde_json::to_string(snapshot).unwrap_or_else(|_| "{\"tabs\":[]}".to_owned());
+        self.repo.set_setting(KEY_SESSION_TABS, &json)
+    }
+
+    /// Load the "restore last session" tab snapshot. Returns `Ok(None)` when
+    /// the key is absent, the JSON is malformed (defensively parsed --
+    /// CONVENTIONS §2: stored files are untrusted), or the snapshot's tab
+    /// list is empty.
+    pub fn load_session_tabs(&self) -> Result<Option<SessionTabSnapshot>, RepositoryError> {
+        let Some(raw) = self.repo.get_setting(KEY_SESSION_TABS)? else {
+            return Ok(None);
+        };
+        match serde_json::from_str::<SessionTabSnapshot>(&raw) {
+            Ok(snap) if !snap.tabs.is_empty() => Ok(Some(snap)),
+            _ => Ok(None),
+        }
+    }
+
     // ── private helpers ────────────────────────────────────────────────────
 
     fn read_i32(&self, key: &str, default: i32) -> Result<i32, RepositoryError> {
@@ -322,5 +386,48 @@ mod tests {
         svc.save_theme_mode(1).unwrap();
         let s = svc.load().unwrap();
         assert_eq!(s.theme_mode, 1);
+    }
+
+    // ── P6.14: session-tab restore snapshot ─────────────────────────────
+
+    #[test]
+    fn load_session_tabs_absent_is_none() {
+        let repo = fresh();
+        let svc = SettingsService::new(&repo);
+        assert_eq!(svc.load_session_tabs().unwrap(), None);
+    }
+
+    #[test]
+    fn session_tabs_round_trip() {
+        let repo = fresh();
+        let svc = SettingsService::new(&repo);
+        let snap = SessionTabSnapshot {
+            tabs: vec![
+                SessionTabEntry::Connection(ConnectionId::new(7)),
+                SessionTabEntry::Local,
+                SessionTabEntry::Connection(ConnectionId::new(3)),
+            ],
+            active: 1,
+        };
+        svc.save_session_tabs(&snap).unwrap();
+        let loaded = svc.load_session_tabs().unwrap().expect("snapshot present");
+        assert_eq!(loaded, snap);
+    }
+
+    #[test]
+    fn saving_an_empty_snapshot_loads_as_none() {
+        let repo = fresh();
+        let svc = SettingsService::new(&repo);
+        svc.save_session_tabs(&SessionTabSnapshot::default())
+            .unwrap();
+        assert_eq!(svc.load_session_tabs().unwrap(), None);
+    }
+
+    #[test]
+    fn corrupt_session_tabs_json_falls_back_to_none() {
+        let repo = fresh();
+        repo.set_setting(KEY_SESSION_TABS, "not json").unwrap();
+        let svc = SettingsService::new(&repo);
+        assert_eq!(svc.load_session_tabs().unwrap(), None);
     }
 }

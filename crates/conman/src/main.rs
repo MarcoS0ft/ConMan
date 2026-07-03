@@ -125,16 +125,24 @@ fn build_config(
     //  - Pre-existing populated DB migrated from an older build that never set the
     //    flag: flag absent + groups present → set flag without seeding (backfill).
     // This ensures we never duplicate data on an already-populated DB (fix k).
-    {
+    // P6.14: `first_launch` is `true` only in the genuine brand-new-DB case
+    // (flag absent AND no groups) -- distinct from the "backfill" case (flag
+    // absent but groups already present, e.g. a DB migrated from an older
+    // build that never set the flag), which is not a first launch and must
+    // not force a plain local-shell tab / skip the Launchpad-empty fallback.
+    let first_launch = {
         let svc = SettingsService::new(&repo);
         let already_seeded = svc.load_first_run_seeded()?;
+        let mut first_launch = false;
         if !already_seeded {
             if repo.list_groups()?.is_empty() {
                 seed_demo_data(&repo)?;
+                first_launch = true;
             }
             svc.save_first_run_seeded()?;
         }
-    }
+        first_launch
+    };
 
     let repo: Arc<dyn cm_core::ConnectionRepository> = Arc::new(repo);
 
@@ -145,6 +153,7 @@ fn build_config(
         repo,
         secrets,
         activation_rx,
+        first_launch,
     })
 }
 

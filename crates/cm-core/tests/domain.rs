@@ -709,6 +709,16 @@ impl ConnectionRepository for InMemoryRepo {
             "not implemented in InMemoryRepo".into(),
         ))
     }
+
+    // --- Recents (stub) ---
+
+    fn record_recent(&self, _id: ConnectionId, _opened_at: i64) -> Result<(), RepositoryError> {
+        Ok(())
+    }
+
+    fn list_recents(&self, _limit: usize) -> Result<Vec<(ConnectionId, i64)>, RepositoryError> {
+        Ok(Vec::new())
+    }
 }
 
 #[test]
