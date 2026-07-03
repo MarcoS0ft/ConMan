@@ -43,7 +43,9 @@ mod generated_ui {
 // Re-export the Slint-generated types used by the controller and by
 // cm-platform or tests.  `Theme` is internal and not re-exported here;
 // appearance is driven via the alias properties on `AppWindow` instead.
-pub use generated_ui::{AppWindow, ConnRow, CredRow, PaletteAction, TabItem, ToastEntry};
+pub use generated_ui::{
+    AppWindow, ConnRow, CredRow, PaletteAction, RecentItem, TabItem, ToastEntry,
+};
 
 pub use controller::run;
 pub use terminal_renderer::{
@@ -71,6 +73,13 @@ pub struct AppConfig {
     /// `cm-platform` type so `cm-ui` does not need a dependency on
     /// `cm-platform` for this one hook.
     pub activation_rx: Option<std::sync::mpsc::Receiver<()>>,
+    /// P6.14: `true` only on the very first-ever launch (a brand-new DB that
+    /// the composition root just seeded with demo data). The first launch
+    /// always opens a plain local-shell tab, by established design,
+    /// regardless of the "restore last session" setting or the Launchpad
+    /// empty-workspace fallback (there is nothing to restore and no recents
+    /// to show yet anyway). `false` for every later launch.
+    pub first_launch: bool,
 }
 
 impl std::fmt::Debug for AppConfig {

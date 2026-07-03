@@ -101,6 +101,8 @@ pub(super) struct PushTabArgs {
     /// The stored connection id this tab was launched from, if any (P6.9 gap 16;
     /// see `Tab::origin_connection_id`).
     pub(super) origin_connection_id: Option<i32>,
+    /// See `Tab::is_empty` (P6.14 gap 3). `false` for every real connect path.
+    pub(super) is_empty: bool,
 }
 
 pub(super) fn push_tab(
@@ -117,6 +119,7 @@ pub(super) fn push_tab(
         title,
         initial_status,
         origin_connection_id,
+        is_empty,
     } = args;
     let mut st = state.borrow_mut();
     let scale = st.scale;
@@ -152,6 +155,7 @@ pub(super) fn push_tab(
         extra_panes: Vec::new(),
         sel: PaneSelectionState::default(),
         last_focused_pane: 0,
+        is_empty,
     });
     st.active = st.tabs.len() - 1;
     let active = st.active;
@@ -165,12 +169,40 @@ pub(super) fn push_tab(
     });
     ui.set_active_tab(active as i32);
     ui.set_session_status(SharedString::from(initial_status));
+    // P6.14: keep the "restore last session" snapshot current on every tab
+    // open (write-through rather than a single on-exit hook -- robust
+    // against a crash/kill, matching how other UI prefs already persist
+    // eagerly on change, e.g. `sidebar_collapsed`/`active_panel`).
+    startup::persist_session_tabs(state);
 }
 
+/// Opens a plain local-shell tab (terminal visible immediately).
 pub(super) fn open_local_tab(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,
     ui: &AppWindow,
+) {
+    open_local_tab_inner(state, tab_model, ui, false);
+}
+
+/// P6.14 (gap 3): opens a tab backed by the same plain local shell, but
+/// fronted by the Launchpad ("home" state) until the user picks something
+/// from it. Used for the app's empty-workspace slot (non-first-launch
+/// startup with nothing to restore) and for "explicitly emptied" -- closing
+/// the last real tab lands here instead of quitting (see `close_tab`).
+pub(super) fn open_empty_tab(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+) {
+    open_local_tab_inner(state, tab_model, ui, true);
+}
+
+fn open_local_tab_inner(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    is_empty: bool,
 ) {
     let (size, ls) = {
         let st = state.borrow();
@@ -199,13 +231,19 @@ pub(super) fn open_local_tab(
             title,
             initial_status: "connected",
             origin_connection_id: None,
+            is_empty,
         },
     );
     ui.set_session_identity(SharedString::from(identity));
     ui.set_overlay_connecting(false);
     ui.set_overlay_error(false);
-    ui.set_launchpad_open(false);
     ui.set_rdp_active(false);
+    if is_empty {
+        ui.set_launchpad_open(true);
+        launchpad::refresh_recents(state, ui);
+    } else {
+        ui.set_launchpad_open(false);
+    }
 }
 
 pub(super) fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
@@ -223,6 +261,8 @@ pub(super) fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
     let tab = &st.tabs[idx];
     overlays::update_overlays_from_status(ui, tab, &status);
     sessions::render_active(&mut st, ui);
+    drop(st);
+    startup::persist_session_tabs(state);
 }
 
 pub(super) fn close_tab(
@@ -273,7 +313,10 @@ pub(super) fn close_tab(
 
     if st.tabs.is_empty() {
         drop(st);
-        let _ = slint::quit_event_loop();
+        // P6.14 (gap 3): closing the last real tab lands on the Launchpad
+        // home tab ("explicitly emptied") instead of quitting the app --
+        // `open_empty_tab` persists its own snapshot (empty tab list).
+        open_empty_tab(state, tab_model, ui);
         return;
     }
     if st.active >= idx && st.active > 0 {
@@ -291,6 +334,8 @@ pub(super) fn close_tab(
     let status = st.tabs[active].session.status();
     overlays::update_overlays_from_status(ui, &st.tabs[active], &status);
     sessions::render_active(&mut st, ui);
+    drop(st);
+    startup::persist_session_tabs(state);
 }
 
 pub(super) fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {

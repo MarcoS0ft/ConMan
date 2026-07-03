@@ -382,6 +382,7 @@ pub(super) fn reattach_session(
             extra_panes: Vec::new(),
             sel: PaneSelectionState::default(),
             last_focused_pane: 0,
+            is_empty: false,
         });
         st.active = st.tabs.len() - 1;
         let active = st.active;
@@ -403,6 +404,7 @@ pub(super) fn reattach_session(
         ui.set_overlay_error(false);
         ui.set_launchpad_open(false);
         ui.set_rdp_active(false);
+        startup::persist_session_tabs(state);
     }
     // Update the detached count.
     let count = state.borrow().detached.len();
