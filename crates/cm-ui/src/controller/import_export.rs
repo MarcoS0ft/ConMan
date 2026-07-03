@@ -143,8 +143,21 @@ fn refresh_after_import(io: &ImportExportHandles, state: &Rc<RefCell<State>>, ui
 // Dialog-showing entry points (never called from a test — see the memo)
 // ---------------------------------------------------------------------------
 
-/// "Export connections…" palette action: prompt for a save path, write the
-/// current tree (secrets excluded) there, and toast the result.
+/// Run the dialog-free exporter against `path` and toast the result. Shared
+/// by [`export_via_dialog`] and the `CONMAN_AUTOEXPORT` headless test hook
+/// (`util.rs`) — mirrors [`run_import`]'s split (P6.17 finding F3).
+pub(super) fn run_export(io: &ImportExportHandles, path: &Path) {
+    match export_to_path(io.repo.as_ref(), path) {
+        Ok(()) => io.push_toast(format!("Exported to {}", path.display()), TOAST_SUCCESS),
+        Err(e) => {
+            tracing::warn!("export failed: {e}");
+            io.push_toast(format!("Export failed: {e}"), TOAST_ERROR);
+        }
+    }
+}
+
+/// "Export connections…" palette action: prompt for a save path, then run
+/// the dialog-free export.
 pub(super) fn export_via_dialog(io: &ImportExportHandles) {
     let Some(path) = rfd::FileDialog::new()
         .set_title("Export connections")
@@ -154,13 +167,7 @@ pub(super) fn export_via_dialog(io: &ImportExportHandles) {
     else {
         return; // user cancelled
     };
-    match export_to_path(io.repo.as_ref(), &path) {
-        Ok(()) => io.push_toast(format!("Exported to {}", path.display()), TOAST_SUCCESS),
-        Err(e) => {
-            tracing::warn!("export failed: {e}");
-            io.push_toast(format!("Export failed: {e}"), TOAST_ERROR);
-        }
-    }
+    run_export(io, &path);
 }
 
 /// "Import connections…" palette action: prompt for a file, then run the
@@ -213,6 +220,7 @@ mod tests {
         CredentialId, CredentialKind, CredentialRef, Group, GroupId, LocalSettings, Secret,
     };
     use cm_storage::SqliteRepository;
+    use slint::Model;
 
     use super::*;
 
@@ -319,6 +327,50 @@ mod tests {
         let mock_store = MockStore::default();
         let err = import_from_path(&path, &repo, &mock_store).unwrap_err();
         assert!(err.contains("empty"));
+    }
+
+    /// Builds an [`ImportExportHandles`] over an in-memory repo/mock keychain
+    /// for `run_export`/`run_import`-level tests (P6.17 F3 / `CONMAN_AUTOEXPORT`).
+    fn handles_for(repo: Arc<dyn ConnectionRepository>) -> ImportExportHandles {
+        ImportExportHandles {
+            repo,
+            secrets: Arc::new(MockStore::default()),
+            conn_model: Rc::new(VecModel::default()),
+            cred_model: Rc::new(VecModel::default()),
+            toast_model: Rc::new(VecModel::default()),
+            toast_next_id: Rc::new(RefCell::new(0)),
+        }
+    }
+
+    #[test]
+    fn run_export_writes_the_file_and_toasts_success() {
+        let repo: Arc<dyn ConnectionRepository> = Arc::new(repo_with_one_group_one_conn_one_cred());
+        let io = handles_for(repo);
+        let dir = tempfile::tempdir().expect("tmp dir");
+        let path = dir.path().join("export.json");
+
+        run_export(&io, &path);
+
+        assert!(path.exists(), "export file should be written");
+        assert_eq!(io.toast_model.row_count(), 1);
+        let toast = io.toast_model.row_data(0).expect("toast pushed");
+        assert_eq!(toast.kind, TOAST_SUCCESS);
+        assert!(toast.message.contains("Exported to"));
+    }
+
+    #[test]
+    fn run_export_to_an_unwritable_path_toasts_an_error() {
+        let repo: Arc<dyn ConnectionRepository> = Arc::new(repo_with_one_group_one_conn_one_cred());
+        let io = handles_for(repo);
+        // A directory that doesn't exist -- `std::fs::write` fails.
+        let bad_path = std::path::Path::new("/nonexistent-dir-for-conman-test/export.json");
+
+        run_export(&io, bad_path);
+
+        assert_eq!(io.toast_model.row_count(), 1);
+        let toast = io.toast_model.row_data(0).expect("toast pushed");
+        assert_eq!(toast.kind, TOAST_ERROR);
+        assert!(toast.message.contains("Export failed"));
     }
 
     #[test]
