@@ -190,6 +190,15 @@ impl PaneSelectionState {
     /// grid snapshot (used to expand word/line bounds and to capture the
     /// staleness baseline) — `None` degrades to a bare drag with no
     /// word/line expansion (the pane has not produced a snapshot yet).
+    ///
+    /// Returns `true` iff the visible [`Selection`] geometry actually changed
+    /// (created, extended, or — implicitly, via [`clear`](Self::clear), which
+    /// callers invoke separately — removed). P6.8 bundled fix (F-perf,
+    /// P6.17 finding R1): the controller uses this to gate the forced
+    /// selection-highlight re-render in `sessions.rs`'s `wire_pointer` so a
+    /// plain button-less hover move (no selection, [`crate::input::map_mouse`]
+    /// returns `None`) no longer forces a full-grid raster on every motion
+    /// event — only an actual selection change does.
     pub(crate) fn on_pointer(
         &mut self,
         button: i32,
@@ -197,7 +206,7 @@ impl PaneSelectionState {
         cell: (u16, u16),
         snap: Option<&GridSnapshot>,
         now: Instant,
-    ) {
+    ) -> bool {
         match (button, kind) {
             (BTN_LEFT, KIND_PRESS) => {
                 let n = self.click.register(cell, now);
@@ -248,20 +257,30 @@ impl PaneSelectionState {
                 if let Some(snap) = snap {
                     self.rebaseline(snap);
                 }
+                true
             }
             (BTN_LEFT, KIND_MOVE) if self.dragging => {
-                if let Some(sel) = &mut self.selection {
-                    sel.cursor = SelectionPoint {
-                        row: cell.0,
-                        col: cell.1,
-                    };
-                }
-                if let Some(snap) = snap {
+                let new_cursor = SelectionPoint {
+                    row: cell.0,
+                    col: cell.1,
+                };
+                let changed = match &mut self.selection {
+                    Some(sel) if sel.cursor != new_cursor => {
+                        sel.cursor = new_cursor;
+                        true
+                    }
+                    _ => false,
+                };
+                if changed && let Some(snap) = snap {
                     self.rebaseline(snap);
                 }
+                changed
             }
-            (_, KIND_RELEASE) => self.dragging = false,
-            _ => {}
+            (_, KIND_RELEASE) => {
+                self.dragging = false;
+                false
+            }
+            _ => false,
         }
     }
 
@@ -567,5 +586,60 @@ mod tests {
         let snap = row_snap(&["abc"], 3);
         let s = PaneSelectionState::default();
         assert_eq!(s.copy_text(&snap), None);
+    }
+
+    // ── P6.8 bundled fix (F-perf, P6.17 finding R1): on_pointer's "changed" ──
+    // return value is exactly the render-gating signal `sessions.rs`'s
+    // `wire_pointer` uses to skip the forced re-render on events that didn't
+    // touch the selection -- these assert that signal is correct.
+
+    #[test]
+    fn press_reports_changed() {
+        let snap = row_snap(&["abc"], 3);
+        let mut s = PaneSelectionState::default();
+        let t0 = Instant::now();
+        assert!(s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0));
+    }
+
+    #[test]
+    fn dragging_move_to_a_new_cell_reports_changed() {
+        let snap = row_snap(&["abcdef"], 6);
+        let mut s = PaneSelectionState::default();
+        let t0 = Instant::now();
+        s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0);
+        assert!(s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 3), Some(&snap), t0));
+    }
+
+    #[test]
+    fn dragging_move_to_the_same_cell_reports_unchanged() {
+        // The drag cursor didn't actually move to a new cell -- e.g. two
+        // motion events land in the same cell -- there is nothing new to
+        // paint, so this must report `false` (a real-world analogue of a
+        // hover-only move, at the drag layer).
+        let snap = row_snap(&["abcdef"], 6);
+        let mut s = PaneSelectionState::default();
+        let t0 = Instant::now();
+        s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 2), Some(&snap), t0);
+        assert!(!s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 2), Some(&snap), t0));
+    }
+
+    #[test]
+    fn button_less_hover_move_reports_unchanged() {
+        // The exact case P6.17 finding R1 flagged: a plain move with no
+        // button held (not dragging) must never report a selection change --
+        // this is the "hover-only move" the F-perf gate exists to skip.
+        let snap = row_snap(&["abcdef"], 6);
+        let mut s = PaneSelectionState::default();
+        let t0 = Instant::now();
+        assert!(!s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 3), Some(&snap), t0));
+    }
+
+    #[test]
+    fn release_reports_unchanged() {
+        let snap = row_snap(&["abc"], 3);
+        let mut s = PaneSelectionState::default();
+        let t0 = Instant::now();
+        s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0);
+        assert!(!s.on_pointer(BTN_LEFT, KIND_RELEASE, (0, 0), Some(&snap), t0));
     }
 }

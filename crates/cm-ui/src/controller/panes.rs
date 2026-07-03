@@ -10,7 +10,7 @@ use cm_session::{LocalTerminalSession, PaneGroup, PaneLayout, SessionStatus, Sur
 use slint::{ComponentHandle, Model, SharedString, TimerMode, VecModel};
 
 use crate::selection::PaneSelectionState;
-use crate::terminal_renderer::{FontSet, TerminalRenderer, TerminalTheme};
+use crate::terminal_renderer::{FontSet, TerminalRenderer};
 use crate::{AppWindow, TabItem, ToastEntry};
 
 use super::HkQueue;
@@ -279,11 +279,12 @@ pub(super) fn do_split(
     };
 
     // Spawn a new local terminal for the extra pane (half the width for H-split).
+    // P6.8 (gap 9): follow the live app theme rather than hardcoding dark.
     let renderer = TerminalRenderer::with_fonts(
         slot.fonts,
         slot.font_size_px,
         slot.scale,
-        TerminalTheme::dark(),
+        util::terminal_theme_for(ui),
     );
     let (pane_w, pane_h) = split_pane_dims(layout, slot.surface_w, slot.surface_h);
     let size = if pane_w > 0.0 && pane_h > 0.0 {
@@ -390,11 +391,12 @@ pub(super) fn connect_in_split(
                 return;
             };
 
+            // P6.8 (gap 9): follow the live app theme rather than hardcoding dark.
             let renderer = TerminalRenderer::with_fonts(
                 slot.fonts,
                 slot.font_size_px,
                 slot.scale,
-                TerminalTheme::dark(),
+                util::terminal_theme_for(ui),
             );
             let (pane_w, pane_h) = split_pane_dims(layout, slot.surface_w, slot.surface_h);
             let size = if pane_w > 0.0 && pane_h > 0.0 {
@@ -561,7 +563,9 @@ pub(super) fn reattach_session(
         let st = state.borrow();
         (st.scale, st.fonts.clone(), st.font_size_px)
     };
-    let renderer = TerminalRenderer::with_fonts(fonts, font_size_px, scale, TerminalTheme::dark());
+    // P6.8 (gap 9): follow the live app theme rather than hardcoding dark.
+    let renderer =
+        TerminalRenderer::with_fonts(fonts, font_size_px, scale, util::terminal_theme_for(ui));
     let status_dot = match session.status() {
         SessionStatus::Connected => "connected",
         SessionStatus::Connecting => "connecting",

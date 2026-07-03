@@ -175,22 +175,27 @@ export component SettingsPanel inherits Rectangle {
                         options: ["Dark", "Light", "System"];
                         selected <=> root.theme-mode;
                         changed(i) => {
-                            root.theme-changed(i);
+                            // P6.8 (gap 9): `Theme.dark-mode` must already hold the
+                            // NEW value before `root.theme-changed(i)` fires --
+                            // the Rust handler re-pushes the terminal palette from
+                            // `ui.get_dark_mode()` synchronously inside that call,
+                            // so the write order here matters (was reversed pre-P6.8).
                             if (i == 0) { Theme.dark-mode = true; }
                             else if (i == 1) { Theme.dark-mode = false; }
                             else {
                                 Theme.dark-mode = (Palette.color-scheme == ColorScheme.dark);
                             }
+                            root.theme-changed(i);
                         }
                     }
                 }
 
                 // Accent swatches — label left, swatches right (compact enough).
-                SettingRow { title: "Accent color"; subtitle: "Preset colors";
+                SettingRow { title: "Accent color"; subtitle: "Presets, or the live OS accent";
                     HorizontalLayout {
                         spacing: Theme.space-1; alignment: end;
                         // Preset swatches come from Theme.accent-presets — no hardcoded hex here.
-                        // space-1 (4px) gap ensures all 4 swatches fit within the 252px panel.
+                        // space-1 (4px) gap ensures all swatches fit within the 252px panel.
                         for c[idx] in Theme.accent-presets : Rectangle {
                             width: 24px; height: 24px; border-radius: 12px;
                             background: c;
@@ -207,6 +212,30 @@ export component SettingsPanel inherits Rectangle {
                                 // Live recolor — writes directly to the Theme global.
                                 Theme.accent = Theme.accent-presets[idx];
                                 root.accent-changed(idx);
+                            } }
+                        }
+                        // Reserved "OS accent" swatch (P6.8, gap 10): a live, non-
+                        // preset color read from the OS by `cm_platform::accent` and
+                        // pushed into `Theme.os-accent-color` from Rust at startup
+                        // (and live, where the platform has a change signal). Kept
+                        // out of `accent-presets` because it isn't a fixed color.
+                        // Always outlined (unlike the flat presets above) so it
+                        // reads as "live/special" even when not selected.
+                        Rectangle {
+                            width: 24px; height: 24px; border-radius: 12px;
+                            background: Theme.os-accent-color;
+                            border-width: root.accent-index == Theme.os-accent-index ? 2px : 1px;
+                            border-color: root.accent-index == Theme.os-accent-index
+                                ? Theme.color-base : Theme.color-stroke;
+                            Rectangle {
+                                width: 100%; height: 100%; border-radius: 12px;
+                                border-width: root.accent-index == Theme.os-accent-index ? 2px : 0px;
+                                border-color: Theme.os-accent-color;
+                            }
+                            TouchArea { clicked => {
+                                root.accent-index = Theme.os-accent-index;
+                                Theme.accent = Theme.os-accent-color;
+                                root.accent-changed(Theme.os-accent-index);
                             } }
                         }
                     }

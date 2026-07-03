@@ -16,5 +16,20 @@ thiserror = "2"
 # the actual subscriber; libraries only ever call the `tracing::*` macros.
 tracing = "0.1"
 
+# P6.8 (gap 10, OS accent read) — new-dep memo:
+# docs/devel/memos/P6.8-accent-platform-deps.md. Both are already present in
+# the resolved workspace lockfile transitively (via Slint's winit backend on
+# their respective OS), MIT-licensed, target-gated so neither OS pulls the
+# other's dependency.
+[target.'cfg(target_os = "linux")'.dependencies]
+# Session D-Bus client (blocking API) for the freedesktop `Settings` portal
+# read (`org.freedesktop.appearance`/`accent-color`) and its `SettingChanged`
+# live-update signal.
+zbus = "5"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# `DwmGetColorizationColor` (Win32_Graphics_Dwm) for the OS accent read.
+windows = { version = "0.62", features = ["Win32_Graphics_Dwm"] }
+
 [lints]
 workspace = true

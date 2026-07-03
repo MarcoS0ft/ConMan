@@ -394,6 +394,13 @@ fn wire_pointer(ctx: &Ctx) {
                 return;
             };
             let focused = tab.pane_group.focused();
+            // P6.8 bundled fix (F-perf, P6.17 finding R1): only the
+            // selection-highlight path below needs a forced render (the
+            // engine's own output still drives the normal tick-loop redraw).
+            // Tracking whether *this* event actually changed the selection
+            // means a plain button-less hover move -- no selection, no mouse
+            // event forwarded -- no longer forces a full-grid raster.
+            let mut selection_changed = false;
 
             if focused == 0 || tab.extra_panes.get(focused - 1).is_none() {
                 // Primary pane (or an out-of-range focus index — defensive
@@ -402,7 +409,7 @@ fn wire_pointer(ctx: &Ctx) {
                     Surface::TerminalGrid(_) => {
                         let (row, col) = tab.renderer.cell_at(x * base_scale, y * base_scale);
                         let snap = tab.last.as_ref();
-                        tab.sel.on_pointer(button, kind, (row, col), snap, now);
+                        selection_changed = tab.sel.on_pointer(button, kind, (row, col), snap, now);
                         if let Some(ev) = input::map_mouse(button, kind, row, col, mods) {
                             tab.session.send_input(SessionInput::Mouse(ev));
                         }
@@ -426,7 +433,7 @@ fn wire_pointer(ctx: &Ctx) {
                 if matches!(ep.session.surface(), Surface::TerminalGrid(_)) {
                     let (row, col) = ep.renderer.cell_at(x * ep.scale, y * ep.scale);
                     let snap = ep.last.as_ref();
-                    ep.sel.on_pointer(button, kind, (row, col), snap, now);
+                    selection_changed = ep.sel.on_pointer(button, kind, (row, col), snap, now);
                     if let Some(ev) = input::map_mouse(button, kind, row, col, mods) {
                         ep.session.send_input(SessionInput::Mouse(ev));
                     }
@@ -438,8 +445,10 @@ fn wire_pointer(ctx: &Ctx) {
             // would never pick it up — force one render now against the
             // pane's last known snapshot so the highlight (or its removal)
             // appears immediately rather than waiting for the next
-            // unrelated output event.
-            if let Some(ui) = weak.upgrade() {
+            // unrelated output event. P6.8: gated on `selection_changed` so a
+            // hover-only move (no selection, no forwarded mouse event) no
+            // longer pays for a render it doesn't need.
+            if selection_changed && let Some(ui) = weak.upgrade() {
                 render_active(&mut st, &ui);
             }
         }
@@ -1781,6 +1790,25 @@ pub(super) fn tick(
         overlays::update_overlays_from_status(ui, &st.tabs[active], &status);
         render_active(&mut st, ui);
     }
+}
+
+/// Re-push the light/dark terminal palette to every open renderer (primary pane +
+/// extra panes, across all tabs) on a live app theme switch (P6.8, gap 9 — closes
+/// P6.17 finding V1: "theme switch recolors both chrome and terminal").
+///
+/// Every renderer's `theme` field is updated so a *background* tab picks up the
+/// right palette the next time it renders (tab switch, new output); only the
+/// currently visible pane(s) need (and get) an immediate re-render here.
+pub(super) fn apply_terminal_theme_to_all(state: &Rc<RefCell<State>>, ui: &AppWindow) {
+    let theme = util::terminal_theme_for(ui);
+    let mut st = state.borrow_mut();
+    for tab in &mut st.tabs {
+        tab.renderer.set_theme(theme.clone());
+        for ep in &mut tab.extra_panes {
+            ep.renderer.set_theme(theme.clone());
+        }
+    }
+    render_active(&mut st, ui);
 }
 
 pub(super) fn render_active(st: &mut State, ui: &AppWindow) {

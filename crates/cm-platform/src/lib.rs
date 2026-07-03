@@ -10,9 +10,11 @@
 //!   resolution (P1.5, extended for logging in P6.3).
 //! - [`single_instance`]: the single-instance guard (P6.16) — a `std`-only
 //!   loopback-TCP lock + activation handshake; see the module docs for the
-//!   protocol. Clipboard access and DPI helpers remain unimplemented (not yet
-//!   scheduled).
+//!   protocol.
+//! - [`accent`]: OS accent-color read + best-effort live watch (P6.8, gap 10).
+//!   Clipboard access and DPI helpers remain unimplemented (not yet scheduled).
 
+pub mod accent;
 mod error;
 pub mod single_instance;
 

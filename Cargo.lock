@@ -935,6 +935,8 @@ dependencies = [
  "dirs",
  "thiserror 2.0.18",
  "tracing",
+ "windows",
+ "zbus",
 ]
 
 [[package]]
@@ -992,6 +994,7 @@ version = "0.0.0"
 dependencies = [
  "arboard",
  "cm-core",
+ "cm-platform",
  "cm-session",
  "cm-storage",
  "dirs",

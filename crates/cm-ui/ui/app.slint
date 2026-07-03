@@ -864,8 +864,24 @@ export component AppWindow inherits Window {
     callback density-changed(int);
     callback accent-changed(int);
     // P5.2 fix: restore persisted accent color at launch (called from Rust startup).
+    // P6.8 (gap 10): a persisted "OS accent" selection (accent-index ==
+    // Theme.os-accent-index) resolves to the live OS color instead of a preset.
     callback apply-accent-index(int);
-    apply-accent-index(idx) => { Theme.accent = Theme.accent-presets[idx]; }
+    apply-accent-index(idx) => {
+        Theme.accent = idx == Theme.os-accent-index
+            ? Theme.os-accent-color : Theme.accent-presets[idx];
+    }
+    // P6.8 (gap 10): pushes the live OS accent value read by `cm_platform::accent`
+    // into `Theme.os-accent-color` -- called once at startup and, where the
+    // platform has a live signal, again on every OS accent change. Keeps the
+    // accent live if the user currently has the "OS accent" swatch selected.
+    callback set-os-accent(color);
+    set-os-accent(c) => {
+        Theme.os-accent-color = c;
+        if (root.accent-index == Theme.os-accent-index) {
+            Theme.accent = c;
+        }
+    }
     callback settings-font-size-changed(int);
     callback settings-shell-path-changed(string);
     callback settings-shell-args-changed(string);

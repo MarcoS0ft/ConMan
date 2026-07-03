@@ -9,7 +9,7 @@ use cm_session::{PaneLayout, RdpAuthInput, SessionInput, SshAuthInput};
 use slint::{ComponentHandle, Timer, TimerMode};
 
 use crate::AppWindow;
-use crate::terminal_renderer::TerminalRenderer;
+use crate::terminal_renderer::{TerminalRenderer, TerminalTheme};
 
 use super::*;
 
@@ -54,6 +54,28 @@ pub(super) fn rdp_auto_accept_certs() -> bool {
 #[cfg(not(debug_assertions))]
 pub(super) fn rdp_auto_accept_certs() -> bool {
     false
+}
+
+/// The [`TerminalTheme`] a newly-constructed (or live-switched) terminal renderer
+/// should use, derived from the live `Theme.dark-mode` Slint global (P6.8, gap 9):
+/// dark chrome gets the dark terminal palette, light chrome gets the light one.
+/// Reading `ui.get_dark_mode()` at call time (rather than caching it) is what makes
+/// this correct for both "pick the initial theme at spawn" and "re-push on a live
+/// theme switch" call sites.
+pub(super) fn terminal_theme_for(ui: &AppWindow) -> TerminalTheme {
+    if ui.get_dark_mode() {
+        TerminalTheme::dark()
+    } else {
+        TerminalTheme::light()
+    }
+}
+
+/// Push an OS-read accent color (P6.8, gap 10; see `cm_platform::accent`) into
+/// the live `Theme.os-accent-color` Slint global via the `set-os-accent`
+/// callback — used both at startup and from the best-effort live accent-change
+/// watch.
+pub(super) fn push_os_accent(ui: &AppWindow, color: cm_platform::accent::AccentColor) {
+    ui.invoke_set_os_accent(slint::Color::from_rgb_u8(color.r, color.g, color.b));
 }
 
 pub(super) fn grid_for(

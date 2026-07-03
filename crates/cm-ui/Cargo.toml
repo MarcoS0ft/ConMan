@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 cm-core = { path = "../cm-core" }
 cm-storage = { path = "../cm-storage" }
+# cm-platform: OS accent-color read at startup + live watch (P6.8, gap 10).
+cm-platform = { path = "../cm-platform" }
 # The local terminal session (PTY + libghostty engine, on its own threads). Brings in the
 # zig-built engine via its default `engine-libghostty` feature.
 cm-session = { path = "../cm-session" }
