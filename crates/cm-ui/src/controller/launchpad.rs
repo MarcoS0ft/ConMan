@@ -61,14 +61,15 @@ fn wire_open_recent(ctx: &Ctx) {
         move |idx| {
             let Some(ui) = weak.upgrade() else { return };
             // `idx` is the position in whatever list is currently displayed
-            // (recents, or the live search-filtered list) -- look the row up
-            // by its *displayed* id (`RecentItem.id`), which is the real
-            // connection id, not `idx` itself.
+            // (recents, or the live search-filtered list) -- resolve the row
+            // to its *displayed* id (`RecentItem.id`, the real connection
+            // id), never `idx` itself.
             let conn_id = {
                 let st = state.borrow();
-                st.launchpad_recents_model
-                    .row_data(idx as usize)
-                    .map(|item| item.id)
+                let items: Vec<RecentItem> = (0..st.launchpad_recents_model.row_count())
+                    .filter_map(|i| st.launchpad_recents_model.row_data(i))
+                    .collect();
+                recent_id_at(&items, idx)
             };
             let Some(conn_id) = conn_id else { return };
             let conn = {
@@ -137,6 +138,20 @@ fn wire_open_group_split(ctx: &Ctx) {
             }
         }
     });
+}
+
+/// Resolves `idx` (a `RecentItem` list position, from `on_open_recent`) to
+/// the connection id displayed at that position, or `None` if out of range.
+/// Pulled out of the wired closure so it's testable without a live
+/// `AppWindow`/model (mirrors `overlays::resolve_edit_action`) -- the actual
+/// list at click time may be the true recents or a live search-filtered
+/// list, so this always resolves against *whatever* is currently displayed,
+/// never a stale/cached recents snapshot.
+fn recent_id_at(items: &[RecentItem], idx: i32) -> Option<i32> {
+    usize::try_from(idx)
+        .ok()
+        .and_then(|i| items.get(i))
+        .map(|item| item.id)
 }
 
 /// Finds the group the "Open Production in split" button refers to. The
@@ -289,6 +304,32 @@ mod tests {
         // Defensive: a future-looking `opened_at` (clock skew) never panics
         // or goes negative.
         assert_eq!(relative_time_secs(100, 500), "just now");
+    }
+
+    fn item(id: i32) -> RecentItem {
+        RecentItem {
+            id,
+            name: SharedString::from("x"),
+            meta: SharedString::from(""),
+            kind: SharedString::from("SSH"),
+            status: SharedString::from("disconnected"),
+        }
+    }
+
+    #[test]
+    fn recent_id_at_resolves_by_position_not_id() {
+        let items = vec![item(42), item(7), item(99)];
+        assert_eq!(recent_id_at(&items, 0), Some(42));
+        assert_eq!(recent_id_at(&items, 1), Some(7));
+        assert_eq!(recent_id_at(&items, 2), Some(99));
+    }
+
+    #[test]
+    fn recent_id_at_out_of_range_is_none() {
+        let items = vec![item(42)];
+        assert_eq!(recent_id_at(&items, 1), None);
+        assert_eq!(recent_id_at(&items, -1), None);
+        assert_eq!(recent_id_at(&[], 0), None);
     }
 
     #[test]
