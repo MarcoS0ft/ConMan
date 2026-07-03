@@ -650,7 +650,9 @@ impl ConnectionRepository for SqliteRepository {
     fn list_recents(&self, limit: usize) -> Result<Vec<(ConnectionId, i64)>, RepositoryError> {
         let conn = self.lock()?;
         let mut stmt = conn
-            .prepare("SELECT connection_id, opened_at FROM recents ORDER BY opened_at DESC LIMIT ?1")
+            .prepare(
+                "SELECT connection_id, opened_at FROM recents ORDER BY opened_at DESC LIMIT ?1",
+            )
             .map_err(map_err)?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = stmt
@@ -658,8 +660,11 @@ impl ConnectionRepository for SqliteRepository {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
             })
             .map_err(map_err)?;
-        rows.map(|r| r.map(|(id, ts)| (ConnectionId::new(id), ts)).map_err(map_err))
-            .collect()
+        rows.map(|r| {
+            r.map(|(id, ts)| (ConnectionId::new(id), ts))
+                .map_err(map_err)
+        })
+        .collect()
     }
 }
 

@@ -168,7 +168,10 @@ mod tests {
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .expect("version row");
-        assert_eq!(version, CURRENT_VERSION, "should be at the current version after migration");
+        assert_eq!(
+            version, CURRENT_VERSION,
+            "should be at the current version after migration"
+        );
 
         // Settings table must now exist.
         conn.execute(
@@ -199,11 +202,8 @@ mod tests {
         setup_db_at_version(&mut conn, 2).expect("v2 setup");
 
         // Insert a connection that a `recents` row can reference once v3 lands.
-        conn.execute(
-            "INSERT INTO groups (name, sort) VALUES ('g', 0)",
-            [],
-        )
-        .expect("insert group");
+        conn.execute("INSERT INTO groups (name, sort) VALUES ('g', 0)", [])
+            .expect("insert group");
         conn.execute(
             "INSERT INTO connections (group_id, kind, name, settings_json, sort, created_at, updated_at) \
              VALUES (1, 'ssh', 'survived-conn', '{}', 0, 0, 0)",
@@ -217,14 +217,20 @@ mod tests {
                 [],
             )
             .is_err();
-        assert!(recents_missing, "recents table should not exist in v2 schema");
+        assert!(
+            recents_missing,
+            "recents table should not exist in v2 schema"
+        );
 
         run_migrations(&mut conn).expect("migrate v2 → current");
 
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .expect("version row");
-        assert_eq!(version, CURRENT_VERSION, "should be at the current version after migration");
+        assert_eq!(
+            version, CURRENT_VERSION,
+            "should be at the current version after migration"
+        );
 
         conn.execute(
             "INSERT INTO recents (connection_id, opened_at) VALUES (1, 100)",
