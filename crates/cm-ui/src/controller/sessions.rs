@@ -390,6 +390,13 @@ fn wire_pointer(ctx: &Ctx) {
                 return;
             };
             let focused = tab.pane_group.focused();
+            // P6.8 bundled fix (F-perf, P6.17 finding R1): only the
+            // selection-highlight path below needs a forced render (the
+            // engine's own output still drives the normal tick-loop redraw).
+            // Tracking whether *this* event actually changed the selection
+            // means a plain button-less hover move -- no selection, no mouse
+            // event forwarded -- no longer forces a full-grid raster.
+            let mut selection_changed = false;
 
             if focused == 0 || tab.extra_panes.get(focused - 1).is_none() {
                 // Primary pane (or an out-of-range focus index — defensive
@@ -398,7 +405,7 @@ fn wire_pointer(ctx: &Ctx) {
                     Surface::TerminalGrid(_) => {
                         let (row, col) = tab.renderer.cell_at(x * base_scale, y * base_scale);
                         let snap = tab.last.as_ref();
-                        tab.sel.on_pointer(button, kind, (row, col), snap, now);
+                        selection_changed = tab.sel.on_pointer(button, kind, (row, col), snap, now);
                         if let Some(ev) = input::map_mouse(button, kind, row, col, mods) {
                             tab.session.send_input(SessionInput::Mouse(ev));
                         }
@@ -422,7 +429,7 @@ fn wire_pointer(ctx: &Ctx) {
                 if matches!(ep.session.surface(), Surface::TerminalGrid(_)) {
                     let (row, col) = ep.renderer.cell_at(x * ep.scale, y * ep.scale);
                     let snap = ep.last.as_ref();
-                    ep.sel.on_pointer(button, kind, (row, col), snap, now);
+                    selection_changed = ep.sel.on_pointer(button, kind, (row, col), snap, now);
                     if let Some(ev) = input::map_mouse(button, kind, row, col, mods) {
                         ep.session.send_input(SessionInput::Mouse(ev));
                     }
@@ -434,8 +441,10 @@ fn wire_pointer(ctx: &Ctx) {
             // would never pick it up — force one render now against the
             // pane's last known snapshot so the highlight (or its removal)
             // appears immediately rather than waiting for the next
-            // unrelated output event.
-            if let Some(ui) = weak.upgrade() {
+            // unrelated output event. P6.8: gated on `selection_changed` so a
+            // hover-only move (no selection, no forwarded mouse event) no
+            // longer pays for a render it doesn't need.
+            if selection_changed && let Some(ui) = weak.upgrade() {
                 render_active(&mut st, &ui);
             }
         }
