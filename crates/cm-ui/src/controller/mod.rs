@@ -45,6 +45,7 @@ mod palette;
 mod panes;
 #[cfg(feature = "qa-harness")]
 mod qa_harness;
+mod search;
 mod sessions;
 mod settings_ctl;
 mod startup;
@@ -164,6 +165,9 @@ struct Tab {
     /// tab (never persisted into the restore-last-session snapshot -- see
     /// `startup::persist_session_tabs`).
     is_empty: bool,
+    /// P6.7: whole-buffer search overlay state, targeting this tab's primary
+    /// pane (`session`) — see `search.rs`'s module doc for the scoping note.
+    search: search::SearchState,
 }
 
 struct State {
@@ -439,6 +443,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
 
     tabs::wire_tabs(&ctx);
     sessions::wire_sessions(&ctx);
+    search::wire_search(&ctx);
     panes::wire_panes(&ctx);
     tree_ctl::wire_tree_ctl(&ctx);
     keys_ctl::wire_keys_ctl(&ctx);

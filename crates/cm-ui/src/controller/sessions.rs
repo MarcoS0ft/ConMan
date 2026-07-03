@@ -65,6 +65,16 @@ fn wire_key_input(ctx: &Ctx) {
                 );
                 return;
             }
+            // P6.7: while the terminal search overlay is open, the terminal
+            // FocusScope still forwards keys here (same pattern as the
+            // palette above) — route them to the query box instead of the
+            // session/Ctrl+Shift dispatch below. `Ctrl⇧F` closes it (handled
+            // inside `handle_search_key`); opening it is the ordinary
+            // Ctrl+Shift dispatch case below, reached only when not open.
+            if ui.get_terminal_search_open() {
+                search::handle_search_key(&ui, &state, text.as_str(), special, mods);
+                return;
+            }
 
             // ── P5.1: Ctrl+Shift shortcut layer (reserved by GUI_DESIGN §5) ──
             // These are intercepted before forwarding to the session so they
@@ -76,6 +86,14 @@ fn wire_key_input(ctx: &Ctx) {
             if ctrl_shift {
                 let t = text.as_str();
                 match (special, t) {
+                    // Ctrl+Shift+F → open the terminal search overlay
+                    // (P6.7). Closing it is handled inside
+                    // `search::handle_search_key`, reached via the
+                    // `terminal_search_open` check above once it's open.
+                    (0, "f" | "F") => {
+                        search::open_search(&ui, &state);
+                        return;
+                    }
                     // Ctrl+Shift+\ or Ctrl+Shift+| → H-split.
                     (0, "\\" | "|") => {
                         panes::do_split(&state, &tab_model_kb, &ui, PaneLayout::HSplit);
@@ -200,6 +218,28 @@ fn wire_key_input(ctx: &Ctx) {
                     }
                     CtrlShiftAction::None => {}
                 }
+            }
+
+            // P6.7: Shift+PageUp/PageDown scroll the terminal's own
+            // scrollback by one page, intercepted before they would
+            // otherwise be forwarded as a PageUp/PageDown key. Plain
+            // (non-Shift, non-Ctrl) PageUp/PageDown still reach the session
+            // unchanged — many apps (less, vim) handle it themselves.
+            let plain_shift = mods & input::MOD_SHIFT != 0 && mods & input::MOD_CTRL == 0;
+            if plain_shift && (special == PAGE_UP || special == PAGE_DOWN) {
+                let page_rows = {
+                    let st = state.borrow();
+                    st.tabs
+                        .get(st.active)
+                        .map_or(24, |t| i64::from(t.rows.max(1)))
+                };
+                let delta = if special == PAGE_UP {
+                    page_rows
+                } else {
+                    -page_rows
+                };
+                scroll_active_tab_by(&state, delta);
+                return;
             }
 
             let st = state.borrow();
@@ -344,6 +384,44 @@ fn do_paste(state: &Rc<RefCell<State>>) {
 const BTN_MIDDLE: i32 = 3;
 const KIND_PRESS: i32 = 1;
 
+/// `special` codes for PageUp/PageDown (see `input::map_key`'s doc comment
+/// for the full table — these two are intercepted here, before
+/// `input::map_key`, for the P6.7 Shift+PageUp/PageDown scroll shortcut).
+const PAGE_UP: i32 = 11;
+const PAGE_DOWN: i32 = 12;
+
+/// Lines scrolled per wheel notch when the app hasn't claimed the wheel via
+/// mouse tracking (P6.7 — see `wire_scroll`).
+const WHEEL_SCROLL_LINES: u32 = 3;
+
+/// The scroll offset to request given the current one plus a signed `delta`
+/// (positive = further into scrollback, negative = toward the tail), clamped
+/// to what's actually available. Pure — shared by the wheel and
+/// Shift+PageUp/PageDown paths.
+fn clamp_scroll(current: &GridSnapshot, delta: i64) -> u32 {
+    (i64::from(current.scroll_offset) + delta).clamp(0, i64::from(current.scrollback_len)) as u32
+}
+
+/// P6.7: request a scroll-offset change for the active tab's **primary**
+/// terminal session (matches `wire_scroll`'s pre-existing "always the active
+/// tab's `session`, not whichever pane is focused" scope — see the task
+/// report). No-op before the first snapshot arrives, or for a non-terminal
+/// surface (RDP).
+fn scroll_active_tab_by(state: &Rc<RefCell<State>>, delta: i64) {
+    let st = state.borrow();
+    let Some(tab) = st.tabs.get(st.active) else {
+        return;
+    };
+    if !matches!(tab.session.surface(), Surface::TerminalGrid(_)) {
+        return;
+    }
+    let Some(last) = tab.last.as_ref() else {
+        return;
+    };
+    tab.session
+        .send_input(SessionInput::Scroll(clamp_scroll(last, delta)));
+}
+
 /// Whether the pane currently focused in `tab` is a terminal surface (as
 /// opposed to an RDP framebuffer, which has no selection/paste concept).
 /// Extra panes are terminal-only in practice today (RDP-in-a-split-pane is a
@@ -459,14 +537,40 @@ fn wire_scroll(ctx: &Ctx) {
     ctx.ui.on_scroll({
         let state = ctx.state.clone();
         move |_dx, dy| {
+            if dy == 0.0 {
+                return;
+            }
             let st = state.borrow();
             // Terminal scroll only — RDP scroll is handled by on_rdp_scroll (fix c).
-            if let Some(tab) = st.tabs.get(st.active)
-                && matches!(tab.session.surface(), Surface::TerminalGrid(_))
-                && let Some(ev) = input::map_scroll(dy, 0, 0, 0)
-            {
-                tab.session.send_input(SessionInput::Mouse(ev));
+            let Some(tab) = st.tabs.get(st.active) else {
+                return;
+            };
+            if !matches!(tab.session.surface(), Surface::TerminalGrid(_)) {
+                return;
             }
+            let Some(last) = tab.last.as_ref() else {
+                return;
+            };
+            if last.mouse_tracking {
+                // The app has grabbed the wheel (e.g. less/vim/htop with
+                // mouse reporting on) — forward it as a wheel-button mouse
+                // event, exactly like pre-P6.7 behavior.
+                if let Some(ev) = input::map_scroll(dy, 0, 0, 0) {
+                    tab.session.send_input(SessionInput::Mouse(ev));
+                }
+                return;
+            }
+            // P6.7: no mouse-tracking app has claimed the wheel — scroll our
+            // own scrollback viewport instead. Previously this silently did
+            // nothing useful: `encode_mouse` returns empty bytes with no
+            // mouse mode active, so a wheel notch was a no-op.
+            let delta: i64 = if dy > 0.0 {
+                i64::from(WHEEL_SCROLL_LINES)
+            } else {
+                -i64::from(WHEEL_SCROLL_LINES)
+            };
+            tab.session
+                .send_input(SessionInput::Scroll(clamp_scroll(last, delta)));
         }
     });
 }
@@ -1129,11 +1233,43 @@ pub(super) fn render_frame(
     target: Option<(u32, u32)>,
 ) -> Image {
     let sel = tab.sel.selection().copied();
-    let buf = match target {
-        Some((w, h)) => tab.renderer.render_to_selected(snap, w, h, sel.as_ref()),
-        None => tab.renderer.render_selected(snap, sel.as_ref()),
-    };
+    let (matches, current) = visible_search_highlights(&tab.search, snap);
+    let (w, h) = target.unwrap_or_else(|| tab.renderer.pixel_size(snap.size));
+    let buf = tab
+        .renderer
+        .render_to_full(snap, w, h, sel.as_ref(), &matches, current);
     Image::from_rgba8(buf)
+}
+
+/// P6.7: the active tab's search matches that fall within `snap`'s currently
+/// displayed viewport window, translated to the index `render_to_full`
+/// expects for `current_match` — `terminal_renderer::render_to_full`'s doc
+/// asks callers to pre-filter for exactly this reason (an unfiltered 10k-line
+/// match list would be scanned per-cell on every redraw).
+fn visible_search_highlights(
+    search: &search::SearchState,
+    snap: &GridSnapshot,
+) -> (Vec<crate::terminal_renderer::SearchMatch>, Option<usize>) {
+    if !search.is_open() {
+        return (Vec::new(), None);
+    }
+    let abs_top = snap.scrollback_len.saturating_sub(snap.scroll_offset);
+    let abs_bottom = abs_top + u32::from(snap.size.rows);
+    let current_match = search
+        .current()
+        .and_then(|i| search.matches().get(i))
+        .copied();
+    let visible: Vec<_> = search
+        .matches()
+        .iter()
+        .filter(|m| {
+            let r = u32::from(m.row);
+            r >= abs_top && r < abs_bottom
+        })
+        .copied()
+        .collect();
+    let current_idx = current_match.and_then(|cm| visible.iter().position(|m| *m == cm));
+    (visible, current_idx)
 }
 
 pub(crate) fn drain_latest<T>(rx: &Receiver<T>) -> Option<T> {
@@ -1530,6 +1666,20 @@ fn tick_tab(
         st.tabs[i].last_focused_pane = focused_now;
     }
 
+    // P6.7: the search overlay only targets the active tab's primary pane;
+    // poll for a buffer-text reply every tick while it's open. A poll that
+    // (re)computes matches has no snapshot of its own to ride along with, so
+    // force a render + refresh the overlay's match-count UI now (same
+    // "no new GridSnapshot, but the highlight changed" situation
+    // `wire_pointer`'s `selection_changed` handles for mouse selection).
+    if i == active && st.tabs[i].search.is_open() && st.tabs[i].search.poll() {
+        search::refresh_search_ui_from(ui, st);
+        if let Some(snap) = st.tabs[i].last.clone() {
+            let img = render_frame(&mut st.tabs[i], &snap, target);
+            ui.set_frame(img);
+        }
+    }
+
     // Drain the latest update for this tab's primary surface.
     match st.tabs[i].session.surface() {
         Surface::TerminalGrid(rx) => {
@@ -1718,6 +1868,17 @@ pub(super) fn tick(
             tab.sel.clear();
             for ep in &mut tab.extra_panes {
                 ep.sel.clear();
+            }
+        }
+        // P6.7: the search overlay is a single global `terminal-search-open`
+        // property tied conceptually to the active tab's primary pane — a
+        // tab switch closes it rather than leaving it open over unrelated
+        // content (the per-tab `SearchState` itself, including its last
+        // query, is preserved so reopening it later on that tab resumes).
+        if ui.get_terminal_search_open() {
+            ui.set_terminal_search_open(false);
+            if let Some(tab) = st.tabs.get_mut(old) {
+                tab.search.close();
             }
         }
         st.last_active_tab = active;

@@ -158,6 +158,7 @@ pub(super) fn push_tab(
         sel: PaneSelectionState::default(),
         last_focused_pane: 0,
         is_empty,
+        search: super::search::SearchState::default(),
     });
     st.active = st.tabs.len() - 1;
     let active = st.active;

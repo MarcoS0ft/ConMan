@@ -602,6 +602,7 @@ pub(super) fn reattach_session(
             sel: PaneSelectionState::default(),
             last_focused_pane: 0,
             is_empty: false,
+            search: super::search::SearchState::default(),
         });
         st.active = st.tabs.len() - 1;
         let active = st.active;
