@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use cm_core::LocalSettings;
-use cm_session::{LocalTerminalSession, PaneGroup, Session, SessionStatus, Surface};
+use cm_session::{PaneGroup, Session, SessionStatus, Surface};
 use slint::{ComponentHandle, Model, SharedString, TimerMode, VecModel};
 
 use crate::selection::PaneSelectionState;
@@ -241,7 +241,8 @@ fn spawn_local_tab(
     size: TerminalSize,
     is_empty: bool,
 ) {
-    let session = match LocalTerminalSession::spawn(&ls, size) {
+    let provider = state.borrow().session_provider.clone();
+    let session = match provider.spawn_local(&ls, size) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("failed to open terminal: {e}");
@@ -257,7 +258,7 @@ fn spawn_local_tab(
         tab_model,
         ui,
         PushTabArgs {
-            session: Box::new(session),
+            session,
             connect_info: None,
             is_remote: false,
             rdp_clipboard: None,

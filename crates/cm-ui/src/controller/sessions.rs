@@ -13,10 +13,9 @@ use cm_core::{
     RdpSettings, Secret, SshAuthMethod, SshSettings,
 };
 use cm_session::{
-    CertDecision, CertInfo, CertStore, CertVerifier, FailedSession, FocusDir, FrameUpdate,
-    HostKeyDecision, HostKeyInfo, HostKeyVerifier, KbdInteractiveChallenge, KbdInteractiveHandler,
-    KnownHosts, PaneLayout, RdpAuthInput, RdpSession, SessionInput, SessionStatus, SshAuthInput,
-    SshTerminalSession, Surface,
+    CertDecision, CertInfo, CertVerifier, FailedSession, FocusDir, FrameUpdate, HostKeyDecision,
+    HostKeyInfo, HostKeyVerifier, KbdInteractiveChallenge, KbdInteractiveHandler, PaneLayout,
+    RdpAuthInput, SessionInput, SessionStatus, SshAuthInput, Surface,
 };
 use slint::{ComponentHandle, Image, Model, SharedString, Timer, TimerMode, VecModel};
 
@@ -1784,8 +1783,8 @@ pub(super) fn open_ssh_tab(
         AuthProvenance::Direct => SshAuthSource::Direct(auth.clone()),
         AuthProvenance::Credential(id) => SshAuthSource::Credential(id),
     };
-    match SshTerminalSession::connect(&settings, auth, verifier, KnownHosts::with_defaults(), size)
-    {
+    let provider = state.borrow().session_provider.clone();
+    match provider.connect_ssh(&settings, auth, verifier, size) {
         Ok(session) => {
             let ci = SshConnectInfo {
                 settings,
@@ -1796,7 +1795,7 @@ pub(super) fn open_ssh_tab(
                 tab_model,
                 ui,
                 tabs::PushTabArgs {
-                    session: Box::new(session),
+                    session,
                     connect_info: Some(ConnectInfo::Ssh(ci)),
                     is_remote: true,
                     rdp_clipboard: None,
@@ -1830,19 +1829,6 @@ pub(super) fn open_ssh_tab(
     }
 }
 
-/// Persistent RDP cert-trust store in the OS app-data dir, so accepted certs
-/// survive restarts. Shared by [`open_rdp_tab`] and [`reconnect_rdp_tab`]
-/// (P6.12) -- both must trust against the exact same on-disk store so a
-/// reconnect never re-prompts for a cert the initial connect already
-/// accepted.
-fn default_cert_store() -> Arc<CertStore> {
-    let path = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("conman")
-        .join("cert_trust.json");
-    CertStore::new_persistent(path)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn open_rdp_tab(
     state: &Rc<RefCell<State>>,
@@ -1863,8 +1849,8 @@ pub(super) fn open_rdp_tab(
         AuthProvenance::Direct => RdpAuthSource::Direct(auth.clone()),
         AuthProvenance::Credential(id) => RdpAuthSource::Credential(id),
     };
-    let cert_store = default_cert_store();
-    let session = match RdpSession::connect(&settings, auth, verifier, cert_store) {
+    let provider = state.borrow().session_provider.clone();
+    let session = match provider.connect_rdp(&settings, auth, verifier) {
         Ok(s) => s,
         Err(e) => {
             // P6.12: mirrors open_ssh_tab's synchronous-setup-error handling
@@ -1884,7 +1870,7 @@ pub(super) fn open_rdp_tab(
         }
     };
     // Retain a reference to the drive thread's clipboard slot for remote→local sync.
-    let rdp_clipboard = Some(Arc::clone(&session.remote_clipboard));
+    let rdp_clipboard = session.remote_clipboard();
     let ci = RdpConnectInfo {
         settings,
         auth_source,
@@ -1894,7 +1880,7 @@ pub(super) fn open_rdp_tab(
         tab_model,
         ui,
         tabs::PushTabArgs {
-            session: Box::new(session),
+            session,
             connect_info: Some(ConnectInfo::Rdp(ci)),
             is_remote: true,
             rdp_clipboard,
@@ -1932,10 +1918,10 @@ pub(super) fn reconnect_rdp_tab(
         AuthProvenance::Direct => RdpAuthSource::Direct(auth.clone()),
         AuthProvenance::Credential(id) => RdpAuthSource::Credential(id),
     };
-    let cert_store = default_cert_store();
-    match RdpSession::connect(&settings, auth, verifier, cert_store) {
+    let provider = state.borrow().session_provider.clone();
+    match provider.connect_rdp(&settings, auth, verifier) {
         Ok(new_session) => {
-            let rdp_clipboard = Some(Arc::clone(&new_session.remote_clipboard));
+            let rdp_clipboard = new_session.remote_clipboard();
             let ci = RdpConnectInfo {
                 settings,
                 auth_source,
@@ -1943,7 +1929,7 @@ pub(super) fn reconnect_rdp_tab(
             {
                 let mut st = state.borrow_mut();
                 if let Some(tab) = st.tabs.get_mut(tab_idx) {
-                    tab.session = Box::new(new_session);
+                    tab.session = new_session;
                     tab.connect_info = Some(ConnectInfo::Rdp(ci));
                     tab.last_frame = None;
                     tab.rdp_clipboard = rdp_clipboard;
@@ -1983,8 +1969,8 @@ pub(super) fn reconnect_ssh_tab(
         AuthProvenance::Direct => SshAuthSource::Direct(auth.clone()),
         AuthProvenance::Credential(id) => SshAuthSource::Credential(id),
     };
-    match SshTerminalSession::connect(&settings, auth, verifier, KnownHosts::with_defaults(), size)
-    {
+    let provider = state.borrow().session_provider.clone();
+    match provider.connect_ssh(&settings, auth, verifier, size) {
         Ok(new_session) => {
             let ci = SshConnectInfo {
                 settings,
@@ -1993,7 +1979,7 @@ pub(super) fn reconnect_ssh_tab(
             {
                 let mut st = state.borrow_mut();
                 if let Some(tab) = st.tabs.get_mut(tab_idx) {
-                    tab.session = Box::new(new_session);
+                    tab.session = new_session;
                     tab.connect_info = Some(ConnectInfo::Ssh(ci));
                     tab.last = None;
                 }

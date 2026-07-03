@@ -21,6 +21,7 @@ mod kind;
 mod ports;
 pub mod rdp;
 pub mod session;
+pub mod session_ports;
 mod settings;
 pub mod ssh;
 pub mod terminal;
@@ -38,21 +39,9 @@ pub use session::{
     ExitStatus, FailedSession, FrameUpdate, RdpInputEvent, RdpMouseButton, Session, SessionInput,
     SessionStatus, Surface,
 };
+pub use session_ports::{SessionProvider, SessionSetupError};
 pub use settings::{ConnectionSettings, LocalSettings, RdpSettings, SshAuthMethod, SshSettings};
 pub use terminal::{
     Cell, CellAttrs, Color, CursorShape, CursorState, GridSnapshot, Key, KeyEvent, KeyModifiers,
     MouseAction, MouseButton, MouseEvent, TerminalEngine, TerminalSize,
 };
-
-/// **Sketch only — `SessionProvider` is not yet finalized.**
-///
-/// `TerminalEngine` was finalized in P2.1 and now lives in [`crate::terminal`].
-/// [`crate::session::Session`] (the unified session-lifecycle trait) and the
-/// SSH/RDP auth-input and verifier-trait contracts ([`crate::ssh`],
-/// [`crate::rdp`]) were relocated here from `cm-session` in P6.15 as the
-/// shared vocabulary any `SessionProvider` port needs; the port trait itself
-/// — tying those together into `spawn_local`/`connect_ssh`/`connect_rdp` — is
-/// defined in a following change (`docs/devel/memos/
-/// P6.15-sessionprovider-port.md`).
-// TODO(P6.15 cont.): finalize SessionProvider signature.
-pub mod session_ports {}

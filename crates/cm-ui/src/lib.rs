@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use cm_core::{ConnectionRepository, CredentialStore};
+use cm_core::{ConnectionRepository, CredentialStore, SessionProvider};
 
 mod clipboard;
 mod controller;
@@ -63,6 +63,12 @@ pub struct AppConfig {
     pub repo: Arc<dyn ConnectionRepository>,
     /// The OS-keychain credential store.
     pub secrets: Arc<dyn CredentialStore>,
+    /// P6.15 (gap 27): establishes live sessions for local/SSH/RDP tabs. The
+    /// controller calls this port instead of naming the concrete
+    /// `cm_session::{LocalTerminalSession, SshTerminalSession, RdpSession}`
+    /// adapters directly — the binary builds `cm_session::
+    /// SessionProviderImpl` and injects it here, mirroring `repo`/`secrets`.
+    pub session_provider: Arc<dyn SessionProvider>,
     /// P6.16: receives a `()` for every activation request from a second
     /// `conman` launch (delivered by `cm_platform::single_instance`). `run`
     /// spawns a small listener thread that brings the window forward on the

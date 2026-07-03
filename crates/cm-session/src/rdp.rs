@@ -567,6 +567,13 @@ impl Session for RdpSession {
             SessionInput::Scroll(_) => {}
         }
     }
+
+    /// P6.15: was a public field (`RdpSession::remote_clipboard`) `cm-ui`
+    /// read directly; now a trait method so it's reachable through
+    /// `Box<dyn Session>` (the `SessionProvider` port's return type).
+    fn remote_clipboard(&self) -> Option<Arc<Mutex<Option<String>>>> {
+        Some(Arc::clone(&self.remote_clipboard))
+    }
 }
 
 impl Drop for RdpSession {

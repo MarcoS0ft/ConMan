@@ -17,10 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use cm_core::LocalSettings;
 use cm_core::terminal::TerminalSize;
-use cm_session::{
-    CertDecision, LocalTerminalSession, PaneGroup, PaneLayout, RdpSession, SessionInput,
-    SessionStatus, Surface,
-};
+use cm_session::{CertDecision, PaneGroup, PaneLayout, SessionInput, SessionStatus, Surface};
 use slint::{ComponentHandle, Image, Model, SharedString, TimerMode, VecModel};
 
 use crate::selection::PaneSelectionState;
@@ -696,7 +693,8 @@ pub(super) fn do_split(
         INITIAL_SIZE
     };
 
-    let session = match LocalTerminalSession::spawn(&slot.local_settings, size) {
+    let provider = state.borrow().session_provider.clone();
+    let session = match provider.spawn_local(&slot.local_settings, size) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("split pane spawn failed: {e}");
@@ -711,7 +709,7 @@ pub(super) fn do_split(
         ui,
         layout,
         slot.new_pane_idx,
-        Box::new(session),
+        session,
         renderer,
         size,
         pane_w,
@@ -797,13 +795,8 @@ pub(super) fn connect_in_split(
                 auto_accept,
             });
 
-            let session = match cm_session::SshTerminalSession::connect(
-                s,
-                auth,
-                verifier,
-                cm_session::KnownHosts::with_defaults(),
-                size,
-            ) {
+            let provider = state.borrow().session_provider.clone();
+            let session = match provider.connect_ssh(s, auth, verifier, size) {
                 Ok(sess) => sess,
                 Err(e) => {
                     tracing::warn!("connect-in-split SSH connect failed: {e}");
@@ -819,7 +812,7 @@ pub(super) fn connect_in_split(
                 ui,
                 layout,
                 slot.new_pane_idx,
-                Box::new(session),
+                session,
                 renderer,
                 size,
                 pane_w,
@@ -861,15 +854,9 @@ pub(super) fn connect_in_split(
                 pending: cert_pending.clone(),
                 auto_accept,
             });
-            let cert_store = {
-                let path = dirs::data_local_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("conman")
-                    .join("cert_trust.json");
-                cm_session::CertStore::new_persistent(path)
-            };
 
-            let session = match RdpSession::connect(s, auth, verifier, cert_store) {
+            let provider = state.borrow().session_provider.clone();
+            let session = match provider.connect_rdp(s, auth, verifier) {
                 Ok(sess) => sess,
                 Err(e) => {
                     tracing::warn!("connect-in-split RDP connect failed: {e}");
@@ -885,7 +872,7 @@ pub(super) fn connect_in_split(
                 ui,
                 layout,
                 slot.new_pane_idx,
-                Box::new(session),
+                session,
                 renderer,
                 INITIAL_SIZE,
                 pane_w,
