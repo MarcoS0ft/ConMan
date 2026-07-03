@@ -1,8 +1,7 @@
 //! Settings persistence: theme/density/accent/font-size/shell path-args-cwd/
 //! startup-behavior callbacks, plus the AppSettings <-> live-UI helpers.
 
-use cm_core::LocalSettings;
-use cm_storage::SettingsService;
+use cm_core::{AppSettings, LocalSettings, SettingsService};
 use slint::ComponentHandle;
 
 use crate::AppWindow;
@@ -167,7 +166,7 @@ fn wire_startup_behavior_changed(ctx: &Ctx) {
     });
 }
 
-pub(super) fn local_settings_from_app(s: &cm_storage::AppSettings) -> LocalSettings {
+pub(super) fn local_settings_from_app(s: &AppSettings) -> LocalSettings {
     LocalSettings {
         program: if s.shell_path.is_empty() {
             None
@@ -198,7 +197,7 @@ pub(super) fn local_settings_from_app(s: &cm_storage::AppSettings) -> LocalSetti
 /// NOTE (P1.5): In the current binary the repository is in-memory, so none of
 /// these values survive process restart.  End-to-end persistence will be
 /// observable once the disk-backed repository lands in P1.5.
-pub(super) fn apply_settings_to_ui(s: &cm_storage::AppSettings, ui: &AppWindow) {
+pub(super) fn apply_settings_to_ui(s: &AppSettings, ui: &AppWindow) {
     ui.set_theme_mode(s.theme_mode);
     ui.set_density(s.density);
     ui.set_accent_index(s.accent_index);

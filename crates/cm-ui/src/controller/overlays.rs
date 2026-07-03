@@ -1,8 +1,8 @@
 //! Overlay + panel chrome: connecting/error overlays driven by session status,
 //! toast dismissal, the Connections/Keys panel switch, and the sidebar toggle.
 
+use cm_core::SettingsService;
 use cm_session::SessionStatus;
-use cm_storage::SettingsService;
 use slint::{ComponentHandle, Model, SharedString};
 
 use crate::AppWindow;

@@ -24,9 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cm_core::terminal::{GridSnapshot, TerminalSize};
-use cm_core::{LocalSettings, RdpSettings, SshSettings};
+use cm_core::{LocalSettings, RdpSettings, SettingsService, SshSettings};
 use cm_session::{CertDecision, HostKeyDecision, PaneGroup, RdpAuthInput, Session, SshAuthInput};
-use cm_storage::SettingsService;
 use slint::{ComponentHandle, Image, ModelRc, SharedString, Timer, VecModel};
 
 use crate::clipboard::Clipboard;
@@ -398,7 +397,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("failed to load settings: {e}");
-                cm_storage::AppSettings::default()
+                cm_core::AppSettings::default()
             }
         }
     };

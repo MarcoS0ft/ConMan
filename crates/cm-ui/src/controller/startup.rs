@@ -13,8 +13,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use cm_core::ConnectionId;
-use cm_storage::{SessionTabEntry, SessionTabSnapshot, SettingsService};
+use cm_core::{ConnectionId, SessionTabEntry, SessionTabSnapshot, SettingsService};
 
 use super::*;
 
