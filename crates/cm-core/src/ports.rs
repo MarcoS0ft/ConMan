@@ -131,6 +131,24 @@ pub trait ConnectionRepository: Send + Sync {
 
     fn get_setting(&self, key: &str) -> Result<Option<String>, RepositoryError>;
     fn set_setting(&self, key: &str, value: &str) -> Result<(), RepositoryError>;
+
+    // -----------------------------------------------------------------------
+    // Recents (P6.14 — Launchpad)
+    // -----------------------------------------------------------------------
+
+    /// Records that `id` was just opened at `opened_at` (epoch seconds),
+    /// superseding any earlier record for the same connection. Recency only —
+    /// not frecency (a nice-to-have noted, not implemented, by the P6.14 task
+    /// spec). Best-effort: callers should treat a failure here as non-fatal to
+    /// the connect attempt itself (see the schema memo,
+    /// `docs/devel/memos/P6.14-recents-schema.md`).
+    fn record_recent(&self, id: ConnectionId, opened_at: i64) -> Result<(), RepositoryError>;
+
+    /// Returns up to `limit` `(connection id, opened_at)` pairs among
+    /// recently-opened connections, most-recently-opened first. A connection
+    /// deleted since it was recorded is never returned (its recents row is
+    /// removed with it — see the schema memo).
+    fn list_recents(&self, limit: usize) -> Result<Vec<(ConnectionId, i64)>, RepositoryError>;
 }
 
 /// Secret-storage port backed by the OS keychain. Secrets cross this boundary

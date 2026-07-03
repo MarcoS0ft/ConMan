@@ -3,13 +3,14 @@ use rusqlite::OptionalExtension as _;
 use crate::error::StorageError;
 
 /// Latest schema version this build understands.
-pub const CURRENT_VERSION: u32 = 2;
+pub const CURRENT_VERSION: u32 = 3;
 
 /// Ordered migration scripts.  Index `i` upgrades from version `i` to `i+1`,
 /// i.e. `MIGRATIONS[0]` is the v0→v1 script (the initial schema).
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, include_str!("../migrations/v1.sql")),
     (2, include_str!("../migrations/v2.sql")),
+    (3, include_str!("../migrations/v3.sql")),
 ];
 
 /// Applies all pending migrations on `conn`.  Safe to call on a fresh (empty)
@@ -158,13 +159,16 @@ mod tests {
         )
         .expect("insert group");
 
-        // Apply remaining migrations (v2 adds the settings table).
-        run_migrations(&mut conn).expect("migrate v1 → v2");
+        // Apply all remaining migrations (v2 adds the settings table; later
+        // versions, e.g. v3's `recents` table, ride along -- `run_migrations`
+        // always walks to `CURRENT_VERSION`, so this asserts against that
+        // constant rather than a version number that will go stale again).
+        run_migrations(&mut conn).expect("migrate v1 → current");
 
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .expect("version row");
-        assert_eq!(version, 2, "should be at v2 after migration");
+        assert_eq!(version, CURRENT_VERSION, "should be at the current version after migration");
 
         // Settings table must now exist.
         conn.execute(
@@ -185,5 +189,55 @@ mod tests {
             .query_row("SELECT name FROM groups", [], |r| r.get(0))
             .expect("read group");
         assert_eq!(name, "survived-group");
+    }
+
+    #[test]
+    fn v2_to_v3_migration_adds_recents_table() {
+        let mut conn = open_in_memory();
+
+        // Set up v2 (no recents table yet).
+        setup_db_at_version(&mut conn, 2).expect("v2 setup");
+
+        // Insert a connection that a `recents` row can reference once v3 lands.
+        conn.execute(
+            "INSERT INTO groups (name, sort) VALUES ('g', 0)",
+            [],
+        )
+        .expect("insert group");
+        conn.execute(
+            "INSERT INTO connections (group_id, kind, name, settings_json, sort, created_at, updated_at) \
+             VALUES (1, 'ssh', 'survived-conn', '{}', 0, 0, 0)",
+            [],
+        )
+        .expect("insert connection");
+
+        let recents_missing = conn
+            .execute(
+                "INSERT INTO recents (connection_id, opened_at) VALUES (1, 100)",
+                [],
+            )
+            .is_err();
+        assert!(recents_missing, "recents table should not exist in v2 schema");
+
+        run_migrations(&mut conn).expect("migrate v2 → current");
+
+        let version: u32 = conn
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .expect("version row");
+        assert_eq!(version, CURRENT_VERSION, "should be at the current version after migration");
+
+        conn.execute(
+            "INSERT INTO recents (connection_id, opened_at) VALUES (1, 100)",
+            [],
+        )
+        .expect("insert into recents after migration");
+
+        // ON DELETE CASCADE: deleting the connection removes its recents row.
+        conn.execute("DELETE FROM connections WHERE id = 1", [])
+            .expect("delete connection");
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recents", [], |r| r.get(0))
+            .expect("count recents");
+        assert_eq!(remaining, 0, "recents row should cascade-delete");
     }
 }
