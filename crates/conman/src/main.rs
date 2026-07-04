@@ -20,8 +20,16 @@
 //! `logging.rs`) — console layer in debug, rotating file layer under
 //! `cm_platform::app_log_dir()` in release (`windows_subsystem = "windows"`
 //! swallows stderr there).
+//!
+//! P7.1: before any of the above, decides the Slint renderer
+//! (`render_backend::resolve_and_apply`) — honors an explicit user
+//! `SLINT_BACKEND`, otherwise probes the accelerated (winit+femtovg)
+//! renderer in a disposable child process and forces the software renderer
+//! if it doesn't come up (e.g. no usable hardware OpenGL), so the app
+//! renders instead of crashing.
 
 mod logging;
+mod render_backend;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -40,8 +48,20 @@ use cm_ui::AppConfig;
 use slint as _;
 
 fn main() -> ExitCode {
+    // P7.1: the disposable renderer-probe child takes this branch and exits
+    // immediately — no logging subscriber, no single-instance guard, no
+    // storage, no keyring. See the `render_backend` module docs.
+    if std::env::var_os(render_backend::PROBE_ENV_VAR).is_some() {
+        return render_backend::run_probe_child();
+    }
+
     // Install the tracing subscriber first — everything below may log.
     let _logging_guard = logging::init();
+
+    // P7.1: must run before any Slint API is touched in this process, and
+    // before anything stateful (single-instance/keyring/DB) so a fallback
+    // decision never races with real app state.
+    render_backend::resolve_and_apply();
 
     // ── Single-instance guard (P6.16) — first, before storage/keyring ──────
     let activation_rx: Option<Receiver<()>> = match single_instance::acquire() {
