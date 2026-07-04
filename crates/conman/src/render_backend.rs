@@ -45,6 +45,12 @@
 //! An explicit user-set `SLINT_BACKEND` always wins and skips the probe
 //! entirely, so the xvfb/QA gates (which set `winit-femtovg` / `software`)
 //! are unaffected.
+//!
+//! [`resolve`] (which may call `force_software_backend`'s `unsafe
+//! std::env::set_var`) must run **before** `logging::init()` -- see
+//! `force_software_backend`'s doc comment for why -- so the decision is
+//! carried across that call as a [`RendererDecision`] and only logged
+//! afterward, by [`log_decision`].
 
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
@@ -143,12 +149,14 @@ fn probe() -> ProbeOutcome {
 /// # Safety
 /// `std::env::set_var` is `unsafe` because mutating the environment races
 /// with any other thread reading it. This is only ever called from
-/// [`resolve_and_apply`], which `main` calls immediately after
-/// `logging::init()` and before anything else -- in particular before the
-/// single-instance listener thread ([`cm_platform::single_instance`]) or the
-/// release-build log-appender thread are spawned. No other thread exists yet
-/// to race with (CONVENTIONS §2 unsafe-usage rule; see also
-/// `docs/devel/memos/P7.1-backend-fallback.md`).
+/// [`resolve`], which `main` calls **before** `logging::init()` (which, in
+/// release builds, spawns a background log-appender thread) and before
+/// anything else that could spawn a thread (e.g. the single-instance
+/// listener thread, `cm_platform::single_instance`). The process is still
+/// strictly single-threaded at this point, so no other thread exists yet to
+/// race with (CONVENTIONS §2 unsafe-usage rule; see also
+/// `docs/devel/memos/P7.1-backend-fallback.md`). Do not call this after
+/// `logging::init()` -- that would break the invariant.
 fn force_software_backend() {
     #[allow(unsafe_code)] // see the doc comment above for the upheld invariant
     unsafe {
@@ -156,37 +164,72 @@ fn force_software_backend() {
     }
 }
 
-/// Decides the renderer for the real run and applies it before anything else
-/// in `main` touches the platform, logging the decision via `tracing` either
-/// way (P7.1 requirements 2-3). Must be called before any Slint API is used
-/// in this process, immediately after `logging::init()`.
-pub(crate) fn resolve_and_apply() {
+/// The renderer decision made by [`resolve`], carried across `logging::init()`
+/// so [`log_decision`] can report it once a subscriber exists.
+pub(crate) enum RendererDecision {
+    /// The user set `SLINT_BACKEND` themselves; honored verbatim.
+    ExplicitEnv(String),
+    /// No override; the probe confirmed the accelerated renderer comes up.
+    Accelerated,
+    /// No override; couldn't tell either way (e.g. failed to spawn the
+    /// probe). Proceeds with the accelerated default.
+    Inconclusive(String),
+    /// No override; the probe failed, so the software renderer has already
+    /// been forced (`force_software_backend` ran inside [`resolve`]).
+    FallbackForced(String),
+}
+
+/// Decides the renderer for the real run and -- if a fallback is needed --
+/// applies it immediately, by forcing `SLINT_BACKEND=software` in this
+/// process's environment.
+///
+/// Must run before any Slint API is used in this process, and **before**
+/// `logging::init()`: forcing the fallback needs `std::env::set_var`, which
+/// is only sound while the process is still single-threaded (see
+/// `force_software_backend`'s doc comment), and `logging::init()` is the
+/// first thing in `main` that can spawn a thread. Returns the decision for
+/// [`log_decision`] to report once logging is up.
+pub(crate) fn resolve() -> RendererDecision {
     if let Ok(explicit) = std::env::var("SLINT_BACKEND") {
-        tracing::info!(
-            renderer = %explicit,
-            fallback = false,
-            "startup renderer: honoring explicit SLINT_BACKEND"
-        );
-        return;
+        return RendererDecision::ExplicitEnv(explicit);
     }
 
     match probe() {
-        ProbeOutcome::Accelerated => {
+        ProbeOutcome::Accelerated => RendererDecision::Accelerated,
+        ProbeOutcome::Inconclusive(reason) => RendererDecision::Inconclusive(reason),
+        ProbeOutcome::Failed(reason) => {
+            force_software_backend();
+            RendererDecision::FallbackForced(reason)
+        }
+    }
+}
+
+/// Logs the decision [`resolve`] already made and applied, via `tracing`
+/// (P7.1 requirements 2-3). Call immediately after `logging::init()`.
+pub(crate) fn log_decision(decision: RendererDecision) {
+    match decision {
+        RendererDecision::ExplicitEnv(explicit) => {
+            tracing::info!(
+                renderer = %explicit,
+                fallback = false,
+                "startup renderer: honoring explicit SLINT_BACKEND"
+            );
+        }
+        RendererDecision::Accelerated => {
             tracing::info!(
                 renderer = "accelerated (winit+femtovg)",
                 fallback = false,
                 "startup renderer: probe succeeded"
             );
         }
-        ProbeOutcome::Inconclusive(reason) => {
+        RendererDecision::Inconclusive(reason) => {
             tracing::warn!(
                 reason = %reason,
                 "startup renderer: probe inconclusive, proceeding with the accelerated renderer"
             );
         }
-        ProbeOutcome::Failed(reason) => {
+        RendererDecision::FallbackForced(reason) => {
             tracing::warn!(reason = %reason, "startup renderer: probe failed");
-            force_software_backend();
             tracing::info!(
                 renderer = "software",
                 fallback = true,

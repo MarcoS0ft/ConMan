@@ -22,11 +22,12 @@
 //! swallows stderr there).
 //!
 //! P7.1: before any of the above, decides the Slint renderer
-//! (`render_backend::resolve_and_apply`) — honors an explicit user
-//! `SLINT_BACKEND`, otherwise probes the accelerated (winit+femtovg)
-//! renderer in a disposable child process and forces the software renderer
-//! if it doesn't come up (e.g. no usable hardware OpenGL), so the app
-//! renders instead of crashing.
+//! (`render_backend::resolve`) — honors an explicit user `SLINT_BACKEND`,
+//! otherwise probes the accelerated (winit+femtovg) renderer in a disposable
+//! child process and forces the software renderer if it doesn't come up
+//! (e.g. no usable hardware OpenGL), so the app renders instead of crashing.
+//! This must run **before** `logging::init()` (see `render_backend`'s module
+//! docs) — the decision is logged afterward, once a subscriber exists.
 
 mod logging;
 mod render_backend;
@@ -55,13 +56,20 @@ fn main() -> ExitCode {
         return render_backend::run_probe_child();
     }
 
-    // Install the tracing subscriber first — everything below may log.
+    // P7.1: resolve (and, if needed, apply) the renderer choice *before*
+    // installing the logging subscriber. `logging::init()` is the first
+    // thing below that can spawn a thread (the release build's non-blocking
+    // log-appender worker); forcing the software fallback needs
+    // `std::env::set_var`, which is only sound while the process is still
+    // single-threaded. See `render_backend::force_software_backend`'s doc
+    // comment for the full invariant.
+    let renderer_decision = render_backend::resolve();
+
+    // Install the tracing subscriber — everything below may log.
     let _logging_guard = logging::init();
 
-    // P7.1: must run before any Slint API is touched in this process, and
-    // before anything stateful (single-instance/keyring/DB) so a fallback
-    // decision never races with real app state.
-    render_backend::resolve_and_apply();
+    // Now that a subscriber exists, report the decision made above.
+    render_backend::log_decision(renderer_decision);
 
     // ── Single-instance guard (P6.16) — first, before storage/keyring ──────
     let activation_rx: Option<Receiver<()>> = match single_instance::acquire() {
