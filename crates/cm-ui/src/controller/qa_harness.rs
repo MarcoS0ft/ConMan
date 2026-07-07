@@ -28,6 +28,45 @@
 //! `{"ok":false,"error":…}` reply (CONVENTIONS §2 — untrusted input never
 //! aborts; this listens on loopback only but the input is still
 //! agent/script-supplied, not to be trusted blindly).
+//!
+//! # P7.4 — dialog-aware input (the visual-QA gate's enabler)
+//!
+//! Before P7.4, `key`/`text`/`pointer` only ever reached the active
+//! `TerminalSurface`/RDP pane (see `wire_key_input`/`wire_pointer` in
+//! `sessions.rs`) — an agent could not focus a quick-connect field, type into
+//! the profile editor, or click a dialog's Save/Cancel, so dialogs (where the
+//! 2026-07 Windows UI investigation's #1/#2 defects live) were untestable.
+//!
+//! Rather than simulating real pointer clicks + keystrokes against dialog
+//! widgets (which would need per-widget screen geometry that no `.slint` file
+//! currently exposes, and this wave's file ownership keeps `qa_harness.rs` as
+//! Lane B's only in-scope file — the dialogs' `.slint` sources belong to other
+//! lanes), this module drives dialogs at the same level the Rust controller
+//! already does: every dialog's fields are plain `in`/`in-out` properties on
+//! `AppWindow` (flat, for quick-connect/host-key/cert-dialog) or a struct
+//! property (`ConnProfile`/`GroupForm`/`CredFormData`, for the profile/group/
+//! credential editors), and every button is wired to either an
+//! `AppWindow` callback (`profile-save`, `qc-connect`, `host-key-accept`, …)
+//! or a plain `*-open = false` (Cancel, which every dialog wires inline in
+//! `app.slint` rather than through a Rust callback). Setting a field's bound
+//! property is the exact end-state effect that focusing it and typing would
+//! produce (the same property the Rust `on_*_save` handler reads back), and
+//! invoking a button's callback is the exact call a real click makes — so the
+//! three new commands below (`dialog_field`, `dialog_click`, `dialog_state`)
+//! give scripts a faithful, if not literally keystroke-shaped, way to drive
+//! and inspect any dialog. See `dialog_field_names` for the per-dialog field
+//! catalog (the rubric's per-kind field-manifest check walks this) and
+//! `dialog_click` for the button map.
+//!
+//! One deliberate asymmetry: `dialog_state`'s bulk field dump omits
+//! secret-bearing fields (quick-connect's `secret`/`passphrase`, the
+//! credential editor's `secret`/`passphrase`, the kbd-interactive dialog's
+//! per-row `value`s) — matching `cmd_state`'s "never any secret material"
+//! rule for passive/bulk introspection. An agent that already knows a field
+//! is secret-bearing can still round-trip it via an explicit
+//! `dialog_field`/`get`or `/set` naming that field (needed to actually drive
+//! a password/passphrase field end-to-end) — this is a narrow, deliberate
+//! read, not a broad dump.
 use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -35,8 +74,10 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use serde_json::Value;
 use slint::{ComponentHandle, Model};
 
+use crate::generated_ui::{ConnProfile, CredFormData, GroupForm};
 use crate::{AppWindow, PaletteAction, TabItem};
 
 use super::palette;
@@ -238,6 +279,10 @@ fn process_command(h: &QaHandles, req: &serde_json::Value) -> String {
         "pointer" => cmd_pointer(h, req),
         "palette" => cmd_palette(h, req),
         "screenshot" => cmd_screenshot(h, req),
+        "dialog_field" => cmd_dialog_field(h, req),
+        "dialog_click" => cmd_dialog_click(h, req),
+        "dialog_state" => cmd_dialog_state(h, req),
+        "pixel" => cmd_pixel(h, req),
         "quit" => cmd_quit(),
         other => error_reply(&format!("unknown cmd: {other}")),
     }
@@ -282,6 +327,9 @@ fn cmd_state(h: &QaHandles) -> String {
         ("profile_editor_open", ui.get_profile_editor_open()),
         ("group_editor_open", ui.get_group_editor_open()),
         ("cred_editor_open", ui.get_cred_editor_open()),
+        // P7.4: was missing — the P6.13 keyboard-interactive dialog had no
+        // flag in this list, so `state` could not see it was open.
+        ("kbd_open", ui.get_kbd_open()),
     ];
     let open_overlays: Vec<&str> = overlay_flags
         .iter()
@@ -477,6 +525,586 @@ fn cmd_palette(h: &QaHandles, req: &serde_json::Value) -> String {
     serde_json::json!({ "ok": true }).to_string()
 }
 
+// ── dialog (P7.4 enabler) ──────────────────────────────────────────────────
+//
+// See the module doc for the design rationale. `dialog_field`/`dialog_click`/
+// `dialog_state` are the three new commands; everything below is their
+// per-dialog plumbing.
+
+/// `value` coercion helpers — a malformed `"value"` (wrong JSON type) is a
+/// clear protocol error, never a panic (CONVENTIONS §2).
+fn need_str(v: &Value) -> Result<slint::SharedString, String> {
+    v.as_str()
+        .map(slint::SharedString::from)
+        .ok_or_else(|| "expected a string \"value\"".to_string())
+}
+fn need_i32(v: &Value) -> Result<i32, String> {
+    v.as_i64()
+        .map(|n| n as i32)
+        .ok_or_else(|| "expected an integer \"value\"".to_string())
+}
+fn need_bool(v: &Value) -> Result<bool, String> {
+    v.as_bool()
+        .ok_or_else(|| "expected a boolean \"value\"".to_string())
+}
+
+fn dialog_open(h: &QaHandles, dialog: &str) -> Result<bool, String> {
+    Ok(match dialog {
+        "quick_connect" => h.ui.get_quick_connect_open(),
+        "profile_editor" => h.ui.get_profile_editor_open(),
+        "group_editor" => h.ui.get_group_editor_open(),
+        "cred_editor" => h.ui.get_cred_editor_open(),
+        "host_key" => h.ui.get_host_key_open(),
+        "cert_dialog" => h.ui.get_cert_dialog_open(),
+        "kbd_interactive" => h.ui.get_kbd_open(),
+        other => return Err(format!("unknown dialog: {other}")),
+    })
+}
+
+/// The field catalog `dialog_state` bulk-dumps for each dialog. Also what the
+/// rubric's per-kind field-manifest check walks (e.g. `profile_editor` has no
+/// `domain`/`resolution` entries at all — reading them via `dialog_field`
+/// returns `unknown field`, which is precisely the P7.2 defect #2 signal).
+/// Deliberately excludes secret-bearing fields (see module doc) — those are
+/// still reachable one at a time via an explicit `dialog_field` call.
+fn dialog_field_names(dialog: &str) -> &'static [&'static str] {
+    match dialog {
+        "quick_connect" => &[
+            "kind",
+            "host",
+            "port",
+            "username",
+            "auth_method",
+            "rdp_domain",
+            "rdp_resolution",
+            "local_program",
+            "local_args",
+            "local_cwd",
+        ],
+        "profile_editor" => &[
+            "id",
+            "name",
+            "group_id",
+            "kind",
+            "host",
+            "port",
+            "username",
+            "auth_method",
+            "selected_cred_idx",
+            "effective_cred_name",
+            "effective_inherited",
+            "selected_group_idx",
+        ],
+        "group_editor" => &[
+            "id",
+            "name",
+            "parent_id",
+            "default_cred_idx",
+            "selected_parent_idx",
+        ],
+        "cred_editor" => &[
+            "id",
+            "name",
+            "kind",
+            "username",
+            "folder_id",
+            "selected_folder_idx",
+        ],
+        "host_key" => &[
+            "mismatch",
+            "host",
+            "key_type",
+            "fingerprint",
+            "stored_fingerprint",
+        ],
+        "cert_dialog" => &[
+            "mismatch",
+            "host",
+            "subject",
+            "fingerprint",
+            "stored_fingerprint",
+        ],
+        "kbd_interactive" => &["name", "instructions"],
+        _ => &[],
+    }
+}
+
+fn qc_field_get(h: &QaHandles, field: &str) -> Result<Value, String> {
+    Ok(match field {
+        "kind" => Value::from(h.ui.get_qc_kind()),
+        "host" => Value::from(h.ui.get_qc_host().as_str()),
+        "port" => Value::from(h.ui.get_qc_port().as_str()),
+        "username" => Value::from(h.ui.get_qc_username().as_str()),
+        "auth_method" => Value::from(h.ui.get_qc_auth_method()),
+        "secret" => Value::from(h.ui.get_qc_secret().as_str()),
+        "passphrase" => Value::from(h.ui.get_qc_passphrase().as_str()),
+        "rdp_domain" => Value::from(h.ui.get_qc_rdp_domain().as_str()),
+        "rdp_resolution" => Value::from(h.ui.get_qc_rdp_resolution().as_str()),
+        "local_program" => Value::from(h.ui.get_qc_local_program().as_str()),
+        "local_args" => Value::from(h.ui.get_qc_local_args().as_str()),
+        "local_cwd" => Value::from(h.ui.get_qc_local_cwd().as_str()),
+        other => return Err(format!("quick_connect: unknown field {other}")),
+    })
+}
+
+fn qc_field_set(h: &QaHandles, field: &str, value: &Value) -> Result<(), String> {
+    match field {
+        "kind" => h.ui.set_qc_kind(need_i32(value)?),
+        "host" => h.ui.set_qc_host(need_str(value)?),
+        "port" => h.ui.set_qc_port(need_str(value)?),
+        "username" => h.ui.set_qc_username(need_str(value)?),
+        "auth_method" => h.ui.set_qc_auth_method(need_i32(value)?),
+        "secret" => h.ui.set_qc_secret(need_str(value)?),
+        "passphrase" => h.ui.set_qc_passphrase(need_str(value)?),
+        "rdp_domain" => h.ui.set_qc_rdp_domain(need_str(value)?),
+        "rdp_resolution" => h.ui.set_qc_rdp_resolution(need_str(value)?),
+        "local_program" => h.ui.set_qc_local_program(need_str(value)?),
+        "local_args" => h.ui.set_qc_local_args(need_str(value)?),
+        "local_cwd" => h.ui.set_qc_local_cwd(need_str(value)?),
+        other => return Err(format!("quick_connect: unknown field {other}")),
+    }
+    Ok(())
+}
+
+/// Pure (no `AppWindow` needed) — reads a [`ConnProfile`] snapshot back as
+/// JSON. Split out from the `AppWindow` round-trip so it's unit-testable
+/// without a live UI (see the tests module).
+fn profile_field_get(f: &ConnProfile, field: &str) -> Result<Value, String> {
+    Ok(match field {
+        "id" => Value::from(f.id),
+        "name" => Value::from(f.name.as_str()),
+        "group_id" => Value::from(f.group_id),
+        "kind" => Value::from(f.kind),
+        "host" => Value::from(f.host.as_str()),
+        "port" => Value::from(f.port.as_str()),
+        "username" => Value::from(f.username.as_str()),
+        "auth_method" => Value::from(f.auth_method),
+        "selected_cred_idx" => Value::from(f.selected_cred_idx),
+        "effective_cred_name" => Value::from(f.effective_cred_name.as_str()),
+        "effective_inherited" => Value::from(f.effective_inherited),
+        "selected_group_idx" => Value::from(f.selected_group_idx),
+        other => return Err(format!("profile_editor: unknown field {other}")),
+    })
+}
+
+/// Mutates a [`ConnProfile`] in place — pure, unit-testable (see tests).
+/// Deliberately has **no** "kind changed -> fix up port" side effect: unlike
+/// `QuickConnectForm`'s `changed kind` handler in `dialogs.slint`,
+/// `ProfileEditor` has none (that's the P7.2 defect #2 root cause the 2026-07
+/// investigation memo found) — this function must not paper over that by
+/// adding one here.
+fn profile_field_set(f: &mut ConnProfile, field: &str, value: &Value) -> Result<(), String> {
+    match field {
+        "id" => f.id = need_i32(value)?,
+        "name" => f.name = need_str(value)?,
+        "group_id" => f.group_id = need_i32(value)?,
+        "kind" => f.kind = need_i32(value)?,
+        "host" => f.host = need_str(value)?,
+        "port" => f.port = need_str(value)?,
+        "username" => f.username = need_str(value)?,
+        "auth_method" => f.auth_method = need_i32(value)?,
+        "selected_cred_idx" => f.selected_cred_idx = need_i32(value)?,
+        "effective_cred_name" => f.effective_cred_name = need_str(value)?,
+        "effective_inherited" => f.effective_inherited = need_bool(value)?,
+        "selected_group_idx" => f.selected_group_idx = need_i32(value)?,
+        other => return Err(format!("profile_editor: unknown field {other}")),
+    }
+    Ok(())
+}
+
+fn group_field_get(f: &GroupForm, field: &str) -> Result<Value, String> {
+    Ok(match field {
+        "id" => Value::from(f.id),
+        "name" => Value::from(f.name.as_str()),
+        "parent_id" => Value::from(f.parent_id),
+        "default_cred_idx" => Value::from(f.default_cred_idx),
+        "selected_parent_idx" => Value::from(f.selected_parent_idx),
+        other => return Err(format!("group_editor: unknown field {other}")),
+    })
+}
+
+fn group_field_set(f: &mut GroupForm, field: &str, value: &Value) -> Result<(), String> {
+    match field {
+        "id" => f.id = need_i32(value)?,
+        "name" => f.name = need_str(value)?,
+        "parent_id" => f.parent_id = need_i32(value)?,
+        "default_cred_idx" => f.default_cred_idx = need_i32(value)?,
+        "selected_parent_idx" => f.selected_parent_idx = need_i32(value)?,
+        other => return Err(format!("group_editor: unknown field {other}")),
+    }
+    Ok(())
+}
+
+fn cred_field_get(f: &CredFormData, field: &str) -> Result<Value, String> {
+    Ok(match field {
+        "id" => Value::from(f.id),
+        "name" => Value::from(f.name.as_str()),
+        "kind" => Value::from(f.kind),
+        "username" => Value::from(f.username.as_str()),
+        "folder_id" => Value::from(f.folder_id),
+        "selected_folder_idx" => Value::from(f.selected_folder_idx),
+        "secret" => Value::from(f.secret.as_str()),
+        "passphrase" => Value::from(f.passphrase.as_str()),
+        other => return Err(format!("cred_editor: unknown field {other}")),
+    })
+}
+
+fn cred_field_set(f: &mut CredFormData, field: &str, value: &Value) -> Result<(), String> {
+    match field {
+        "id" => f.id = need_i32(value)?,
+        "name" => f.name = need_str(value)?,
+        "kind" => f.kind = need_i32(value)?,
+        "username" => f.username = need_str(value)?,
+        "folder_id" => f.folder_id = need_i32(value)?,
+        "selected_folder_idx" => f.selected_folder_idx = need_i32(value)?,
+        "secret" => f.secret = need_str(value)?,
+        "passphrase" => f.passphrase = need_str(value)?,
+        other => return Err(format!("cred_editor: unknown field {other}")),
+    }
+    Ok(())
+}
+
+fn host_key_field_get(h: &QaHandles, field: &str) -> Result<Value, String> {
+    Ok(match field {
+        "mismatch" => Value::from(h.ui.get_host_key_mismatch()),
+        "host" => Value::from(h.ui.get_host_key_host().as_str()),
+        "key_type" => Value::from(h.ui.get_host_key_type().as_str()),
+        "fingerprint" => Value::from(h.ui.get_host_key_fingerprint().as_str()),
+        "stored_fingerprint" => Value::from(h.ui.get_host_key_stored_fp().as_str()),
+        other => return Err(format!("host_key: unknown field {other}")),
+    })
+}
+
+fn host_key_field_set(h: &QaHandles, field: &str, value: &Value) -> Result<(), String> {
+    match field {
+        "mismatch" => h.ui.set_host_key_mismatch(need_bool(value)?),
+        "host" => h.ui.set_host_key_host(need_str(value)?),
+        "key_type" => h.ui.set_host_key_type(need_str(value)?),
+        "fingerprint" => h.ui.set_host_key_fingerprint(need_str(value)?),
+        "stored_fingerprint" => h.ui.set_host_key_stored_fp(need_str(value)?),
+        other => return Err(format!("host_key: unknown field {other}")),
+    }
+    Ok(())
+}
+
+fn cert_dialog_field_get(h: &QaHandles, field: &str) -> Result<Value, String> {
+    Ok(match field {
+        "mismatch" => Value::from(h.ui.get_cert_dialog_mismatch()),
+        "host" => Value::from(h.ui.get_cert_dialog_host().as_str()),
+        "subject" => Value::from(h.ui.get_cert_dialog_subject().as_str()),
+        "fingerprint" => Value::from(h.ui.get_cert_dialog_fingerprint().as_str()),
+        "stored_fingerprint" => Value::from(h.ui.get_cert_dialog_stored_fp().as_str()),
+        other => return Err(format!("cert_dialog: unknown field {other}")),
+    })
+}
+
+fn cert_dialog_field_set(h: &QaHandles, field: &str, value: &Value) -> Result<(), String> {
+    match field {
+        "mismatch" => h.ui.set_cert_dialog_mismatch(need_bool(value)?),
+        "host" => h.ui.set_cert_dialog_host(need_str(value)?),
+        "subject" => h.ui.set_cert_dialog_subject(need_str(value)?),
+        "fingerprint" => h.ui.set_cert_dialog_fingerprint(need_str(value)?),
+        "stored_fingerprint" => h.ui.set_cert_dialog_stored_fp(need_str(value)?),
+        other => return Err(format!("cert_dialog: unknown field {other}")),
+    }
+    Ok(())
+}
+
+/// The kbd-interactive dialog has no flat per-field properties — its prompts
+/// are a `[KbdPromptRow]` model. `"prompts"` reads the whole array; a single
+/// row's `value` is addressed as `"prompt:<idx>"` (get: reads the row; set:
+/// fires `AppWindow::kbd-answer-edited(idx, text)`, the exact callback a real
+/// keystroke in that row's `FormField` triggers — see `wire_kbd_answer_edited`
+/// in `sessions.rs`, which is what actually mutates the model).
+fn kbd_field_get(h: &QaHandles, field: &str) -> Result<Value, String> {
+    match field {
+        "name" => Ok(Value::from(h.ui.get_kbd_name().as_str())),
+        "instructions" => Ok(Value::from(h.ui.get_kbd_instructions().as_str())),
+        "prompts" => {
+            let model = h.ui.get_kbd_prompts();
+            let rows: Vec<Value> = (0..model.row_count())
+                .filter_map(|i| model.row_data(i))
+                .map(|r| {
+                    serde_json::json!({
+                        "text": r.text.as_str(),
+                        "echo": r.echo,
+                        "value": r.value.as_str(),
+                    })
+                })
+                .collect();
+            Ok(Value::from(rows))
+        }
+        other => {
+            if let Some(idx_str) = other.strip_prefix("prompt:") {
+                let idx: usize = idx_str
+                    .parse()
+                    .map_err(|_| format!("kbd_interactive: bad prompt index {idx_str:?}"))?;
+                let model = h.ui.get_kbd_prompts();
+                let row = model
+                    .row_data(idx)
+                    .ok_or_else(|| format!("kbd_interactive: no prompt at index {idx}"))?;
+                Ok(serde_json::json!({
+                    "text": row.text.as_str(),
+                    "echo": row.echo,
+                    "value": row.value.as_str(),
+                }))
+            } else {
+                Err(format!("kbd_interactive: unknown field {other}"))
+            }
+        }
+    }
+}
+
+fn kbd_field_set(h: &QaHandles, field: &str, value: &Value) -> Result<(), String> {
+    let Some(idx_str) = field.strip_prefix("prompt:") else {
+        return Err(format!(
+            "kbd_interactive: field {field:?} is not settable (only \"prompt:<idx>\")"
+        ));
+    };
+    let idx: i32 = idx_str
+        .parse()
+        .map_err(|_| format!("kbd_interactive: bad prompt index {idx_str:?}"))?;
+    let text = need_str(value)?;
+    h.ui.invoke_kbd_answer_edited(idx, text);
+    Ok(())
+}
+
+fn dialog_field_get(h: &QaHandles, dialog: &str, field: &str) -> Result<Value, String> {
+    match dialog {
+        "quick_connect" => qc_field_get(h, field),
+        "profile_editor" => profile_field_get(&h.ui.get_profile_form(), field),
+        "group_editor" => group_field_get(&h.ui.get_group_form(), field),
+        "cred_editor" => cred_field_get(&h.ui.get_cred_form(), field),
+        "host_key" => host_key_field_get(h, field),
+        "cert_dialog" => cert_dialog_field_get(h, field),
+        "kbd_interactive" => kbd_field_get(h, field),
+        other => Err(format!("unknown dialog: {other}")),
+    }
+}
+
+fn dialog_field_set(h: &QaHandles, dialog: &str, field: &str, value: &Value) -> Result<(), String> {
+    match dialog {
+        "quick_connect" => qc_field_set(h, field, value),
+        "profile_editor" => {
+            let mut f = h.ui.get_profile_form();
+            profile_field_set(&mut f, field, value)?;
+            h.ui.set_profile_form(f);
+            Ok(())
+        }
+        "group_editor" => {
+            let mut f = h.ui.get_group_form();
+            group_field_set(&mut f, field, value)?;
+            h.ui.set_group_form(f);
+            Ok(())
+        }
+        "cred_editor" => {
+            let mut f = h.ui.get_cred_form();
+            cred_field_set(&mut f, field, value)?;
+            h.ui.set_cred_form(f);
+            Ok(())
+        }
+        "host_key" => host_key_field_set(h, field, value),
+        "cert_dialog" => cert_dialog_field_set(h, field, value),
+        "kbd_interactive" => kbd_field_set(h, field, value),
+        other => Err(format!("unknown dialog: {other}")),
+    }
+}
+
+/// `{"cmd":"dialog_field","dialog":"<name>","field":"<name>","action":"get"|"set","value":…}`
+/// — the enabler's field half. `action` defaults to `"get"`. See the module
+/// doc for why a direct property set is the harness's "focus + inject text".
+fn cmd_dialog_field(h: &QaHandles, req: &Value) -> String {
+    let Some(dialog) = req.get("dialog").and_then(|v| v.as_str()) else {
+        return error_reply("\"dialog_field\" requires a \"dialog\" field");
+    };
+    let Some(field) = req.get("field").and_then(|v| v.as_str()) else {
+        return error_reply("\"dialog_field\" requires a \"field\" field");
+    };
+    let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("get");
+    match action {
+        "get" => match dialog_field_get(h, dialog, field) {
+            Ok(v) => serde_json::json!({ "ok": true, "value": v }).to_string(),
+            Err(e) => error_reply(&e),
+        },
+        "set" => {
+            let Some(value) = req.get("value") else {
+                return error_reply("\"dialog_field\" set requires a \"value\"");
+            };
+            match dialog_field_set(h, dialog, field, value) {
+                Ok(()) => serde_json::json!({ "ok": true }).to_string(),
+                Err(e) => error_reply(&e),
+            }
+        }
+        other => error_reply(&format!("unknown dialog_field action: {other}")),
+    }
+}
+
+/// Invokes a named dialog's named button. Cancel buttons are not Rust
+/// callbacks (every dialog wires `cancel => { root.*-open = false; }` inline
+/// in `app.slint`), so those close the flag directly rather than calling an
+/// `invoke_*`; every other button matches a real `AppWindow` callback that a
+/// click already fires.
+fn dialog_click(h: &QaHandles, dialog: &str, button: &str) -> Result<(), String> {
+    match (dialog, button) {
+        ("quick_connect", "connect") => h.ui.invoke_qc_connect(),
+        ("quick_connect", "cancel") => h.ui.set_quick_connect_open(false),
+        ("profile_editor", "save") => h.ui.invoke_profile_save(),
+        ("profile_editor", "cancel") => h.ui.set_profile_editor_open(false),
+        ("group_editor", "save") => h.ui.invoke_group_save(),
+        ("group_editor", "cancel") => h.ui.set_group_editor_open(false),
+        ("cred_editor", "save") => h.ui.invoke_cred_save(),
+        ("cred_editor", "cancel") => h.ui.set_cred_editor_open(false),
+        ("host_key", "accept") => h.ui.invoke_host_key_accept(),
+        ("host_key", "reject") => h.ui.invoke_host_key_reject(),
+        ("cert_dialog", "accept") => h.ui.invoke_cert_accept(),
+        ("cert_dialog", "reject") => h.ui.invoke_cert_reject(),
+        ("kbd_interactive", "submit") => h.ui.invoke_kbd_submit(),
+        ("kbd_interactive", "cancel") => h.ui.invoke_kbd_cancel(),
+        (other_dialog, other_button) => {
+            return Err(format!(
+                "no such dialog/button: {other_dialog}/{other_button}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `{"cmd":"dialog_click","dialog":"<name>","button":"<name>"}` — the
+/// enabler's button half.
+fn cmd_dialog_click(h: &QaHandles, req: &Value) -> String {
+    let Some(dialog) = req.get("dialog").and_then(|v| v.as_str()) else {
+        return error_reply("\"dialog_click\" requires a \"dialog\" field");
+    };
+    let Some(button) = req.get("button").and_then(|v| v.as_str()) else {
+        return error_reply("\"dialog_click\" requires a \"button\" field");
+    };
+    match dialog_click(h, dialog, button) {
+        Ok(()) => serde_json::json!({ "ok": true }).to_string(),
+        Err(e) => error_reply(&e),
+    }
+}
+
+/// `{"cmd":"dialog_state","dialog":"<name>"}` -> `{"ok":true,"open":bool,
+/// "fields":{...}}` — bulk read of [`dialog_field_names`]'s catalog for one
+/// dialog, plus its open flag. The rubric's per-kind field-manifest check
+/// (RDP ⇒ {Host,Port,Username,Domain,Resolution,…}) is built on this: a field
+/// simply absent from the reply (vs. present with a value) is the signal.
+fn cmd_dialog_state(h: &QaHandles, req: &Value) -> String {
+    let Some(dialog) = req.get("dialog").and_then(|v| v.as_str()) else {
+        return error_reply("\"dialog_state\" requires a \"dialog\" field");
+    };
+    let open = match dialog_open(h, dialog) {
+        Ok(o) => o,
+        Err(e) => return error_reply(&e),
+    };
+    let mut fields = serde_json::Map::new();
+    for name in dialog_field_names(dialog) {
+        if let Ok(v) = dialog_field_get(h, dialog, name) {
+            fields.insert((*name).to_string(), v);
+        }
+    }
+    serde_json::json!({ "ok": true, "open": open, "fields": fields }).to_string()
+}
+
+// ── pixel (P7.4: opacity/bleed-through + contrast rubric checks) ───────────
+
+/// Bounds on a `pixel` request — same "cap, don't trust" pattern as
+/// [`MAX_LINE_LEN`]: a hostile/malformed request must not make this command
+/// scan an unbounded number of pixels.
+const MAX_PIXEL_REGIONS: usize = 64;
+const MAX_PIXEL_REGION_DIM: u64 = 512;
+
+/// `{"cmd":"pixel","regions":[{"name":…,"x":…,"y":…,"w":…,"h":…}, …]}` —
+/// takes one fresh `take_snapshot()` (same source as `screenshot`, but
+/// returns averaged-region samples inline instead of writing a PNG) so a
+/// script can assert e.g. "this dialog gutter pixel equals the panel token,
+/// not the launchpad behind it" without a PNG-decode round trip. `w`/`h`
+/// default to `1` (a single-pixel sample); omitted `x`/`y` default to `0`.
+fn cmd_pixel(h: &QaHandles, req: &Value) -> String {
+    let Some(regions) = req.get("regions").and_then(|v| v.as_array()) else {
+        return error_reply("\"pixel\" requires a \"regions\" array");
+    };
+    if regions.is_empty() {
+        return error_reply("\"regions\" must be non-empty");
+    }
+    if regions.len() > MAX_PIXEL_REGIONS {
+        return error_reply(&format!("too many regions (max {MAX_PIXEL_REGIONS})"));
+    }
+    let buf = match h.ui.window().take_snapshot() {
+        Ok(b) => b,
+        Err(e) => return error_reply(&format!("take_snapshot failed: {e}")),
+    };
+    let (width, height) = (buf.width(), buf.height());
+    let rgba = buf.as_bytes();
+
+    let mut samples = serde_json::Map::new();
+    for (i, r) in regions.iter().enumerate() {
+        let name = r
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("region{i}"));
+        let x = r.get("x").and_then(Value::as_u64).unwrap_or(0);
+        let y = r.get("y").and_then(Value::as_u64).unwrap_or(0);
+        let w = r
+            .get("w")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .clamp(1, MAX_PIXEL_REGION_DIM);
+        let hh = r
+            .get("h")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .clamp(1, MAX_PIXEL_REGION_DIM);
+
+        if x >= u64::from(width) || y >= u64::from(height) {
+            samples.insert(
+                name,
+                serde_json::json!({ "error": format!(
+                    "region origin ({x},{y}) outside {width}x{height}"
+                ) }),
+            );
+            continue;
+        }
+        let x_end = (x + w).min(u64::from(width));
+        let y_end = (y + hh).min(u64::from(height));
+
+        let (mut rs, mut gs, mut bs, mut as_, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
+        for py in y..y_end {
+            for px in x..x_end {
+                let idx = ((py * u64::from(width) + px) * 4) as usize;
+                if let Some(px_bytes) = rgba.get(idx..idx + 4) {
+                    rs += u64::from(px_bytes[0]);
+                    gs += u64::from(px_bytes[1]);
+                    bs += u64::from(px_bytes[2]);
+                    as_ += u64::from(px_bytes[3]);
+                    n += 1;
+                }
+            }
+        }
+        if n == 0 {
+            samples.insert(name, serde_json::json!({ "error": "empty region" }));
+            continue;
+        }
+        let (r8, g8, b8, a8) = (
+            (rs / n) as u8,
+            (gs / n) as u8,
+            (bs / n) as u8,
+            (as_ / n) as u8,
+        );
+        samples.insert(
+            name,
+            serde_json::json!({
+                "r": r8, "g": g8, "b": b8, "a": a8,
+                "hex": format!("#{r8:02x}{g8:02x}{b8:02x}"),
+                "n": n,
+            }),
+        );
+    }
+    serde_json::json!({ "ok": true, "width": width, "height": height, "samples": samples })
+        .to_string()
+}
+
 // ── screenshot ───────────────────────────────────────────────────────────
 
 /// `{"cmd":"screenshot","path":…}` — `Window::take_snapshot()` (confirmed
@@ -640,5 +1268,194 @@ mod tests {
     fn read_bounded_line_returns_none_on_immediate_eof() {
         let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
         assert_eq!(read_bounded_line(&mut cursor).unwrap(), None);
+    }
+
+    // ── P7.4 dialog enabler: value coercion ─────────────────────────────
+
+    #[test]
+    fn need_str_accepts_string_rejects_other() {
+        assert_eq!(need_str(&serde_json::json!("hi")).unwrap().as_str(), "hi");
+        assert!(need_str(&serde_json::json!(42)).is_err());
+    }
+
+    #[test]
+    fn need_i32_accepts_integer_rejects_other() {
+        assert_eq!(need_i32(&serde_json::json!(7)).unwrap(), 7);
+        assert!(need_i32(&serde_json::json!("7")).is_err());
+    }
+
+    #[test]
+    fn need_bool_accepts_bool_rejects_other() {
+        assert!(need_bool(&serde_json::json!(true)).unwrap());
+        assert!(need_bool(&serde_json::json!(1)).is_err());
+    }
+
+    // ── P7.4 dialog enabler: per-kind field manifest ─────────────────────
+    // The rubric's field-manifest check is built directly on
+    // `dialog_field_names`: a dialog missing a field entirely (vs. present
+    // with a value) is the FAIL signal for P7.2 defect #2.
+
+    #[test]
+    fn profile_editor_field_names_omit_rdp_domain_and_resolution() {
+        let names = dialog_field_names("profile_editor");
+        assert!(!names.contains(&"rdp_domain"));
+        assert!(!names.contains(&"rdp_resolution"));
+        assert!(!names.contains(&"domain"));
+        assert!(!names.contains(&"resolution"));
+    }
+
+    #[test]
+    fn quick_connect_field_names_include_rdp_domain_and_resolution() {
+        let names = dialog_field_names("quick_connect");
+        assert!(names.contains(&"rdp_domain"));
+        assert!(names.contains(&"rdp_resolution"));
+    }
+
+    #[test]
+    fn dialog_field_names_excludes_secret_bearing_fields() {
+        // Never a broad dump of secret material — matches `cmd_state`'s rule.
+        assert!(!dialog_field_names("quick_connect").contains(&"secret"));
+        assert!(!dialog_field_names("quick_connect").contains(&"passphrase"));
+        assert!(!dialog_field_names("cred_editor").contains(&"secret"));
+        assert!(!dialog_field_names("cred_editor").contains(&"passphrase"));
+        assert!(!dialog_field_names("kbd_interactive").contains(&"prompts"));
+    }
+
+    #[test]
+    fn dialog_field_names_unknown_dialog_is_empty() {
+        let empty: &[&str] = &[];
+        assert_eq!(dialog_field_names("no_such_dialog"), empty);
+    }
+
+    // ── P7.4 dialog enabler: ConnProfile field get/set (pure, no AppWindow) ──
+
+    fn sample_profile() -> ConnProfile {
+        ConnProfile {
+            id: 1,
+            name: "svc".into(),
+            group_id: 0,
+            kind: 0,
+            host: "h".into(),
+            port: "22".into(),
+            username: "u".into(),
+            auth_method: 1,
+            selected_cred_idx: 0,
+            effective_cred_name: "".into(),
+            effective_inherited: false,
+            selected_group_idx: 0,
+        }
+    }
+
+    #[test]
+    fn profile_field_get_reads_known_fields() {
+        let f = sample_profile();
+        assert_eq!(
+            profile_field_get(&f, "name").unwrap(),
+            serde_json::json!("svc")
+        );
+        assert_eq!(profile_field_get(&f, "kind").unwrap(), serde_json::json!(0));
+    }
+
+    #[test]
+    fn profile_field_get_unknown_field_errs() {
+        // profile_editor's ConnProfile literally has no domain/resolution
+        // member — this IS the P7.2 defect #2 signal, not a harness gap.
+        let f = sample_profile();
+        assert!(profile_field_get(&f, "domain").is_err());
+        assert!(profile_field_get(&f, "resolution").is_err());
+    }
+
+    #[test]
+    fn profile_field_set_kind_does_not_touch_port() {
+        // Root cause of defect #2's port half: setting `kind` alone (what
+        // switching the SegmentedControl does) must NOT auto-fix `port` —
+        // `ProfileEditor` has no `changed kind` reactive glue, unlike
+        // `QuickConnectForm`. This test pins that (buggy, pre-P7.2-fix)
+        // behavior so a future fix flips it deliberately, not by accident.
+        let mut f = sample_profile();
+        profile_field_set(&mut f, "kind", &serde_json::json!(1)).unwrap();
+        assert_eq!(f.kind, 1);
+        assert_eq!(f.port.as_str(), "22");
+    }
+
+    #[test]
+    fn profile_field_set_unknown_field_errs() {
+        let mut f = sample_profile();
+        assert!(profile_field_set(&mut f, "bogus", &serde_json::json!("x")).is_err());
+    }
+
+    // ── P7.4 dialog enabler: GroupForm / CredFormData ────────────────────
+
+    #[test]
+    fn group_field_get_set_round_trip() {
+        let mut f = GroupForm {
+            id: 0,
+            name: "g".into(),
+            parent_id: 0,
+            default_cred_idx: 0,
+            selected_parent_idx: 0,
+        };
+        group_field_set(&mut f, "name", &serde_json::json!("renamed")).unwrap();
+        assert_eq!(
+            group_field_get(&f, "name").unwrap(),
+            serde_json::json!("renamed")
+        );
+    }
+
+    #[test]
+    fn cred_field_get_set_round_trip_including_secret() {
+        let mut f = CredFormData {
+            id: 0,
+            name: "c".into(),
+            kind: 0,
+            username: "".into(),
+            folder_id: 0,
+            selected_folder_idx: 0,
+            secret: "".into(),
+            passphrase: "".into(),
+        };
+        cred_field_set(&mut f, "secret", &serde_json::json!("s3cr3t")).unwrap();
+        assert_eq!(
+            cred_field_get(&f, "secret").unwrap(),
+            serde_json::json!("s3cr3t")
+        );
+    }
+
+    // ── P7.4 dialog enabler: dispatch never panics without an event loop ──
+    // Same pattern as `dispatch_line_empty_object_never_panics` above: no
+    // `AppWindow` is constructible in this crate's plain unit tests, so these
+    // exercise the `invoke_from_event_loop` failure path end-to-end for the
+    // new commands and prove they fail soft.
+
+    #[test]
+    fn dispatch_line_dialog_field_never_panics() {
+        let reply = dispatch_line(
+            r#"{"cmd":"dialog_field","dialog":"quick_connect","field":"host","action":"get"}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["ok"], false);
+    }
+
+    #[test]
+    fn dispatch_line_dialog_click_never_panics() {
+        let reply =
+            dispatch_line(r#"{"cmd":"dialog_click","dialog":"quick_connect","button":"connect"}"#);
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["ok"], false);
+    }
+
+    #[test]
+    fn dispatch_line_dialog_state_never_panics() {
+        let reply = dispatch_line(r#"{"cmd":"dialog_state","dialog":"profile_editor"}"#);
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["ok"], false);
+    }
+
+    #[test]
+    fn dispatch_line_pixel_never_panics() {
+        let reply =
+            dispatch_line(r#"{"cmd":"pixel","regions":[{"name":"p","x":0,"y":0,"w":1,"h":1}]}"#);
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["ok"], false);
     }
 }
