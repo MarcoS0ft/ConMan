@@ -1010,39 +1010,18 @@ export component AppWindow inherits Window {
     callback rdp-key-down(string /* text */, int /* special */, int /* mods */);
     callback rdp-key-up(string /* text */, int /* special */, int /* mods */);
 
-    // ── Main shell ────────────────────────────────────────────────────
-    VerticalLayout {
-        // Tab strip.
+    // ── Main shell (P7.3) ───────────────────────────────────────────────
+    // Two-column shell: a full-height NAV column (activity bar + side panel,
+    // spanning top-to-bottom) on the left, and a RIGHT column (tab strip +
+    // session + status bar, status bar scoped to this column only) — an
+    // mRemoteNG-style split that replaces the P2.4-era "tab strip spans the
+    // full window width above everything" layout. See GUI_DESIGN.md §2.
+    HorizontalLayout {
+        spacing: 0px;
+
+        // ── Left: full-height nav column ────────────────────────────
+        // Activity bar.
         Rectangle {
-            height: 40px;
-            background: Theme.color-base.darker(0.2);
-            HorizontalLayout {
-                padding: Theme.space-1;
-                spacing: Theme.space-1;
-                alignment: start;
-                for tab[idx] in tabs: Tab {
-                    title: tab.title;
-                    status: tab.status;
-                    pane-count: tab.pane-count;
-                    active: idx == active-tab;
-                    clicked => { root.select-tab(idx); }
-                    closed => { root.close-tab(idx); }
-                }
-                IconButton {
-                    glyph: "\u{EA60}";
-                    clicked => { root.new-tab(); }
-                }
-                Rectangle { horizontal-stretch: 1; }
-            }
-        }
-
-        // Body: activity bar + side panel + session area.
-        HorizontalLayout {
-            spacing: 0px;
-            vertical-stretch: 1;
-
-            // Activity bar.
-            Rectangle {
                 width: Theme.activity-bar-width;
                 background: Theme.color-elevated;
                 VerticalLayout {
@@ -1443,13 +1422,51 @@ export component AppWindow inherits Window {
                 }
             }
 
+        // ── Hairline divider (P7.3, fixes #5) ───────────────────────────
+        // A clean, deliberate seam between the nav column and the tab-strip/
+        // session/status column — replaces the old zero-gap "first tab flush
+        // to the window corner" join.
+        Rectangle {
+            width: 1px;
+            background: Theme.color-stroke;
+        }
+
+        // ── Right: tab strip + session + status bar column ──────────────
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 0px;
+
+            // Tab strip (spans only this column — NOT over the nav column).
+            Rectangle {
+                height: 40px;
+                background: Theme.color-base.darker(0.2);
+                HorizontalLayout {
+                    padding: Theme.space-1;
+                    spacing: Theme.space-1;
+                    alignment: start;
+                    for tab[idx] in tabs: Tab {
+                        title: tab.title;
+                        status: tab.status;
+                        pane-count: tab.pane-count;
+                        active: idx == active-tab;
+                        clicked => { root.select-tab(idx); }
+                        closed => { root.close-tab(idx); }
+                    }
+                    IconButton {
+                        glyph: "\u{EA60}";
+                        clicked => { root.new-tab(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+
             // Session area (P6.10 / P6.17 R2: wrapped in a plain Rectangle so the
             // session-state overlays below can be layered ABOVE the surface/broadcast
             // bar but stay confined to this cell — they no longer paint over the tab
             // strip or status bar, which used to happen when they were mounted as
             // 100%x100% siblings of the whole AppWindow (app.slint:1372-1389 pre-P6.10).
             session-area := Rectangle {
-                horizontal-stretch: 1;
+                vertical-stretch: 1;
                 clip: true;
 
             VerticalLayout {
@@ -1726,76 +1743,77 @@ export component AppWindow inherits Window {
                 close => { root.search-close(); }
             }
             }
-        }
 
-        // Status bar.
-        Rectangle {
-            height: Theme.status-bar-height;
-            background: Theme.color-base.darker(0.2);
-            HorizontalLayout {
-                padding-left: Theme.space-3; padding-right: Theme.space-3;
-                spacing: Theme.space-4;
-                VerticalLayout {
-                    alignment: center;
-                    StatusPill {
-                        state: session-status;
-                        // P6.9 (gap 13): the label now tracks the live status instead
-                        // of a hardcoded "Connected · " prefix — a Failed/Disconnected
-                        // tab used to read "Connected · host" while showing a red dot.
-                        text: session-identity == "" ? "No active session"
-                            : (session-status == "connecting" ? "Connecting · "
-                                : session-status == "connected" ? "Connected · "
-                                : session-status == "error" ? "Failed · "
-                                : "Disconnected · ") + session-identity;
+            // Status bar (P7.3: scoped to this column only — NOT full window
+            // width, so it never draws under/past the nav column).
+            Rectangle {
+                height: Theme.status-bar-height;
+                background: Theme.color-base.darker(0.2);
+                HorizontalLayout {
+                    padding-left: Theme.space-3; padding-right: Theme.space-3;
+                    spacing: Theme.space-4;
+                    VerticalLayout {
+                        alignment: center;
+                        StatusPill {
+                            state: session-status;
+                            // P6.9 (gap 13): the label now tracks the live status instead
+                            // of a hardcoded "Connected · " prefix — a Failed/Disconnected
+                            // tab used to read "Connected · host" while showing a red dot.
+                            text: session-identity == "" ? "No active session"
+                                : (session-status == "connecting" ? "Connecting · "
+                                    : session-status == "connected" ? "Connected · "
+                                    : session-status == "error" ? "Failed · "
+                                    : "Disconnected · ") + session-identity;
+                        }
                     }
-                }
-                Rectangle { horizontal-stretch: 1; }
-                // Detached-session badge: click to open palette filtered to "reattach".
-                if detached-count > 0 : Rectangle {
-                    y: (parent.height - self.height) / 2;
-                    height: 18px;
-                    border-radius: Theme.radius-sm - 2px;
-                    background: Theme.color-elevated;
-                    HorizontalLayout {
-                        padding-left: Theme.space-2; padding-right: Theme.space-2;
-                        spacing: Theme.space-1;
-                        Text { text: "\u{EAAD}"; color: Theme.color-text-secondary; font-size: Theme.font-xs;
-                            font-family: Theme.font-family-mono; vertical-alignment: center; }
-                        Text { text: detached-count + " detached"; color: Theme.color-text-secondary;
-                            font-size: Theme.font-xs; font-family: Theme.font-family; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    // Detached-session badge: click to open palette filtered to "reattach".
+                    if detached-count > 0 : Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        height: 18px;
+                        border-radius: Theme.radius-sm - 2px;
+                        background: Theme.color-elevated;
+                        HorizontalLayout {
+                            padding-left: Theme.space-2; padding-right: Theme.space-2;
+                            spacing: Theme.space-1;
+                            Text { text: "\u{EAAD}"; color: Theme.color-text-secondary; font-size: Theme.font-xs;
+                                font-family: Theme.font-family-mono; vertical-alignment: center; }
+                            Text { text: detached-count + " detached"; color: Theme.color-text-secondary;
+                                font-size: Theme.font-xs; font-family: Theme.font-family; vertical-alignment: center; }
+                        }
+                        TouchArea { clicked => { root.open-palette(); } }
                     }
-                    TouchArea { clicked => { root.open-palette(); } }
-                }
-                // Broadcast indicator in the status bar (never silent — P6.11
-                // names the active target, not just "BC"). Click opens the
-                // targeting menu; the dedicated dismiss button in the
-                // broadcast bar above still turns broadcast fully off.
-                if broadcast-active : Rectangle {
-                    y: (parent.height - self.height) / 2;
-                    height: 18px;
-                    border-radius: Theme.radius-sm - 2px;
-                    background: Theme.color-broadcast-edge;
-                    HorizontalLayout {
-                        padding-left: Theme.space-2; padding-right: Theme.space-2;
-                        Text { text: "\u{EAAD} BC · " + root.broadcast-target-label; color: Theme.color-base; font-size: Theme.font-xs;
-                            font-family: Theme.font-family-mono; font-weight: 700; vertical-alignment: center; }
+                    // Broadcast indicator in the status bar (never silent — P6.11
+                    // names the active target, not just "BC"). Click opens the
+                    // targeting menu; the dedicated dismiss button in the
+                    // broadcast bar above still turns broadcast fully off.
+                    if broadcast-active : Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        height: 18px;
+                        border-radius: Theme.radius-sm - 2px;
+                        background: Theme.color-broadcast-edge;
+                        HorizontalLayout {
+                            padding-left: Theme.space-2; padding-right: Theme.space-2;
+                            Text { text: "\u{EAAD} BC · " + root.broadcast-target-label; color: Theme.color-base; font-size: Theme.font-xs;
+                                font-family: Theme.font-family-mono; font-weight: 700; vertical-alignment: center; }
+                        }
+                        TouchArea { clicked => { root.open-broadcast-target(); } }
                     }
-                    TouchArea { clicked => { root.open-broadcast-target(); } }
-                }
-                Rectangle {
-                    y: (parent.height - self.height) / 2;
-                    height: 18px;
-                    border-radius: Theme.radius-sm - 2px;
-                    background: Theme.color-accent-subtle;
-                    HorizontalLayout {
-                        padding-left: Theme.space-2; padding-right: Theme.space-2;
-                        spacing: Theme.space-1;
-                        Text { text: "Ctrl K"; color: Theme.color-accent; font-size: Theme.font-xs;
-                            font-family: Theme.font-family-mono; font-weight: 700; vertical-alignment: center; }
-                        Text { text: "Palette"; color: Theme.color-accent; font-size: Theme.font-sm;
-                            font-family: Theme.font-family; vertical-alignment: center; }
+                    Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        height: 18px;
+                        border-radius: Theme.radius-sm - 2px;
+                        background: Theme.color-accent-subtle;
+                        HorizontalLayout {
+                            padding-left: Theme.space-2; padding-right: Theme.space-2;
+                            spacing: Theme.space-1;
+                            Text { text: "Ctrl K"; color: Theme.color-accent; font-size: Theme.font-xs;
+                                font-family: Theme.font-family-mono; font-weight: 700; vertical-alignment: center; }
+                            Text { text: "Palette"; color: Theme.color-accent; font-size: Theme.font-sm;
+                                font-family: Theme.font-family; vertical-alignment: center; }
+                        }
+                        TouchArea { clicked => { root.open-palette(); } }
                     }
-                    TouchArea { clicked => { root.open-palette(); } }
                 }
             }
         }
