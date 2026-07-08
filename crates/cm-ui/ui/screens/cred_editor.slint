@@ -42,6 +42,10 @@ export component CredEditor {
     callback save();
     callback cancel();
 
+    // P8.1: no dialog role in Slint 1.17 — groupbox + "<Title> dialog".
+    accessible-role: groupbox;
+    accessible-label: (root.form.id == 0 ? "New credential" : "Edit credential") + " dialog";
+
     VerticalLayout {
         padding: Theme.space-6;
         spacing: Theme.space-5;
@@ -56,7 +60,7 @@ export component CredEditor {
         }
 
         // ── Name ──────────────────────────────────────────────────────
-        FormField {
+        cred-name-field := FormField {
             label: "Name";
             placeholder: "e.g. ops@prod, deploy key";
             text <=> root.form.name;
@@ -79,14 +83,14 @@ export component CredEditor {
         }
 
         // ── Username ──────────────────────────────────────────────────
-        FormField {
+        cred-username-field := FormField {
             label: "Username";
             placeholder: "login username (optional)";
             text <=> root.form.username;
         }
 
         // ── Secret (Password kind: password field) ───────────────────
-        if root.form.kind == 0 : FormField {
+        if root.form.kind == 0 : cred-secret-field := FormField {
             label: "Password";
             placeholder: "••••••••";
             password: true;
@@ -94,14 +98,14 @@ export component CredEditor {
         }
 
         // ── SSH Key path ──────────────────────────────────────────────
-        if root.form.kind == 1 || root.form.kind == 2 : FormField {
+        if root.form.kind == 1 || root.form.kind == 2 : cred-key-path-field := FormField {
             label: "Private Key Path";
             placeholder: "~/.ssh/id_ed25519";
             text <=> root.form.secret;
         }
 
         // ── Passphrase (SSH Key+PP kind) ─────────────────────────────
-        if root.form.kind == 2 : FormField {
+        if root.form.kind == 2 : cred-passphrase-field := FormField {
             label: "Passphrase";
             placeholder: "key passphrase (optional)";
             password: true;
@@ -118,11 +122,12 @@ export component CredEditor {
                 font-family: Theme.font-family;
                 font-weight: 600;
             }
-            ComboBox {
+            cred-folder-combo := ComboBox {
                 model: root.folder-name-list;
                 // Two-way bound: Rust sets selected-folder-idx before opening
                 // the editor; on_cred_save resolves it back to a DB id.
                 current-index <=> root.form.selected-folder-idx;
+                accessible-label: "Folder";
             }
         }
 
@@ -131,11 +136,11 @@ export component CredEditor {
             spacing: Theme.space-3;
             alignment: end;
             padding-top: Theme.space-2;
-            SecondaryButton {
+            cred-cancel-btn := SecondaryButton {
                 text: "Cancel";
                 clicked => { root.cancel(); }
             }
-            PrimaryButton {
+            cred-save-btn := PrimaryButton {
                 text: "Save";
                 enabled: root.form.name != "";
                 clicked => { root.save(); }

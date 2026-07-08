@@ -37,6 +37,12 @@ export component ConnectingOverlay inherits Rectangle {
     // in app.slint to the same `close-tab` path the tab close button uses.
     callback cancel();
 
+    // P8.1: not a dialog (it replaces the session surface in place, not a
+    // modal), but still a distinct region a screen reader should be able to
+    // land on — a live, human-meaningful status line.
+    accessible-role: region;
+    accessible-label: "Connecting to " + root.identity;
+
     background: Theme.color-terminal-bg;
 
     // ── 8-dot orbital spinner (r=15px, 40×40 container, dots 5×5px) ──────────
@@ -127,7 +133,7 @@ export component ConnectingOverlay inherits Rectangle {
         // (closes this tab via the same path as the tab strip's ✕).
         HorizontalLayout {
             alignment: center;
-            SecondaryButton {
+            connecting-cancel-btn := SecondaryButton {
                 text: "Cancel";
                 clicked => { root.cancel(); }
             }
@@ -144,6 +150,10 @@ export component ErrorOverlay inherits Rectangle {
     in property <string> detail: "after 4.2s";
     callback reconnect();
     callback edit();
+
+    // P8.1: same region rationale as ConnectingOverlay.
+    accessible-role: region;
+    accessible-label: "Connection error for " + root.identity;
 
     background: Theme.color-terminal-bg;
 
@@ -184,8 +194,8 @@ export component ErrorOverlay inherits Rectangle {
         HorizontalLayout {
             alignment: center;
             spacing: Theme.space-2;
-            PrimaryButton { text: "Reconnect"; clicked => { root.reconnect(); } }
-            SecondaryButton { text: "Edit…"; clicked => { root.edit(); } }
+            error-reconnect-btn := PrimaryButton { text: "Reconnect"; clicked => { root.reconnect(); } }
+            error-edit-btn := SecondaryButton { text: "Edit…"; clicked => { root.edit(); } }
         }
     }
 }
@@ -206,6 +216,12 @@ export component SearchOverlay inherits Rectangle {
     callback next();
     callback prev();
     callback close();
+
+    // P8.1: a small finder popup — dialog-like but not modal; groupbox +
+    // static label (its own content, the query text, is separately labeled
+    // on the input field below).
+    accessible-role: groupbox;
+    accessible-label: "Find in scrollback dialog";
 
     width: 320px;
     height: 44px;
@@ -230,6 +246,7 @@ export component SearchOverlay inherits Rectangle {
             placeholder-text: "Find in scrollback…";
             text <=> root.query;
             horizontal-stretch: 1;
+            accessible-label: "Find in scrollback";
             edited(t) => { root.edited(t); }
             accepted => { root.next(); }
         }
@@ -240,19 +257,19 @@ export component SearchOverlay inherits Rectangle {
             font-family: Theme.font-family-mono;
             vertical-alignment: center;
         }
-        IconButton {
+        search-prev-btn := IconButton {
             glyph: "\u{EAB7}"; // ChevronUp -> previous match
             size: 22px; glyph-size: Theme.icon-xs;
             tooltip: "Previous match (Shift+Enter)";
             clicked => { root.prev(); }
         }
-        IconButton {
+        search-next-btn := IconButton {
             glyph: "\u{EAB4}"; // ChevronDown -> next match
             size: 22px; glyph-size: Theme.icon-xs;
             tooltip: "Next match (Enter)";
             clicked => { root.next(); }
         }
-        IconButton {
+        search-close-btn := IconButton {
             glyph: "\u{EA76}"; // cod-close
             size: 22px; glyph-size: Theme.icon-xs;
             tooltip: "Close (Esc)";

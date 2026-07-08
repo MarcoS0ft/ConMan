@@ -52,6 +52,7 @@ export component Launchpad inherits Rectangle {
                     color: Theme.color-text-secondary; vertical-alignment: center; }
                 LineEdit { placeholder-text: "Search a host, or type  ssh user@host  to connect…";
                     text <=> root.query; font-size: Theme.font-base;
+                    accessible-label: "Search or connect";
                     edited(t) => { root.edited(t); } }
             }
         }
@@ -61,12 +62,19 @@ export component Launchpad inherits Rectangle {
             font-family: Theme.font-family; font-weight: 700; letter-spacing: 0.6px; }
 
         // Recents grid (2 columns).
-        for item[idx] in recents : Rectangle {
+        for item[idx] in recents : recent-item-row := Rectangle {
             height: 50px;
             background: Theme.color-card;
             border-radius: Theme.radius-md;
             border-width: 1px;
             border-color: Theme.color-stroke;
+            // P8.1: one recent-connection card = one list item; label combines
+            // the connection name + relative time (both dynamic).
+            accessible-role: list-item;
+            accessible-label: item.name + " · " + item.meta;
+            accessible-item-index: idx;
+            accessible-item-count: root.recents.length;
+            accessible-action-default => { root.open-recent(idx); }
             HorizontalLayout {
                 padding-left: Theme.space-3; padding-right: Theme.space-3;
                 spacing: Theme.space-3;
@@ -95,8 +103,8 @@ export component Launchpad inherits Rectangle {
 
         HorizontalLayout {
             spacing: Theme.space-2;
-            PrimaryButton { text: "Quick connect"; clicked => { root.quick-connect(); } }
-            SecondaryButton { text: "Open Production in split"; clicked => { root.open-group-split(); } }
+            launchpad-quick-connect-btn := PrimaryButton { text: "Quick connect"; clicked => { root.quick-connect(); } }
+            launchpad-open-group-btn := SecondaryButton { text: "Open Production in split"; clicked => { root.open-group-split(); } }
         }
     }
 }

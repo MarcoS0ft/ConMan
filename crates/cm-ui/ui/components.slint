@@ -43,6 +43,13 @@ export component StatusPill {
   in property <string> state: "disconnected";
   in property <string> text: "";
 
+  // P8.1: read-only status text — role `text` (not interactive), label tracks
+  // the live status line verbatim (dynamic content per the a11y contract).
+  // Qualified `AccessibleRole.text` (not bare `text`) — this component has its
+  // own `text` property, which would otherwise shadow the enum value.
+  accessible-role: AccessibleRole.text;
+  accessible-label: root.text;
+
   HorizontalLayout {
     spacing: Theme.space-2;
     alignment: start;
@@ -72,6 +79,16 @@ export component IconButton {
   // P5.3b: optional tooltip text shown above the button on hover.
   in property <string> tooltip: "";
   callback clicked();
+
+  // P8.1: icon-only button — the visible tooltip text IS the accessible label
+  // (the contract's rule for icon-only buttons). Every call site MUST supply a
+  // non-empty `tooltip`; the a11y audit test (tests/a11y_audit.rs) fails any
+  // IconButton instance that doesn't.
+  accessible-role: button;
+  accessible-label: root.tooltip;
+  // Real activation via accessibility APIs / the testing backend's
+  // invoke_accessible_default_action() (mirrors Slint's own Button widget).
+  accessible-action-default => { root.clicked(); }
 
   width: size;
   height: size;
@@ -134,7 +151,13 @@ export component IconButton {
 export component ActivityBarButton {
   in property <string> glyph;
   in property <bool>   active: false;
+  // P8.1: icon-only nav button — same tooltip-is-the-label contract as IconButton.
+  in property <string> tooltip: "";
   callback clicked();
+
+  accessible-role: button;
+  accessible-label: root.tooltip;
+  accessible-action-default => { root.clicked(); }
 
   height: 40px;
   width: 100%;
@@ -184,6 +207,11 @@ export component PrimaryButton {
   in property <bool>   destructive: false;
   callback clicked();
 
+  // P8.1: a button's accessible label is its own visible text (contract §3).
+  accessible-role: button;
+  accessible-label: root.text;
+  accessible-action-default => { root.clicked(); }
+
   property <color> bg:
     !enabled    ? Theme.color-hover :
     destructive ? transparent :
@@ -229,6 +257,11 @@ export component SecondaryButton {
   in property <bool>   enabled: true;
   callback clicked();
 
+  // P8.1: a button's accessible label is its own visible text (contract §3).
+  accessible-role: button;
+  accessible-label: root.text;
+  accessible-action-default => { root.clicked(); }
+
   preferred-height: Theme.control-height;
   preferred-width: 100px;
   min-width: 72px;
@@ -270,6 +303,12 @@ export component SegmentedControl {
 
   preferred-height: Theme.control-height;
 
+  // P8.1: the strip is a non-interactive grouping container (no label
+  // required — the audit test's interactive-role set excludes `tab-list`);
+  // each option below is the real interactive target and carries its own
+  // role/label/index per the contract's repeated-item rule.
+  accessible-role: tab-list;
+
   Rectangle {
     width: parent.width;
     height: parent.height;
@@ -281,11 +320,20 @@ export component SegmentedControl {
     HorizontalLayout {
       padding: 3px;
       spacing: 3px;
-      for opt[idx] in root.options: Rectangle {
+      for opt[idx] in root.options: seg-tab := Rectangle {
         horizontal-stretch: 1;
         border-radius: Theme.radius-sm;
         background: idx == root.selected ? Theme.color-accent
                   : seg-touch.has-hover ? Theme.color-hover : transparent;
+        // P8.1: one option = one tab. Label is the option's own visible
+        // text; repeated instances disambiguate via item-index/item-count
+        // (never label suffixes), per the contract.
+        accessible-role: tab;
+        accessible-label: opt;
+        accessible-item-index: idx;
+        accessible-item-count: root.options.length;
+        accessible-item-selected: idx == root.selected;
+        accessible-action-default => { root.selected = idx; root.changed(idx); }
         Text {
           text: opt;
           color: idx == root.selected ? Theme.color-accent-text : Theme.color-text-secondary;
@@ -333,6 +381,10 @@ export component FormField {
       text <=> root.text;
       input-type: root.password ? InputType.password : InputType.text;
       font-size: Theme.font-base;
+      // P8.1: role + accessible-value are already supplied by LineEdit's own
+      // definition (text-input role, value bound to `text`); we only need to
+      // attach the human label this field's caller already provided.
+      accessible-label: root.label;
       accepted(t) => { root.accepted(t); }
       edited(t) => { root.edited(t); }
     }
@@ -458,8 +510,11 @@ export component Toast inherits Rectangle {
             horizontal-stretch: 1;
         }
         // Dismiss button.
-        TouchArea {
+        dismiss-btn := TouchArea {
             width: 18px; height: 18px;
+            accessible-role: button;
+            accessible-label: "Dismiss notification";
+            accessible-action-default => { root.dismissed(); }
             clicked => { root.dismissed(); }
             Text { text: "\u{EA76}"; font-family: Theme.font-family-icons;  // cod-close
                 font-size: Theme.icon-sm;

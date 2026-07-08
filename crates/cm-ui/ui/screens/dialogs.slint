@@ -59,6 +59,13 @@ export component QuickConnectForm inherits Rectangle {
     callback connect();
     callback cancel();
 
+    // P8.1: no dialog role exists in Slint 1.17 — dialog root = groupbox +
+    // "<Title> dialog" label (the contract's rule). Title text is dynamic
+    // per kind, so the label follows it.
+    accessible-role: groupbox;
+    accessible-label: (root.kind == 0 ? "New SSH connection"
+        : root.kind == 1 ? "New RDP connection" : "New local shell") + " dialog";
+
     width: 520px;
     background: Theme.color-overlay;
     border-radius: Theme.radius-lg;
@@ -112,15 +119,15 @@ export component QuickConnectForm inherits Rectangle {
         if root.kind != 2 : HorizontalLayout {
             spacing: Theme.space-3;
             VerticalLayout { horizontal-stretch: 1;
-                FormField { label: "HOST"; placeholder: "web-prod-01.lab"; text <=> root.host; }
+                qc-host-field := FormField { label: "HOST"; placeholder: "web-prod-01.lab"; text <=> root.host; }
             }
             Rectangle { width: 100px;
-                FormField { label: "PORT"; placeholder: root.kind == 0 ? "22" : "3389"; text <=> root.port; }
+                qc-port-field := FormField { label: "PORT"; placeholder: root.kind == 0 ? "22" : "3389"; text <=> root.port; }
             }
         }
 
         // ── Username (SSH + RDP) ────────────────────────────────────────
-        if root.kind != 2 : FormField {
+        if root.kind != 2 : qc-username-field := FormField {
             label: "USERNAME";
             placeholder: root.kind == 0 ? "ops" : "administrator";
             text <=> root.username;
@@ -136,9 +143,9 @@ export component QuickConnectForm inherits Rectangle {
                 selected <=> root.auth-method;
             }
         }
-        if root.kind == 0 && auth-method == 0 : FormField { label: "PRIVATE KEY"; placeholder: "~/.ssh/id_ed25519"; text <=> root.secret; }
-        if root.kind == 0 && auth-method == 0 : FormField { label: "PASSPHRASE"; placeholder: ""; password: true; text <=> root.passphrase; }
-        if root.kind == 0 && auth-method == 1 : FormField { label: "PASSWORD"; placeholder: ""; password: true; text <=> root.secret; }
+        if root.kind == 0 && auth-method == 0 : qc-secret-field := FormField { label: "PRIVATE KEY"; placeholder: "~/.ssh/id_ed25519"; text <=> root.secret; }
+        if root.kind == 0 && auth-method == 0 : qc-passphrase-field := FormField { label: "PASSPHRASE"; placeholder: ""; password: true; text <=> root.passphrase; }
+        if root.kind == 0 && auth-method == 1 : qc-password-field := FormField { label: "PASSWORD"; placeholder: ""; password: true; text <=> root.secret; }
         if root.kind == 0 && auth-method == 2 : Text {
             text: "Uses the running SSH agent. No secret stored.";
             color: Theme.color-text-secondary;
@@ -154,21 +161,21 @@ export component QuickConnectForm inherits Rectangle {
         }
 
         // ── RDP-only fields ──────────────────────────────────────────────
-        if root.kind == 1 : FormField { label: "DOMAIN"; placeholder: "(optional, e.g. CORP)"; text <=> root.rdp-domain; }
-        if root.kind == 1 : FormField { label: "RESOLUTION"; placeholder: "1280x720"; text <=> root.rdp-resolution; }
-        if root.kind == 1 : FormField { label: "PASSWORD"; placeholder: ""; password: true; text <=> root.secret; }
+        if root.kind == 1 : qc-rdp-domain-field := FormField { label: "DOMAIN"; placeholder: "(optional, e.g. CORP)"; text <=> root.rdp-domain; }
+        if root.kind == 1 : qc-rdp-resolution-field := FormField { label: "RESOLUTION"; placeholder: "1280x720"; text <=> root.rdp-resolution; }
+        if root.kind == 1 : qc-rdp-password-field := FormField { label: "PASSWORD"; placeholder: ""; password: true; text <=> root.secret; }
 
         // ── Local-only fields ────────────────────────────────────────────
-        if root.kind == 2 : FormField { label: "PROGRAM"; placeholder: "(default shell)"; text <=> root.local-program; }
-        if root.kind == 2 : FormField { label: "ARGUMENTS"; placeholder: "(space-separated)"; text <=> root.local-args; }
-        if root.kind == 2 : FormField { label: "WORKING DIRECTORY"; placeholder: "(default)"; text <=> root.local-cwd; }
+        if root.kind == 2 : qc-local-program-field := FormField { label: "PROGRAM"; placeholder: "(default shell)"; text <=> root.local-program; }
+        if root.kind == 2 : qc-local-args-field := FormField { label: "ARGUMENTS"; placeholder: "(space-separated)"; text <=> root.local-args; }
+        if root.kind == 2 : qc-local-cwd-field := FormField { label: "WORKING DIRECTORY"; placeholder: "(default)"; text <=> root.local-cwd; }
 
         // Footer.
         HorizontalLayout {
             spacing: Theme.space-3;
             Rectangle { horizontal-stretch: 1; }
-            SecondaryButton { text: "Cancel"; clicked => { root.cancel(); } }
-            PrimaryButton { text: "Connect"; clicked => { root.connect(); } }
+            qc-cancel-btn := SecondaryButton { text: "Cancel"; clicked => { root.cancel(); } }
+            qc-connect-btn := PrimaryButton { text: "Connect"; clicked => { root.connect(); } }
         }
     }
 }
@@ -186,6 +193,9 @@ export component HostKeyDialog inherits Rectangle {
     in property <string> stored-fingerprint: "SHA256 aRq9…Kf2P pXc8";
     callback reject();
     callback accept();    // accept (unknown) OR accept & replace (mismatch)
+
+    accessible-role: groupbox;
+    accessible-label: (root.mismatch ? "Host key mismatch" : "Unknown host key") + " dialog";
 
     width: mismatch ? 500px : 480px;
     background: Theme.color-base;
@@ -272,10 +282,10 @@ export component HostKeyDialog inherits Rectangle {
                 spacing: Theme.space-3;
                 Rectangle { horizontal-stretch: 1; }
                 // Mismatch: Reject is primary/default. Unknown: Reject is secondary.
-                if mismatch : PrimaryButton { text: "Reject"; clicked => { root.reject(); } }
-                if !mismatch : SecondaryButton { text: "Reject"; clicked => { root.reject(); } }
-                if mismatch : PrimaryButton { text: "Accept & replace"; destructive: true; clicked => { root.accept(); } }
-                if !mismatch : PrimaryButton { text: "Accept & continue"; clicked => { root.accept(); } }
+                if mismatch : hostkey-reject-mismatch-btn := PrimaryButton { text: "Reject"; clicked => { root.reject(); } }
+                if !mismatch : hostkey-reject-unknown-btn := SecondaryButton { text: "Reject"; clicked => { root.reject(); } }
+                if mismatch : hostkey-accept-replace-btn := PrimaryButton { text: "Accept & replace"; destructive: true; clicked => { root.accept(); } }
+                if !mismatch : hostkey-accept-continue-btn := PrimaryButton { text: "Accept & continue"; clicked => { root.accept(); } }
             }
         }
     }
@@ -300,6 +310,9 @@ export component CertDialog inherits Rectangle {
     in property <string> stored-fingerprint: "";
     callback reject();
     callback accept();    // "Accept & remember" (unknown) OR "Accept & replace" (mismatch)
+
+    accessible-role: groupbox;
+    accessible-label: (root.mismatch ? "RDP certificate mismatch" : "Unknown RDP certificate") + " dialog";
 
     width: mismatch ? 510px : 490px;
     background: Theme.color-base;
@@ -392,10 +405,10 @@ export component CertDialog inherits Rectangle {
             HorizontalLayout {
                 spacing: Theme.space-3;
                 Rectangle { horizontal-stretch: 1; }
-                if mismatch  : PrimaryButton { text: "Reject"; clicked => { root.reject(); } }
-                if !mismatch : SecondaryButton { text: "Reject"; clicked => { root.reject(); } }
-                if mismatch  : PrimaryButton { text: "Accept & replace"; destructive: true; clicked => { root.accept(); } }
-                if !mismatch : PrimaryButton { text: "Accept & remember"; clicked => { root.accept(); } }
+                if mismatch  : cert-reject-mismatch-btn := PrimaryButton { text: "Reject"; clicked => { root.reject(); } }
+                if !mismatch : cert-reject-unknown-btn := SecondaryButton { text: "Reject"; clicked => { root.reject(); } }
+                if mismatch  : cert-accept-replace-btn := PrimaryButton { text: "Accept & replace"; destructive: true; clicked => { root.accept(); } }
+                if !mismatch : cert-accept-remember-btn := PrimaryButton { text: "Accept & remember"; clicked => { root.accept(); } }
             }
         }
     }
@@ -423,6 +436,9 @@ export component KbdInteractiveDialog inherits Rectangle {
     callback answer-edited(int, string);
     callback submit();
     callback cancel();
+
+    accessible-role: groupbox;
+    accessible-label: (root.name == "" ? "Keyboard-interactive authentication" : root.name) + " dialog";
 
     width: 460px;
     background: Theme.color-base;
@@ -452,7 +468,7 @@ export component KbdInteractiveDialog inherits Rectangle {
             wrap: word-wrap;
         }
 
-        for row[idx] in prompts : FormField {
+        for row[idx] in prompts : kbd-prompt-field := FormField {
             label: row.text;
             password: !row.echo;
             text: row.value;
@@ -462,8 +478,8 @@ export component KbdInteractiveDialog inherits Rectangle {
         HorizontalLayout {
             spacing: Theme.space-3;
             Rectangle { horizontal-stretch: 1; }
-            SecondaryButton { text: "Cancel"; clicked => { root.cancel(); } }
-            PrimaryButton { text: "Submit"; clicked => { root.submit(); } }
+            kbd-cancel-btn := SecondaryButton { text: "Cancel"; clicked => { root.cancel(); } }
+            kbd-submit-btn := PrimaryButton { text: "Submit"; clicked => { root.submit(); } }
         }
     }
 }

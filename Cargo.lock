@@ -998,6 +998,7 @@ dependencies = [
  "cm-session",
  "cm-storage",
  "fontdue",
+ "i-slint-backend-testing",
  "png",
  "rfd",
  "serde_json",

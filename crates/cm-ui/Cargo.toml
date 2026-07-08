@@ -50,11 +50,24 @@ rfd = "0.17"
 # drive/inspect/screenshot the running app. Never present in a normal `--release` build
 # unless explicitly opted in. See docs/devel/tasks/P6.2b-remote-qa-harness.md.
 qa-harness = ["dep:png"]
+# P8.1: off by default, no dependency changes of its own. When enabled, build.rs compiles
+# ui/app.slint with Slint compiler debug info (element ids/roles/labels), which
+# i-slint-backend-testing's ElementHandle queries need to resolve anything at all. This is
+# what tests/a11y_audit.rs runs under. A default (feature-off) build — including
+# `--release` — stays debug-info-free: no element-name strings in the shipped binary.
+# See docs/devel/tasks/P8.1-a11y-element-contract.md.
+ui-introspection = []
 
 [dev-dependencies]
 # Already a workspace dep (dev-only, in cm-storage) — used here for the P6.6
 # import/export seam tests (fresh scratch dirs for exported/imported files).
 tempfile = "3"
+# P8.1: Slint's own testing backend — instantiate AppWindow headlessly (no display, no
+# event loop) and walk its element tree via ElementHandle for the a11y audit test
+# (tests/a11y_audit.rs). Dev-only, never shipped. Internal/non-semver crate per its own
+# docs — pinned exact, bump only in lockstep with the `slint` version above. New-dep memo:
+# docs/devel/memos/P8.1-slint-testing-backend-dep.md.
+i-slint-backend-testing = "=1.17.0"
 
 [build-dependencies]
 # Compiles `ui/app.slint` into Rust (consumed via `slint::include_modules!`).

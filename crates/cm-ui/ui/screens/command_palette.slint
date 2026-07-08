@@ -35,6 +35,11 @@ export component CommandPalette inherits Rectangle {
     // activated(idx): dispatches the action at `idx` in the current filtered list.
     callback activated(int);
 
+    // P8.1: no dialog role in Slint 1.17 — groupbox + "<Title> dialog" (static
+    // title here; the palette's own content, not its chrome, is dynamic).
+    accessible-role: groupbox;
+    accessible-label: "Command palette dialog";
+
     width: 620px;
     background: Theme.color-overlay;
     border-radius: Theme.radius-lg;
@@ -61,6 +66,7 @@ export component CommandPalette inherits Rectangle {
                     placeholder-text: "Type a host, action, or setting…";
                     text <=> root.query;
                     font-size: Theme.font-lg;
+                    accessible-label: "Command palette search";
                     edited(t) => {
                         // Rust resets selected-index to 0 on each palette-edited call;
                         // local reset here ensures the UI stays consistent if the Slint
@@ -90,7 +96,7 @@ export component CommandPalette inherits Rectangle {
                     font-weight: 700;
                     letter-spacing: 0.6px;
                 }
-                Rectangle {
+                action-row := Rectangle {
                     height: 38px;
                     border-radius: Theme.radius-sm;
                     // Keyboard-selected row uses the accent-subtle highlight;
@@ -98,6 +104,14 @@ export component CommandPalette inherits Rectangle {
                     // now superseded by `idx == root.selected-index`.
                     background: idx == root.selected-index ? Theme.color-accent-subtle
                               : row-touch.has-hover ? Theme.color-hover : transparent;
+                    // P8.1: one result row = one list item; label combines the
+                    // visible primary + secondary text (dynamic per action).
+                    accessible-role: list-item;
+                    accessible-label: act.detail == "" ? act.label : act.label + " — " + act.detail;
+                    accessible-item-index: idx;
+                    accessible-item-count: root.actions.length;
+                    accessible-item-selected: idx == root.selected-index;
+                    accessible-action-default => { root.activated(idx); }
                     HorizontalLayout {
                         padding-left: Theme.space-3; padding-right: Theme.space-3;
                         spacing: Theme.space-3;
