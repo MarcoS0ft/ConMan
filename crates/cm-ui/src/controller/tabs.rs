@@ -252,8 +252,16 @@ fn spawn_local_tab(
     };
     let used: Vec<u32> = state.borrow().tabs.iter().map(|t| t.num).collect();
     let num = lowest_free_number(&used);
-    let title = format!("shell {num}");
-    let identity = format!("shell {num}");
+    // P6.14 (gap 3): the Launchpad-fronted empty/"home" tab isn't a shell the
+    // user asked for -- it must never pick up the "shell N" numbering real
+    // local-terminal tabs use (that's `Tab::num`/`lowest_free_number`'s job).
+    // Give it an explicit, non-shell title instead of falling through to the
+    // shell default below.
+    let (title, identity) = if is_empty {
+        ("Home".to_string(), "Home".to_string())
+    } else {
+        (format!("shell {num}"), format!("shell {num}"))
+    };
     push_tab(
         state,
         tab_model,
