@@ -131,6 +131,12 @@ export component SettingsPanel inherits Rectangle {
     callback shell-cwd-changed(string);
     callback startup-behavior-changed(int);
 
+    // P8.1: landmark region — non-interactive, but a genuine navigation aid
+    // for screen readers jumping between panels (not required for the audit's
+    // interactive-role check, added for real a11y value).
+    accessible-role: region;
+    accessible-label: "Settings panel";
+
     background: Theme.color-base;
 
     VerticalLayout {
@@ -196,11 +202,24 @@ export component SettingsPanel inherits Rectangle {
                         spacing: Theme.space-1; alignment: end;
                         // Preset swatches come from Theme.accent-presets — no hardcoded hex here.
                         // space-1 (4px) gap ensures all swatches fit within the 252px panel.
-                        for c[idx] in Theme.accent-presets : Rectangle {
+                        for c[idx] in Theme.accent-presets : accent-swatch := Rectangle {
                             width: 24px; height: 24px; border-radius: 12px;
                             background: c;
                             border-width: idx == root.accent-index ? 2px : 0px;
                             border-color: Theme.color-base;
+                            // P8.1: a single-select swatch picker is a radio group;
+                            // no color-name text exists to quote, so the label is
+                            // an honest ordinal (no fabricated color name).
+                            accessible-role: radio-button;
+                            accessible-label: "Accent preset " + (idx + 1);
+                            accessible-checked: idx == root.accent-index;
+                            accessible-item-index: idx;
+                            accessible-item-count: Theme.accent-presets.length;
+                            accessible-action-default => {
+                                root.accent-index = idx;
+                                Theme.accent = Theme.accent-presets[idx];
+                                root.accent-changed(idx);
+                            }
                             // Selected ring (inner outline in swatch color).
                             Rectangle {
                                 width: 100%; height: 100%; border-radius: 12px;
@@ -221,12 +240,20 @@ export component SettingsPanel inherits Rectangle {
                         // out of `accent-presets` because it isn't a fixed color.
                         // Always outlined (unlike the flat presets above) so it
                         // reads as "live/special" even when not selected.
-                        Rectangle {
+                        os-accent-swatch := Rectangle {
                             width: 24px; height: 24px; border-radius: 12px;
                             background: Theme.os-accent-color;
                             border-width: root.accent-index == Theme.os-accent-index ? 2px : 1px;
                             border-color: root.accent-index == Theme.os-accent-index
                                 ? Theme.color-base : Theme.color-stroke;
+                            accessible-role: radio-button;
+                            accessible-label: "OS accent color";
+                            accessible-checked: root.accent-index == Theme.os-accent-index;
+                            accessible-action-default => {
+                                root.accent-index = Theme.os-accent-index;
+                                Theme.accent = Theme.os-accent-color;
+                                root.accent-changed(Theme.os-accent-index);
+                            }
                             Rectangle {
                                 width: 100%; height: 100%; border-radius: 12px;
                                 border-width: root.accent-index == Theme.os-accent-index ? 2px : 0px;
@@ -297,17 +324,36 @@ export component SettingsPanel inherits Rectangle {
                                 font-family: Theme.font-family; horizontal-alignment: center;
                                 vertical-alignment: center;
                                 width: parent.width; height: parent.height; }
-                            dec-ta := TouchArea { clicked => {
+                            dec-ta := TouchArea {
+                                accessible-role: button;
+                                accessible-label: "Decrease font size";
+                                accessible-action-default => {
+                                    if (root.font-size > 6) {
+                                        root.font-size -= 1;
+                                        root.font-size-changed(root.font-size);
+                                    }
+                                }
+                                clicked => {
                                 if (root.font-size > 6) {
                                     root.font-size -= 1;
                                     root.font-size-changed(root.font-size);
                                 }
                             } }
                         }
-                        Rectangle {
+                        font-size-value := Rectangle {
                             width: 38px; height: Theme.control-height;
                             border-radius: Theme.radius-sm; background: Theme.color-card;
                             border-width: 1px; border-color: Theme.color-stroke;
+                            // P8.1: the −/value/+ trio is a custom stepper — the
+                            // closest role fit is `spinbox`, with the numeric value
+                            // exposed for assistive tech (bounds mirror the clamps
+                            // the dec/inc buttons already enforce).
+                            accessible-role: spinbox;
+                            accessible-label: "Terminal font size";
+                            accessible-value: root.font-size + " pt";
+                            accessible-value-minimum: 6;
+                            accessible-value-maximum: 72;
+                            accessible-value-step: 1;
                             Text { text: root.font-size; color: Theme.color-text;
                                 font-size: Theme.font-base; font-family: Theme.font-family-mono;
                                 horizontal-alignment: center; vertical-alignment: center;
@@ -322,7 +368,16 @@ export component SettingsPanel inherits Rectangle {
                                 font-family: Theme.font-family; horizontal-alignment: center;
                                 vertical-alignment: center;
                                 width: parent.width; height: parent.height; }
-                            inc-ta := TouchArea { clicked => {
+                            inc-ta := TouchArea {
+                                accessible-role: button;
+                                accessible-label: "Increase font size";
+                                accessible-action-default => {
+                                    if (root.font-size < 72) {
+                                        root.font-size += 1;
+                                        root.font-size-changed(root.font-size);
+                                    }
+                                }
+                                clicked => {
                                 if (root.font-size < 72) {
                                     root.font-size += 1;
                                     root.font-size-changed(root.font-size);
@@ -340,10 +395,11 @@ export component SettingsPanel inherits Rectangle {
                     Text { text: "Executable path — empty uses $SHELL or cmd.exe";
                         color: Theme.color-text-secondary; font-size: Theme.font-sm;
                         font-family: Theme.font-family; }
-                    LineEdit {
+                    settings-shell-path-field := LineEdit {
                         text <=> root.shell-path;
                         placeholder-text: "/bin/bash";
                         font-size: Theme.font-base;
+                        accessible-label: "Default shell";
                         accepted(t) => { root.shell-path-changed(t); }
                         edited(t)   => { root.shell-path = t; root.shell-path-changed(t); }
                     }
@@ -354,10 +410,11 @@ export component SettingsPanel inherits Rectangle {
                     Text { text: "Shell arguments"; color: Theme.color-text;
                         font-size: Theme.font-base; font-family: Theme.font-family;
                         font-weight: 600; }
-                    LineEdit {
+                    settings-shell-args-field := LineEdit {
                         text <=> root.shell-args;
                         placeholder-text: "--login";
                         font-size: Theme.font-base;
+                        accessible-label: "Shell arguments";
                         accepted(t) => { root.shell-args-changed(t); }
                         edited(t)   => { root.shell-args = t; root.shell-args-changed(t); }
                     }
@@ -371,10 +428,11 @@ export component SettingsPanel inherits Rectangle {
                     Text { text: "Empty defaults to the user home directory";
                         color: Theme.color-text-secondary; font-size: Theme.font-sm;
                         font-family: Theme.font-family; }
-                    LineEdit {
+                    settings-shell-cwd-field := LineEdit {
                         text <=> root.shell-cwd;
                         placeholder-text: "~";
                         font-size: Theme.font-base;
+                        accessible-label: "Working directory";
                         accepted(t) => { root.shell-cwd-changed(t); }
                         edited(t)   => { root.shell-cwd = t; root.shell-cwd-changed(t); }
                     }

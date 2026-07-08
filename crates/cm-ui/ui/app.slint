@@ -288,8 +288,21 @@ component Tab inherits Rectangle {
     in property <string> status;
     in property <int>    pane-count: 1;
     in property <bool>   active;
+    // P8.1: position within the tab strip, supplied by the `for` loop at the
+    // call site — repeated items disambiguate via item-index/item-count, not
+    // label suffixes (the contract's rule).
+    in property <int>    item-index: 0;
+    in property <int>    item-count: 1;
     callback clicked();
     callback closed();
+
+    // P8.1: one tab per session; label is the (dynamic) tab title.
+    accessible-role: tab;
+    accessible-label: root.title;
+    accessible-item-index: root.item-index;
+    accessible-item-count: root.item-count;
+    accessible-item-selected: root.active;
+    accessible-action-default => { root.clicked(); }
 
     height: Theme.tab-height;
     border-radius: Theme.radius-sm + 0px;
@@ -327,10 +340,11 @@ component Tab inherits Rectangle {
         }
         VerticalLayout {
             alignment: center;
-            IconButton {
+            close-tab-btn := IconButton {
                 glyph: "\u{EA76}";
                 size: 16px;
                 glyph-size: Theme.icon-xs;
+                tooltip: "Close tab";
                 clicked => { root.closed(); }
             }
         }
@@ -345,6 +359,9 @@ component ConnectionRow inherits Rectangle {
     in property <ConnRow> data;
     // P5.3b: keyboard-navigation cursor highlight (driven by parent's kb-idx).
     in property <bool> highlighted: false;
+    // P8.1: position within the flattened tree, supplied by the `for` loop.
+    in property <int> row-index: 0;
+    in property <int> row-count: 0;
     callback activated();       // open session tab (leaf)
     callback toggled();         // expand / collapse group
     callback edit-clicked();    // open profile / group editor
@@ -357,6 +374,16 @@ component ConnectionRow inherits Rectangle {
     callback delete-clicked();
     callback move-up();         // reorder: move one step up within same parent
     callback move-down();       // reorder: move one step down within same parent
+
+    // P8.1: a flattened tree row rendered inside a ListView — `list-item` is
+    // the closest role Slint 1.17 offers (no distinct tree-item role); label
+    // is the connection/group name, per the contract's dynamic-content rule.
+    accessible-role: list-item;
+    accessible-label: data.label;
+    accessible-item-index: root.row-index;
+    accessible-item-count: root.row-count;
+    accessible-item-selected: data.selected;
+    accessible-action-default => { if (data.is-group) { root.toggled(); } else { root.activated(); } }
 
     height: Theme.tree-row-height;
     border-radius: Theme.radius-sm;
@@ -490,31 +517,36 @@ component ConnectionRow inherits Rectangle {
             spacing: Theme.gap-hairline;
             alignment: center;
             // ↑ / ↓ reorder within the same parent.
-            IconButton {
+            move-up-btn := IconButton {
                 glyph: "\u{EAB7}";   // ChevronUp
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                tooltip: "Move up";
                 clicked => { root.move-up(); }
             }
-            IconButton {
+            move-down-btn := IconButton {
                 glyph: "\u{EAB4}";   // ChevronDown
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                tooltip: "Move down";
                 clicked => { root.move-down(); }
             }
             // Group: new-child + edit; Connection: edit (pencil).
-            if data.is-group : IconButton {
+            if data.is-group : new-child-btn := IconButton {
                 glyph: "\u{EA60}";   // Add (new child)
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                tooltip: "New child";
                 clicked => { root.new-sub(); }
             }
-            IconButton {
+            edit-row-btn := IconButton {
                 glyph: "\u{F03EB}";   // Edit (pencil)
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                tooltip: data.is-group ? "Edit group" : "Edit";
                 clicked => { root.edit-clicked(); }
             }
-            IconButton {
+            delete-row-btn := IconButton {
                 glyph: "\u{EA81}";   // Delete (trash)
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 glyph-color: Theme.color-error;
+                tooltip: "Delete";
                 clicked => { root.delete-clicked(); }
             }
         }
@@ -526,10 +558,22 @@ component CredTreeRow inherits Rectangle {
     in property <CredRow> data;
     // P5.3b: keyboard-navigation cursor highlight.
     in property <bool> highlighted: false;
+    // P8.1: position within the flattened folder tree, supplied by the `for` loop.
+    in property <int> row-index: 0;
+    in property <int> row-count: 0;
     callback activated();
     callback toggled();
     callback new-sub();
     callback delete-clicked();
+
+    // P8.1: same list-item rationale as ConnectionRow — label is the
+    // credential/folder name (dynamic content).
+    accessible-role: list-item;
+    accessible-label: data.label;
+    accessible-item-index: root.row-index;
+    accessible-item-count: root.row-count;
+    accessible-item-selected: data.selected;
+    accessible-action-default => { if (data.is-folder) { root.toggled(); } else { root.activated(); } }
 
     height: Theme.tree-row-height;
     border-radius: Theme.radius-sm;
@@ -629,20 +673,23 @@ component CredTreeRow inherits Rectangle {
         if touch.has-hover : HorizontalLayout {
             spacing: Theme.gap-hairline;
             alignment: center;
-            if data.is-folder : IconButton {
+            if data.is-folder : new-cred-btn := IconButton {
                 glyph: "\u{EA60}";
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                tooltip: "New credential";
                 clicked => { root.new-sub(); }
             }
-            if !data.is-folder : IconButton {
+            if !data.is-folder : edit-cred-btn := IconButton {
                 glyph: "\u{F03EB}";
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                tooltip: "Edit";
                 clicked => { root.activated(); }
             }
-            IconButton {
+            delete-cred-btn := IconButton {
                 glyph: "\u{EA81}";
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 glyph-color: Theme.color-error;
+                tooltip: "Delete";
                 clicked => { root.delete-clicked(); }
             }
         }
@@ -1039,28 +1086,36 @@ export component AppWindow inherits Window {
                     padding-top: Theme.space-2;
                     padding-bottom: Theme.space-2;
                     spacing: Theme.space-1;
-                    ActivityBarButton {
+                    connections-panel-btn := ActivityBarButton {
                         glyph: "\u{F0317}"; active: active-panel == 0;
+                        tooltip: "Connections";
                         clicked => { root.select-panel(0); }
                     }
-                    ActivityBarButton {
+                    keys-panel-btn := ActivityBarButton {
                         glyph: "\u{EB11}"; active: active-panel == 1;
+                        tooltip: "Keys";
                         clicked => { root.select-panel(1); }
                     }
                     Rectangle { vertical-stretch: 1; }
-                    ActivityBarButton {
+                    settings-panel-btn := ActivityBarButton {
                         glyph: "\u{F0493}"; active: active-panel == 2;
+                        tooltip: "Settings";
                         clicked => { root.select-panel(2); }
                     }
                     // P6.9 (gap 11): chrome collapse toggle beyond the palette-only
                     // path ("Toggle sidebar" in the command palette). Same glyph as
                     // that palette action (cod-three_bars); `active` mirrors the
                     // current collapsed state so the rail lights up when hidden.
-                    ActivityBarButton {
+                    sidebar-toggle-btn := ActivityBarButton {
                         glyph: "\u{EB6A}"; active: root.sidebar-collapsed;
+                        tooltip: "Toggle sidebar";
                         clicked => { root.toggle-sidebar(); }
                     }
-                    ActivityBarButton { glyph: "\u{F0849}"; }
+                    // P8.1: pre-existing unwired placeholder icon (no `clicked`
+                    // handler, no behavior) — out of this task's scope to wire up
+                    // or invent a fabricated label for. Allowlisted in
+                    // tests/a11y_audit.rs under this exact id.
+                    team-placeholder-btn := ActivityBarButton { glyph: "\u{F0849}"; }
                 }
             }
 
@@ -1084,13 +1139,13 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
-                        IconButton {
+                        new-group-btn := IconButton {
                             glyph: "\u{EA80}";   // New folder / group
                             size: 24px; glyph-size: Theme.icon-sm;
                             tooltip: "New group";
                             clicked => { root.new-group(0); }
                         }
-                        IconButton {
+                        new-connection-btn := IconButton {
                             glyph: "\u{EA60}";   // Add connection
                             size: 24px; glyph-size: Theme.icon-sm;
                             tooltip: "New connection";
@@ -1105,11 +1160,12 @@ export component AppWindow inherits Window {
                         Text { text: "\u{F0349}"; font-family: Theme.font-family-icons;
                             font-size: Theme.icon-sm; color: Theme.color-text-secondary;
                             vertical-alignment: center; }
-                        LineEdit {
+                        conn-filter-field := LineEdit {
                             placeholder-text: "Filter connections…";
                             text <=> root.conn-filter;
                             font-size: Theme.font-sm;
                             horizontal-stretch: 1;
+                            accessible-label: "Filter connections";
                             edited(t) => { root.conn-filter-changed(t); }
                         }
                     }
@@ -1200,8 +1256,10 @@ export component AppWindow inherits Window {
                             }
                             ListView {
                                 width: 100%; height: 100%;
-                                for conn[idx] in connections: ConnectionRow {
+                                for conn[idx] in connections: conn-row := ConnectionRow {
                                     data: conn;
+                                    row-index: idx;
+                                    row-count: connections.length;
                                     highlighted: idx == conn-tree-focus.kb-idx;
                                     activated     => { root.row-activated(idx); }
                                     toggled       => { root.toggle-conn-row(idx); }
@@ -1245,7 +1303,7 @@ export component AppWindow inherits Window {
                         height: 52px;
                         HorizontalLayout {
                             padding: Theme.space-3;
-                            PrimaryButton {
+                            quick-connect-btn := PrimaryButton {
                                 text: "Quick connect";
                                 clicked => { root.quick-connect(); }
                             }
@@ -1268,13 +1326,13 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
-                        IconButton {
+                        new-folder-btn := IconButton {
                             glyph: "\u{EA80}";   // New folder
                             size: 24px; glyph-size: Theme.icon-sm;
                             tooltip: "New folder";
                             clicked => { root.new-cred-folder(0); }
                         }
-                        IconButton {
+                        new-credential-btn := IconButton {
                             glyph: "\u{EA60}";   // New credential
                             size: 24px; glyph-size: Theme.icon-sm;
                             tooltip: "New credential";
@@ -1289,11 +1347,12 @@ export component AppWindow inherits Window {
                         Text { text: "\u{F0349}"; font-family: Theme.font-family-icons;
                             font-size: Theme.icon-sm; color: Theme.color-text-secondary;
                             vertical-alignment: center; }
-                        LineEdit {
+                        cred-filter-field := LineEdit {
                             placeholder-text: "Filter credentials…";
                             text <=> root.cred-filter;
                             font-size: Theme.font-sm;
                             horizontal-stretch: 1;
+                            accessible-label: "Filter credentials";
                             edited(t) => { root.cred-filter-changed(t); }
                         }
                     }
@@ -1353,8 +1412,10 @@ export component AppWindow inherits Window {
                             }
                             ListView {
                                 width: 100%; height: 100%;
-                                for cred[idx] in credentials: CredTreeRow {
+                                for cred[idx] in credentials: cred-row := CredTreeRow {
                                     data: cred;
+                                    row-index: idx;
+                                    row-count: credentials.length;
                                     highlighted: idx == cred-tree-focus.kb-idx;
                                     activated      => { root.edit-cred(cred.id); }
                                     toggled        => { root.toggle-cred-row(idx); }
@@ -1415,6 +1476,12 @@ export component AppWindow inherits Window {
                           : transparent;
                 property <int> drag-base-width: 0;
                 sb-resize := TouchArea {
+                    // P8.1: no dedicated "separator/resize handle" role exists in
+                    // Slint 1.17's enum; `slider` is the closest value-bearing fit
+                    // for a 1-D drag control.
+                    accessible-role: slider;
+                    accessible-label: "Resize side panel";
+                    accessible-value: root.sidebar-width + "px";
                     mouse-cursor: MouseCursor.ew-resize;
                     pointer-event(e) => {
                         if (e.kind == PointerEventKind.down) {
@@ -1455,16 +1522,19 @@ export component AppWindow inherits Window {
                     padding: Theme.space-1;
                     spacing: Theme.space-1;
                     alignment: start;
-                    for tab[idx] in tabs: Tab {
+                    for tab[idx] in tabs: tab-item := Tab {
                         title: tab.title;
                         status: tab.status;
                         pane-count: tab.pane-count;
                         active: idx == active-tab;
+                        item-index: idx;
+                        item-count: tabs.length;
                         clicked => { root.select-tab(idx); }
                         closed => { root.close-tab(idx); }
                     }
-                    IconButton {
+                    new-tab-btn := IconButton {
                         glyph: "\u{EA60}";
+                        tooltip: "New tab";
                         clicked => { root.new-tab(); }
                     }
                     Rectangle { horizontal-stretch: 1; }
@@ -1584,11 +1654,16 @@ export component AppWindow inherits Window {
                                     vertical-alignment: center;
                                 }
                             }
-                            bc-target-touch := TouchArea { clicked => { root.open-broadcast-target(); } }
+                            bc-target-touch := TouchArea {
+                                accessible-role: button;
+                                accessible-label: "Broadcast target: " + root.broadcast-target-label;
+                                accessible-action-default => { root.open-broadcast-target(); }
+                                clicked => { root.open-broadcast-target(); }
+                            }
                         }
                         Rectangle { horizontal-stretch: 1; }
                         // Dismiss button.
-                        IconButton {
+                        broadcast-off-btn := IconButton {
                             glyph: "\u{EA76}";
                             size: 24px; glyph-size: Theme.icon-sm;
                             tooltip: "Turn off broadcast";
@@ -1635,6 +1710,10 @@ export component AppWindow inherits Window {
                         }
                         bc-visible-touch := TouchArea {
                             height: 26px;
+                            accessible-role: radio-button;
+                            accessible-label: "All visible panes";
+                            accessible-checked: root.broadcast-target-label == "all panes";
+                            accessible-action-default => { root.select-broadcast-visible(); }
                             clicked => { root.select-broadcast-visible(); }
                             HorizontalLayout {
                                 Text {
@@ -1647,8 +1726,14 @@ export component AppWindow inherits Window {
                             }
                         }
                         if broadcast-saved-groups.length > 0 : Rectangle { height: 1px; background: Theme.color-stroke; }
-                        for grp[gi] in root.broadcast-saved-groups : TouchArea {
+                        for grp[gi] in root.broadcast-saved-groups : bg-group-row := TouchArea {
                             height: 26px;
+                            accessible-role: radio-button;
+                            accessible-label: grp;
+                            accessible-checked: root.broadcast-target-label == grp;
+                            accessible-item-index: gi;
+                            accessible-item-count: root.broadcast-saved-groups.length;
+                            accessible-action-default => { root.select-broadcast-group(gi); }
                             clicked => { root.select-broadcast-group(gi); }
                             HorizontalLayout {
                                 Text {
@@ -1669,8 +1754,14 @@ export component AppWindow inherits Window {
                             font-weight: 700;
                             letter-spacing: 0.6px;
                         }
-                        for chk[pi] in root.broadcast-pane-checks : TouchArea {
+                        for chk[pi] in root.broadcast-pane-checks : bg-pane-check := TouchArea {
                             height: 24px;
+                            accessible-role: checkbox;
+                            accessible-label: "Pane " + (pi + 1);
+                            accessible-checked: chk;
+                            accessible-item-index: pi;
+                            accessible-item-count: root.broadcast-pane-checks.length;
+                            accessible-action-default => { root.toggle-broadcast-pane-check(pi); }
                             clicked => { root.toggle-broadcast-pane-check(pi); }
                             HorizontalLayout {
                                 spacing: Theme.space-1;
@@ -1692,17 +1783,18 @@ export component AppWindow inherits Window {
                         }
                         HorizontalLayout {
                             spacing: Theme.space-2;
-                            SecondaryButton {
+                            apply-broadcast-btn := SecondaryButton {
                                 text: "Apply";
                                 clicked => { root.apply-broadcast-custom(); }
                             }
                         }
-                        LineEdit {
+                        broadcast-group-name-field := LineEdit {
                             placeholder-text: "Save selection as…";
                             text <=> root.broadcast-group-name-draft;
+                            accessible-label: "Save selection as";
                             accepted => { root.save-broadcast-group(); }
                         }
-                        SecondaryButton {
+                        save-broadcast-group-btn := SecondaryButton {
                             text: "Save as named group";
                             clicked => { root.save-broadcast-group(); }
                         }
@@ -1797,7 +1889,12 @@ export component AppWindow inherits Window {
                             Text { text: detached-count + " detached"; color: Theme.color-text-secondary;
                                 font-size: Theme.font-xs; font-family: Theme.font-family; vertical-alignment: center; }
                         }
-                        TouchArea { clicked => { root.open-palette(); } }
+                        detached-badge-btn := TouchArea {
+                            accessible-role: button;
+                            accessible-label: root.detached-count + " detached sessions";
+                            accessible-action-default => { root.open-palette(); }
+                            clicked => { root.open-palette(); }
+                        }
                     }
                     // Broadcast indicator in the status bar (never silent — P6.11
                     // names the active target, not just "BC"). Click opens the
@@ -1813,7 +1910,12 @@ export component AppWindow inherits Window {
                             Text { text: "\u{EAAD} BC · " + root.broadcast-target-label; color: Theme.color-base; font-size: Theme.font-xs;
                                 font-family: Theme.font-family-mono; font-weight: 700; vertical-alignment: center; }
                         }
-                        TouchArea { clicked => { root.open-broadcast-target(); } }
+                        broadcast-badge-btn := TouchArea {
+                            accessible-role: button;
+                            accessible-label: "Broadcast active: " + root.broadcast-target-label;
+                            accessible-action-default => { root.open-broadcast-target(); }
+                            clicked => { root.open-broadcast-target(); }
+                        }
                     }
                     Rectangle {
                         y: (parent.height - self.height) / 2;
@@ -1828,7 +1930,12 @@ export component AppWindow inherits Window {
                             Text { text: "Palette"; color: Theme.color-accent; font-size: Theme.font-sm;
                                 font-family: Theme.font-family; vertical-alignment: center; }
                         }
-                        TouchArea { clicked => { root.open-palette(); } }
+                        palette-badge-btn := TouchArea {
+                            accessible-role: button;
+                            accessible-label: "Open command palette";
+                            accessible-action-default => { root.open-palette(); }
+                            clicked => { root.open-palette(); }
+                        }
                     }
                 }
             }
@@ -1839,7 +1946,7 @@ export component AppWindow inherits Window {
     Modal {
         open: root.quick-connect-open;
         dismissed => { root.quick-connect-open = false; }
-        QuickConnectForm {
+        quick-connect-dialog := QuickConnectForm {
             kind <=> root.qc-kind;
             host <=> root.qc-host;
             port <=> root.qc-port;
@@ -1861,7 +1968,7 @@ export component AppWindow inherits Window {
     Modal {
         open: root.host-key-open;
         dismissed => {}
-        HostKeyDialog {
+        host-key-dialog := HostKeyDialog {
             mismatch:           root.host-key-mismatch;
             host:               root.host-key-host;
             key-type:           root.host-key-type;
@@ -1876,7 +1983,7 @@ export component AppWindow inherits Window {
     Modal {
         open: root.cert-dialog-open;
         dismissed => {}
-        CertDialog {
+        cert-dialog := CertDialog {
             mismatch:           root.cert-dialog-mismatch;
             host:               root.cert-dialog-host;
             subject:            root.cert-dialog-subject;
@@ -1891,7 +1998,7 @@ export component AppWindow inherits Window {
     Modal {
         open: root.kbd-open;
         dismissed => {}
-        KbdInteractiveDialog {
+        kbd-dialog := KbdInteractiveDialog {
             name:         root.kbd-name;
             instructions: root.kbd-instructions;
             prompts:      root.kbd-prompts;
@@ -1905,7 +2012,7 @@ export component AppWindow inherits Window {
     Modal {
         open: root.profile-editor-open;
         dismissed => { root.profile-editor-open = false; }
-        ProfileEditor {
+        profile-editor-dialog := ProfileEditor {
             form <=> root.profile-form;
             cred-name-list: root.cred-name-list;
             group-name-list: root.group-name-list;
@@ -1918,7 +2025,7 @@ export component AppWindow inherits Window {
     Modal {
         open: root.group-editor-open;
         dismissed => { root.group-editor-open = false; }
-        GroupEditor {
+        group-editor-dialog := GroupEditor {
             form <=> root.group-form;
             cred-name-list: root.cred-name-list;
             group-name-list: root.group-name-list;
@@ -1931,7 +2038,7 @@ export component AppWindow inherits Window {
     Modal {
         open: root.cred-editor-open;
         dismissed => { root.cred-editor-open = false; }
-        CredEditor {
+        cred-editor-dialog := CredEditor {
             form <=> root.cred-form;
             folder-name-list: root.folder-name-list;
             save   => { root.cred-save(); }
@@ -1947,7 +2054,7 @@ export component AppWindow inherits Window {
         width: 440px;
         spacing: Theme.space-2;
         alignment: end;
-        for t in root.toasts: Toast {
+        for t in root.toasts: toast-item := Toast {
             message: t.message;
             kind:    t.kind;
             dismissed => { root.toast-dismissed(t.id); }
@@ -1961,7 +2068,7 @@ export component AppWindow inherits Window {
             root.palette-open = false;
             root.palette-selected = 0;
         }
-        CommandPalette {
+        command-palette-dialog := CommandPalette {
             query <=> root.palette-query;
             actions: root.palette-actions;
             selected-index <=> root.palette-selected;

@@ -78,6 +78,10 @@ export component ProfileEditor inherits Rectangle {
     callback save();
     callback cancel();
 
+    // P8.1: no dialog role in Slint 1.17 — groupbox + "<Title> dialog".
+    accessible-role: groupbox;
+    accessible-label: (root.form.id == 0 ? "New connection" : "Edit connection") + " dialog";
+
     width: 520px;
     // Nearly-fill the Modal's centering region vertically, leaving a small
     // top/bottom gutter (alignment:center in the Modal, screens/dialogs.slint,
@@ -124,7 +128,7 @@ export component ProfileEditor inherits Rectangle {
                 padding-right: Theme.scrollbar-gutter;
 
                 // ── Name ──────────────────────────────────────────────
-                FormField {
+                profile-name-field := FormField {
                     label: "Name";
                     placeholder: "Connection name";
                     text <=> root.form.name;
@@ -140,9 +144,10 @@ export component ProfileEditor inherits Rectangle {
                         font-family: Theme.font-family;
                         font-weight: 600;
                     }
-                    ComboBox {
+                    profile-group-combo := ComboBox {
                         model: root.group-name-list;
                         current-index <=> root.form.selected-group-idx;
+                        accessible-label: "Group";
                     }
                 }
 
@@ -175,19 +180,19 @@ export component ProfileEditor inherits Rectangle {
                 }
 
                 // ── Host / Port (SSH + RDP) ───────────────────────────
-                if root.form.kind != 2 : FormField {
+                if root.form.kind != 2 : profile-host-field := FormField {
                     label: "Host";
                     placeholder: "hostname or IP address";
                     text <=> root.form.host;
                 }
-                if root.form.kind != 2 : FormField {
+                if root.form.kind != 2 : profile-port-field := FormField {
                     label: "Port";
                     placeholder: root.form.kind == 0 ? "22" : "3389";
                     text <=> root.form.port;
                 }
 
                 // ── Username (SSH + RDP) ──────────────────────────────
-                if root.form.kind != 2 : FormField {
+                if root.form.kind != 2 : profile-username-field := FormField {
                     label: "Username";
                     placeholder: "login username";
                     text <=> root.form.username;
@@ -210,12 +215,12 @@ export component ProfileEditor inherits Rectangle {
                 }
 
                 // ── RDP-only fields (mirror QuickConnectForm) ─────────
-                if root.form.kind == 1 : FormField {
+                if root.form.kind == 1 : profile-rdp-domain-field := FormField {
                     label: "Domain";
                     placeholder: "(optional, e.g. CORP)";
                     text <=> root.form.rdp-domain;
                 }
-                if root.form.kind == 1 : FormField {
+                if root.form.kind == 1 : profile-rdp-resolution-field := FormField {
                     label: "Resolution";
                     placeholder: "1280x720";
                     text <=> root.form.rdp-resolution;
@@ -231,9 +236,10 @@ export component ProfileEditor inherits Rectangle {
                         font-family: Theme.font-family;
                         font-weight: 600;
                     }
-                    ComboBox {
+                    profile-cred-combo := ComboBox {
                         model: root.cred-name-list;
                         current-index <=> root.form.selected-cred-idx;
+                        accessible-label: "Credential";
                     }
                     // Show the effective (possibly inherited) credential.
                     if root.form.effective-cred-name != "" : HorizontalLayout {
@@ -272,11 +278,11 @@ export component ProfileEditor inherits Rectangle {
             spacing: Theme.space-3;
             alignment: end;
             padding-top: Theme.space-2;
-            SecondaryButton {
+            profile-cancel-btn := SecondaryButton {
                 text: "Cancel";
                 clicked => { root.cancel(); }
             }
-            PrimaryButton {
+            profile-save-btn := PrimaryButton {
                 text: "Save";
                 enabled: root.form.name != "";
                 clicked => { root.save(); }
@@ -302,6 +308,10 @@ export component GroupEditor inherits Rectangle {
     callback save();
     callback cancel();
 
+    // P8.1: no dialog role in Slint 1.17 — groupbox + "<Title> dialog".
+    accessible-role: groupbox;
+    accessible-label: (root.form.id == 0 ? "New group" : "Group settings") + " dialog";
+
     width: 520px;
     background: Theme.color-overlay;
     border-radius: Theme.radius-lg;
@@ -324,7 +334,7 @@ export component GroupEditor inherits Rectangle {
             font-weight: 700;
         }
 
-        FormField {
+        group-name-field := FormField {
             label: "Name";
             placeholder: "Group name";
             text <=> root.form.name;
@@ -340,9 +350,10 @@ export component GroupEditor inherits Rectangle {
                 font-family: Theme.font-family;
                 font-weight: 600;
             }
-            ComboBox {
+            group-parent-combo := ComboBox {
                 model: root.group-name-list;
                 current-index <=> root.form.selected-parent-idx;
+                accessible-label: "Parent Group";
             }
         }
 
@@ -362,20 +373,21 @@ export component GroupEditor inherits Rectangle {
                 font-family: Theme.font-family;
                 wrap: word-wrap;
             }
-            ComboBox {
+            group-default-cred-combo := ComboBox {
                 model: root.cred-name-list;
                 current-index <=> root.form.default-cred-idx;
+                accessible-label: "Default Credential";
             }
         }
 
         HorizontalLayout {
             spacing: Theme.space-3;
             alignment: end;
-            SecondaryButton {
+            group-cancel-btn := SecondaryButton {
                 text: "Cancel";
                 clicked => { root.cancel(); }
             }
-            PrimaryButton {
+            group-save-btn := PrimaryButton {
                 text: "Save";
                 enabled: root.form.name != "";
                 clicked => { root.save(); }
