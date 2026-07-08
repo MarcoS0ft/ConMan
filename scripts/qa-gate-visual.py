@@ -69,6 +69,11 @@ from pathlib import Path
 _driver_spec = importlib.util.spec_from_file_location(
     "mcp_scenario_driver", Path(__file__).resolve().parent / "mcp-scenario-driver.py"
 )
+if _driver_spec is None or _driver_spec.loader is None:
+    raise ImportError(
+        "could not load scripts/mcp-scenario-driver.py: "
+        "importlib.util.spec_from_file_location returned no spec/loader"
+    )
 _driver = importlib.util.module_from_spec(_driver_spec)
 _driver_spec.loader.exec_module(_driver)
 McpClient = _driver.McpClient
@@ -78,6 +83,7 @@ try:
     from PIL import Image
     HAVE_PIL = True
 except ImportError:
+    Image = None  # type: ignore[assignment]  # every call site is guarded by HAVE_PIL
     HAVE_PIL = False
 
 # Theme tokens (ui/theme.slint) -- (dark, light) hex pairs. Mirrored here
@@ -104,8 +110,8 @@ def hex_to_rgb(h: str) -> tuple[int, int, int]:
 
 def relative_luminance(rgb: tuple[int, int, int]) -> float:
     def chan(c: int) -> float:
-        c = c / 255.0
-        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+        v = c / 255.0
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
 
     r, g, b = (chan(c) for c in rgb)
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
@@ -165,6 +171,7 @@ def screenshot(client: McpClient, window_handle: str, out_path: Path):
     png = b64decode(block["data"])
     out_path.write_bytes(png)
     if HAVE_PIL:
+        assert Image is not None, "HAVE_PIL is True but Image is unbound -- inconsistent Pillow import state"
         return Image.open(out_path).convert("RGB")
     return None
 
@@ -203,7 +210,7 @@ def check_dialog_gutter(client, window_handle, out_dir: Path, report: Report, da
     if img is None:
         report.record(check, "unverified", "screenshot unavailable")
         return
-    pos, size = dialog["absolutePosition"], dialog["size"]
+    pos = dialog["absolutePosition"]
     # Sample a point just inside the dialog's own top-left corner -- close
     # enough to guarantee it's dialog background (padding exists on every
     # side per profile_editor.slint's `padding: Theme.space-6`), far enough

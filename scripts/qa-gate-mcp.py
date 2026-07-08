@@ -78,6 +78,11 @@ from pathlib import Path
 _driver_spec = importlib.util.spec_from_file_location(
     "mcp_scenario_driver", Path(__file__).resolve().parent / "mcp-scenario-driver.py"
 )
+if _driver_spec is None or _driver_spec.loader is None:
+    raise ImportError(
+        "could not load scripts/mcp-scenario-driver.py: "
+        "importlib.util.spec_from_file_location returned no spec/loader"
+    )
 _driver = importlib.util.module_from_spec(_driver_spec)
 _driver_spec.loader.exec_module(_driver)
 McpClient = _driver.McpClient
