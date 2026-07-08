@@ -12,7 +12,7 @@ import { Theme } from "../theme.slint";
 import {
     FormField, PrimaryButton, SecondaryButton, SegmentedControl, Card
 } from "../components.slint";
-import { ComboBox } from "std-widgets.slint";
+import { ComboBox, ScrollView } from "std-widgets.slint";
 
 // ── ConnProfile ────────────────────────────────────────────────────────────
 // Data bag for the connection profile editor. All fields are in-out so Rust
@@ -24,6 +24,8 @@ import { ComboBox } from "std-widgets.slint";
 // `effective-cred-name`  resolved credential name (may come from a group)
 // `effective-inherited`  true when the effective cred comes from a group
 // `selected-group-idx`  index into AppWindow.group-name-list; 0 = "Root (no group)"
+// `rdp-domain` / `rdp-resolution`  RDP-only (kind == 1); mirror QuickConnectForm's
+// fields (screens/dialogs.slint) so a profile-saved RDP connection can set them too.
 export struct ConnProfile {
     id: int,
     name: string,
@@ -37,6 +39,8 @@ export struct ConnProfile {
     effective-cred-name: string,
     effective-inherited: bool,
     selected-group-idx: int,
+    rdp-domain: string,
+    rdp-resolution: string,
 }
 
 // ── GroupForm ──────────────────────────────────────────────────────────────
@@ -55,7 +59,13 @@ export struct GroupForm {
 // ── ProfileEditor ──────────────────────────────────────────────────────────
 // Mounted inside a Modal.  Rust sets `form` + `cred-name-list` + `group-name-list`
 // before opening.
-export component ProfileEditor {
+//
+// Opaque card + bounded height: mirrors QuickConnectForm (screens/dialogs.slint) —
+// a solid `color-overlay` panel with a border/radius so nothing behind the Modal
+// scrim bleeds through, in both themes. The field column is capped to the
+// available window height and scrolls internally so Save/Cancel are never
+// pushed off the bottom on a short window (P7.2, gap #1/#2).
+export component ProfileEditor inherits Rectangle {
     in-out property <ConnProfile> form;
     // Flat list of credential names for the ComboBox.
     // cred-name-list[0] is always "Inherit from group"; the rest map 1-to-1
@@ -67,6 +77,26 @@ export component ProfileEditor {
     in property <[string]> group-name-list;
     callback save();
     callback cancel();
+
+    width: 520px;
+    // Nearly-fill the Modal's centering region vertically, leaving a small
+    // top/bottom gutter (alignment:center in the Modal, screens/dialogs.slint,
+    // splits the remainder evenly). A bare percentage literal is the one
+    // Slint form exempt from layout-info propagation -- binding to an
+    // ancestor's *resolved* pixel height instead creates a genuine
+    // compile-time binding loop through the Window's own preferred size.
+    // This is what actually guarantees Save/Cancel are never pushed off the
+    // bottom: the field ScrollView below gets whatever's left after the fixed-
+    // height Title/Actions rows, however tall/short the window is (P7.2 #2).
+    height: 94%;
+    background: Theme.color-overlay;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.color-stroke;
+
+    // Absorb clicks so the Modal scrim behind doesn't dismiss on inner clicks
+    // (mirrors QuickConnectForm, screens/dialogs.slint).
+    TouchArea {}
 
     VerticalLayout {
         padding: Theme.space-6;
@@ -81,120 +111,154 @@ export component ProfileEditor {
             font-weight: 700;
         }
 
-        // ── Name ──────────────────────────────────────────────────────
-        FormField {
-            label: "Name";
-            placeholder: "Connection name";
-            text <=> root.form.name;
-        }
+        // ── Scrollable field column ──────────────────────────────────────
+        // Bounded by the card's max-height above; Title and Actions stay
+        // outside the scroll region so they're always visible.
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: Theme.space-5;
 
-        // ── Group (move between groups) ───────────────────────────────
-        if root.group-name-list.length > 0 : VerticalLayout {
-            spacing: Theme.space-2;
-            Text {
-                text: "Group";
-                color: Theme.color-text-secondary;
-                font-size: Theme.font-sm;
-                font-family: Theme.font-family;
-                font-weight: 600;
-            }
-            ComboBox {
-                model: root.group-name-list;
-                current-index <=> root.form.selected-group-idx;
-            }
-        }
-
-        // ── Kind ──────────────────────────────────────────────────────
-        VerticalLayout {
-            spacing: Theme.space-2;
-            Text {
-                text: "Type";
-                color: Theme.color-text-secondary;
-                font-size: Theme.font-sm;
-                font-family: Theme.font-family;
-                font-weight: 600;
-            }
-            SegmentedControl {
-                options: ["SSH", "RDP", "Local"];
-                selected <=> root.form.kind;
-            }
-        }
-
-        // ── Host / Port (SSH + RDP) ───────────────────────────────────
-        if root.form.kind != 2 : FormField {
-            label: "Host";
-            placeholder: "hostname or IP address";
-            text <=> root.form.host;
-        }
-        if root.form.kind != 2 : FormField {
-            label: "Port";
-            placeholder: root.form.kind == 0 ? "22" : "3389";
-            text <=> root.form.port;
-        }
-
-        // ── Username (SSH + RDP) ──────────────────────────────────────
-        if root.form.kind != 2 : FormField {
-            label: "Username";
-            placeholder: "login username";
-            text <=> root.form.username;
-        }
-
-        // ── Auth method (SSH only) ────────────────────────────────────
-        if root.form.kind == 0 : VerticalLayout {
-            spacing: Theme.space-2;
-            Text {
-                text: "Authentication";
-                color: Theme.color-text-secondary;
-                font-size: Theme.font-sm;
-                font-family: Theme.font-family;
-                font-weight: 600;
-            }
-            SegmentedControl {
-                options: ["Public Key", "Password", "Agent"];
-                selected <=> root.form.auth-method;
-            }
-        }
-
-        // ── Credential ────────────────────────────────────────────────
-        VerticalLayout {
-            spacing: Theme.space-2;
-            Text {
-                text: "Credential";
-                color: Theme.color-text-secondary;
-                font-size: Theme.font-sm;
-                font-family: Theme.font-family;
-                font-weight: 600;
-            }
-            ComboBox {
-                model: root.cred-name-list;
-                current-index <=> root.form.selected-cred-idx;
-            }
-            // Show the effective (possibly inherited) credential.
-            if root.form.effective-cred-name != "" : HorizontalLayout {
-                spacing: Theme.space-2;
-                padding-top: Theme.space-1;
-                Text {
-                    text: root.form.effective-inherited ? "Inheriting:" : "Using:";
-                    color: Theme.color-text-disabled;
-                    font-size: Theme.font-sm;
-                    font-family: Theme.font-family;
-                    vertical-alignment: center;
+                // ── Name ──────────────────────────────────────────────
+                FormField {
+                    label: "Name";
+                    placeholder: "Connection name";
+                    text <=> root.form.name;
                 }
-                Text {
-                    text: root.form.effective-cred-name;
-                    color: root.form.effective-inherited
-                        ? Theme.color-accent : Theme.color-text;
-                    font-size: Theme.font-sm;
-                    font-family: Theme.font-family;
-                    font-weight: 500;
-                    vertical-alignment: center;
+
+                // ── Group (move between groups) ───────────────────────
+                if root.group-name-list.length > 0 : VerticalLayout {
+                    spacing: Theme.space-2;
+                    Text {
+                        text: "Group";
+                        color: Theme.color-text-secondary;
+                        font-size: Theme.font-sm;
+                        font-family: Theme.font-family;
+                        font-weight: 600;
+                    }
+                    ComboBox {
+                        model: root.group-name-list;
+                        current-index <=> root.form.selected-group-idx;
+                    }
                 }
-                if root.form.effective-inherited : Text {
-                    text: "(from group)";
-                    color: Theme.color-text-disabled;
-                    font-size: Theme.font-sm;
-                    font-family: Theme.font-family;
-                    vertical-alignment: center;
+
+                // ── Kind ──────────────────────────────────────────────
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    Text {
+                        text: "Type";
+                        color: Theme.color-text-secondary;
+                        font-size: Theme.font-sm;
+                        font-family: Theme.font-family;
+                        font-weight: 600;
+                    }
+                    SegmentedControl {
+                        options: ["SSH", "RDP", "Local"];
+                        selected <=> root.form.kind;
+                        // A saved RDP connection almost never wants port 22
+                        // and vice versa -- keep the pre-filled default in
+                        // step with kind so an untouched Port field still
+                        // saves the right value (mirrors QuickConnectForm's
+                        // `changed kind` handler, screens/dialogs.slint).
+                        changed(new-kind) => {
+                            if (new-kind == 1 && root.form.port == "22") {
+                                root.form.port = "3389";
+                            } else if (new-kind != 1 && root.form.port == "3389") {
+                                root.form.port = "22";
+                            }
+                        }
+                    }
+                }
+
+                // ── Host / Port (SSH + RDP) ───────────────────────────
+                if root.form.kind != 2 : FormField {
+                    label: "Host";
+                    placeholder: "hostname or IP address";
+                    text <=> root.form.host;
+                }
+                if root.form.kind != 2 : FormField {
+                    label: "Port";
+                    placeholder: root.form.kind == 0 ? "22" : "3389";
+                    text <=> root.form.port;
+                }
+
+                // ── Username (SSH + RDP) ──────────────────────────────
+                if root.form.kind != 2 : FormField {
+                    label: "Username";
+                    placeholder: "login username";
+                    text <=> root.form.username;
+                }
+
+                // ── Auth method (SSH only) ────────────────────────────
+                if root.form.kind == 0 : VerticalLayout {
+                    spacing: Theme.space-2;
+                    Text {
+                        text: "Authentication";
+                        color: Theme.color-text-secondary;
+                        font-size: Theme.font-sm;
+                        font-family: Theme.font-family;
+                        font-weight: 600;
+                    }
+                    SegmentedControl {
+                        options: ["Public Key", "Password", "Agent"];
+                        selected <=> root.form.auth-method;
+                    }
+                }
+
+                // ── RDP-only fields (mirror QuickConnectForm) ─────────
+                if root.form.kind == 1 : FormField {
+                    label: "Domain";
+                    placeholder: "(optional, e.g. CORP)";
+                    text <=> root.form.rdp-domain;
+                }
+                if root.form.kind == 1 : FormField {
+                    label: "Resolution";
+                    placeholder: "1280x720";
+                    text <=> root.form.rdp-resolution;
+                }
+
+                // ── Credential ─────────────────────────────────────────
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    Text {
+                        text: "Credential";
+                        color: Theme.color-text-secondary;
+                        font-size: Theme.font-sm;
+                        font-family: Theme.font-family;
+                        font-weight: 600;
+                    }
+                    ComboBox {
+                        model: root.cred-name-list;
+                        current-index <=> root.form.selected-cred-idx;
+                    }
+                    // Show the effective (possibly inherited) credential.
+                    if root.form.effective-cred-name != "" : HorizontalLayout {
+                        spacing: Theme.space-2;
+                        padding-top: Theme.space-1;
+                        Text {
+                            text: root.form.effective-inherited ? "Inheriting:" : "Using:";
+                            color: Theme.color-text-disabled;
+                            font-size: Theme.font-sm;
+                            font-family: Theme.font-family;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: root.form.effective-cred-name;
+                            color: root.form.effective-inherited
+                                ? Theme.color-accent : Theme.color-text;
+                            font-size: Theme.font-sm;
+                            font-family: Theme.font-family;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+                        if root.form.effective-inherited : Text {
+                            text: "(from group)";
+                            color: Theme.color-text-disabled;
+                            font-size: Theme.font-sm;
+                            font-family: Theme.font-family;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
             }
         }

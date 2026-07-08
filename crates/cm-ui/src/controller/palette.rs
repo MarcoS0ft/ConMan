@@ -209,6 +209,8 @@ pub(super) fn dispatch_palette_action(
                 effective_cred_name: SharedString::from(""),
                 effective_inherited: false,
                 selected_group_idx,
+                rdp_domain: SharedString::from(""),
+                rdp_resolution: SharedString::from(tree_ctl::default_rdp_resolution().as_str()),
             };
             ui.set_profile_form(form);
             ui.set_profile_editor_open(true);
@@ -233,6 +235,8 @@ pub(super) fn dispatch_palette_action(
                 effective_cred_name: SharedString::from(""),
                 effective_inherited: false,
                 selected_group_idx,
+                rdp_domain: SharedString::from(""),
+                rdp_resolution: SharedString::from(tree_ctl::default_rdp_resolution().as_str()),
             };
             ui.set_profile_form(form);
             ui.set_profile_editor_open(true);

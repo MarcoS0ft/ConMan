@@ -88,6 +88,8 @@ fn wire_new_connection(ctx: &Ctx) {
                 effective_cred_name: SharedString::from(""),
                 effective_inherited: false,
                 selected_group_idx,
+                rdp_domain: SharedString::from(""),
+                rdp_resolution: SharedString::from(default_rdp_resolution().as_str()),
             };
             drop(st);
             ui.set_profile_form(form);
@@ -133,7 +135,8 @@ fn wire_edit_conn(ctx: &Ctx) {
             let Some(conn) = st.conn_tree.conn_by_id(conn_id as i64) else {
                 return;
             };
-            let (kind, host, port, username, auth_method) = profile_fields_from_conn(conn);
+            let (kind, host, port, username, auth_method, rdp_domain, rdp_resolution) =
+                profile_fields_from_conn(conn);
             let cred_sel_idx = cred_name_idx(
                 conn.credential,
                 st.keys_panel.credentials(),
@@ -156,6 +159,8 @@ fn wire_edit_conn(ctx: &Ctx) {
                 effective_cred_name: SharedString::from(eff_name.as_str()),
                 effective_inherited: inherited,
                 selected_group_idx,
+                rdp_domain: SharedString::from(rdp_domain.as_str()),
+                rdp_resolution: SharedString::from(rdp_resolution.as_str()),
             };
             drop(st);
             ui.set_profile_form(form);
@@ -678,7 +683,13 @@ pub(super) fn is_ancestor_or_self(
     false
 }
 
-pub(super) fn profile_fields_from_conn(conn: &Connection) -> (i32, String, String, String, i32) {
+/// Returns `(kind, host, port, username, auth_method, rdp_domain, rdp_resolution)`.
+/// `rdp_domain`/`rdp_resolution` are only meaningful for `kind == 1` (RDP);
+/// SSH/Local return them empty/default since the editor hides those fields
+/// for those kinds (P7.2, gap #2).
+pub(super) fn profile_fields_from_conn(
+    conn: &Connection,
+) -> (i32, String, String, String, i32, String, String) {
     match &conn.settings {
         ConnectionSettings::Ssh(s) => (
             0,
@@ -690,6 +701,8 @@ pub(super) fn profile_fields_from_conn(conn: &Connection) -> (i32, String, Strin
                 SshAuthMethod::Password => 1,
                 SshAuthMethod::Agent => 2,
             },
+            String::new(),
+            default_rdp_resolution(),
         ),
         ConnectionSettings::Rdp(s) => (
             1,
@@ -697,29 +710,63 @@ pub(super) fn profile_fields_from_conn(conn: &Connection) -> (i32, String, Strin
             s.port.to_string(),
             s.username.clone().unwrap_or_default(),
             1,
+            s.domain.clone().unwrap_or_default(),
+            format!("{}x{}", s.width, s.height),
         ),
-        ConnectionSettings::Local(_) => (2, String::new(), String::new(), String::new(), 1),
+        ConnectionSettings::Local(_) => (
+            2,
+            String::new(),
+            String::new(),
+            String::new(),
+            1,
+            String::new(),
+            default_rdp_resolution(),
+        ),
     }
+}
+
+/// Default "WIDTHxHEIGHT" string shown/stored when a form has never had an
+/// RDP resolution set -- matches QuickConnectForm's default (screens/dialogs.slint).
+pub(super) fn default_rdp_resolution() -> String {
+    format!(
+        "{}x{}",
+        RdpSettings::DEFAULT_WIDTH,
+        RdpSettings::DEFAULT_HEIGHT
+    )
 }
 
 pub(super) fn settings_from_form(form: &ConnProfile) -> ConnectionSettings {
     match form.kind {
-        1 => ConnectionSettings::Rdp(RdpSettings {
-            host: form.host.to_string(),
-            port: form.port.as_str().parse::<u16>().unwrap_or(3389),
-            domain: None,
-            username: {
-                let u = form.username.trim().to_owned();
-                if u.is_empty() { None } else { Some(u) }
-            },
-            // width/height/color_depth added by P4.1; default them until the profile
-            // editor surfaces resolution/depth fields (later UI enhancement).
-            ..RdpSettings::default()
-        }),
+        1 => {
+            let (width, height) = sessions::parse_qc_resolution(form.rdp_resolution.as_str());
+            ConnectionSettings::Rdp(RdpSettings {
+                host: form.host.to_string(),
+                port: form
+                    .port
+                    .as_str()
+                    .parse::<u16>()
+                    .unwrap_or(RdpSettings::DEFAULT_PORT),
+                domain: {
+                    let d = form.rdp_domain.trim().to_owned();
+                    if d.is_empty() { None } else { Some(d) }
+                },
+                username: {
+                    let u = form.username.trim().to_owned();
+                    if u.is_empty() { None } else { Some(u) }
+                },
+                width,
+                height,
+                color_depth: RdpSettings::default().color_depth,
+            })
+        }
         2 => ConnectionSettings::Local(LocalSettings::default()),
         _ => ConnectionSettings::Ssh(SshSettings {
             host: form.host.to_string(),
-            port: form.port.as_str().parse::<u16>().unwrap_or(22),
+            port: form
+                .port
+                .as_str()
+                .parse::<u16>()
+                .unwrap_or(SshSettings::DEFAULT_PORT),
             username: form.username.to_string(),
             auth_method: match form.auth_method {
                 0 => SshAuthMethod::PublicKey {
@@ -859,9 +906,10 @@ mod tests {
         assert_eq!(kind_from_form_int(99), ConnectionKind::Ssh);
     }
 
-    #[test]
-    fn profile_form_mapping_ssh() {
-        let form = ConnProfile {
+    // Baseline ConnProfile builder for the settings_from_form/profile_fields_from_conn
+    // tests below -- keeps each test focused on the field(s) it actually varies.
+    fn base_profile_form() -> ConnProfile {
+        ConnProfile {
             id: 0,
             name: SharedString::from("Test"),
             group_id: 0,
@@ -874,7 +922,14 @@ mod tests {
             effective_cred_name: SharedString::from(""),
             effective_inherited: false,
             selected_group_idx: 0,
-        };
+            rdp_domain: SharedString::from(""),
+            rdp_resolution: SharedString::from(""),
+        }
+    }
+
+    #[test]
+    fn profile_form_mapping_ssh() {
+        let form = base_profile_form();
         let settings = settings_from_form(&form);
         assert!(
             matches!(
@@ -883,6 +938,105 @@ mod tests {
             ),
             "SSH settings port should be 2222"
         );
+    }
+
+    #[test]
+    fn ssh_kind_falls_back_to_default_port_on_garbage() {
+        let mut form = base_profile_form();
+        form.port = SharedString::from("not-a-port");
+        let settings = settings_from_form(&form);
+        assert!(matches!(
+            settings,
+            ConnectionSettings::Ssh(SshSettings { port: 22, .. })
+        ));
+    }
+
+    // ── P7.2: RDP-kind field manifest / default port mapping ────────────────
+
+    #[test]
+    fn rdp_kind_defaults_to_port_3389_on_garbage() {
+        let mut form = base_profile_form();
+        form.kind = 1;
+        form.port = SharedString::from("");
+        let settings = settings_from_form(&form);
+        assert!(matches!(
+            settings,
+            ConnectionSettings::Rdp(RdpSettings { port: 3389, .. })
+        ));
+    }
+
+    #[test]
+    fn rdp_kind_maps_domain_and_resolution() {
+        let mut form = base_profile_form();
+        form.kind = 1;
+        form.host = SharedString::from("win11-tgt");
+        form.port = SharedString::from("3389");
+        form.username = SharedString::from("administrator");
+        form.rdp_domain = SharedString::from("CORP");
+        form.rdp_resolution = SharedString::from("1920x1080");
+        let settings = settings_from_form(&form);
+        match settings {
+            ConnectionSettings::Rdp(s) => {
+                assert_eq!(s.host, "win11-tgt");
+                assert_eq!(s.port, 3389);
+                assert_eq!(s.domain.as_deref(), Some("CORP"));
+                assert_eq!(s.username.as_deref(), Some("administrator"));
+                assert_eq!(s.width, 1920);
+                assert_eq!(s.height, 1080);
+            }
+            other => panic!("expected RDP settings, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rdp_kind_empty_domain_and_garbage_resolution_fall_back() {
+        let mut form = base_profile_form();
+        form.kind = 1;
+        form.rdp_domain = SharedString::from("   ");
+        form.rdp_resolution = SharedString::from("garbage");
+        let settings = settings_from_form(&form);
+        match settings {
+            ConnectionSettings::Rdp(s) => {
+                assert_eq!(s.domain, None, "blank domain should map to None");
+                assert_eq!(s.width, RdpSettings::DEFAULT_WIDTH);
+                assert_eq!(s.height, RdpSettings::DEFAULT_HEIGHT);
+            }
+            other => panic!("expected RDP settings, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn profile_fields_from_conn_round_trips_rdp_domain_and_resolution() {
+        let settings = ConnectionSettings::Rdp(RdpSettings {
+            host: "10.0.0.5".to_owned(),
+            port: 3389,
+            domain: Some("CORP".to_owned()),
+            username: Some("admin".to_owned()),
+            width: 1024,
+            height: 768,
+            color_depth: RdpSettings::default().color_depth,
+        });
+        let conn = Connection::new(
+            ConnectionId::new(1),
+            None,
+            "rdp-conn".to_owned(),
+            ConnectionKind::Rdp,
+            settings,
+            None,
+            0,
+            0,
+            0,
+        )
+        .expect("valid RDP connection");
+        let (kind, host, port, username, auth_method, rdp_domain, rdp_resolution) =
+            profile_fields_from_conn(&conn);
+        assert_eq!(kind, 1);
+        assert_eq!(host, "10.0.0.5");
+        assert_eq!(port, "3389");
+        assert_eq!(username, "admin");
+        assert_eq!(auth_method, 1);
+        assert_eq!(rdp_domain, "CORP");
+        assert_eq!(rdp_resolution, "1024x768");
     }
 
     // -- group name list helpers ---------------------------------------------

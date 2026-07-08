@@ -750,12 +750,14 @@ fn qc_connect_ssh(
     );
 }
 
-/// P6.12: parses a "WIDTHxHEIGHT" quick-connect resolution field (e.g.
-/// "1920x1080") into RDP width/height. Falls back to
-/// `RdpSettings::DEFAULT_WIDTH`/`DEFAULT_HEIGHT` for anything that doesn't
-/// parse cleanly -- empty field, garbage text, or a zero dimension -- so a
-/// malformed typed value can never turn into a zero-sized desktop request.
-fn parse_qc_resolution(s: &str) -> (u16, u16) {
+/// P6.12: parses a "WIDTHxHEIGHT" resolution field (e.g. "1920x1080") into RDP
+/// width/height. Falls back to `RdpSettings::DEFAULT_WIDTH`/`DEFAULT_HEIGHT`
+/// for anything that doesn't parse cleanly -- empty field, garbage text, or a
+/// zero dimension -- so a malformed typed value can never turn into a
+/// zero-sized desktop request. `pub(super)`: also reused by the profile
+/// editor's RDP field mapping (`tree_ctl::settings_from_form`, P7.2) so the
+/// two RDP forms parse resolution identically.
+pub(super) fn parse_qc_resolution(s: &str) -> (u16, u16) {
     let defaults = (RdpSettings::DEFAULT_WIDTH, RdpSettings::DEFAULT_HEIGHT);
     let Some((w, h)) = s.split_once(['x', 'X']) else {
         return defaults;
