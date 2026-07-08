@@ -55,6 +55,11 @@ export global Theme {
   out property <color> color-hover:    dark-mode ? #ffffff0d : #0000000a;
   // Modal scrim behind dialogs / command palette (same in both schemes).
   out property <color> color-scrim:    #00000099;
+  // Quiet chrome strip (tab strip + status bar backgrounds, P7.6, fixes P7.3-a).
+  // `color-base.darker(0.2)` was asymmetric across schemes: near-invisible on
+  // the dark canvas but a heavy #C6C8CB slab on the light one. A dedicated
+  // per-scheme token keeps both readings hairline-subtle.
+  out property <color> color-strip:    dark-mode ? #0b0d10 : #e2e5e9;
 
   // ── Terminal default surface ───────────────────────────────────────────────
   // The glyph-atlas renderer (P2.3) draws cells, but its DEFAULT bg/fg should derive
