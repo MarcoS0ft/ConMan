@@ -67,7 +67,10 @@ features = ["std"]
 version = "0.7"
 
 [dependencies.picky]
-version = "=7.0.0-rc.23"
+# P9.1: bumped rc.23 -> rc.24, the only picky release whose RustCrypto pins
+# (ecdsa rc.18 / rsa rc.18 / p256 rc.10 / curve25519 rc.0) match russh 0.61.2's
+# exact pins. See docs/devel/memos/P9.1-credssp-dep-audit.md.
+version = "=7.0.0-rc.24"
 optional = true
 
 [dependencies.picky-asn1-der]
@@ -83,8 +86,14 @@ version = "0.9"
 features = ["std"]
 
 [dependencies.sspi]
-version = "0.21"
-features = ["scard"]
+# P9.1: pin exactly 0.21.0 (a caret would let cargo pick registry 0.21.1,
+# bypassing the vendored [patch.crates-io] override) and drop default
+# features: `scard` pulls winscard -> crypto-bigint =0.7.0-rc.18, which
+# conflicts with russh's crypto-bigint ^0.7.3. ConMan only does NTLM
+# username/password, so scard is not needed. See
+# docs/devel/memos/P9.1-credssp-dep-audit.md.
+version = "=0.21.0"
+default-features = false
 optional = true
 
 [dependencies.tracing]
