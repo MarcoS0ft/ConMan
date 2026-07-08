@@ -824,16 +824,6 @@ async fn drive_inner(
         .await
         .map_err(map_negotiation_error)?;
 
-    // 4b. P9.1: the server's protocol selection is decided by connect_begin
-    //     (before the TLS upgrade even happens), so `should_perform_credssp()`
-    //     is already known here. If the server requires NLA and we have no
-    //     password, fail fast with an actionable error instead of running the
-    //     TLS handshake and CredSSP exchange only to have NTLM reject an
-    //     empty credential deep inside the connector.
-    if credssp_requires_credentials(connector.should_perform_credssp(), auth.password.expose()) {
-        return Err(RdpError::CredentialsRequired);
-    }
-
     // 5. TLS upgrade — ironrdp-tls performs the handshake; CA validation and
     //    TOFU follow in verify_cert.
     let (tcp, leftover) = framed.into_inner();
@@ -850,9 +840,31 @@ async fn drive_inner(
         &ctx.cert_store,
     )?;
 
-    // 7. Mark TLS as done, rebuild framed over TLS, finalize connection.
+    // 7. Mark TLS as done, rebuild framed over TLS.
     let upgraded = mark_as_upgraded(should_upgrade, &mut connector);
     let mut framed: TokioFramed<_> = TokioFramed::new_with_leftover(tls_stream, leftover);
+
+    // 7b. P9.1: `should_perform_credssp()` only reflects the server's real
+    //     protocol selection *after* `mark_as_upgraded` above has driven the
+    //     connector's state machine past `EnhancedSecurityUpgrade`: that call
+    //     transitions to `ClientConnectorState::Credssp` when the server
+    //     selected HYBRID, or to `BasicSettingsExchange...` when it selected
+    //     plain TLS (see vendored `ironrdp-connector`'s
+    //     `mark_security_upgrade_as_done`). Immediately after `connect_begin`
+    //     (i.e. before this point) the connector is still in
+    //     `EnhancedSecurityUpgrade`, where `should_perform_credssp()` is
+    //     unconditionally false — checking there would never fire. So: if the
+    //     server requires NLA and we have no password, fail fast here with an
+    //     actionable error instead of running the CredSSP exchange only to
+    //     have NTLM reject an empty credential deep inside the connector. The
+    //     extra TLS handshake already performed above is an acceptable cost —
+    //     it's the CredSSP round-trip (and its opaque failure mode) that this
+    //     check avoids. For a TLS-only server, the state here is
+    //     `BasicSettingsExchange...`, so `should_perform_credssp()` is false
+    //     and this check is a no-op — the plain-TLS path is unaffected.
+    if credssp_requires_credentials(connector.should_perform_credssp(), auth.password.expose()) {
+        return Err(RdpError::CredentialsRequired);
+    }
 
     // `connect_finalize` (credssp build) takes:
     //   upgraded, connector, &mut framed, network_client, server_name,
@@ -860,7 +872,7 @@ async fn drive_inner(
     // NTLM completes locally (no KDC round-trip), so the NetworkClient's
     // send() is never invoked — see NtlmOnlyNetworkClient. Kerberos is off
     // (kerberos_config: None). CredSSP itself only runs when the server
-    // selected HYBRID (should_perform_credssp(), checked in step 4b above);
+    // selected HYBRID (should_perform_credssp(), checked in step 7b above);
     // TLS-only servers never reach the CredSSP branch inside this call.
     let mut network_client = NtlmOnlyNetworkClient;
     let connection_result: ConnectionResult = connect_finalize(
@@ -1752,6 +1764,142 @@ mod tests {
     fn credssp_requires_credentials_false_when_tls_only_selected_regardless_of_password() {
         assert!(!credssp_requires_credentials(false, b""));
         assert!(!credssp_requires_credentials(false, b"hunter2"));
+    }
+
+    /// Builds a minimal-but-valid `ironrdp_connector::Config` for driving a
+    /// real `ClientConnector` in tests. Field values beyond
+    /// `enable_tls`/`enable_credssp` don't matter here — the drift-guard
+    /// test below force-sets `connector.state` directly rather than letting
+    /// the connector negotiate it, so nothing else in `Config` is read.
+    fn test_connector_config() -> Config {
+        Config {
+            desktop_size: DesktopSize {
+                width: 800,
+                height: 600,
+            },
+            desktop_scale_factor: 0,
+            enable_tls: true,
+            enable_credssp: true,
+            credentials: Credentials::UsernamePassword {
+                username: "tester".to_owned(),
+                password: "hunter2".to_owned(),
+            },
+            domain: None,
+            client_build: 0,
+            client_name: "conman-test".to_owned(),
+            keyboard_type: ironrdp_pdu::gcc::KeyboardType::IbmEnhanced,
+            keyboard_subtype: 0,
+            keyboard_functional_keys_count: 12,
+            keyboard_layout: 0x0409,
+            ime_file_name: String::new(),
+            bitmap: None,
+            dig_product_id: String::new(),
+            client_dir: String::new(),
+            alternate_shell: String::new(),
+            work_dir: String::new(),
+            platform: ironrdp_pdu::rdp::capability_sets::MajorPlatformType::UNSPECIFIED,
+            hardware_id: None,
+            request_data: None,
+            autologon: true,
+            enable_audio_playback: false,
+            performance_flags: ironrdp_pdu::rdp::client_info::PerformanceFlags::default(),
+            license_cache: None,
+            timezone_info: ironrdp_pdu::rdp::client_info::TimezoneInfo::default(),
+            compression_type: None,
+            enable_server_pointer: true,
+            pointer_software_rendering: false,
+            multitransport_flags: None,
+        }
+    }
+
+    fn test_connector_local_addr() -> std::net::SocketAddr {
+        "0.0.0.0:0".parse().expect("hardcoded SocketAddr is valid")
+    }
+
+    /// Drift guard (Milestone-C reviewer blocker): proves, against the real
+    /// vendored `ClientConnector` state machine — not a reimplementation —
+    /// that `should_perform_credssp()` only becomes meaningful *after*
+    /// `mark_as_upgraded`, and is unconditionally `false` right after
+    /// `connect_begin` (where the missing-credential check used to live,
+    /// making it dead code).
+    ///
+    /// This uses the exact production functions `rdp::connect` calls:
+    /// `ironrdp_tokio::skip_connect_begin` performs the identical
+    /// precondition assertion and state handoff as `connect_begin` without
+    /// requiring a live socket (both hand back the connector already in
+    /// `EnhancedSecurityUpgrade`), and `ironrdp_tokio::mark_as_upgraded` is
+    /// the literal function `connect()` calls at rdp.rs step 7.
+    ///
+    /// A future regression that moves the `credssp_requires_credentials`
+    /// call back to right after `connect_begin`/`skip_connect_begin` (i.e.
+    /// before `mark_as_upgraded`) will not be caught by compilation, but
+    /// *is* caught here: this test fails loudly if `should_perform_credssp()`
+    /// ever reads `true` before `mark_as_upgraded`, or `false` after it for
+    /// a HYBRID selection.
+    ///
+    /// What this test does *not* cover: driving `connect()` itself end to
+    /// end (that needs a real or fully-scripted RDP negotiation over a
+    /// socket — `connect_begin` parses actual X.224 Connection Confirm
+    /// bytes). That remaining gap is covered by the win11-dev live NLA
+    /// verify: an empty-password HYBRID connection to a real NLA-enabled
+    /// server must surface `RdpError::CredentialsRequired`, not the
+    /// cryptic pre-fix `RdpError::Auth`.
+    #[test]
+    fn credssp_state_machine_only_settles_after_mark_as_upgraded() {
+        use ironrdp_connector::ClientConnectorState;
+        use ironrdp_pdu::nego::SecurityProtocol;
+
+        // --- HYBRID (NLA) case: the bug this fix corrects ---
+        let mut connector =
+            ClientConnector::new(test_connector_config(), test_connector_local_addr());
+        // This is what connect_begin leaves behind once the server has
+        // confirmed HYBRID (see ClientConnectorState::ConnectionInitiationWaitConfirm's
+        // transition in vendored ironrdp-connector): state EnhancedSecurityUpgrade.
+        connector.state = ClientConnectorState::EnhancedSecurityUpgrade {
+            selected_protocol: SecurityProtocol::HYBRID,
+        };
+        let should_upgrade = ironrdp_tokio::skip_connect_begin(&mut connector);
+
+        // This is exactly the point where the pre-fix check lived (rdp.rs
+        // step "4b", immediately after connect_begin): should_perform_credssp()
+        // is false here even though the server selected HYBRID. Checking here
+        // is dead code.
+        assert!(
+            !connector.should_perform_credssp(),
+            "should_perform_credssp() must be false before mark_as_upgraded, even for \
+             a HYBRID selection (state is still EnhancedSecurityUpgrade) — this is \
+             precisely the dead-code bug this test guards against"
+        );
+
+        let _upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
+
+        // After mark_as_upgraded, the connector has transitioned past
+        // EnhancedSecurityUpgrade; for a HYBRID selection it now sits in
+        // Credssp, so the check is live.
+        assert!(
+            connector.should_perform_credssp(),
+            "should_perform_credssp() must be true after mark_as_upgraded when the \
+             server selected HYBRID — this is the fix's load-bearing assumption \
+             (the check must run after mark_as_upgraded, not before)"
+        );
+
+        // --- TLS-only case: plain-TLS regression guard ---
+        let mut connector =
+            ClientConnector::new(test_connector_config(), test_connector_local_addr());
+        connector.state = ClientConnectorState::EnhancedSecurityUpgrade {
+            selected_protocol: SecurityProtocol::SSL,
+        };
+        let should_upgrade = ironrdp_tokio::skip_connect_begin(&mut connector);
+        assert!(!connector.should_perform_credssp());
+
+        let _upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
+
+        assert!(
+            !connector.should_perform_credssp(),
+            "TLS-only servers must never trip should_perform_credssp(), even after \
+             mark_as_upgraded — the plain-TLS backward-compat guarantee: reordering \
+             the check to run after mark_as_upgraded must not regress this path"
+        );
     }
 
     /// A CredSSP-kind `connect_finalize` failure (bad NTLM credentials, or an
