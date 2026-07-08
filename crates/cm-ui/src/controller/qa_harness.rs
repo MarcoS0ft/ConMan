@@ -1343,6 +1343,8 @@ mod tests {
             effective_cred_name: "".into(),
             effective_inherited: false,
             selected_group_idx: 0,
+            rdp_domain: "".into(),
+            rdp_resolution: "".into(),
         }
     }
 
