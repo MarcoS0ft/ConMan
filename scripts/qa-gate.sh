@@ -12,16 +12,16 @@
 #
 # Usage (Linux, everything in one go):
 #   scripts/qa-gate.sh --out-dir /tmp/qa-gate-out \
-#     --ssh-host 127.0.0.1 --ssh-user $USER --ssh-key-path ~/.ssh/id_ed25519 \
+#     --ssh-host 127.0.0.1 --ssh-user <ssh-user> --ssh-key-path <ssh-key> \
 #     --seed /path/to/seed.json --tree-ssh-label p84-tree-ssh \
 #     --tree-rdp-label p84-tree-rdp \
-#     --rdp-target-ssh-host 192.0.2.16 --rdp-target-ssh-user dev
+#     --rdp-target-ssh-host <rdp-target-ip> --rdp-target-ssh-user <rdp-target-user>
 #
 # Usage (win11-dev, MCP+visual legs only, tunnel already open via mcp-win.sh):
 #   scripts/qa-gate.sh --out-dir /tmp/qa-gate-win --skip-in-process \
 #     --skip-linux-launch --mcp-port 48950 --light \
 #     --tree-ssh-label wintgt-ssh --tree-rdp-label wintgt-rdp \
-#     --rdp-target-ssh-host 192.0.2.16 --rdp-target-ssh-user dev
+#     --rdp-target-ssh-host <rdp-target-ip> --rdp-target-ssh-user <rdp-target-user>
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,7 +36,7 @@ THEME_FLAG="--dark"
 SEED_JSON=""
 SSH_HOST="" SSH_USER="" SSH_KEY_PATH=""
 TREE_SSH_LABEL="" TREE_RDP_LABEL=""
-RDP_TARGET_SSH_HOST="" RDP_TARGET_SSH_USER="dev"
+RDP_TARGET_SSH_HOST="" RDP_TARGET_SSH_USER=""
 KEYCTL_SESSION_NAME="p84qagate"
 
 while [ $# -gt 0 ]; do
@@ -139,7 +139,7 @@ else
         ${TREE_SSH_LABEL:+--tree-ssh-label "$TREE_SSH_LABEL"} \
         ${TREE_RDP_LABEL:+--tree-rdp-label "$TREE_RDP_LABEL"} \
         ${RDP_TARGET_SSH_HOST:+--rdp-target-ssh-host "$RDP_TARGET_SSH_HOST"} \
-        --rdp-target-ssh-user "$RDP_TARGET_SSH_USER" \
+        ${RDP_TARGET_SSH_USER:+--rdp-target-ssh-user "$RDP_TARGET_SSH_USER"} \
         > "$OUT_DIR/mcp-stdout.json" 2>"$OUT_DIR/mcp-stderr.log"
     MCP_STATUS=$?
     cat "$OUT_DIR/mcp-stderr.log" | tee -a "$SUMMARY"

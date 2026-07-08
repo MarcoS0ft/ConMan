@@ -59,9 +59,9 @@ reads the report to see which).
 Usage (seed a CONMAN_AUTOIMPORT JSON with the tree-launch connections BEFORE
 launching conman -- see scripts/qa-gate.sh, which wires this up end-to-end):
     scripts/qa-gate-mcp.py --port 48900 --out-dir /tmp/out \\
-        --ssh-host 127.0.0.1 --ssh-user qa-user --ssh-key-path ~/.ssh/id_rsa \\
+        --ssh-host 127.0.0.1 --ssh-user <ssh-user> --ssh-key-path <ssh-key> \\
         --tree-ssh-label p84-tree-ssh --tree-rdp-label p84-tree-rdp \\
-        --rdp-target-ssh-host 192.0.2.16 --rdp-target-ssh-user dev \\
+        --rdp-target-ssh-host <rdp-target-ip> --rdp-target-ssh-user <rdp-target-user> \\
         --report-out /tmp/out/mcp-report.json
 """
 from __future__ import annotations
@@ -404,6 +404,9 @@ def target_precheck(args, report: Report) -> None:
     if not args.rdp_target_ssh_host:
         report.record(step, "skip", "no --rdp-target-ssh-host given")
         return
+    if not args.rdp_target_ssh_user:
+        report.record(step, "skip", "no --rdp-target-ssh-user given (required with --rdp-target-ssh-host)")
+        return
     try:
         rdp_tcp = "HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp"
         ps = (
@@ -435,6 +438,9 @@ def step_rdp_reconnect(client: McpClient, window_handle: str, report: Report, ar
     step = "mcp:rdp-reconnect"
     if not args.rdp_target_ssh_host:
         report.record(step, "skip", "no --rdp-target-ssh-host given (needed to force a drop)")
+        return
+    if not args.rdp_target_ssh_user:
+        report.record(step, "skip", "no --rdp-target-ssh-user given (required with --rdp-target-ssh-host)")
         return
     try:
         if not select_last_tab(client, window_handle):
@@ -493,7 +499,8 @@ def main() -> int:
     ap.add_argument("--tree-rdp-label", default=None, help="CONMAN_AUTOIMPORT-seeded RDP connection name")
 
     ap.add_argument("--rdp-target-ssh-host", default=None)
-    ap.add_argument("--rdp-target-ssh-user", default="dev")
+    ap.add_argument("--rdp-target-ssh-user", default=None,
+                    help="SSH user on the RDP target host (for the precheck); required only when --rdp-target-ssh-host is given")
 
     args = ap.parse_args()
 
