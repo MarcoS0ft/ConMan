@@ -94,3 +94,61 @@ impl std::fmt::Debug for AppConfig {
         f.debug_struct("AppConfig").finish_non_exhaustive()
     }
 }
+
+// ---------------------------------------------------------------------------
+// P8.2 — in-process element-test harness (dev/test-only public surface)
+// ---------------------------------------------------------------------------
+
+/// A hermetically-constructed, non-event-loop-driven `AppWindow` from
+/// [`build_for_test`], plus everything that must stay alive for as long as
+/// the caller wants the wired callbacks/timers to keep working (the redraw
+/// timer, the resize-debounce timer, every Slint list-model handle the
+/// controller closed over, ...). That "everything else" is intentionally
+/// opaque -- callers only ever need `ui` (to drive/introspect the element
+/// tree); the rest exists purely to not be dropped.
+///
+/// Dropping a `TestHarness` tears the whole wired app down (timers stop,
+/// callbacks' captured `Rc`/`Arc` handles release) -- keep it alive for the
+/// duration of a test scenario, same as the real `run()` keeps its `Ctx`
+/// alive for the duration of the event loop.
+#[cfg(any(test, feature = "ui-introspection"))]
+pub struct TestHarness {
+    /// The live, wired `AppWindow`. Query/drive it with
+    /// `i_slint_backend_testing::ElementHandle`/`ElementRoot` the same way
+    /// you would the real app's window.
+    pub ui: AppWindow,
+    _keepalive: Box<dyn std::any::Any>,
+}
+
+#[cfg(any(test, feature = "ui-introspection"))]
+impl std::fmt::Debug for TestHarness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestHarness").finish_non_exhaustive()
+    }
+}
+
+/// P8.2 construction seam: builds the real `AppWindow` + controller wiring
+/// in-process -- the same model setup and `wire_*()` registration [`run`]
+/// does -- without entering the event loop, given already-constructed test
+/// doubles in `config` (an in-memory `SqliteRepository`, a mock/loopback
+/// `SessionProvider`, `activation_rx: None`). Does not change `run`'s public
+/// signature or behavior; this is an additional, test-facing entry point.
+///
+/// Callers must first initialize `i-slint-backend-testing`'s simulated
+/// backend (`i_slint_backend_testing::init_no_event_loop()` for widget-only
+/// checks, or `init_integration_test_with_mock_time()` — **once per process**
+/// — for anything that needs the redraw timer / mock time to advance). See
+/// `crates/cm-ui/tests/` and `docs/devel/tasks/P8.2-element-test-harness.md`.
+///
+/// # Panics
+/// Panics if the underlying `AppWindow::new()` fails (see
+/// [`controller::build_for_test`]'s panic doc) -- acceptable for a test-only
+/// entry point; a failed harness construction should abort that test loudly.
+#[cfg(any(test, feature = "ui-introspection"))]
+pub fn build_for_test(config: AppConfig) -> TestHarness {
+    let (ui, ctx, redraw) = controller::build_for_test(config);
+    TestHarness {
+        ui,
+        _keepalive: Box::new((ctx, redraw)),
+    }
+}
