@@ -608,6 +608,60 @@ async fn drive_inner(
     Ok(())
 }
 
+/// Candidate RSA signature hash algorithms to try, in order, against
+/// `handle`'s server (BUG-ssh-rsa-sha2). `PrivateKeyWithHashAlg::new` maps
+/// `None` to the legacy `ssh-rsa` (SHA-1) signature algorithm, which modern
+/// OpenSSH (8.8+, ~2021 on) rejects outright when `PubkeyAcceptedAlgorithms`
+/// excludes it — the exact failure this fixes. Mirrors the OpenSSH client:
+/// prefer the server's advertised `server-sig-algs` (RFC 8332) when present;
+/// otherwise try SHA-2 first (accepted by all OpenSSH >= 7.2 / ~2016) and
+/// fall back to legacy `ssh-rsa` only if the server still wants it.
+///
+/// Non-RSA keys (Ed25519/ECDSA) always get the single `None` candidate: the
+/// hash-alg concept is RSA-only (`PrivateKeyWithHashAlg::new` ignores it for
+/// other key types), and skipping the negotiation round-trip avoids the
+/// `best_supported_rsa_hash` up-to-1s wait for keys where it can't matter.
+async fn rsa_hash_candidates(
+    handle: &russh::client::Handle<ClientHandler>,
+    algorithm: russh::keys::ssh_key::Algorithm,
+) -> Vec<Option<HashAlg>> {
+    if !algorithm.is_rsa() {
+        return vec![None];
+    }
+    match handle.best_supported_rsa_hash().await {
+        // The server sent `server-sig-algs`: `Some(hash)` is its best
+        // SHA-2 variant, `Some(None)` means it advertised the extension but
+        // only accepts legacy `ssh-rsa` — either way, trust it and stop.
+        Ok(Some(hash)) => vec![hash],
+        // No extension info (older/non-conforming server): try SHA-2 first,
+        // then fall back to `ssh-rsa` if both are rejected.
+        Ok(None) | Err(_) => vec![Some(HashAlg::Sha512), Some(HashAlg::Sha256), None],
+    }
+}
+
+/// Public-key auth for a locally-held [`russh::keys::PrivateKey`] (the
+/// `Key { path }` and `KeyMaterial` arms), retrying across
+/// [`rsa_hash_candidates`] until one succeeds or the candidates are
+/// exhausted.
+async fn authenticate_publickey_negotiated(
+    handle: &mut russh::client::Handle<ClientHandler>,
+    user: &str,
+    key: Arc<russh::keys::PrivateKey>,
+) -> Result<bool, SshError> {
+    let candidates = rsa_hash_candidates(handle, key.algorithm()).await;
+    for hash_alg in candidates {
+        let signed = PrivateKeyWithHashAlg::new(Arc::clone(&key), hash_alg);
+        let res = handle
+            .authenticate_publickey(user, signed)
+            .await
+            .map_err(|e| SshError::Auth(e.to_string()))?;
+        if res.success() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Try the configured authentication method.
 async fn authenticate(
     handle: &mut russh::client::Handle<ClientHandler>,
@@ -629,12 +683,7 @@ async fn authenticate(
                 .map(|s| String::from_utf8_lossy(s.expose()).into_owned());
             let key = load_secret_key(&path, pass.as_deref())
                 .map_err(|e| SshError::Key(e.to_string()))?;
-            let key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
-            let res = handle
-                .authenticate_publickey(user, key)
-                .await
-                .map_err(|e| SshError::Auth(e.to_string()))?;
-            Ok(res.success())
+            authenticate_publickey_negotiated(handle, user, Arc::new(key)).await
         }
         // P6.4: a stored credential's key material, fetched from the keychain
         // (no path on disk — decode the PEM text directly).
@@ -648,12 +697,7 @@ async fn authenticate(
                 .map(|s| String::from_utf8_lossy(s.expose()).into_owned());
             let key = decode_secret_key(&pem, pass.as_deref())
                 .map_err(|e| SshError::Key(e.to_string()))?;
-            let key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
-            let res = handle
-                .authenticate_publickey(user, key)
-                .await
-                .map_err(|e| SshError::Auth(e.to_string()))?;
-            Ok(res.success())
+            authenticate_publickey_negotiated(handle, user, Arc::new(key)).await
         }
         // ssh-agent: Unix reaches it via the domain socket in `SSH_AUTH_SOCK`;
         // Windows (P6.13) via the OpenSSH agent named pipe. Either way, an
@@ -708,11 +752,25 @@ where
         .map_err(|e| SshError::Auth(format!("agent identities: {e}")))?;
     for id in identities {
         if let russh::keys::agent::AgentIdentity::PublicKey { key, .. } = id {
-            let res = handle
-                .authenticate_publickey_with(user, key, None, agent)
-                .await
-                .map_err(|e| SshError::Auth(format!("agent auth: {e}")))?;
-            if res.success() {
+            // BUG-ssh-rsa-sha2: agent-held RSA keys need the same SHA-2
+            // negotiation as local keys. The agent protocol (RFC 8332 /
+            // draft-miller-ssh-agent) signs with whatever `hash_alg` we ask
+            // for via signature-request flags, so the fix is the same
+            // candidate list — just handed to the agent instead of signed
+            // in-process.
+            let candidates = rsa_hash_candidates(handle, key.algorithm()).await;
+            let mut authenticated = false;
+            for hash_alg in candidates {
+                let res = handle
+                    .authenticate_publickey_with(user, key.clone(), hash_alg, agent)
+                    .await
+                    .map_err(|e| SshError::Auth(format!("agent auth: {e}")))?;
+                if res.success() {
+                    authenticated = true;
+                    break;
+                }
+            }
+            if authenticated {
                 return Ok(true);
             }
         }

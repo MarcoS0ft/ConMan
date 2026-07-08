@@ -148,6 +148,17 @@ fn keygen(path: &Path) {
     assert!(status.success(), "ssh-keygen failed");
 }
 
+/// Generate an RSA keypair (BUG-ssh-rsa-sha2 regression coverage needs an
+/// actual RSA key — `ssh-rsa`/`rsa-sha2-*` are RSA-only signature schemes).
+fn keygen_rsa(path: &Path) {
+    let status = Command::new("ssh-keygen")
+        .args(["-t", "rsa", "-b", "3072", "-N", "", "-q", "-f"])
+        .arg(path)
+        .status()
+        .expect("run ssh-keygen -t rsa");
+    assert!(status.success(), "ssh-keygen -t rsa failed");
+}
+
 /// Generate an ed25519 keypair at `<dir>/<name>`; returns
 /// `(private_key_path, PrivateKey, PublicKey)`.
 fn gen_keypair(dir: &Path, name: &str) -> (PathBuf, PrivateKey, PublicKey) {
@@ -1152,6 +1163,200 @@ fn ssh_publickey_runs_mark42_over_real_sshd() {
     assert!(
         wait_for_text(&session, "MARK42", Duration::from_secs(10)),
         "expected the remote shell to execute the command over SSH"
+    );
+
+    session.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// BUG-ssh-rsa-sha2 regression — real `sshd`, SHA-2-only RSA auth.
+// ---------------------------------------------------------------------------
+//
+// `LoopbackSshServer` (the in-process harness above) cannot reproduce this
+// bug: its `Handler::auth_publickey` callback fires only *after* russh's own
+// server-side signature verification succeeds, with no visibility into which
+// signature algorithm name (`ssh-rsa` vs `rsa-sha2-256`/`-512`) the client
+// used — so it cannot enforce `PubkeyAcceptedAlgorithms`-style exclusion the
+// way real `sshd` does. A real `sshd` is required to prove the fix; it's
+// already a test dependency here (`start_sshd`/`ssh_publickey_runs_mark42_over_real_sshd`
+// above), so this reuses that pattern with an RSA user key and an explicit
+// `PubkeyAcceptedAlgorithms` that excludes `ssh-rsa`.
+
+/// Like [`start_sshd`] but the user key is RSA and `PubkeyAcceptedAlgorithms`
+/// is pinned to `rsa-sha2-512,rsa-sha2-256` — legacy `ssh-rsa`/SHA-1 is
+/// explicitly excluded, the exact server posture that broke ConMan against
+/// win11-target (BUG-ssh-rsa-sha2): before the fix, `authenticate()` always
+/// signed RSA keys via `PrivateKeyWithHashAlg::new(key, None)`, which russh
+/// maps to legacy `ssh-rsa`, and a server configured this way rejects it.
+fn start_sshd_rsa_sha2_only() -> TestServer {
+    let sshd = std::env::var("CONMAN_TEST_SSHD").unwrap_or_else(|_| "/usr/sbin/sshd".to_owned());
+    let user = std::env::var("USER").expect("USER");
+    let dir = std::env::temp_dir().join(format!("conman-ssh-it-rsa-sha2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let host_key = dir.join("hostkey");
+    let user_key = dir.join("id_rsa");
+    keygen(&host_key); // host-key algorithm is unrelated to user-auth sig algo
+    keygen_rsa(&user_key);
+    std::fs::copy(dir.join("id_rsa.pub"), dir.join("authorized_keys")).unwrap();
+
+    let port = free_port();
+    let cfg = dir.join("sshd_config");
+    std::fs::write(
+        &cfg,
+        format!(
+            "Port {port}\n\
+             ListenAddress 127.0.0.1\n\
+             HostKey {hk}\n\
+             AuthorizedKeysFile {ak}\n\
+             PidFile {pid}\n\
+             UsePAM no\n\
+             StrictModes no\n\
+             PermitRootLogin no\n\
+             PrintMotd no\n\
+             PubkeyAcceptedAlgorithms rsa-sha2-512,rsa-sha2-256\n",
+            hk = host_key.display(),
+            ak = dir.join("authorized_keys").display(),
+            pid = dir.join("sshd.pid").display(),
+        ),
+    )
+    .unwrap();
+
+    let log = std::fs::File::create(dir.join("sshd.log")).unwrap();
+    let child = Command::new(&sshd)
+        .args(["-D", "-e", "-f"])
+        .arg(&cfg)
+        .stderr(log)
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn sshd ({sshd}): {e}"));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    TestServer {
+        child,
+        dir,
+        port,
+        key_path: user_key,
+        user,
+    }
+}
+
+#[test]
+#[ignore = "needs a local sshd; run with --ignored --nocapture"]
+fn ssh_publickey_rsa_authenticates_when_server_requires_sha2() {
+    let server = start_sshd_rsa_sha2_only();
+
+    let cfg = SshSettings {
+        host: "127.0.0.1".to_owned(),
+        port: server.port,
+        username: server.user.clone(),
+        auth_method: cm_core::SshAuthMethod::Password,
+    };
+
+    let known_hosts = KnownHosts::with_paths(server.dir.join("conman_known_hosts"), None);
+    let auth = SshAuthInput::Key {
+        path: server.key_path.clone(),
+        passphrase: None,
+    };
+
+    let session = SshTerminalSession::connect(
+        &cfg,
+        auth,
+        Arc::new(AcceptAll),
+        known_hosts,
+        TerminalSize { rows: 24, cols: 80 },
+    )
+    .expect("spawn ssh session");
+
+    wait_for_connected(&session, Duration::from_secs(10));
+
+    // Type a command whose OUTPUT (MARK42) differs from the echoed input —
+    // proves a real authenticated shell ran, not just a TCP handshake.
+    session.paste(b"echo MARK$((6*7))".to_vec());
+    session.send_key(KeyEvent {
+        key: Key::Enter,
+        mods: KeyModifiers::default(),
+    });
+
+    assert!(
+        wait_for_text(&session, "MARK42", Duration::from_secs(10)),
+        "expected RSA-key publickey auth to succeed against a server whose \
+         PubkeyAcceptedAlgorithms requires SHA-2 (excludes ssh-rsa) -- the \
+         exact condition BUG-ssh-rsa-sha2 reproduced against win11-target"
+    );
+
+    session.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// BUG-ssh-rsa-sha2 live re-verify — opt-in, real external host.
+// ---------------------------------------------------------------------------
+
+/// Opt-in live proof driven entirely by env vars, so no lab-specific
+/// host/user/key path is ever hardcoded in tracked source (this repo keeps
+/// infra/host details out of tracked files). No-ops (does not fail) when the
+/// env vars are unset, so `cargo test --ignored` elsewhere never fails on
+/// missing lab access; only meaningful when explicitly pointed at a host:
+///
+/// ```text
+/// CONMAN_LIVE_SSH_HOST=<ip-or-hostname> CONMAN_LIVE_SSH_USER=<user> \
+///   CONMAN_LIVE_SSH_KEY=<path-to-rsa-private-key> \
+///   cargo test -p cm-session --test ssh_loopback -- --ignored \
+///   ssh_publickey_rsa_live_host_requiring_sha2 --nocapture
+/// ```
+#[test]
+#[ignore = "opt-in: set CONMAN_LIVE_SSH_HOST/_USER/_KEY to run against a real host"]
+fn ssh_publickey_rsa_live_host_requiring_sha2() {
+    let (host, user, key_path) = match (
+        std::env::var("CONMAN_LIVE_SSH_HOST"),
+        std::env::var("CONMAN_LIVE_SSH_USER"),
+        std::env::var("CONMAN_LIVE_SSH_KEY"),
+    ) {
+        (Ok(h), Ok(u), Ok(k)) => (h, u, k),
+        _ => {
+            eprintln!(
+                "ssh_publickey_rsa_live_host_requiring_sha2: skipping -- set \
+                 CONMAN_LIVE_SSH_HOST/_USER/_KEY to exercise a live host"
+            );
+            return;
+        }
+    };
+
+    let dir = scratch_dir("live-rsa-sha2");
+    let cfg = SshSettings {
+        host,
+        port: 22,
+        username: user,
+        auth_method: cm_core::SshAuthMethod::Password,
+    };
+    let known_hosts = known_hosts_in(&dir);
+    let auth = SshAuthInput::Key {
+        path: PathBuf::from(key_path),
+        passphrase: None,
+    };
+
+    let session =
+        SshTerminalSession::connect(&cfg, auth, Arc::new(AcceptAll), known_hosts, default_size())
+            .expect("spawn ssh session");
+
+    wait_for_connected(&session, Duration::from_secs(15));
+
+    session.paste(b"echo MARK$((6*7))".to_vec());
+    session.send_key(KeyEvent {
+        key: Key::Enter,
+        mods: KeyModifiers::default(),
+    });
+
+    assert!(
+        wait_for_text(&session, "MARK42", Duration::from_secs(15)),
+        "expected RSA-key publickey auth over cm_session::ssh to succeed against the live host"
     );
 
     session.shutdown();
