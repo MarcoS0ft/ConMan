@@ -283,6 +283,7 @@ fn process_command(h: &QaHandles, req: &serde_json::Value) -> String {
         "dialog_click" => cmd_dialog_click(h, req),
         "dialog_state" => cmd_dialog_state(h, req),
         "pixel" => cmd_pixel(h, req),
+        "close_tab" => cmd_close_tab(h, req),
         "quit" => cmd_quit(),
         other => error_reply(&format!("unknown cmd: {other}")),
     }
@@ -346,6 +347,10 @@ fn cmd_state(h: &QaHandles) -> String {
             "open_overlays": open_overlays,
             "broadcast_active": ui.get_broadcast_active(),
             "toasts": toasts,
+            // P7.6: exposes the status bar's "N detached" pill count so a
+            // scenario can assert a cancelled/aborted Connecting session
+            // never lands in the detached pool (fixes P7.3-b).
+            "detached_count": ui.get_detached_count(),
         }
     })
     .to_string()
@@ -950,6 +955,10 @@ fn dialog_click(h: &QaHandles, dialog: &str, button: &str) -> Result<(), String>
         ("quick_connect", "cancel") => h.ui.set_quick_connect_open(false),
         ("profile_editor", "save") => h.ui.invoke_profile_save(),
         ("profile_editor", "cancel") => h.ui.set_profile_editor_open(false),
+        // P7.6: opens the (root-group) GroupEditor -- same `new-group(0)`
+        // callback the sidebar's "+"/context-menu "New group" action fires --
+        // so a scenario can screenshot it without pixel-hunting tree rows.
+        ("group_editor", "new") => h.ui.invoke_new_group(0),
         ("group_editor", "save") => h.ui.invoke_group_save(),
         ("group_editor", "cancel") => h.ui.set_group_editor_open(false),
         ("cred_editor", "save") => h.ui.invoke_cred_save(),
@@ -1139,6 +1148,22 @@ fn write_png(path: &str, width: u32, height: u32, rgba: &[u8]) -> std::io::Resul
         .write_image_data(rgba)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(())
+}
+
+// ── close_tab ────────────────────────────────────────────────────────────
+
+/// `{"cmd":"close_tab","idx":N}` — invokes `AppWindow::close-tab(idx)`, the
+/// same callback both the tab strip's own ✕ (`Tab.closed`, `app.slint`) and
+/// the ConnectingOverlay's Cancel button (`app.slint`'s `cancel =>` handler)
+/// route through. Added for P7.6 so a scenario can assert the Cancel/close
+/// path aborts (rather than detaches) a session still `Connecting`, without
+/// pixel-hunting for the overlay's Cancel button or the tab's ✕ glyph.
+fn cmd_close_tab(h: &QaHandles, req: &Value) -> String {
+    let Some(idx) = req.get("idx").and_then(Value::as_i64) else {
+        return error_reply("\"close_tab\" requires an \"idx\" field");
+    };
+    h.ui.invoke_close_tab(idx as i32);
+    serde_json::json!({ "ok": true }).to_string()
 }
 
 // ── quit ─────────────────────────────────────────────────────────────────
@@ -1457,6 +1482,15 @@ mod tests {
     fn dispatch_line_pixel_never_panics() {
         let reply =
             dispatch_line(r#"{"cmd":"pixel","regions":[{"name":"p","x":0,"y":0,"w":1,"h":1}]}"#);
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(v["ok"], false);
+    }
+
+    // P7.6: `close_tab` is new -- same "handles not initialised in a plain
+    // unit test" failure-soft path as the dialog commands above.
+    #[test]
+    fn dispatch_line_close_tab_never_panics() {
+        let reply = dispatch_line(r#"{"cmd":"close_tab","idx":0}"#);
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["ok"], false);
     }
