@@ -49,7 +49,12 @@ dirs = { version = "6", optional = true }
 # ironrdp-input 0.6, ironrdp-pdu 0.8, ironrdp-cliprdr 0.6.
 # Note: ironrdp-svc is a transitive dep only (via ironrdp-cliprdr); not used directly.
 # TLS uses rustls with ring backend to avoid aws-lc-rs / NASM requirement (P3.1 lesson).
-ironrdp-connector = "0.9"
+ironrdp-connector = { version = "0.9", features = ["credssp"] }
+# P9.1: enable CredSSP/NLA. ironrdp-tokio re-exports ironrdp-async but has no
+# credssp passthrough, so depend on ironrdp-async directly to turn the feature
+# on across the (patched/vendored) graph. Feature unification activates the
+# credssp connect_finalize variant used in rdp.rs.
+ironrdp-async = { version = "0.9", features = ["credssp"] }
 ironrdp-core = "0.2"
 ironrdp-session = "0.10"
 ironrdp-tokio = "0.9"

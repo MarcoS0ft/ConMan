@@ -50,3 +50,10 @@ codegen-units = 1
 [patch.crates-io]
 ironrdp-connector = { path = "vendor/ironrdp-connector" }
 ironrdp-async = { path = "vendor/ironrdp-async" }
+# P9.1: vendor sspi 0.21.0 with its exact RustCrypto RC pins re-aligned to the
+# snapshot russh 0.61.2 uses (picky rc.24 / rsa rc.18 / ecdsa rc.18 / p256-p521
+# rc.10). Stock sspi 0.21.0 pins picky=rc.23+rsa=rc.17 and sspi 0.21.1 pins
+# picky=rc.25 (ecdsa rc.22 / p256 rc.14) — neither unifies with russh's exact
+# pins. See docs/devel/memos/P9.1-credssp-dep-audit.md and
+# docs/devel/tasks/CLEANUP-credssp-vendoring.md (removal trigger).
+sspi = { path = "vendor/sspi" }

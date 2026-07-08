@@ -1,10 +1,15 @@
 use ironrdp_core::{WriteBuf, other_err};
 use ironrdp_pdu::{PduHint, nego};
-use picky::key::PrivateKey;
+// P9.1: `picky` itself is no longer referenced directly (only via
+// picky-asn1-x509/picky-asn1-der) now that the SmartCard match arm below was
+// stubbed out, but it stays a declared dependency (credssp feature parity
+// with the audited dep snapshot); mark it explicitly used to satisfy this
+// crate's `unused_crate_dependencies` lint.
+use picky as _;
 use picky_asn1_x509::{Certificate, ExtensionView, GeneralName, oids};
 use sspi::credssp::{self, ClientState, CredSspClient};
 use sspi::generator::{Generator, NetworkRequest};
-use sspi::{Secret, Username};
+use sspi::Username;
 use tracing::debug;
 
 use crate::{
@@ -109,33 +114,17 @@ impl CredsspSequence {
                 }
                 .into()
             }
-            Credentials::SmartCard { pin, config } => match config {
-                Some(config) => {
-                    let cert: Certificate = picky_asn1_der::from_bytes(&config.certificate)
-                        .map_err(|_e| general_err!("can't parse certificate"))?;
-                    let key = PrivateKey::from_pkcs1(&config.private_key)
-                        .map_err(|_e| general_err!("can't parse private key"))?;
-                    let identity = sspi::SmartCardIdentity {
-                        username: extract_user_principal_name(&cert)
-                            .or_else(|| extract_user_name(&cert))
-                            .unwrap_or_default(),
-                        certificate: cert,
-                        reader_name: config.reader_name.clone(),
-                        card_name: None,
-                        container_name: Some(config.container_name.clone()),
-                        csp_name: config.csp_name.clone(),
-                        pin: pin.as_bytes().to_vec().into(),
-                        private_key: Some(key.into()),
-                        scard_type: sspi::SmartCardType::Emulated {
-                            scard_pin: Secret::new(pin.as_bytes().to_vec()),
-                        },
-                    };
-                    sspi::Credentials::SmartCard(Box::new(identity))
-                }
-                None => {
-                    return Err(general_err!("smart card configuration missing"));
-                }
-            },
+            // P9.1: smart-card CredSSP requires sspi's `scard` feature, which
+            // pulls `winscard` -> `crypto-bigint =0.7.0-rc.18`, conflicting
+            // with russh 0.61.2's `crypto-bigint ^0.7.3`. ConMan only performs
+            // NTLM username/password NLA, so the scard feature is disabled and
+            // this arm is unreachable in practice. Return an error rather than
+            // reference the (now feature-gated) sspi smart-card types.
+            Credentials::SmartCard { .. } => {
+                return Err(general_err!(
+                    "smart card CredSSP is not supported in this build (sspi `scard` feature disabled)"
+                ));
+            }
         };
 
         let server_name = server_name.into_inner();
@@ -241,10 +230,18 @@ impl CredsspSequence {
     }
 }
 
+// P9.1: unreachable now that the SmartCard match arm above (which was their
+// only caller) returns an error instead of parsing the certificate. Kept
+// (rather than deleted) so a future smartcard-CredSSP reactivation (once the
+// `scard` sspi feature no longer conflicts with russh's crypto-bigint pin)
+// doesn't have to rewrite them from scratch; `#[allow(dead_code)]` silences
+// the lint in the meantime.
+#[allow(dead_code)]
 fn extract_user_name(cert: &Certificate) -> Option<String> {
     cert.tbs_certificate.subject.find_common_name().map(ToString::to_string)
 }
 
+#[allow(dead_code)]
 fn extract_user_principal_name(cert: &Certificate) -> Option<String> {
     cert.extensions()
         .iter()

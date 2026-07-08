@@ -16,11 +16,12 @@ addressed semantically instead of by screen coordinates:
      asserts the tab's status pill reads Connected ("Connected with success"
      is the ironrdp log line the P6.17/win-ui memos anchor on; this script
      doesn't grep the log, that's the coordinator's evidence-gathering step
-     over the same SSH/console access used for the precheck below). Runs the
-     win-ui-investigation memo's recommended TARGET-SIDE PRECHECK first (NLA
-     off + a cert bound to RDP-Tcp) over a plain `ssh` call, so a failure
-     here is attributable to a real client regression, not target config
-     drift.
+     over the same SSH/console access used for the precheck below). Runs a
+     TARGET-SIDE PRECHECK first (a cert bound to RDP-Tcp, and either NLA off
+     -- the original win-ui-investigation memo recommendation, plain-TLS path
+     -- or NLA on -- P9.1's CredSSP/NTLM path, also an expect-success
+     configuration now) over a plain `ssh` call, so a failure here is
+     attributable to a real client regression, not target config drift.
   4. reconnect: drops the RDP session on the target (`tsdiscon`) and clicks
      the app's own Reconnect button, reasserting Connected -- and reasons
      about "no cert re-prompt" the only way possible over this element
@@ -397,9 +398,21 @@ def step_tree_launch(client: McpClient, window_handle: str, report: Report, args
 
 
 def target_precheck(args, report: Report) -> None:
-    """The win-ui-investigation memo's recommendation: check NLA-off +
-    cert-bound on the RDP TARGET over plain ssh before attempting a connect,
-    so a failure is attributable to the client, not target-config drift."""
+    """Check cert-bound + a known-supported security mode on the RDP TARGET
+    over plain ssh before attempting a connect, so a failure is attributable
+    to the client, not target-config drift.
+
+    P9.1 (CredSSP/NLA support) made both `UserAuthentication` values a
+    supported, expect-success configuration: NLA off (`0`, the original
+    win-ui-investigation memo recommendation -- plain TLS path, unchanged)
+    and NLA on (`1` -- exercises the new CredSSP/NTLM path). Only the legacy
+    Standard RDP Security case (no enhanced-security layer at all) remains
+    unsupported by design; this PowerShell probe can't directly observe that
+    (it only reads the NLA flag, not the negotiated security layer), so it is
+    not distinguished here -- a target with NLA off and `SecurityLayer` also
+    forced to legacy RDP would still report NLA=0 and pass this precheck, then
+    fail the actual connect with `RdpError::LegacySecurityOnly` (see
+    `docs/devel/memos/rdp-xrdp-diagnosis-2026-07.md`)."""
     step = "mcp:rdp-target-precheck"
     if not args.rdp_target_ssh_host:
         report.record(step, "skip", "no --rdp-target-ssh-host given")
@@ -422,8 +435,10 @@ def target_precheck(args, report: Report) -> None:
         out = ssh_run(args.rdp_target_ssh_user, args.rdp_target_ssh_host, ps)
         nla = next((l.split("=", 1)[1] for l in out.stdout.splitlines() if l.startswith("NLA=")), "?")
         cert = next((l.split("=", 1)[1] for l in out.stdout.splitlines() if l.startswith("CERT=")), "")
-        if nla == "0" and cert:
-            report.record(step, "pass", f"target precheck OK: NLA off (UserAuthentication=0), cert bound ({cert})")
+        if nla in ("0", "1") and cert:
+            mode = "NLA off (UserAuthentication=0), plain-TLS path" if nla == "0" \
+                else "NLA on (UserAuthentication=1), CredSSP/NTLM path (P9.1)"
+            report.record(step, "pass", f"target precheck OK: {mode}, cert bound ({cert})")
         else:
             report.record(
                 step, "fail",

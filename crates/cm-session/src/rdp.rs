@@ -13,8 +13,8 @@
 //!   both remote→local and local→remote text transfers are implemented.
 //!
 //! IronRDP crate versions (verified 2026-06-28 against crates.io):
-//!   ironrdp-connector  0.9.0  (vendored, CredSSP feature disabled)
-//!   ironrdp-async      0.9.0  (vendored, CredSSP feature disabled)
+//!   ironrdp-connector  0.9.0  (vendored, CredSSP feature ON — P9.1)
+//!   ironrdp-async      0.9.0  (vendored, CredSSP feature ON — P9.1)
 //!   ironrdp-session    0.10.0
 //!   ironrdp-tokio      0.9.0
 //!   ironrdp-graphics   0.8.1
@@ -26,18 +26,32 @@
 //! TLS backend: `rustls` with the `ring` crypto provider — avoids the
 //! `aws-lc-rs` NASM/MSVC build failures encountered in P3.1.
 //!
-//! CredSSP / NLA is intentionally disabled. ConMan uses TLS security
-//! (graphical login), which is simpler and avoids pre-release sspi/picky
-//! dependency conflicts with the russh crate used by the SSH session.
+//! **CredSSP / NLA (P9.1)**: `enable_credssp: true` — the connector advertises
+//! TLS|CredSSP. The server picks; `ClientConnector::should_perform_credssp()`
+//! gates the CredSSP step, so servers that select plain TLS (NLA disabled,
+//! e.g. win11-target, xrdp `security_layer=tls`) are completely unaffected —
+//! this is the load-bearing backward-compat guarantee for the pre-existing
+//! TLS-only path. Auth mechanism is **NTLM only** (username/password,
+//! optional domain — see [`RdpAuthInput`]); Kerberos scaffolding
+//! (`KerberosConfig`, a KDC-capable `NetworkClient`) exists upstream but is
+//! wired off (`kerberos_config: None`) — see [`NtlmOnlyNetworkClient`].
+//! Smartcard CredSSP is not supported (the vendored `sspi` build disables the
+//! `scard` feature to avoid a crypto-bigint conflict with russh — see
+//! `docs/devel/memos/P9.1-credssp-dep-audit.md`).
+//!
+//! **Dependency snapshot is a pinned, fragile RustCrypto RC alignment** (not a
+//! durable position) — see `docs/devel/memos/P9.1-credssp-dep-audit.md` and
+//! `docs/devel/tasks/CLEANUP-credssp-vendoring.md` for the exact pins and the
+//! removal trigger (RustCrypto 1.0 stabilization).
 //!
 //! **Server-side TLS requirement**: ConMan's IronRDP connector only advertises
 //! and accepts enhanced-security protocols (TLS / CredSSP); it has no
 //! implementation of legacy Standard RDP Security (RC4) and never will (see
 //! `RdpError::LegacySecurityOnly` below). The RDP server must therefore be
-//! configured to offer TLS — for xrdp, `security_layer=negotiate` (or `tls`)
-//! in `/etc/xrdp/xrdp.ini`, restart the service. A server left at the xrdp
-//! default `security_layer=rdp` selects Standard RDP Security and the
-//! connection fails with a dedicated, actionable error rather than a raw
+//! configured to offer TLS or CredSSP — for xrdp, `security_layer=negotiate`
+//! (or `tls`) in `/etc/xrdp/xrdp.ini`, restart the service. A server left at
+//! the xrdp default `security_layer=rdp` selects Standard RDP Security and
+//! the connection fails with a dedicated, actionable error rather than a raw
 //! connector string (diagnosed in `memos/rdp-xrdp-diagnosis-2026-07.md`;
 //! supporting the legacy layer via a second engine is a P8 candidate, not
 //! this crate).
@@ -441,6 +455,15 @@ pub enum RdpError {
          support. Enable TLS on the server (xrdp: set `security_layer=negotiate` and restart)."
     )]
     LegacySecurityOnly,
+    /// The server selected CredSSP/HYBRID (NLA is required) but no password
+    /// was supplied. NLA authenticates before the graphical session starts,
+    /// so — unlike the TLS-only path, where a blank password just fails
+    /// later at the Windows logon screen — ConMan can and must detect this
+    /// up front and give an actionable message instead of letting the raw
+    /// CredSSP/NTLM exchange fail cryptically. See Milestone C
+    /// (`docs/devel/tasks/P9.1-credssp-nla-support.md`).
+    #[error("This server requires credentials (NLA); add a credential or enter a password.")]
+    CredentialsRequired,
     #[error("Certificate rejected: {0}")]
     CertRejected(String),
     #[error("Authentication failed: {0}")]
@@ -467,11 +490,50 @@ pub enum RdpError {
 /// any other negotiation mismatch selects a *non-empty* protocol and so never
 /// renders that token. All other `connect_begin` failures pass through
 /// unchanged as `RdpError::Protocol`.
+///
+/// **P9.1 note:** before CredSSP was enabled, a HYBRID-requiring server (NLA
+/// on) made `connect_begin` fail outright (the opposite mismatch from the one
+/// this function handles) and there was pressure to add a matching
+/// `HYBRID_REQUIRED → dead end` mapping here. That is now obsolete: with
+/// `enable_credssp: true`, ConMan advertises TLS|CredSSP, so a HYBRID-only
+/// server negotiates successfully and `connect_begin` no longer fails for
+/// that case at all — the CredSSP exchange happens later, inside
+/// `connect_finalize` (see [`map_finalize_error`] for *its* failure mapping:
+/// missing credentials / bad-credential auth failures). Only the
+/// empty-selected-protocol legacy case handled below remains a
+/// `connect_begin`-time failure.
 fn map_negotiation_error(e: ConnectorError) -> RdpError {
     if let ConnectorErrorKind::Reason(reason) = e.kind()
         && reason.contains("STANDARD_RDP_SECURITY")
     {
         return RdpError::LegacySecurityOnly;
+    }
+    RdpError::Protocol(e.to_string())
+}
+
+/// Whether NLA/CredSSP is about to be performed with no password supplied.
+///
+/// NLA authenticates before the graphical session starts, so a blank
+/// password against a HYBRID-selecting server is detectably wrong *before*
+/// attempting the CredSSP exchange (unlike the TLS-only path, where a blank
+/// password just fails later at the Windows logon screen). Pure and
+/// unit-testable independent of a live connector/socket.
+fn credssp_requires_credentials(should_perform_credssp: bool, password: &[u8]) -> bool {
+    should_perform_credssp && password.is_empty()
+}
+
+/// Maps a `connect_finalize` (CredSSP) failure to an [`RdpError`].
+///
+/// [`ConnectorErrorKind::Credssp`] covers both a rejected NTLM handshake (bad
+/// username/password) and a KDC-requiring exchange (Kerberos, unsupported —
+/// see [`NtlmOnlyNetworkClient`]); ConMan does not yet distinguish those
+/// sub-cases from the connector, so both map to the same actionable
+/// `RdpError::Auth`. All other `connect_finalize` failures pass through
+/// unchanged as `RdpError::Protocol`, matching [`map_negotiation_error`]'s
+/// fallback behavior.
+fn map_finalize_error(e: ConnectorError) -> RdpError {
+    if matches!(e.kind(), ConnectorErrorKind::Credssp(_)) {
+        return RdpError::Auth(e.to_string());
     }
     RdpError::Protocol(e.to_string())
 }
@@ -650,6 +712,32 @@ struct DriveCtx {
     remote_clipboard: Arc<Mutex<Option<String>>>,
 }
 
+/// The [`ironrdp_async::NetworkClient`] ConMan gives CredSSP for its
+/// NTLM-only auth mode (P9.1).
+///
+/// This is a complete, correct implementation for that mode — not a
+/// placeholder: NTLM's challenge/response handshake never suspends the
+/// CredSSP generator to make a network request (that only happens for
+/// Kerberos, reaching a KDC), so `send` is provably unreachable as long as
+/// `kerberos_config` stays `None` (enforced at the one call site in
+/// `drive_inner`). If a future Kerberos path is wired, this type must be
+/// replaced with a real KDC-capable client.
+#[derive(Debug)]
+struct NtlmOnlyNetworkClient;
+
+impl ironrdp_async::NetworkClient for NtlmOnlyNetworkClient {
+    async fn send(
+        &mut self,
+        _network_request: &ironrdp_connector::sspi::generator::NetworkRequest,
+    ) -> ironrdp_connector::ConnectorResult<Vec<u8>> {
+        use ironrdp_connector::ConnectorErrorExt as _;
+        Err(ironrdp_connector::ConnectorError::general(
+            "CredSSP requested a network round-trip (KDC), but ConMan only \
+             supports NTLM (no Kerberos/KDC client configured)",
+        ))
+    }
+}
+
 async fn drive(cfg: RdpSettings, auth: RdpAuthInput, ctx: DriveCtx) {
     let status = ctx.status.clone();
     match drive_inner(&cfg, auth, ctx).await {
@@ -673,7 +761,7 @@ async fn drive_inner(
         .await
         .map_err(|e| RdpError::Connect(e.to_string()))?;
 
-    // 2. Build connector config (TLS security, CredSSP/NLA disabled).
+    // 2. Build connector config (TLS security, CredSSP/NLA enabled — P9.1).
     //    Password exposed only here, at the IronRDP boundary, then moved.
     let password = String::from_utf8_lossy(auth.password.expose()).into_owned();
     let connector_config = Config {
@@ -683,7 +771,11 @@ async fn drive_inner(
         },
         desktop_scale_factor: 0,
         enable_tls: true,
-        enable_credssp: false,
+        // P9.1: advertise TLS|CredSSP. `should_perform_credssp()` (checked
+        // below, after negotiation) is true only when the server actually
+        // selects HYBRID, so TLS-only servers are unaffected — this is the
+        // backward-compat guarantee for the pre-existing plain-TLS path.
+        enable_credssp: true,
         credentials: Credentials::UsernamePassword {
             username: auth.username.clone(),
             password,
@@ -732,6 +824,16 @@ async fn drive_inner(
         .await
         .map_err(map_negotiation_error)?;
 
+    // 4b. P9.1: the server's protocol selection is decided by connect_begin
+    //     (before the TLS upgrade even happens), so `should_perform_credssp()`
+    //     is already known here. If the server requires NLA and we have no
+    //     password, fail fast with an actionable error instead of running the
+    //     TLS handshake and CredSSP exchange only to have NTLM reject an
+    //     empty credential deep inside the connector.
+    if credssp_requires_credentials(connector.should_perform_credssp(), auth.password.expose()) {
+        return Err(RdpError::CredentialsRequired);
+    }
+
     // 5. TLS upgrade — ironrdp-tls performs the handshake; CA validation and
     //    TOFU follow in verify_cert.
     let (tcp, leftover) = framed.into_inner();
@@ -752,17 +854,26 @@ async fn drive_inner(
     let upgraded = mark_as_upgraded(should_upgrade, &mut connector);
     let mut framed: TokioFramed<_> = TokioFramed::new_with_leftover(tls_stream, leftover);
 
-    // `connect_finalize` (no-credssp build) takes:
-    //   upgraded, connector, &mut framed, server_name, server_public_key
+    // `connect_finalize` (credssp build) takes:
+    //   upgraded, connector, &mut framed, network_client, server_name,
+    //   server_public_key, kerberos_config
+    // NTLM completes locally (no KDC round-trip), so the NetworkClient's
+    // send() is never invoked — see NtlmOnlyNetworkClient. Kerberos is off
+    // (kerberos_config: None). CredSSP itself only runs when the server
+    // selected HYBRID (should_perform_credssp(), checked in step 4b above);
+    // TLS-only servers never reach the CredSSP branch inside this call.
+    let mut network_client = NtlmOnlyNetworkClient;
     let connection_result: ConnectionResult = connect_finalize(
         upgraded,
         connector,
         &mut framed,
+        &mut network_client,
         ironrdp_connector::ServerName::new(cfg.host.clone()),
         server_public_key,
+        None,
     )
     .await
-    .map_err(|e| RdpError::Protocol(e.to_string()))?;
+    .map_err(map_finalize_error)?;
 
     let desktop_size = connection_result.desktop_size;
 
@@ -1606,6 +1717,74 @@ mod tests {
         let raw = err.to_string();
 
         let mapped = map_negotiation_error(err);
+
+        match mapped {
+            RdpError::Protocol(msg) => assert_eq!(msg, raw),
+            other => panic!("expected RdpError::Protocol passthrough, got: {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // P9.1 CredSSP/NLA: credential-check + connect_finalize error mapping
+    // ---------------------------------------------------------------------------
+
+    /// HYBRID-selected (should_perform_credssp() == true) + no password ==>
+    /// the actionable missing-credential error, *before* any CredSSP exchange
+    /// is attempted.
+    #[test]
+    fn credssp_requires_credentials_when_hybrid_selected_and_password_empty() {
+        assert!(credssp_requires_credentials(true, b""));
+    }
+
+    /// HYBRID-selected + a real password ==> proceed (CredSSP will run and
+    /// either succeed or fail on its own terms — not ConMan's business here).
+    #[test]
+    fn credssp_requires_credentials_false_when_hybrid_selected_and_password_present() {
+        assert!(!credssp_requires_credentials(true, b"hunter2"));
+    }
+
+    /// TLS-only server (should_perform_credssp() == false) + no password ==>
+    /// unaffected by this check at all, even though the password is empty.
+    /// This is the plain-TLS regression guard: a blank password against a
+    /// TLS-only server must not be misdiagnosed as an NLA credential problem
+    /// (it just proceeds to the graphical Windows logon screen, as before).
+    #[test]
+    fn credssp_requires_credentials_false_when_tls_only_selected_regardless_of_password() {
+        assert!(!credssp_requires_credentials(false, b""));
+        assert!(!credssp_requires_credentials(false, b"hunter2"));
+    }
+
+    /// A CredSSP-kind `connect_finalize` failure (bad NTLM credentials, or an
+    /// unsupported Kerberos/KDC round-trip) maps to the actionable
+    /// `RdpError::Auth`, not the generic `RdpError::Protocol`.
+    #[test]
+    fn map_finalize_error_credssp_kind_maps_to_auth() {
+        let sspi_err = ironrdp_connector::sspi::Error::new(
+            ironrdp_connector::sspi::ErrorKind::LogonDenied,
+            "the referenced account is currently locked out",
+        );
+        let err = ConnectorError::new(
+            "CredSSP",
+            ironrdp_connector::ConnectorErrorKind::Credssp(sspi_err),
+        );
+
+        let mapped = map_finalize_error(err);
+
+        assert!(matches!(mapped, RdpError::Auth(_)), "got: {mapped:?}");
+    }
+
+    /// A non-CredSSP `connect_finalize` failure (e.g. a plain TLS-only-path
+    /// finalize error) passes through unchanged as `RdpError::Protocol`,
+    /// exactly like the pre-P9.1 behavior — the plain-TLS regression guard
+    /// for the finalize step.
+    #[test]
+    fn map_finalize_error_non_credssp_passes_through_unchanged() {
+        use ironrdp_connector::ConnectorErrorExt as _;
+
+        let err = ConnectorError::general("some non-CredSSP finalize failure");
+        let raw = err.to_string();
+
+        let mapped = map_finalize_error(err);
 
         match mapped {
             RdpError::Protocol(msg) => assert_eq!(msg, raw),
