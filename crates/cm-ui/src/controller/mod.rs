@@ -319,7 +319,12 @@ type KbdQueue = Arc<Mutex<std::collections::VecDeque<Sender<Option<Vec<cm_core::
 /// then passed by reference to each feature module's `wire_*` function. Pure
 /// parameter bundling — introduced by the P6.1 controller split, no behavior
 /// change (CONVENTIONS §3: internal/private, no memo required).
-struct Ctx {
+// `pub(crate)`, not private: `lib.rs`'s `build_for_test` (P8.2) needs to name
+// this type to box it up as the test harness's keepalive handle. Its fields
+// stay private -- only this crate's `controller` module (and submodules) can
+// reach into it; `lib.rs` only ever holds an opaque `Ctx` value, never reads
+// it.
+pub(crate) struct Ctx {
     ui: AppWindow,
     state: Rc<RefCell<State>>,
     tab_model: Rc<VecModel<TabItem>>,
@@ -344,15 +349,26 @@ struct Ctx {
     bc_draft: Rc<RefCell<BTreeSet<usize>>>,
 }
 
-/// Build and run the ConMan application.
+/// Shared assembly behind [`run`] (production) and [`build_for_test`] (P8.2's
+/// hermetic element-test harness): model setup + every `wire_*()`
+/// registration, through wiring the redraw timer and (if applicable)
+/// restoring the last session's tabs. Stops **short** of: entering the event
+/// loop, the env-var debug hooks (`util::wire_env_hooks`), the `qa-harness`
+/// endpoint, the OS-accent live-watch thread, and the single-instance
+/// activation listener -- [`run`] adds all of those; [`build_for_test`] adds
+/// none of them (irrelevant, or actively non-deterministic, for hermetic
+/// tests).
 ///
-/// # Errors
-/// Returns a [`slint::PlatformError`] if the window/backend cannot be created.
-pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
+/// Returns the live `AppWindow` handle (a cheap strong-reference clone --
+/// `ctx.ui` also refers to the same live window), the [`Ctx`] bundle, and the
+/// redraw [`Timer`]. The caller MUST keep the latter two alive for as long as
+/// the window should keep ticking: `Ctx` owns the resize-debounce timer and
+/// every model handle the wired callbacks close over, and a dropped Slint
+/// [`Timer`] stops firing.
+fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::PlatformError> {
     let repo = config.repo;
     let secrets = config.secrets;
     let session_provider = config.session_provider;
-    let activation_rx = config.activation_rx;
     let first_launch = config.first_launch;
 
     let ui = AppWindow::new()?;
@@ -536,11 +552,28 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     launchpad::wire_launchpad(&ctx);
 
     // -- Redraw timer ---------------------------------------------------------
-    let _redraw = sessions::wire_tick(&ctx);
+    let redraw = sessions::wire_tick(&ctx);
 
     if let Some(snap) = restore_snapshot {
         startup::restore_session_tabs(&ctx, snap);
     }
+
+    let ui_out = ctx.ui.clone_strong();
+    Ok((ui_out, ctx, redraw))
+}
+
+/// Build and run the ConMan application.
+///
+/// # Errors
+/// Returns a [`slint::PlatformError`] if the window/backend cannot be created.
+pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
+    // Taken before `assemble` consumes the rest of `config` -- only the
+    // single-instance listener below needs it, and `assemble` (shared with
+    // the test seam, which never has one) has no use for this field.
+    let mut config = config;
+    let activation_rx = config.activation_rx.take();
+
+    let (_ui, ctx, _redraw) = assemble(config)?;
 
     // -- Optional headless test hooks -----------------------------------------
     let mut hooks: Vec<Timer> = Vec::new();
@@ -590,4 +623,32 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     }
 
     ctx.ui.run()
+}
+
+/// P8.2 — test-only construction seam. Performs [`run`]'s model setup and all
+/// `wire_*()` registration (via the shared [`assemble`] helper) but does
+/// **not** enter the event loop, and skips the production-only bits that are
+/// irrelevant or actively non-deterministic for hermetic in-process tests
+/// (env-var debug hooks, the `qa-harness` endpoint, the OS-accent live-watch
+/// thread, the single-instance activation listener). Accepts already-built
+/// test doubles via the same [`AppConfig`] `run` takes (an in-memory
+/// `SqliteRepository`, a mock/loopback `SessionProvider`, `activation_rx:
+/// None`), so callers get a fully-wired `AppWindow` with no real I/O, no
+/// display, and no background threads.
+///
+/// `pub(crate)`: reached from outside this crate only through the tiny public
+/// forwarding wrapper `cm_ui::build_for_test` (`lib.rs`), gated the same way
+/// -- this keeps the seam out of the public `run()` surface per the task spec
+/// ("no change to the public `cm_ui::run` signature; internal seam, no memo
+/// needed"). See `docs/devel/tasks/P8.2-element-test-harness.md`.
+///
+/// # Panics
+/// Panics if `AppWindow::new()` fails (e.g. no testing backend installed --
+/// callers must call `i_slint_backend_testing::init_no_event_loop()` or
+/// `init_integration_test_with_mock_time()` first). A panic (not a
+/// `Result`) is deliberate: every caller is test code where an unwind is the
+/// right failure mode, and it keeps this internal seam's signature simple.
+#[cfg(any(test, feature = "ui-introspection"))]
+pub(crate) fn build_for_test(config: AppConfig) -> (AppWindow, Ctx, Timer) {
+    assemble(config).expect("cm_ui::build_for_test: AppWindow::new() failed")
 }
