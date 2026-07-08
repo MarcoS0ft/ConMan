@@ -710,6 +710,10 @@ impl ConnectionRepository for InMemoryRepo {
         ))
     }
 
+    fn list_settings(&self) -> Result<Vec<(String, String)>, RepositoryError> {
+        Ok(Vec::new())
+    }
+
     // --- Recents (stub) ---
 
     fn record_recent(&self, _id: ConnectionId, _opened_at: i64) -> Result<(), RepositoryError> {

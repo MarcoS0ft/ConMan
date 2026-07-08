@@ -381,6 +381,7 @@ mod tests {
             groups_imported: 1,
             connections_imported: 3,
             secrets_imported: 1,
+            settings_imported: 0,
         };
         let msg = summary_message(&stats, 1);
         assert!(msg.contains("1 group(s)"));
