@@ -132,6 +132,12 @@ pub trait ConnectionRepository: Send + Sync {
     fn get_setting(&self, key: &str) -> Result<Option<String>, RepositoryError>;
     fn set_setting(&self, key: &str, value: &str) -> Result<(), RepositoryError>;
 
+    /// Enumerate the whole settings key/value table as `(key, value)` pairs.
+    /// Order is unspecified; callers that need determinism should sort. Used by
+    /// the export/import envelope (v2) to carry app settings alongside a DB
+    /// copy (P1.2 cont.).
+    fn list_settings(&self) -> Result<Vec<(String, String)>, RepositoryError>;
+
     // -----------------------------------------------------------------------
     // Recents (P6.14 — Launchpad)
     // -----------------------------------------------------------------------

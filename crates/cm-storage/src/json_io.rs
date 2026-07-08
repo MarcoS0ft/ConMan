@@ -1,18 +1,24 @@
 //! Versioned JSON import/export for the full connection tree.
 //!
-//! ## Envelope schema (version 1, pinned 2026-06-28, P1.2)
+//! ## Envelope schema (version 2, P1.2)
 //!
 //! ```json
 //! {
-//!   "conman_export_version": 1,
+//!   "conman_export_version": 2,
 //!   "exported_at": <epoch-seconds>,
 //!   "credential_folders": [...],
 //!   "credentials":         [...],
 //!   "groups":              [...],
 //!   "connections":         [...],
-//!   "credential_secrets":  [...]   // omitted when empty
+//!   "credential_secrets":  [...],  // omitted when empty
+//!   "settings":            [["ui.theme_mode","1"], ...]  // v2; omitted when empty
 //! }
 //! ```
+//!
+//! Version 1 (pinned 2026-06-28) is identical minus the `settings` field.
+//! [`import`] accepts both v1 and v2; a v1 envelope simply carries no settings.
+//! Volatile/machine-specific settings keys ([`EXPORT_EXCLUDED_SETTING_KEYS`])
+//! are never exported.
 //!
 //! ## Import semantics (additive, pinned)
 //!
@@ -36,7 +42,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cm_core::{
     Connection, ConnectionId, ConnectionRepository, Credential, CredentialFolder,
     CredentialFolderId, CredentialId, CredentialKind, CredentialPurpose, CredentialRef,
-    CredentialStore, Group, GroupId, Secret,
+    CredentialStore, Group, GroupId, KEY_FIRST_RUN_SEEDED, KEY_RENDERER_BACKEND, KEY_SESSION_TABS,
+    Secret,
 };
 use serde::{Deserialize, Serialize};
 
@@ -44,10 +51,36 @@ use serde::{Deserialize, Serialize};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Envelope schema version produced and accepted by this build.
+/// Envelope schema version produced by this build.
 ///
-/// [`import`] rejects any envelope whose `conman_export_version` differs.
-pub const ENVELOPE_VERSION: u32 = 1;
+/// - v1 (P1.2): tree + optional gated secrets.
+/// - v2 (P1.2 cont.): adds an optional `settings` list carrying app settings.
+///
+/// [`export`] always emits [`ENVELOPE_VERSION`]; [`import`] accepts both v1 and
+/// v2 (see [`MIN_SUPPORTED_VERSION`]) and rejects anything else with
+/// [`ImportExportError::UnsupportedVersion`].
+pub const ENVELOPE_VERSION: u32 = 2;
+
+/// Oldest envelope version [`import`] still accepts. v1 envelopes simply carry
+/// no `settings` (the field defaults to empty), so no migration is needed.
+pub const MIN_SUPPORTED_VERSION: u32 = 1;
+
+/// Settings keys deliberately EXCLUDED from an export: machine-specific /
+/// volatile state that must not travel with a shared or backed-up envelope.
+/// References `cm-core`'s canonical key constants (rather than duplicating
+/// the literal strings here) so a key rename can't silently desync this list
+/// from the settings it's meant to catch.
+/// - [`KEY_SESSION_TABS`]: the last-session tab snapshot — references local
+///   connection IDs and is per-machine session state.
+/// - [`KEY_FIRST_RUN_SEEDED`]: the demo-seed guard — importing it would
+///   suppress first-run seeding on a fresh target DB.
+/// - [`KEY_RENDERER_BACKEND`]: cached hardware-capability probe result
+///   (P7.1). A pinned "accelerated" cache carried to a GPU-less machine
+///   would crash on launch, defeating the renderer probe/fallback entirely —
+///   the importing machine must always re-probe (its absence collapses to
+///   "auto", see [`cm_core::SettingsService::load_renderer_backend`]).
+const EXPORT_EXCLUDED_SETTING_KEYS: &[&str] =
+    &[KEY_SESSION_TABS, KEY_FIRST_RUN_SEEDED, KEY_RENDERER_BACKEND];
 
 /// Upper bound on topological-sort passes to guard against cyclic or otherwise
 /// malformed input from untrusted JSON.
@@ -91,6 +124,12 @@ pub struct ExportEnvelope {
     /// default export carries no hint of the field.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub credential_secrets: Vec<ExportedSecret>,
+    /// App settings (v2) as ordered `[key, value]` string pairs. Volatile /
+    /// machine-specific keys ([`EXPORT_EXCLUDED_SETTING_KEYS`]) are omitted.
+    /// Empty for v1 envelopes (the field is absent there and defaults empty),
+    /// and suppressed from serialisation when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub settings: Vec<(String, String)>,
 }
 
 /// One secret entry in a gated export.
@@ -141,6 +180,8 @@ pub struct ImportStats {
     pub connections_imported: usize,
     /// Number of individual secrets successfully written to the keychain.
     pub secrets_imported: usize,
+    /// Number of app-settings key/value pairs applied (v2 envelopes).
+    pub settings_imported: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +212,13 @@ pub fn export(
         Vec::new()
     };
 
+    // v2: carry app settings, minus the volatile/machine-specific keys.
+    let settings: Vec<(String, String)> = repo
+        .list_settings()?
+        .into_iter()
+        .filter(|(k, _)| !EXPORT_EXCLUDED_SETTING_KEYS.contains(&k.as_str()))
+        .collect();
+
     Ok(ExportEnvelope {
         conman_export_version: ENVELOPE_VERSION,
         exported_at: current_epoch_secs(),
@@ -179,6 +227,7 @@ pub fn export(
         groups,
         connections,
         credential_secrets,
+        settings,
     })
 }
 
@@ -212,9 +261,10 @@ pub fn import(
     repo: &dyn ConnectionRepository,
     store: Option<&dyn CredentialStore>,
 ) -> Result<ImportStats, ImportExportError> {
-    if envelope.conman_export_version != ENVELOPE_VERSION {
+    let found = envelope.conman_export_version;
+    if !(MIN_SUPPORTED_VERSION..=ENVELOPE_VERSION).contains(&found) {
         return Err(ImportExportError::UnsupportedVersion {
-            found: envelope.conman_export_version,
+            found,
             supported: ENVELOPE_VERSION,
         });
     }
@@ -248,6 +298,17 @@ pub fn import(
         && !envelope.credential_secrets.is_empty()
     {
         import_secrets(&envelope.credential_secrets, &cred_id_map, s, &mut stats);
+    }
+
+    // 6. App settings (v2) — applied verbatim via set_setting. Absent in v1
+    //    envelopes (empty). Excluded keys were already dropped at export; be
+    //    defensive and skip them here too in case of hand-edited input.
+    for (key, value) in &envelope.settings {
+        if EXPORT_EXCLUDED_SETTING_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        repo.set_setting(key, value)?;
+        stats.settings_imported += 1;
     }
 
     Ok(stats)

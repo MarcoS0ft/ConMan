@@ -28,6 +28,7 @@ fn settings_suite() {
     theme_dark_light_toggle_updates_dark_mode();
     density_compact_cosy_toggle();
     accent_preset_selection();
+    render_backend_toggle_persists();
 }
 
 /// Opens Settings via the real command-palette flow (mirrors
@@ -126,5 +127,60 @@ fn accent_preset_selection() {
         find_descendant_by_label(&panel, "Accent preset 1").accessible_checked(),
         Some(false),
         "preset 1 must no longer read checked"
+    );
+}
+
+/// P7.1 cont.: the Rendering segmented control (Auto/Software/Hardware) drives
+/// `render-backend` (aliased `AppWindow::render-backend`) AND persists the
+/// mapped `render.backend` string ("auto"/"software"/"accelerated") via the
+/// real controller handler. The renderer only switches on next launch, so this
+/// asserts the model + persistence, not a live renderer swap.
+fn render_backend_toggle_persists() {
+    use cm_core::SettingsService;
+
+    let (h, repo, _provider) = harness();
+    open_settings(&h);
+    let panel = find_singleton(&h.ui, "SettingsPanel");
+
+    assert_eq!(
+        h.ui.get_render_backend(),
+        0,
+        "renderer defaults to Auto (index 0)"
+    );
+
+    find_descendant_by_label(&panel, "Software").invoke_accessible_default_action();
+    pump_ticks(1);
+    assert_eq!(h.ui.get_render_backend(), 1, "Software selects index 1");
+    assert_eq!(
+        SettingsService::new(repo.as_ref())
+            .load_renderer_backend()
+            .unwrap()
+            .as_deref(),
+        Some("software"),
+        "Software must persist render.backend=software"
+    );
+
+    find_descendant_by_label(&panel, "Hardware").invoke_accessible_default_action();
+    pump_ticks(1);
+    assert_eq!(h.ui.get_render_backend(), 2, "Hardware selects index 2");
+    assert_eq!(
+        SettingsService::new(repo.as_ref())
+            .load_renderer_backend()
+            .unwrap()
+            .as_deref(),
+        Some("accelerated"),
+        "Hardware must persist render.backend=accelerated"
+    );
+
+    find_descendant_by_label(&panel, "Auto").invoke_accessible_default_action();
+    pump_ticks(1);
+    assert_eq!(h.ui.get_render_backend(), 0, "Auto selects index 0");
+    // "auto" clears the cache -> load_renderer_backend collapses it to None.
+    assert_eq!(
+        SettingsService::new(repo.as_ref())
+            .load_renderer_backend()
+            .unwrap(),
+        None,
+        "Auto must clear the persisted backend (re-probe next launch)"
     );
 }

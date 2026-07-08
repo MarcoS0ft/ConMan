@@ -975,6 +975,9 @@ export component AppWindow inherits Window {
     in-out property <string> settings-shell-cwd: "";
     // Startup behavior: 0 = clean start, 1 = restore last session
     in-out property <int>    startup-behavior: 0;
+    // Renderer backend (P7.1 cont.): 0 auto · 1 software · 2 hardware.
+    // Applied on next launch; persisted to render.backend by the controller.
+    in-out property <int>    render-backend: 0;
 
     // ── P1.4: Profile editor modal ───────────────────────────────────
     in-out property <bool>        profile-editor-open: false;
@@ -1030,6 +1033,7 @@ export component AppWindow inherits Window {
     callback settings-shell-args-changed(string);
     callback settings-shell-cwd-changed(string);
     callback startup-behavior-changed(int);
+    callback render-backend-changed(int);
 
     // P1.4 — Connections panel CRUD.
     callback toggle-conn-row(int);       // idx → expand/collapse group
@@ -1452,6 +1456,7 @@ export component AppWindow inherits Window {
                     shell-args          <=> root.settings-shell-args;
                     shell-cwd           <=> root.settings-shell-cwd;
                     startup-behavior    <=> root.startup-behavior;
+                    render-backend      <=> root.render-backend;
                     // theme-changed is also handled inside SettingsPanel (live recolor);
                     // the callback here persists the choice to the DB.
                     theme-changed(i)    => { root.theme-changed(i); }
@@ -1462,6 +1467,7 @@ export component AppWindow inherits Window {
                     shell-args-changed(v)        => { root.settings-shell-args-changed(v); }
                     shell-cwd-changed(v)         => { root.settings-shell-cwd-changed(v); }
                     startup-behavior-changed(v)  => { root.startup-behavior-changed(v); }
+                    render-backend-changed(v)    => { root.render-backend-changed(v); }
                 }
             }
 

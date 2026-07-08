@@ -56,14 +56,31 @@ pub(crate) const KEY_SIDE_PANEL_WIDTH: &str = "ui.side_panel_width";
 /// First-run demo data seeded: "1" = already seeded, absent / "0" = not yet.
 /// Gating on this setting (rather than `list_groups().is_empty()`) prevents
 /// re-seeding when the user intentionally deletes all groups (CONVENTIONS §P1.5).
-pub(crate) const KEY_FIRST_RUN_SEEDED: &str = "app.first_run_seeded";
+/// `pub` (not `pub(crate)`) — unlike the other keys above, this one is also
+/// referenced from `cm-storage`'s export-envelope exclusion list
+/// (`EXPORT_EXCLUDED_SETTING_KEYS`) so that list can reference the constant
+/// instead of duplicating the literal string (drift guard).
+pub const KEY_FIRST_RUN_SEEDED: &str = "app.first_run_seeded";
 /// Persisted "restore last session" tab snapshot (P6.14, gap 4) — a JSON
 /// [`SessionTabSnapshot`]. Absent, empty, or malformed all mean "nothing to
 /// restore" (see [`SettingsService::load_session_tabs`]). Reuses the existing
 /// `settings` key/value store rather than a new table: this is a single,
 /// wholesale-replaced blob (never queried/filtered in SQL), unlike `recents`
 /// which needs per-row upsert + ordering (see the schema memo).
-pub(crate) const KEY_SESSION_TABS: &str = "ui.session_tabs";
+///
+/// `pub` (not `pub(crate)`) — see [`KEY_FIRST_RUN_SEEDED`]'s note; also
+/// referenced from `cm-storage`'s export-envelope exclusion list.
+pub const KEY_SESSION_TABS: &str = "ui.session_tabs";
+/// Cached renderer backend (P7.1 cont.): persisted result of the startup
+/// renderer probe so the expensive GPU-less probe runs at most once. One of
+/// "software" | "accelerated" | "auto" (or absent). "auto"/absent means
+/// "probe each launch"; only the "software" fallback is auto-persisted (safe
+/// to carry to other hardware), never "accelerated" (see `render_backend`).
+///
+/// `pub` (not `pub(crate)`) — see [`KEY_FIRST_RUN_SEEDED`]'s note; also
+/// referenced from `cm-storage`'s export-envelope exclusion list (P7.1 cont.:
+/// a cached `accelerated` must never cross machines, see that list's docs).
+pub const KEY_RENDERER_BACKEND: &str = "render.backend";
 
 // ---------------------------------------------------------------------------
 // AppSettings — the loaded settings snapshot
@@ -96,6 +113,11 @@ pub struct AppSettings {
     pub sidebar_collapsed: bool,
     /// Side-panel width in logical px, persisted across restarts (P6.9 gap 11).
     pub side_panel_width: i32,
+    /// Persisted renderer backend (P7.1 cont.): "auto" (probe each launch),
+    /// "software", or "accelerated". "auto" is the default. Surfaced in the
+    /// Settings "Rendering" control; the actual renderer switch takes effect on
+    /// the next launch.
+    pub renderer_backend: String,
 }
 
 impl Default for AppSettings {
@@ -112,6 +134,7 @@ impl Default for AppSettings {
             active_panel: 0,     // Connections
             sidebar_collapsed: false,
             side_panel_width: 252, // matches Theme.side-panel-width (cm-ui/ui/theme.slint)
+            renderer_backend: "auto".to_owned(),
         }
     }
 }
@@ -189,6 +212,10 @@ impl<'a> SettingsService<'a> {
         s.active_panel = self.read_i32(KEY_ACTIVE_PANEL, s.active_panel)?;
         s.sidebar_collapsed = self.read_bool(KEY_SIDEBAR_COLLAPSED, s.sidebar_collapsed)?;
         s.side_panel_width = self.read_i32(KEY_SIDE_PANEL_WIDTH, s.side_panel_width)?;
+        // Read the raw value (including "auto") for the Settings UI; the
+        // separate `load_renderer_backend` collapses "auto"/absent to None for
+        // the startup precedence logic.
+        s.renderer_backend = self.read_string(KEY_RENDERER_BACKEND, &s.renderer_backend)?;
         Ok(s)
     }
 
@@ -285,6 +312,21 @@ impl<'a> SettingsService<'a> {
             Ok(snap) if !snap.tabs.is_empty() => Ok(Some(snap)),
             _ => Ok(None),
         }
+    }
+
+    /// Cached renderer backend. `Ok(None)` when absent or "auto" (= probe each
+    /// launch); otherwise the persisted backend string ("software" |
+    /// "accelerated").
+    pub fn load_renderer_backend(&self) -> Result<Option<String>, RepositoryError> {
+        Ok(self
+            .repo
+            .get_setting(KEY_RENDERER_BACKEND)?
+            .filter(|v| v != "auto" && !v.is_empty()))
+    }
+
+    /// Persist renderer backend ("software" | "accelerated" | "auto").
+    pub fn save_renderer_backend(&self, v: &str) -> Result<(), RepositoryError> {
+        self.repo.set_setting(KEY_RENDERER_BACKEND, v)
     }
 
     // ── private helpers ────────────────────────────────────────────────────
@@ -442,6 +484,15 @@ mod tests {
                 .insert(key.to_owned(), value.to_owned());
             Ok(())
         }
+        fn list_settings(&self) -> Result<Vec<(String, String)>, RepositoryError> {
+            Ok(self
+                .settings
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect())
+        }
         fn record_recent(&self, _id: ConnectionId, _opened_at: i64) -> Result<(), RepositoryError> {
             Ok(())
         }
@@ -569,5 +620,44 @@ mod tests {
         repo.set_setting(KEY_SESSION_TABS, "not json").unwrap();
         let svc = SettingsService::new(&repo);
         assert_eq!(svc.load_session_tabs().unwrap(), None);
+    }
+
+    // ── P7.1: cached renderer backend ────────────────────────────────────
+
+    #[test]
+    fn renderer_backend_absent_is_none() {
+        let repo = fresh();
+        let svc = SettingsService::new(&repo);
+        assert_eq!(svc.load_renderer_backend().unwrap(), None);
+    }
+
+    #[test]
+    fn renderer_backend_round_trips() {
+        let repo = fresh();
+        let svc = SettingsService::new(&repo);
+        svc.save_renderer_backend("software").unwrap();
+        assert_eq!(
+            svc.load_renderer_backend().unwrap(),
+            Some("software".to_owned())
+        );
+        svc.save_renderer_backend("accelerated").unwrap();
+        assert_eq!(
+            svc.load_renderer_backend().unwrap(),
+            Some("accelerated".to_owned())
+        );
+    }
+
+    #[test]
+    fn renderer_backend_auto_or_empty_is_none() {
+        let repo = fresh();
+        let svc = SettingsService::new(&repo);
+        svc.save_renderer_backend("auto").unwrap();
+        assert_eq!(
+            svc.load_renderer_backend().unwrap(),
+            None,
+            "\"auto\" means probe each launch"
+        );
+        svc.save_renderer_backend("").unwrap();
+        assert_eq!(svc.load_renderer_backend().unwrap(), None, "empty is None");
     }
 }

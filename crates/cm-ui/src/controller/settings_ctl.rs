@@ -17,6 +17,42 @@ pub(super) fn wire_settings_ctl(ctx: &Ctx) {
     wire_settings_shell_args_changed(ctx);
     wire_settings_shell_cwd_changed(ctx);
     wire_startup_behavior_changed(ctx);
+    wire_render_backend_changed(ctx);
+}
+
+/// Map the Rendering segmented-control index to the persisted `render.backend`
+/// string. 0 = Auto (clears the cache → re-probe next launch), 1 = Software
+/// (pins the safe fallback), 2 = Hardware (pins the accelerated renderer).
+fn render_backend_str(idx: i32) -> &'static str {
+    match idx {
+        1 => "software",
+        2 => "accelerated",
+        _ => "auto",
+    }
+}
+
+/// Inverse of [`render_backend_str`]: persisted string → control index.
+fn render_backend_index(v: &str) -> i32 {
+    match v {
+        "software" => 1,
+        "accelerated" => 2,
+        _ => 0, // "auto", absent, or unknown
+    }
+}
+
+fn wire_render_backend_changed(ctx: &Ctx) {
+    ctx.ui.on_render_backend_changed({
+        let repo_s = ctx.repo.clone();
+        move |idx| {
+            // Persist only; the renderer switch takes effect on next launch
+            // (the Settings UI says "Applied on restart"). "auto" clears the
+            // cache so the probe runs again; "software"/"accelerated" pin it.
+            let svc = SettingsService::new(repo_s.as_ref());
+            if let Err(e) = svc.save_renderer_backend(render_backend_str(idx)) {
+                tracing::warn!("save render.backend: {e}");
+            }
+        }
+    });
 }
 
 fn wire_theme_changed(ctx: &Ctx) {
@@ -206,6 +242,9 @@ pub(super) fn apply_settings_to_ui(s: &AppSettings, ui: &AppWindow) {
     ui.set_settings_shell_args(s.shell_args.as_str().into());
     ui.set_settings_shell_cwd(s.shell_cwd.as_str().into());
     ui.set_startup_behavior(s.startup_behavior);
+    // P7.1 cont.: reflect the persisted renderer backend ("auto" default) in
+    // the Rendering control.
+    ui.set_render_backend(render_backend_index(&s.renderer_backend));
     ui.set_active_panel(s.active_panel);
     ui.set_sidebar_collapsed(s.sidebar_collapsed);
     // P6.9 (gap 11): restore the persisted side-panel width, defensively

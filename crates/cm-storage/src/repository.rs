@@ -632,6 +632,17 @@ impl ConnectionRepository for SqliteRepository {
         Ok(())
     }
 
+    fn list_settings(&self) -> Result<Vec<(String, String)>, RepositoryError> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM settings ORDER BY key")
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(map_err)?;
+        rows.map(|r| r.map_err(map_err)).collect()
+    }
+
     // -----------------------------------------------------------------------
     // Recents (P6.14 — Launchpad)
     // -----------------------------------------------------------------------

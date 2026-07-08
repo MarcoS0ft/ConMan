@@ -904,3 +904,171 @@ fn envelope_version_constant_matches_serialised() {
         u64::from(ENVELOPE_VERSION)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tests: v2 settings travel in the envelope
+// ---------------------------------------------------------------------------
+
+#[test]
+fn settings_exported_and_reimported() {
+    let src = repo();
+    src.set_setting("ui.theme_mode", "1").expect("set theme");
+    src.set_setting("ui.density", "1").expect("set density");
+    src.set_setting("terminal.font_size", "14")
+        .expect("set font size");
+
+    let envelope = export(&src, &ExportOptions::default(), None).expect("export");
+    // Exported as ordered [key, value] pairs.
+    assert!(
+        envelope
+            .settings
+            .iter()
+            .any(|(k, v)| k == "terminal.font_size" && v == "14"),
+        "a normal (non-excluded) setting must be exported"
+    );
+    assert_eq!(envelope.settings.len(), 3, "all three settings exported");
+
+    // Round-trip into a fresh repo.
+    let dst = repo();
+    let stats = import(&envelope, &dst, None).expect("import");
+    assert_eq!(stats.settings_imported, 3);
+
+    assert_eq!(
+        dst.get_setting("ui.theme_mode").unwrap().as_deref(),
+        Some("1")
+    );
+    assert_eq!(dst.get_setting("ui.density").unwrap().as_deref(), Some("1"));
+    assert_eq!(
+        dst.get_setting("terminal.font_size").unwrap().as_deref(),
+        Some("14")
+    );
+}
+
+#[test]
+fn excluded_settings_keys_are_not_exported() {
+    let src = repo();
+    // Volatile / machine-specific keys that must NOT travel.
+    src.set_setting("ui.session_tabs", "{\"tabs\":[]}")
+        .expect("set tabs");
+    src.set_setting("app.first_run_seeded", "1")
+        .expect("set seeded");
+    // Machine hardware-capability cache (P7.1 cont.) — must NOT travel: a
+    // pinned "accelerated" imported on a GPU-less machine would crash it.
+    src.set_setting("render.backend", "accelerated")
+        .expect("set render backend");
+    // A normal key that SHOULD travel.
+    src.set_setting("ui.theme_mode", "0").expect("set theme");
+
+    let envelope = export(&src, &ExportOptions::default(), None).expect("export");
+
+    let keys: Vec<&str> = envelope.settings.iter().map(|(k, _)| k.as_str()).collect();
+    assert!(
+        !keys.contains(&"ui.session_tabs"),
+        "ui.session_tabs must be excluded"
+    );
+    assert!(
+        !keys.contains(&"app.first_run_seeded"),
+        "app.first_run_seeded must be excluded"
+    );
+    assert!(
+        !keys.contains(&"render.backend"),
+        "render.backend must be excluded — it is machine-specific hardware \
+         capability, and the importing machine must re-probe"
+    );
+    assert!(keys.contains(&"ui.theme_mode"), "normal key must be kept");
+
+    // The serialised JSON must not mention the excluded keys at all.
+    let json = serde_json::to_string(&envelope).expect("to_json");
+    assert!(!json.contains("session_tabs"));
+    assert!(!json.contains("first_run_seeded"));
+    assert!(!json.contains("render.backend"));
+    assert!(!json.contains("\"accelerated\""));
+}
+
+#[test]
+fn empty_settings_field_is_suppressed_in_json() {
+    let src = repo();
+    let json = export_to_json(&src, &ExportOptions::default(), None).expect("export");
+    assert!(
+        !json.contains("\"settings\""),
+        "empty settings list must be omitted from serialisation"
+    );
+}
+
+#[test]
+fn v1_envelope_without_settings_still_imports() {
+    // A hand-written v1 envelope (no `settings` field) must import cleanly for
+    // backward compatibility.
+    let json = serde_json::json!({
+        "conman_export_version": 1,
+        "exported_at": 123,
+        "credential_folders": [],
+        "credentials": [],
+        "groups": [
+            { "id": 1, "parent_id": null, "name": "G", "sort": 0, "default_credential": null }
+        ],
+        "connections": []
+    })
+    .to_string();
+
+    let dst = repo();
+    let stats = import_from_json(&json, &dst, None).expect("v1 import must succeed");
+    assert_eq!(stats.groups_imported, 1);
+    assert_eq!(stats.settings_imported, 0, "v1 carries no settings");
+}
+
+#[test]
+fn v2_envelope_with_settings_imports() {
+    // A hand-written v2 envelope with a settings list.
+    let json = serde_json::json!({
+        "conman_export_version": 2,
+        "exported_at": 123,
+        "credential_folders": [],
+        "credentials": [],
+        "groups": [],
+        "connections": [],
+        "settings": [["terminal.font_size", "16"], ["ui.theme_mode", "1"]]
+    })
+    .to_string();
+
+    let dst = repo();
+    let stats = import_from_json(&json, &dst, None).expect("v2 import");
+    assert_eq!(stats.settings_imported, 2);
+    assert_eq!(
+        dst.get_setting("terminal.font_size").unwrap().as_deref(),
+        Some("16")
+    );
+}
+
+#[test]
+fn v2_envelope_with_render_backend_is_skipped_on_import() {
+    // Defense in depth: even a hand-edited / untrusted envelope that carries
+    // the excluded `render.backend` key must NOT have it applied on import —
+    // mirrors the defensive re-filter in `import()` (P7.1 cont.).
+    let json = serde_json::json!({
+        "conman_export_version": 2,
+        "exported_at": 123,
+        "credential_folders": [],
+        "credentials": [],
+        "groups": [],
+        "connections": [],
+        "settings": [["render.backend", "accelerated"], ["ui.theme_mode", "1"]]
+    })
+    .to_string();
+
+    let dst = repo();
+    let stats = import_from_json(&json, &dst, None).expect("v2 import");
+    assert_eq!(
+        stats.settings_imported, 1,
+        "only the non-excluded key is counted"
+    );
+    assert_eq!(
+        dst.get_setting("render.backend").unwrap(),
+        None,
+        "render.backend must not be applied even if present in the input"
+    );
+    assert_eq!(
+        dst.get_setting("ui.theme_mode").unwrap().as_deref(),
+        Some("1")
+    );
+}

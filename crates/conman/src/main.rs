@@ -56,20 +56,67 @@ fn main() -> ExitCode {
         return render_backend::run_probe_child();
     }
 
+    // P7.1 cont.: open storage *before* the renderer probe so the persisted
+    // renderer-backend cache can be consulted. Both `app_db_path()` and
+    // `SqliteRepository::open()` are thread-free (SQLite spawns no threads), so
+    // this stays safely inside the single-threaded window that
+    // `render_backend::resolve` (which may `std::env::set_var`) requires —
+    // `logging::init()` below is still the first thing that can spawn a thread.
+    let db_path = match app_db_path() {
+        Ok(p) => p,
+        Err(e) => {
+            // No tracing subscriber yet; use stderr for this pre-logging fatal.
+            eprintln!("fatal: could not resolve database path: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let repo_result = SqliteRepository::open(&db_path);
+    let cached: Option<String> = repo_result.as_ref().ok().and_then(|r| {
+        SettingsService::new(r)
+            .load_renderer_backend()
+            .ok()
+            .flatten()
+    });
+
     // P7.1: resolve (and, if needed, apply) the renderer choice *before*
     // installing the logging subscriber. `logging::init()` is the first
     // thing below that can spawn a thread (the release build's non-blocking
     // log-appender worker); forcing the software fallback needs
     // `std::env::set_var`, which is only sound while the process is still
     // single-threaded. See `render_backend::force_software_backend`'s doc
-    // comment for the full invariant.
-    let renderer_decision = render_backend::resolve();
+    // comment for the full invariant. Precedence: explicit `SLINT_BACKEND` env
+    // > persisted cache > probe (P7.1 cont.).
+    let renderer_decision = render_backend::resolve(cached.as_deref());
 
     // Install the tracing subscriber — everything below may log.
     let _logging_guard = logging::init();
 
     // Now that a subscriber exists, report the decision made above.
-    render_backend::log_decision(renderer_decision);
+    render_backend::log_decision(&renderer_decision);
+
+    // The DB open result is needed from here on; a failure is fatal.
+    let repo = match repo_result {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("fatal: failed to open storage: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // P7.1 cont.: persist the renderer-backend cache when (and only when)
+    // `render_backend::persist_decision` says to — the single source of truth
+    // (unit-tested) for both safety invariants: a freshly-forced *software*
+    // fallback is auto-persisted at most once (so the expensive probe runs at
+    // most once on GPU-less machines, and the decision travels with a DB
+    // copy), while a probe that comes up *accelerated* is never auto-persisted
+    // as such — except to clear a stale "software" cache back to "auto" on an
+    // explicit `CONMAN_RENDER_REPROBE` re-probe, so future launches probe
+    // afresh rather than staying stuck in software.
+    if let Some(new_value) = render_backend::persist_decision(&renderer_decision, cached.as_deref())
+        && let Err(e) = SettingsService::new(&repo).save_renderer_backend(new_value)
+    {
+        tracing::warn!("could not persist renderer backend cache: {e}");
+    }
 
     // ── Single-instance guard (P6.16) — first, before storage/keyring ──────
     let activation_rx: Option<Receiver<()>> = match single_instance::acquire() {
@@ -92,7 +139,7 @@ fn main() -> ExitCode {
     // never fails due to keychain issues.
     init_keyring();
 
-    let config = match build_config(activation_rx) {
+    let config = match build_config(repo, activation_rx) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("fatal: failed to initialise storage: {e}");
@@ -132,22 +179,17 @@ fn init_keyring() {
 
 /// Build the [`AppConfig`] that the UI controller receives.
 ///
-/// Opens (or creates) the file-backed SQLite DB at the OS data-dir path
-/// returned by `cm-platform`.  On an empty / brand-new DB a small demo
-/// dataset is seeded once; existing DBs are opened as-is (migrations run
-/// automatically on open).
+/// Takes the already-open file-backed SQLite `repo` (opened in `main` before
+/// the renderer probe so the persisted renderer-backend cache can be read —
+/// P7.1 cont.). On an empty / brand-new DB a small demo dataset is seeded once;
+/// existing DBs are used as-is (migrations already ran on open).
 ///
 /// `activation_rx` (P6.16) is threaded straight through from the
 /// single-instance guard acquired in `main` into the returned [`AppConfig`].
 fn build_config(
+    repo: SqliteRepository,
     activation_rx: Option<Receiver<()>>,
 ) -> Result<AppConfig, Box<dyn std::error::Error>> {
-    // ── Resolve DB path ────────────────────────────────────────────────────
-    let db_path = app_db_path()?;
-
-    // ── Repository (SQLite) ────────────────────────────────────────────────
-    let repo = SqliteRepository::open(&db_path)?;
-
     // Seed demo data only on the very first launch, gated on a persisted flag.
     // Seed demo data only when the DB is genuinely empty (no flag AND no groups).
     // The double guard handles two distinct cases:
