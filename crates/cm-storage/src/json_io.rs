@@ -593,7 +593,11 @@ fn parse_purpose(s: &str) -> Option<CredentialPurpose> {
 }
 
 /// Encode raw bytes as a lower-case hex string.
-fn to_hex(bytes: &[u8]) -> String {
+///
+/// `pub(crate)`: also reused by [`crate::import`]'s foreign-format importers
+/// (e.g. RoyalTS, P9.2) to encode a plaintext secret into an
+/// [`ExportedSecret`] without duplicating the encoder.
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
     for &b in bytes {

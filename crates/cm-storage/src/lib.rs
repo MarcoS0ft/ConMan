@@ -6,7 +6,11 @@
 //! store.
 //!
 //! JSON import/export lives in [`json_io`]; it is interchange-only — the
-//! backing store remains SQLite.
+//! backing store remains SQLite. **P9.2:** foreign-format connection import
+//! (RoyalTS `.rjson`, and CSV/mRemoteNG to come) lives in [`import`] — each
+//! foreign parser produces the same [`json_io::ExportEnvelope`] shape and
+//! hands it to the unmodified [`json_io::import`] seam; see that module's
+//! docs for how the next importer slots in.
 //!
 //! **P6.15:** `AppSettings`/`SettingsService`/`SessionTabEntry`/
 //! `SessionTabSnapshot` moved to `cm_core::app_settings` — they only ever
@@ -20,6 +24,7 @@
 //! [`ConnectionRepository`]: cm_core::ConnectionRepository
 
 mod error;
+pub mod import;
 pub mod json_io;
 pub mod migrations;
 pub mod repository;

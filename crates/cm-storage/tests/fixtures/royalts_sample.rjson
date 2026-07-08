@@ -1,0 +1,78 @@
+{
+  "Objects": [
+    {
+      "Type": "Folder",
+      "ID": "folder-prod",
+      "Name": "Production",
+      "Objects": [
+        {
+          "Type": "Folder",
+          "ID": "folder-web",
+          "Name": "Web Tier",
+          "Objects": [
+            {
+              "Type": "RemoteDesktopConnection",
+              "ID": "conn-rdp-1",
+              "Name": "app-server-rdp",
+              "URI": "app01.internal.example",
+              "Port": 3390,
+              "Domain": "CORP",
+              "UserName": "admin",
+              "CredentialID": "cred-shared-1"
+            },
+            {
+              "Type": "TerminalConnection",
+              "ID": "conn-ssh-1",
+              "Name": "app-server-ssh",
+              "URI": "app01.internal.example",
+              "Port": 2222,
+              "UserName": "svc-app",
+              "CredentialID": "cred-shared-1"
+            },
+            {
+              "Type": "Credential",
+              "ID": "cred-shared-1",
+              "Name": "shared-app-login",
+              "UserName": "svc-app",
+              "Password": "hunter2-plaintext"
+            },
+            {
+              "Type": "TerminalConnection",
+              "ID": "conn-ssh-2",
+              "Name": "no-port-ssh",
+              "URI": "app02.internal.example",
+              "UserName": "root"
+            },
+            {
+              "Type": "RemoteDesktopConnection",
+              "ID": "conn-rdp-2",
+              "Name": "no-port-rdp",
+              "URI": "app03.internal.example"
+            },
+            {
+              "Type": "VNCConnection",
+              "ID": "conn-vnc-1",
+              "Name": "legacy-vnc-console",
+              "URI": "app04.internal.example"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "Type": "RoyalRDSFolder",
+      "ID": "folder-legacy",
+      "Name": "Legacy Family Folder",
+      "Objects": [
+        {
+          "Type": "RoyalRDSConnection",
+          "ID": "conn-legacy-rdp",
+          "Name": "legacy-family-rdp",
+          "URI": "legacy01.internal.example",
+          "Port": 3389,
+          "UserName": "legacyadmin"
+        }
+      ]
+    }
+  ]
+}
