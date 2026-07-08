@@ -14,6 +14,17 @@ path = "src/main.rs"
 # `cargo build -p conman --features qa-harness` (or `conman/qa-harness` from the
 # workspace root).
 qa-harness = ["cm-ui/qa-harness"]
+# P8.3: the Slint-native MCP automation surface, off by default. Enables the
+# `mcp` feature on the shared `slint` build (feature unification pulls in
+# `i-slint-backend-testing`'s embedded MCP server behind the runtime
+# `SLINT_MCP_PORT` double-gate — no port set, no listener, zero overhead) and
+# `cm-ui/ui-introspection` (Slint compiler debug info, so element
+# ids/roles/labels the MCP tools query actually resolve). Deliberately a named
+# Cargo feature rather than Slint's own README-recommended
+# `--features slint/mcp` CLI-only convention — see
+# docs/devel/memos/P8.3-slint-mcp-feature.md for the rationale. Never present
+# in a shipped/release artifact (same posture as `qa-harness`).
+automation = ["slint/mcp", "cm-ui/ui-introspection"]
 
 [dependencies]
 cm-ui = { path = "../cm-ui" }
