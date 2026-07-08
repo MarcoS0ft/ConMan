@@ -376,17 +376,90 @@ export component FormField {
       font-family: Theme.font-family;
       font-weight: 600;
     }
-    edit := LineEdit {
+    // P8.1b: std LineEdit binds `accessible-value <=> text` **inside its own
+    // definition** in every style (`i-slint-compiler-1.17.0/widgets/*/lineedit.slint`).
+    // That is a two-way alias declared at the widget's own scope. Empirically (see
+    // `tests/a11y_audit.rs`'s sentinel test), TWO mitigations were tried and BOTH
+    // failed to stop the leak on a std LineEdit instance:
+    //  1. `accessible-value: root.password ? "" : root.text;` written at this
+    //     instantiation site — compiles with no error/warning, but is silently
+    //     dropped at runtime; `accessible_value()` still returned the cleartext.
+    //     There is no supported way to override one side of a two-way binding
+    //     declared inside a std widget's own definition.
+    //  2. `accessible-role: none;` on the same LineEdit instance — this override
+    //     DOES take effect (`accessible_role()` correctly reports `None`), but
+    //     `accessible_value()` STILL returned the cleartext regardless: the
+    //     testing/introspection API reads the raw `accessible-value` property
+    //     value directly, independent of role (role-gating is a concern of the
+    //     OS-native accessibility bridge, not this API) — so muting the role does
+    //     not stop this sink.
+    // The only mechanism that actually works: never let a std LineEdit hold the
+    // real secret in the first place. Password fields use the raw `TextInput`
+    // builtin instead: it has no widget-level `accessible-value <=> text` alias
+    // (the compiler only fills in a *default* accessible-value binding via
+    // `set_binding_if_not_set` — an explicit binding at the instantiation site
+    // wins outright, confirmed by the same sentinel test now passing). Visual
+    // chrome (box/border/radius/height) is rebuilt from Theme tokens to match
+    // LineEdit's look; masking, typing, and `text`/`edited`/`accepted` behave the
+    // same as before. Non-password fields are untouched (still plain LineEdit).
+    if !root.password : edit := LineEdit {
       placeholder-text: root.placeholder;
       text <=> root.text;
-      input-type: root.password ? InputType.password : InputType.text;
+      input-type: InputType.text;
       font-size: Theme.font-base;
-      // P8.1: role + accessible-value are already supplied by LineEdit's own
-      // definition (text-input role, value bound to `text`); we only need to
-      // attach the human label this field's caller already provided.
       accessible-label: root.label;
       accepted(t) => { root.accepted(t); }
       edited(t) => { root.edited(t); }
+    }
+    if root.password : edit-secure := Rectangle {
+      height: Theme.control-height;
+      background: Theme.color-card;
+      border-radius: Theme.radius-sm;
+      border-width: 1px;
+      border-color: secure-input.has-focus ? Theme.color-accent : Theme.color-stroke;
+      clip: true;
+
+      // The accessible surface for this field lives HERE, on the wrapping
+      // Rectangle — not on `secure-input` below (which carries the real
+      // secret and has its own accessible surface turned off). `text-input`
+      // role + human label are present per scope item 3; the value is masked
+      // (empty), never the cleartext.
+      accessible-role: text-input;
+      accessible-label: root.label;
+      accessible-value: "";
+      accessible-placeholder-text: root.placeholder;
+      accessible-read-only: false;
+
+      HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+
+        placeholder := Text {
+          text: root.text == "" ? root.placeholder : "";
+          color: Theme.color-text-secondary;
+          font-size: Theme.font-base;
+          font-family: Theme.font-family;
+          vertical-alignment: center;
+          accessible-role: none;
+        }
+
+        secure-input := TextInput {
+          text <=> root.text;
+          input-type: InputType.password;
+          font-size: Theme.font-base;
+          font-family: Theme.font-family;
+          color: Theme.color-text;
+          single-line: true;
+          vertical-alignment: center;
+          horizontal-stretch: 1;
+          // This element holds the real secret in its own `text` — its
+          // accessible surface is turned off entirely; `edit-secure` above
+          // is the only accessible carrier for this field.
+          accessible-role: none;
+          accepted => { root.accepted(self.text); }
+          edited => { root.edited(self.text); }
+        }
+      }
     }
   }
 }
