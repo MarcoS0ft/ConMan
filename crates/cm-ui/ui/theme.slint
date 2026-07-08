@@ -179,4 +179,9 @@ export global Theme {
   out property <length> settings-section-header-height: 34px;
   // Keyboard shortcut label column width in settings shortcut rows (carry-over fix h).
   out property <length> settings-shortcut-label-width: 112px;
+  // Vertical scrollbar rail width (Fluent std-widgets `ScrollView`'s
+  // vertical-bar draws 14px wide, overlaid on the flickable's right edge) --
+  // scrollable field columns pad their content by this much on the right so
+  // the rail never overdraws field borders (P7.6, fixes P7.2-a).
+  out property <length> scrollbar-gutter: 14px;
 }

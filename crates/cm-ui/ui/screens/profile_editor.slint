@@ -118,6 +118,10 @@ export component ProfileEditor inherits Rectangle {
             vertical-stretch: 1;
             VerticalLayout {
                 spacing: Theme.space-5;
+                // Right gutter so the vertical scrollbar rail never overdraws
+                // the fields' right borders when the form scrolls (P7.6,
+                // fixes P7.2-a).
+                padding-right: Theme.scrollbar-gutter;
 
                 // ── Name ──────────────────────────────────────────────
                 FormField {
