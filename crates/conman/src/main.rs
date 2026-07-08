@@ -6,9 +6,14 @@
 //! `conman` — the application binary and composition root.
 //!
 //! P1.5: opens a **file-backed** SQLite database whose path is resolved by
-//! `cm-platform::app_db_path()`.  On the very first launch (empty DB) a small
-//! demo dataset is seeded; subsequent launches open and migrate the existing
-//! DB without touching the user's data.
+//! `cm-platform::app_db_path()`. Subsequent launches open and migrate the
+//! existing DB without touching the user's data.
+//!
+//! Dev-only convenience: behind the off-by-default `demo-seed` cargo feature,
+//! a small demo dataset is seeded into an otherwise-empty DB on the very
+//! first launch. Never present in a shipped/release artifact — opt in with
+//! `cargo build -p conman --features demo-seed` (same posture as
+//! `qa-harness`/`automation`).
 //!
 //! P6.16: before touching storage or the keyring, tries to become the single
 //! primary instance (`cm_platform::single_instance`). A second launch that
@@ -181,8 +186,11 @@ fn init_keyring() {
 ///
 /// Takes the already-open file-backed SQLite `repo` (opened in `main` before
 /// the renderer probe so the persisted renderer-backend cache can be read —
-/// P7.1 cont.). On an empty / brand-new DB a small demo dataset is seeded once;
-/// existing DBs are used as-is (migrations already ran on open).
+/// P7.1 cont.). Existing DBs are used as-is (migrations already ran on open).
+/// Only when the dev-only `demo-seed` feature is enabled is a small demo
+/// dataset seeded once into an empty / brand-new DB; by default (and always
+/// in release artifacts) a brand-new DB is left empty and the Launchpad /
+/// welcome flow handles it.
 ///
 /// `activation_rx` (P6.16) is threaded straight through from the
 /// single-instance guard acquired in `main` into the returned [`AppConfig`].
@@ -208,6 +216,7 @@ fn build_config(
         let mut first_launch = false;
         if !already_seeded {
             if repo.list_groups()?.is_empty() {
+                #[cfg(feature = "demo-seed")]
                 seed_demo_data(&repo)?;
                 first_launch = true;
             }
@@ -236,6 +245,11 @@ fn build_config(
 /// Populate the in-memory database with demo groups, connections, credential
 /// folders, and credentials so the UI panels show realistic content out of the
 /// box (and so xvfb screenshots capture a populated tree).
+///
+/// Dev-only: only compiled in when the off-by-default `demo-seed` cargo
+/// feature is enabled (see the module docs and the call site in
+/// `build_config`). Never present in a shipped/release artifact.
+#[cfg(feature = "demo-seed")]
 fn seed_demo_data(repo: &SqliteRepository) -> Result<(), Box<dyn std::error::Error>> {
     use cm_core::{
         Connection, ConnectionId, ConnectionKind, ConnectionSettings, Credential, CredentialFolder,
@@ -373,4 +387,65 @@ fn seed_demo_data(repo: &SqliteRepository) -> Result<(), Box<dyn std::error::Err
     repo.upsert_connection(&local_term)?;
 
     Ok(())
+}
+
+/// Proves the `demo-seed` feature gating (see the `[features]` doc comment in
+/// `Cargo.toml` and the call site in `build_config` above): a fresh, empty DB
+/// must stay empty by default (and always in a release artifact), and must
+/// only pick up the demo dataset when this crate is built with
+/// `--features demo-seed`.
+#[cfg(test)]
+mod demo_seed_gating_tests {
+    use super::*;
+
+    /// Default build (feature OFF, the release posture): first launch on a
+    /// brand-new DB must leave the groups list empty -- no demo seed -- while
+    /// still reporting a genuine `first_launch` so the Launchpad/welcome flow
+    /// still shows.
+    #[cfg(not(feature = "demo-seed"))]
+    #[test]
+    fn first_launch_on_empty_db_stays_empty_without_demo_seed_feature() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("ds-test.sqlite");
+        let repo = SqliteRepository::open(&db_path).expect("open fresh db");
+
+        let config = build_config(repo, None).expect("build_config");
+
+        assert!(
+            config.first_launch,
+            "a brand-new empty DB must still report a genuine first launch"
+        );
+        let groups = config.repo.list_groups().expect("list_groups");
+        assert!(
+            groups.is_empty(),
+            "default (demo-seed OFF) build must not seed any demo groups, got {groups:?}"
+        );
+    }
+
+    /// `--features demo-seed` build (dev-only opt-in): first launch on a
+    /// brand-new DB seeds the demo "Lab"/"Prod" groups.
+    #[cfg(feature = "demo-seed")]
+    #[test]
+    fn first_launch_on_empty_db_seeds_demo_groups_with_demo_seed_feature() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("ds-test.sqlite");
+        let repo = SqliteRepository::open(&db_path).expect("open fresh db");
+
+        let config = build_config(repo, None).expect("build_config");
+
+        assert!(config.first_launch, "brand-new DB must report first launch");
+        let groups = config.repo.list_groups().expect("list_groups");
+        assert!(
+            !groups.is_empty(),
+            "demo-seed feature must seed demo groups on first launch"
+        );
+        assert!(
+            groups.iter().any(|g| g.name == "Lab"),
+            "expected the seeded 'Lab' group, got {groups:?}"
+        );
+        assert!(
+            groups.iter().any(|g| g.name == "Prod"),
+            "expected the seeded 'Prod' group, got {groups:?}"
+        );
+    }
 }
