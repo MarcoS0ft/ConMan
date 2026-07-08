@@ -151,3 +151,106 @@ fn all_interactive_elements_and_dialogs_are_labeled() {
         violations.join("\n")
     );
 }
+
+/// P8.1b — password `FormField`s must not leak cleartext through
+/// `accessible-value` (or any sibling accessibility sink) to introspection.
+///
+/// See `docs/devel/tasks/P8.1b-password-accessible-value-carveout.md`. Sets a
+/// sentinel secret into the quick-connect dialog's password field (`qc-secret`,
+/// rendered by `qc-password-field := FormField { password: true; text <=>
+/// root.secret; }` in `screens/dialogs.slint`) and a *different* sentinel into
+/// a non-password field in the same dialog (`qc-host`, rendered by
+/// `qc-host-field := FormField { text <=> root.host; }`), then walks the
+/// whole element tree.
+///
+/// `qc-kind` defaults to 0 (SSH) and `qc-auth-method` defaults to 1
+/// (Password) in `app.slint`, so `qc-password-field` and `qc-host-field` are
+/// both present without opening the quick-connect `Modal` — `Modal` only
+/// toggles `visible`, it does not conditionally instantiate its `@children`.
+///
+/// Two assertions, both load-bearing:
+///  1. The secret sentinel never appears in any element's `accessible_value`
+///     or `accessible_description`. This is the runtime proof that
+///     `components.slint`'s password branch (a raw `TextInput`-based
+///     `edit-secure` + accessible-carrier wrapper, NOT std `LineEdit`) never
+///     surfaces the cleartext — see the long comment above `FormField`'s
+///     password branch for why a direct `accessible-value` override on std
+///     `LineEdit` does NOT work (its widget-internal `accessible-value <=>
+///     text` two-way alias silently wins over any override attempted from
+///     the instantiation site, confirmed empirically while building this
+///     test). If the mechanism regressed back to routing the real secret
+///     through a std `LineEdit`, this assertion fails with the secret
+///     sentinel showing up verbatim.
+///  2. The non-password sentinel DOES surface via some element's
+///     `accessible_value`. This is the "teeth" check: it proves the
+///     carve-out is targeted at password fields only, not a blanket disable
+///     of `accessible-value` — a regression that blanked every `FormField`
+///     (e.g. `accessible-value: ""` unconditionally) would satisfy assertion
+///     1 but fail this one.
+#[test]
+fn password_fields_never_expose_cleartext_via_accessibility() {
+    i_slint_backend_testing::init_no_event_loop();
+
+    let app = cm_ui::AppWindow::new().expect("AppWindow::new() failed");
+
+    const SECRET_SENTINEL: &str = "SENTINEL-SECRET-XYZ";
+    const PLAIN_SENTINEL: &str = "SENTINEL-PLAIN-ABC";
+
+    // Open the quick-connect Modal: `visible: open` on `Modal` (dialogs.slint)
+    // means invisible/clipped items may be excluded from the accessibility
+    // tree by the backend, so open it to get a faithful walk of what a real
+    // screen reader would see once the user opens quick-connect.
+    app.set_quick_connect_open(true);
+    app.set_qc_secret(SECRET_SENTINEL.into());
+    app.set_qc_host(PLAIN_SENTINEL.into());
+
+    // The masking-only contract: the real `text`/edit data path must be
+    // untouched by the accessibility carve-out. `qc-password-field`'s
+    // `text <=> root.secret` (dialogs.slint) still round-trips the actual
+    // secret through `FormField.text` into `qc_secret` — only the
+    // *accessible* surface is masked, not the model.
+    assert_eq!(
+        app.get_qc_secret().as_str(),
+        SECRET_SENTINEL,
+        "P8.1b: password FormField's text/model path must be unaffected by the \
+         accessibility carve-out — masking is accessible-surface-only"
+    );
+
+    let mut secret_leaks: Vec<String> = Vec::new();
+    let mut plain_surfaced = false;
+
+    app.root_element().visit_descendants(|elem: ElementHandle| {
+        let id = elem.id().map(|s| s.to_string());
+        let id_str = id.as_deref().unwrap_or("<no id>");
+
+        if let Some(v) = elem.accessible_value()
+            && v.contains(SECRET_SENTINEL)
+        {
+            secret_leaks.push(format!("accessible_value on id={id_str}: {v:?}"));
+        }
+        if let Some(d) = elem.accessible_description()
+            && d.contains(SECRET_SENTINEL)
+        {
+            secret_leaks.push(format!("accessible_description on id={id_str}: {d:?}"));
+        }
+        if let Some(v) = elem.accessible_value()
+            && v.contains(PLAIN_SENTINEL)
+        {
+            plain_surfaced = true;
+        }
+
+        ControlFlow::<()>::Continue(())
+    });
+
+    assert!(
+        secret_leaks.is_empty(),
+        "P8.1b: password secret leaked through accessibility introspection:\n{}",
+        secret_leaks.join("\n")
+    );
+    assert!(
+        plain_surfaced,
+        "P8.1b test has no teeth: the non-password sentinel never surfaced via \
+         accessible_value anywhere in the tree, so this test can't distinguish a \
+         targeted carve-out from a blanket accessible-value disable"
+    );
+}
