@@ -166,11 +166,20 @@ export component ErrorOverlay inherits Rectangle {
         }
         Text { text: "Connection failed"; color: Theme.color-text; font-size: Theme.font-lg;
             font-family: Theme.font-family; font-weight: 600; horizontal-alignment: center; }
-        VerticalLayout {
-            Text { text: reason; color: Theme.color-error; font-size: Theme.font-mono;
-                font-family: Theme.font-family-mono; horizontal-alignment: center; }
-            Text { text: identity + " · " + detail; color: Theme.color-text-secondary;
-                font-size: Theme.font-sm; font-family: Theme.font-family-mono; horizontal-alignment: center; }
+        HorizontalLayout {
+            alignment: center;
+            // P7.5: some reasons (e.g. the legacy-Standard-RDP-Security message)
+            // are full sentences, not a short connector string — bound the
+            // width and wrap so they don't get clipped to one line.
+            VerticalLayout {
+                width: min(680px, root.width - Theme.space-8 * 2);
+                spacing: Theme.space-1;
+                Text { text: reason; color: Theme.color-error; font-size: Theme.font-mono;
+                    font-family: Theme.font-family-mono; horizontal-alignment: center;
+                    wrap: word-wrap; }
+                Text { text: identity + " · " + detail; color: Theme.color-text-secondary;
+                    font-size: Theme.font-sm; font-family: Theme.font-family-mono; horizontal-alignment: center; }
+            }
         }
         HorizontalLayout {
             alignment: center;

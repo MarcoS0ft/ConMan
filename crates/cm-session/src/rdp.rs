@@ -30,10 +30,17 @@
 //! (graphical login), which is simpler and avoids pre-release sspi/picky
 //! dependency conflicts with the russh crate used by the SSH session.
 //!
-//! **xrdp server configuration**: the test host (192.0.2.10) must have
-//! `security_layer=negotiate` (or `tls`) in `/etc/xrdp/xrdp.ini` so that the
-//! server accepts the TLS security protocol IronRDP advertises. The default
-//! `security_layer=rdp` (STANDARD_RDP_SECURITY) is not supported by IronRDP.
+//! **Server-side TLS requirement**: ConMan's IronRDP connector only advertises
+//! and accepts enhanced-security protocols (TLS / CredSSP); it has no
+//! implementation of legacy Standard RDP Security (RC4) and never will (see
+//! `RdpError::LegacySecurityOnly` below). The RDP server must therefore be
+//! configured to offer TLS — for xrdp, `security_layer=negotiate` (or `tls`)
+//! in `/etc/xrdp/xrdp.ini`, restart the service. A server left at the xrdp
+//! default `security_layer=rdp` selects Standard RDP Security and the
+//! connection fails with a dedicated, actionable error rather than a raw
+//! connector string (diagnosed in `memos/rdp-xrdp-diagnosis-2026-07.md`;
+//! supporting the legacy layer via a second engine is a P8 candidate, not
+//! this crate).
 //!
 //! **Unified input (P4.2)**: `Session::send_input(SessionInput)` dispatches
 //! `SessionInput::Rdp(events)` to the wire and `SessionInput::RdpPaste(text)`
@@ -65,7 +72,10 @@ use ironrdp_cliprdr::pdu::{
     OwnedFormatDataResponse,
 };
 use ironrdp_cliprdr::{CliprdrClient, CliprdrSvcMessages};
-use ironrdp_connector::{ClientConnector, Config, ConnectionResult, Credentials, DesktopSize};
+use ironrdp_connector::{
+    ClientConnector, Config, ConnectionResult, ConnectorError, ConnectorErrorKind, Credentials,
+    DesktopSize,
+};
 use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_input::{
     Database as InputDatabase, MouseButton, MousePosition, Operation as InputOperation, Scancode,
@@ -422,6 +432,15 @@ pub enum RdpError {
     Tls(String),
     #[error("RDP connect failed: {0}")]
     Protocol(String),
+    /// The server rejected every enhanced-security protocol ConMan advertised
+    /// and negotiated legacy Standard RDP Security (RC4) instead. IronRDP has
+    /// no implementation of that legacy layer (by design) and never will;
+    /// see [`map_negotiation_error`] and the P7.5 diagnosis memo.
+    #[error(
+        "This RDP server only offers legacy Standard RDP Security, which ConMan does not \
+         support. Enable TLS on the server (xrdp: set `security_layer=negotiate` and restart)."
+    )]
+    LegacySecurityOnly,
     #[error("Certificate rejected: {0}")]
     CertRejected(String),
     #[error("Authentication failed: {0}")]
@@ -430,6 +449,31 @@ pub enum RdpError {
     Session(String),
     #[error("Thread spawn failed: {0}")]
     Thread(#[source] std::io::Error),
+}
+
+/// Maps a `connect_begin` negotiation failure to an [`RdpError`].
+///
+/// Detects the specific IronRDP outcome where the server confirmed the
+/// connection but selected no enhanced-security protocol at all — an empty
+/// `selected_protocol` bitset (`ironrdp_pdu::nego::SecurityProtocol::empty()`),
+/// which is exactly what `security_layer=rdp` (legacy Standard RDP Security)
+/// causes an xrdp server to do (`memos/rdp-xrdp-diagnosis-2026-07.md`).
+/// IronRDP's connector reports this as a [`ConnectorErrorKind::Reason`] whose
+/// text embeds the negotiated protocol's `Display` — `"STANDARD_RDP_SECURITY"`
+/// precisely when it is empty (`SecurityProtocol::is_standard_rdp_security`).
+/// Matching that token via the typed `Reason` variant (rather than the whole
+/// rendered connector error, which also carries file/line/context noise) is
+/// as robust as this boundary allows without forking the vendored connector:
+/// any other negotiation mismatch selects a *non-empty* protocol and so never
+/// renders that token. All other `connect_begin` failures pass through
+/// unchanged as `RdpError::Protocol`.
+fn map_negotiation_error(e: ConnectorError) -> RdpError {
+    if let ConnectorErrorKind::Reason(reason) = e.kind()
+        && reason.contains("STANDARD_RDP_SECURITY")
+    {
+        return RdpError::LegacySecurityOnly;
+    }
+    RdpError::Protocol(e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -686,7 +730,7 @@ async fn drive_inner(
     let mut framed: TokioFramed<TcpStream> = TokioFramed::new(tcp);
     let should_upgrade = connect_begin(&mut framed, &mut connector)
         .await
-        .map_err(|e| RdpError::Protocol(e.to_string()))?;
+        .map_err(map_negotiation_error)?;
 
     // 5. TLS upgrade — ironrdp-tls performs the handshake; CA validation and
     //    TOFU follow in verify_cert.
@@ -1490,6 +1534,83 @@ mod tests {
             store.lookup("host.test", 3389).as_deref(),
             Some(cert_fingerprint(&cert_b).as_str())
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // map_negotiation_error (P7.5)
+    // ---------------------------------------------------------------------------
+
+    /// Builds the exact `ConnectorError` IronRDP's `connection.rs` produces
+    /// (`ConnectionInitiationWaitConfirm`, `reason_err!`) when the server's
+    /// selected protocol doesn't intersect what the client requested — the
+    /// literal call site diagnosed in `memos/rdp-xrdp-diagnosis-2026-07.md`.
+    fn negotiation_mismatch_err(
+        requested: ironrdp_pdu::nego::SecurityProtocol,
+        selected: ironrdp_pdu::nego::SecurityProtocol,
+    ) -> ConnectorError {
+        use ironrdp_connector::ConnectorErrorExt as _;
+        ConnectorError::reason(
+            "Initiation",
+            format!("client advertised {requested}, but server selected {selected}"),
+        )
+    }
+
+    #[test]
+    fn map_negotiation_error_legacy_only_server_gets_actionable_message() {
+        use ironrdp_pdu::nego::SecurityProtocol;
+
+        // What ConMan always requests (TLS, CredSSP disabled — cfg above) vs.
+        // an xrdp server stuck on `security_layer=rdp`, which selects no
+        // enhanced-security protocol at all (the empty bitset).
+        let err = negotiation_mismatch_err(SecurityProtocol::SSL, SecurityProtocol::empty());
+
+        let mapped = map_negotiation_error(err);
+
+        assert!(
+            matches!(mapped, RdpError::LegacySecurityOnly),
+            "got: {mapped:?}"
+        );
+        assert_eq!(
+            mapped.to_string(),
+            "This RDP server only offers legacy Standard RDP Security, which ConMan does not \
+             support. Enable TLS on the server (xrdp: set `security_layer=negotiate` and restart)."
+        );
+    }
+
+    #[test]
+    fn map_negotiation_error_other_mismatch_passes_through_unchanged() {
+        use ironrdp_pdu::nego::SecurityProtocol;
+
+        // A different (non-empty) selected protocol must NOT be misdetected
+        // as the legacy-only case — only the empty/STANDARD_RDP_SECURITY
+        // selection is actionable-mapped; everything else keeps today's
+        // (unideal but not wrong) raw connector string.
+        let err = negotiation_mismatch_err(SecurityProtocol::SSL, SecurityProtocol::RDSTLS);
+        let raw = err.to_string();
+
+        let mapped = map_negotiation_error(err);
+
+        match mapped {
+            RdpError::Protocol(msg) => assert_eq!(msg, raw),
+            other => panic!("expected RdpError::Protocol passthrough, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_negotiation_error_unrelated_reason_passes_through_unchanged() {
+        use ironrdp_connector::ConnectorErrorExt as _;
+
+        // A `Reason` error from an unrelated code path (no mention of the
+        // legacy-security token at all) must not be swept up either.
+        let err = ConnectorError::reason("Initiation", "standard RDP security is not supported");
+        let raw = err.to_string();
+
+        let mapped = map_negotiation_error(err);
+
+        match mapped {
+            RdpError::Protocol(msg) => assert_eq!(msg, raw),
+            other => panic!("expected RdpError::Protocol passthrough, got: {other:?}"),
+        }
     }
 
     // ---------------------------------------------------------------------------
