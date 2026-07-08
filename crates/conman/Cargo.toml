@@ -25,6 +25,10 @@ qa-harness = ["cm-ui/qa-harness"]
 # docs/devel/memos/P8.3-slint-mcp-feature.md for the rationale. Never present
 # in a shipped/release artifact (same posture as `qa-harness`).
 automation = ["slint/mcp", "cm-ui/ui-introspection"]
+# Dev-only convenience: seeds a small example DB on first launch. Off by
+# default; NEVER present in a shipped/release artifact. Opt in with
+# `cargo build -p conman --features demo-seed`.
+demo-seed = []
 
 [dependencies]
 cm-ui = { path = "../cm-ui" }
@@ -56,6 +60,11 @@ slint = { version = "1.17", default-features = false, features = [
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+
+[dev-dependencies]
+# Fresh temp-file DBs for the demo-seed gating tests below (mirrors
+# cm-storage/cm-ui's dev-dependency use of the same crate).
+tempfile = "3"
 
 [build-dependencies]
 # Build-graph edge so conman's build script runs AFTER the engine's native build
