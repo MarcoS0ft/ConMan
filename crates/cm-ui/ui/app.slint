@@ -1450,7 +1450,7 @@ export component AppWindow inherits Window {
             // Tab strip (spans only this column — NOT over the nav column).
             Rectangle {
                 height: 40px;
-                background: Theme.color-base.darker(0.2);
+                background: Theme.color-strip;
                 HorizontalLayout {
                     padding: Theme.space-1;
                     spacing: Theme.space-1;
@@ -1764,7 +1764,7 @@ export component AppWindow inherits Window {
             // width, so it never draws under/past the nav column).
             Rectangle {
                 height: Theme.status-bar-height;
-                background: Theme.color-base.darker(0.2);
+                background: Theme.color-strip;
                 HorizontalLayout {
                     padding-left: Theme.space-3; padding-right: Theme.space-3;
                     spacing: Theme.space-4;

@@ -118,6 +118,10 @@ export component ProfileEditor inherits Rectangle {
             vertical-stretch: 1;
             VerticalLayout {
                 spacing: Theme.space-5;
+                // Right gutter so the vertical scrollbar rail never overdraws
+                // the fields' right borders when the form scrolls (P7.6,
+                // fixes P7.2-a).
+                padding-right: Theme.scrollbar-gutter;
 
                 // ── Name ──────────────────────────────────────────────
                 FormField {
@@ -284,7 +288,12 @@ export component ProfileEditor inherits Rectangle {
 // ── GroupEditor ────────────────────────────────────────────────────────────
 // Lets the user rename a group, pick its default credential, and move it to a
 // different parent group.
-export component GroupEditor {
+//
+// Opaque card: mirrors ProfileEditor / QuickConnectForm (P7.6, fixes the same
+// "no opaque card" bleed-through defect P7.2 fixed for ProfileEditor) — a
+// solid `color-overlay` panel with a border/radius so nothing behind the
+// Modal scrim bleeds through, in both themes.
+export component GroupEditor inherits Rectangle {
     in-out property <GroupForm> form;
     in property <[string]> cred-name-list;
     // Flat list of group names for the parent picker.
@@ -292,6 +301,16 @@ export component GroupEditor {
     in property <[string]> group-name-list;
     callback save();
     callback cancel();
+
+    width: 520px;
+    background: Theme.color-overlay;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.color-stroke;
+
+    // Absorb clicks so the Modal scrim behind doesn't dismiss on inner clicks
+    // (mirrors ProfileEditor / QuickConnectForm).
+    TouchArea {}
 
     VerticalLayout {
         padding: Theme.space-6;

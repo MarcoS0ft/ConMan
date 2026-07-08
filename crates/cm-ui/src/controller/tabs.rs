@@ -2,6 +2,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use cm_core::LocalSettings;
 use cm_session::{PaneGroup, Session, SessionStatus, Surface};
@@ -300,6 +301,41 @@ pub(super) fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
     startup::persist_session_tabs(state);
 }
 
+/// What to do with a tab's session when its tab is closed.
+enum Disposition {
+    /// Keep it running in the background pool (reattachable later).
+    Detach,
+    /// Already stopped (or stopping on its own); shut down synchronously.
+    Shutdown,
+    /// Still `Connecting`: hand teardown to a detached thread (see
+    /// [`abort_connecting`]) instead of blocking the UI or parking it in the
+    /// detached pool.
+    AbortConnecting,
+}
+
+fn disposition(s: &dyn Session) -> Disposition {
+    match s.status() {
+        SessionStatus::Connecting => Disposition::AbortConnecting,
+        SessionStatus::Exited(_) | SessionStatus::Failed(_) => Disposition::Shutdown,
+        SessionStatus::Connected | SessionStatus::Disconnected => Disposition::Detach,
+    }
+}
+
+/// Tear down a session that was still `Connecting` when its tab closed.
+///
+/// `Session::shutdown` joins the driver thread, but a `Connecting` SSH/RDP
+/// driver may be blocked inside the TCP connect/handshake (a blackholed host
+/// can hold it for the OS-level connect timeout -- tens of seconds). Calling
+/// `shutdown` straight from the UI callback would freeze the whole app for
+/// that long. Move the join to a detached thread instead: the connect
+/// attempt still tears down completely (no leaked driver thread/socket),
+/// just not on the UI's clock.
+fn abort_connecting(session: Box<dyn Session>) {
+    let _ = thread::Builder::new()
+        .name("abort-connecting".to_owned())
+        .spawn(move || session.shutdown());
+}
+
 pub(super) fn close_tab(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,
@@ -315,30 +351,29 @@ pub(super) fn close_tab(
         .row_data(idx)
         .map(|t| t.title.to_string())
         .unwrap_or_else(|| format!("tab {}", tab.num));
-    // P5.1: Detach all sessions in this tab (keep running in the background).
-    // Sessions that have already exited or failed are shut down immediately.
-    let should_detach = |s: &dyn Session| {
-        !matches!(
-            s.status(),
-            SessionStatus::Exited(_) | SessionStatus::Failed(_)
-        )
-    };
-    if should_detach(tab.session.as_ref()) {
-        st.detached.push(DetachedEntry {
+    // P5.1: Detach live/connected sessions in this tab (keep running in the
+    // background). Sessions that have already exited or failed are shut
+    // down immediately. P7.6 (fixes P7.3-b): a session still `Connecting`
+    // must NOT be detached -- the ConnectingOverlay's Cancel and the tab's
+    // own ✕ both route here, and detaching a dying connect strands it
+    // permanently in the detached pool with no way to kill it. Abort it
+    // instead (see `abort_connecting`).
+    match disposition(tab.session.as_ref()) {
+        Disposition::Detach => st.detached.push(DetachedEntry {
             session: tab.session,
             label: label.clone(),
-        });
-    } else {
-        tab.session.shutdown();
+        }),
+        Disposition::Shutdown => tab.session.shutdown(),
+        Disposition::AbortConnecting => abort_connecting(tab.session),
     }
     for (i, ep) in tab.extra_panes.into_iter().enumerate() {
-        if should_detach(ep.session.as_ref()) {
-            st.detached.push(DetachedEntry {
+        match disposition(ep.session.as_ref()) {
+            Disposition::Detach => st.detached.push(DetachedEntry {
                 session: ep.session,
                 label: format!("{} [pane {}]", label, i + 2),
-            });
-        } else {
-            ep.session.shutdown();
+            }),
+            Disposition::Shutdown => ep.session.shutdown(),
+            Disposition::AbortConnecting => abort_connecting(ep.session),
         }
     }
     tab_model.remove(idx);
@@ -441,6 +476,38 @@ pub(super) fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cm_session::{ExitStatus, SessionInput};
+    use std::sync::mpsc;
+
+    /// A session whose `status()` is fixed at construction, for exercising
+    /// [`disposition`] against every [`SessionStatus`] variant without a real
+    /// transport.
+    struct FakeSession {
+        status: SessionStatus,
+        surface: Surface,
+    }
+
+    impl FakeSession {
+        fn with_status(status: SessionStatus) -> Self {
+            let (_tx, rx) = mpsc::channel::<cm_core::terminal::GridSnapshot>();
+            Self {
+                status,
+                surface: Surface::TerminalGrid(rx),
+            }
+        }
+    }
+
+    impl Session for FakeSession {
+        fn surface(&self) -> &Surface {
+            &self.surface
+        }
+        fn status(&self) -> SessionStatus {
+            self.status.clone()
+        }
+        fn shutdown(&self) {}
+        fn resize_px(&self, _width: u32, _height: u32) {}
+        fn send_input(&self, _input: SessionInput) {}
+    }
 
     #[test]
     fn lowest_free_number_reuses_gaps() {
@@ -449,5 +516,32 @@ mod tests {
         assert_eq!(lowest_free_number(&[1, 3]), 2);
         assert_eq!(lowest_free_number(&[3, 1]), 2);
         assert_eq!(lowest_free_number(&[2, 3]), 1);
+    }
+
+    /// P7.6 (fixes P7.3-b): a `Connecting` session must abort, never detach
+    /// -- this is the crux of the Cancel/close-during-Connecting fix.
+    #[test]
+    fn disposition_aborts_connecting_instead_of_detaching() {
+        let s = FakeSession::with_status(SessionStatus::Connecting);
+        assert!(matches!(disposition(&s), Disposition::AbortConnecting));
+    }
+
+    #[test]
+    fn disposition_detaches_connected_and_disconnected() {
+        let connected = FakeSession::with_status(SessionStatus::Connected);
+        assert!(matches!(disposition(&connected), Disposition::Detach));
+        let disconnected = FakeSession::with_status(SessionStatus::Disconnected);
+        assert!(matches!(disposition(&disconnected), Disposition::Detach));
+    }
+
+    #[test]
+    fn disposition_shuts_down_exited_and_failed() {
+        let exited = FakeSession::with_status(SessionStatus::Exited(ExitStatus {
+            success: true,
+            code: 0,
+        }));
+        assert!(matches!(disposition(&exited), Disposition::Shutdown));
+        let failed = FakeSession::with_status(SessionStatus::Failed("boom".to_owned()));
+        assert!(matches!(disposition(&failed), Disposition::Shutdown));
     }
 }
