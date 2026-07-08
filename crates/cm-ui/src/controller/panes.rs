@@ -769,6 +769,16 @@ pub(super) fn connect_in_split(
                     return;
                 }
             };
+            #[cfg(debug_assertions)]
+            {
+                let st = state.borrow();
+                sessions::log_ssh_launch_auth(
+                    &conn,
+                    st.conn_tree.groups(),
+                    s,
+                    st.keys_panel.credentials(),
+                );
+            }
 
             let Some(slot) = reserve_split_slot(state, layout) else {
                 return;
@@ -832,6 +842,16 @@ pub(super) fn connect_in_split(
                     return;
                 }
             };
+            #[cfg(debug_assertions)]
+            {
+                let st = state.borrow();
+                sessions::log_rdp_launch_auth(
+                    &conn,
+                    st.conn_tree.groups(),
+                    s,
+                    st.keys_panel.credentials(),
+                );
+            }
 
             let Some(slot) = reserve_split_slot(state, layout) else {
                 return;

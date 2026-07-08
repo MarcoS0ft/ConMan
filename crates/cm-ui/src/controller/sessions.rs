@@ -20,6 +20,7 @@ use cm_session::{
 use slint::{ComponentHandle, Image, Model, SharedString, Timer, TimerMode, VecModel};
 
 use crate::input;
+use crate::keys::KeysPanel;
 use crate::{AppWindow, KbdPromptRow, TabItem, ToastEntry};
 
 use super::*;
@@ -1207,6 +1208,16 @@ pub(super) fn launch_saved_connection(
             };
             match resolved {
                 Ok(auth) => {
+                    #[cfg(debug_assertions)]
+                    {
+                        let st = state.borrow();
+                        log_ssh_launch_auth(
+                            conn,
+                            st.conn_tree.groups(),
+                            s,
+                            st.keys_panel.credentials(),
+                        );
+                    }
                     let auto_accept = util::ssh_auto_accept_keys();
                     let verifier = Arc::new(UiHostKeyVerifier {
                         weak_ui: weak.clone(),
@@ -1242,6 +1253,16 @@ pub(super) fn launch_saved_connection(
             };
             match resolved {
                 Ok(auth) => {
+                    #[cfg(debug_assertions)]
+                    {
+                        let st = state.borrow();
+                        log_rdp_launch_auth(
+                            conn,
+                            st.conn_tree.groups(),
+                            s,
+                            st.keys_panel.credentials(),
+                        );
+                    }
                     let auto_accept = util::rdp_auto_accept_certs();
                     let verifier = Arc::new(UiCertVerifier {
                         weak_ui: weak.clone(),
@@ -1690,6 +1711,85 @@ pub(super) fn resolve_rdp_auth(
         password,
         domain: settings.domain.clone(),
     })
+}
+
+/// fix-connect-credential-logging: debug-build-only diagnostic that logs the
+/// *non-secret* auth context a successfully-resolved SSH launch is about to
+/// use -- which credential (object name + id) or fallback source
+/// (`ssh-agent`), and which username, are actually being handed to
+/// [`cm_session::SessionProvider::connect_ssh`]. Fires from every launch path
+/// that goes through [`resolve_ssh_auth`]: `launch_saved_connection` (tree
+/// click / `CONMAN_TREE_AUTOLAUNCH` / Launchpad) and `connect_in_split`
+/// (`controller/panes.rs`).
+///
+/// ABSOLUTE RULE: never log the password/secret/passphrase/key material --
+/// only the credential's name/id, the resolved username, and connection
+/// metadata (host/port). `#[cfg(debug_assertions)]`-gated (definition and
+/// every call site) so this -- and its `info!` line -- never exists in a
+/// release build, regardless of `CONMAN_LOG`.
+#[cfg(debug_assertions)]
+pub(super) fn log_ssh_launch_auth(
+    conn: &Connection,
+    groups: &[Group],
+    settings: &SshSettings,
+    credentials: &[cm_core::Credential],
+) {
+    let cred_source = if matches!(settings.auth_method, SshAuthMethod::Agent) {
+        "ssh-agent".to_owned()
+    } else {
+        match cm_core::resolve_effective_credential(conn, groups) {
+            Some(id) => format!(
+                "object:{}#{}",
+                KeysPanel::cred_display_name(Some(id), credentials),
+                id.get()
+            ),
+            // Unreachable in practice: resolve_ssh_auth already errors out
+            // with NoCredentialAssigned before returning Ok(auth) here.
+            None => "none".to_owned(),
+        }
+    };
+    tracing::info!(
+        conn = %conn.name,
+        kind = "ssh",
+        host = %settings.host,
+        port = settings.port,
+        cred_source = %cred_source,
+        username = %settings.username,
+        "launching connection"
+    );
+}
+
+/// RDP counterpart to [`log_ssh_launch_auth`] -- same rule, plus `domain`
+/// (RDP-specific auth context). `username`/`domain` come from the
+/// connection's own settings, never the credential (see [`resolve_rdp_auth`]
+/// -- the credential holds only the password secret).
+#[cfg(debug_assertions)]
+pub(super) fn log_rdp_launch_auth(
+    conn: &Connection,
+    groups: &[Group],
+    settings: &RdpSettings,
+    credentials: &[cm_core::Credential],
+) {
+    let cred_source = match cm_core::resolve_effective_credential(conn, groups) {
+        Some(id) => format!(
+            "object:{}#{}",
+            KeysPanel::cred_display_name(Some(id), credentials),
+            id.get()
+        ),
+        // Unreachable in practice: resolve_rdp_auth already errors out with
+        // NoCredentialAssigned before returning Ok(auth) here.
+        None => "none".to_owned(),
+    };
+    tracing::info!(
+        conn = %conn.name,
+        kind = "rdp",
+        host = %settings.host,
+        port = settings.port,
+        cred_source = %cred_source,
+        username = %settings.username.clone().unwrap_or_default(),
+        domain = %settings.domain.clone().unwrap_or_default(),
+        "launching connection"
+    );
 }
 
 /// Sets the error-overlay UI state for `reason` -- shared by the synchronous
