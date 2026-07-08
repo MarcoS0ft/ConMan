@@ -866,6 +866,20 @@ async fn drive_inner(
         return Err(RdpError::CredentialsRequired);
     }
 
+    // fix-connect-credential-logging: debug-build-only diagnostic for the
+    // effective username/domain actually handed to CredSSP/NLA finalize --
+    // NEVER the password (not included below; `connector_config`/`auth` are
+    // deliberately not Debug-dumped even though `Secret`'s own Debug impl
+    // redacts, to keep this an explicit, auditable allowlist of fields).
+    #[cfg(debug_assertions)]
+    tracing::info!(
+        username = %auth.username,
+        domain = %auth.domain.clone().unwrap_or_else(|| cfg.domain.clone().unwrap_or_default()),
+        host = %cfg.host,
+        port = cfg.port,
+        "rdp: authenticating (CredSSP/NLA finalize)"
+    );
+
     // `connect_finalize` (credssp build) takes:
     //   upgraded, connector, &mut framed, network_client, server_name,
     //   server_public_key, kerberos_config

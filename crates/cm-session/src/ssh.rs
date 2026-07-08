@@ -577,6 +577,17 @@ async fn drive_inner(
             }
         };
 
+    // fix-connect-credential-logging: debug-build-only diagnostic for the
+    // effective username actually handed to SSH auth. NEVER the
+    // password/key/passphrase carried in `auth` -- only the username.
+    #[cfg(debug_assertions)]
+    tracing::info!(
+        username = %cfg.username,
+        host = %cfg.host,
+        port = cfg.port,
+        "ssh: authenticating"
+    );
+
     if !authenticate(&mut handle, &cfg.username, auth).await? {
         return Err(SshError::Auth("all methods rejected".to_owned()));
     }
