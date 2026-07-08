@@ -910,6 +910,17 @@ export component AppWindow inherits Window {
     in-out property <int>   accent-index: 0;
     in-out property <bool>  dark-mode  <=> Theme.dark-mode;
     in-out property <color> accent     <=> Theme.accent;
+    // Keep std-widgets' native styling (LineEdit, ComboBox, ...) in sync with
+    // the app's own dark/light token switch. `Theme.dark-mode` is our own
+    // global and does NOT by itself affect native-widget styling -- that's
+    // driven by std-widgets' `Palette.color-scheme`. Without this, inputs
+    // (e.g. the profile editor's LineEdits, P7.2) keep rendering with the
+    // environment's default scheme even after the user picks Dark/Light in
+    // Settings, or after startup restores a persisted dark/light choice
+    // (P6.17 gap V2).
+    changed dark-mode => {
+        Palette.color-scheme = self.dark-mode ? ColorScheme.dark : ColorScheme.light;
+    }
     // Terminal defaults
     in-out property <int>    settings-font-size: 13;
     in-out property <string> settings-shell-path: "";
