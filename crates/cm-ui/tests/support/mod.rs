@@ -56,6 +56,23 @@ pub(crate) fn harness() -> (
     Arc<dyn ConnectionRepository>,
     Arc<MockSessionProvider>,
 ) {
+    harness_with(true)
+}
+
+/// P8.4: like [`harness`], but lets the caller pick `first_launch` --
+/// `suite_launchpad.rs` needs `false` to reach the Launchpad-fronted empty
+/// tab (`assemble`'s `if first_launch { open_local_tab } else if
+/// restore_snapshot.is_none() { open_empty_tab }` branch in
+/// `controller/mod.rs`); every other suite keeps using plain [`harness`]'s
+/// `true` (the simplest deterministic start, see this module's original
+/// doc).
+pub(crate) fn harness_with(
+    first_launch: bool,
+) -> (
+    TestHarness,
+    Arc<dyn ConnectionRepository>,
+    Arc<MockSessionProvider>,
+) {
     let repo: Arc<dyn ConnectionRepository> =
         Arc::new(SqliteRepository::open_in_memory().expect("open in-memory SqliteRepository"));
     let provider = MockSessionProvider::new();
@@ -64,7 +81,7 @@ pub(crate) fn harness() -> (
         secrets: Arc::new(NullCredentialStore),
         session_provider: provider.clone(),
         activation_rx: None,
-        first_launch: true,
+        first_launch,
     };
     let harness = cm_ui::build_for_test(config);
     // The testing backend's default window is 800x600 physical px
