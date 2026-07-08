@@ -12,6 +12,7 @@
 
 mod support;
 
+use slint::Model;
 use support::{find_by_id, harness_with, pump_ticks};
 
 #[test]
@@ -21,6 +22,7 @@ fn launchpad_suite() {
     empty_tab_shows_launchpad_while_connected();
     launchpad_quick_connect_opens_the_real_dialog();
     new_tab_button_opens_a_live_shell_not_launchpad();
+    empty_tab_is_titled_home_not_shell_n();
 }
 
 /// J1/W10: a non-first-launch start with nothing to restore lands on the
@@ -80,5 +82,40 @@ fn new_tab_button_opens_a_live_shell_not_launchpad() {
     assert!(
         !h.ui.get_launchpad_open(),
         "the new tab opened by the + button must be a live shell, not another Launchpad"
+    );
+}
+
+/// BUG-home-tab-shell-title: the Launchpad-fronted empty/home tab is not a
+/// shell the user asked to open, so its tab-strip label must read "Home",
+/// never fall through to the "shell N" numbering real local-terminal tabs
+/// use (`tabs.rs::spawn_local_tab`). A subsequently-opened *real* local-shell
+/// tab must still get that "shell N" label untouched.
+fn empty_tab_is_titled_home_not_shell_n() {
+    let (h, _repo, _provider) = harness_with(false);
+    pump_ticks(1);
+    assert!(h.ui.get_launchpad_open(), "starts on the Launchpad tab");
+
+    let home_title =
+        h.ui.get_tabs()
+            .row_data(0)
+            .expect("home tab row")
+            .title
+            .to_string();
+    assert_eq!(
+        home_title, "Home",
+        "the Launchpad-fronted empty tab must be titled 'Home', not a 'shell N' label"
+    );
+
+    find_by_id(&h.ui, "AppWindow::new-tab-btn").invoke_accessible_default_action();
+    pump_ticks(1);
+    let real_shell_title =
+        h.ui.get_tabs()
+            .row_data(1)
+            .expect("real shell tab row")
+            .title
+            .to_string();
+    assert!(
+        real_shell_title.starts_with("shell "),
+        "a real local-shell tab opened afterwards must keep its 'shell N' label, got {real_shell_title:?}"
     );
 }
