@@ -32,6 +32,10 @@ export component ConnectingOverlay inherits Rectangle {
     in property <string> kind: "session";
     // Spinner state: 0-7 cycles clockwise through eight orbital dot positions.
     property <int> spin-tick: 0;
+    // P7.3 (win-ui-investigation #4): an explicit way to abort a slow/held
+    // connect and return, instead of relying solely on the tab's own ✕. Wired
+    // in app.slint to the same `close-tab` path the tab close button uses.
+    callback cancel();
 
     background: Theme.color-terminal-bg;
 
@@ -117,6 +121,15 @@ export component ConnectingOverlay inherits Rectangle {
                 color: Theme.color-text;
                 font-size: Theme.font-mono;
                 font-family: Theme.font-family-mono;
+            }
+        }
+        // P7.3: Cancel affordance — aborts the held connect and returns
+        // (closes this tab via the same path as the tab strip's ✕).
+        HorizontalLayout {
+            alignment: center;
+            SecondaryButton {
+                text: "Cancel";
+                clicked => { root.cancel(); }
             }
         }
     }
