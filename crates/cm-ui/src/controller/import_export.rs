@@ -13,6 +13,13 @@
 //!   `Path` directly. This is the headless seam the task spec asks for: tests
 //!   drive these to assert the produced JSON excludes secrets and that import
 //!   round-trips through a fresh repo.
+//!
+//! **P9.2:** `import_from_path` now dispatches on extension: `.rjson`
+//! (RoyalTS) routes through the new `cm_storage::import` foreign-format
+//! framework; `.json` keeps calling `json_io::import_from_json` directly,
+//! byte-for-byte as before this task — see [`ImportOutcome`] for the shared
+//! result shape (adds a warning count alongside the pre-existing stats /
+//! skipped-secrets pair).
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -79,8 +86,28 @@ pub(super) fn export_to_path(repo: &dyn ConnectionRepository, path: &Path) -> Re
     std::fs::write(path, json).map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
-/// Import `path` into `repo` (additive; see `cm_storage::json_io`'s module
-/// docs for full semantics — never changed here, consumed as-is).
+/// Shared result shape for [`import_from_path`], covering both the native
+/// `.json` path and any `cm_storage::import` foreign-format path (`.rjson`
+/// today). `warnings` is `0` for the native path (it never produces any).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ImportOutcome {
+    pub(super) stats: ImportStats,
+    /// Secrets present in the file that were *not* written to the keychain
+    /// — see the doc comment below for how this is computed.
+    pub(super) skipped_secrets: usize,
+    /// Counted foreign-format warnings (skipped node kinds, etc — P9.2).
+    /// Always `0` for the native `.json` path.
+    pub(super) warnings: usize,
+}
+
+/// Import `path` into `repo`, dispatching by extension:
+///
+/// - `.rjson` (RoyalTS, P9.2) routes through `cm_storage::import`'s
+///   foreign-format framework (parses to an `ExportEnvelope`, then the same
+///   `cm_storage::import()` seam as the native path).
+/// - anything else falls through to the native `.json` envelope path
+///   (additive; see `cm_storage::json_io`'s module docs for full semantics
+///   — **never changed here**, consumed as-is), exactly as before this task.
 ///
 /// Returns the import stats plus how many secrets embedded in the file (if
 /// any) were *not* written to the keychain — the "any skipped" half of the
@@ -92,7 +119,26 @@ pub(super) fn import_from_path(
     path: &Path,
     repo: &dyn ConnectionRepository,
     secrets: &dyn CredentialStore,
-) -> Result<(ImportStats, usize), String> {
+) -> Result<ImportOutcome, String> {
+    let is_royalts = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("rjson"));
+
+    if is_royalts {
+        let outcome = cm_storage::import::import_from_path(path, repo, Some(secrets))
+            .map_err(|e| format!("import failed: {e}"))?;
+        let skipped_secrets = outcome
+            .secrets_attempted
+            .saturating_sub(outcome.stats.secrets_imported);
+        return Ok(ImportOutcome {
+            stats: outcome.stats,
+            skipped_secrets,
+            warnings: outcome.warnings.len(),
+        });
+    }
+
+    // ---- native `.json` path: byte-for-byte as before this task ----------
     let json = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     if json.trim().is_empty() {
@@ -104,18 +150,29 @@ pub(super) fn import_from_path(
     let stats = cm_storage::import(&envelope, repo, Some(secrets))
         .map_err(|e| format!("import failed: {e}"))?;
     let skipped_secrets = total_secrets.saturating_sub(stats.secrets_imported);
-    Ok((stats, skipped_secrets))
+    Ok(ImportOutcome {
+        stats,
+        skipped_secrets,
+        warnings: 0,
+    })
 }
 
 /// Build the post-import summary/conflict toast message: counts imported,
-/// plus a note of any secrets present in the file that were skipped.
-fn summary_message(stats: &ImportStats, skipped_secrets: usize) -> String {
+/// plus a note of any secrets present in the file that were skipped, plus
+/// (P9.2) a note of any foreign-format warnings (e.g. RoyalTS nodes skipped
+/// as unsupported).
+fn summary_message(outcome: &ImportOutcome) -> String {
     let mut msg = format!(
         "Imported {} group(s), {} connection(s), {} credential(s)",
-        stats.groups_imported, stats.connections_imported, stats.credentials_imported
+        outcome.stats.groups_imported,
+        outcome.stats.connections_imported,
+        outcome.stats.credentials_imported
     );
-    if skipped_secrets > 0 {
-        msg.push_str(&format!(" — {skipped_secrets} secret(s) skipped"));
+    if outcome.skipped_secrets > 0 {
+        msg.push_str(&format!(" — {} secret(s) skipped", outcome.skipped_secrets));
+    }
+    if outcome.warnings > 0 {
+        msg.push_str(&format!(" — {} warning(s)", outcome.warnings));
     }
     msg
 }
@@ -180,6 +237,10 @@ pub(super) fn import_via_dialog(
     let Some(path) = rfd::FileDialog::new()
         .set_title("Import connections")
         .add_filter("JSON", &["json"])
+        // P9.2: RoyalTS plaintext export format, routed through
+        // `cm_storage::import::royalts` in `import_from_path` above.
+        .add_filter("RoyalTS", &["rjson"])
+        .add_filter("All supported", &["json", "rjson"])
         .pick_file()
     else {
         return; // user cancelled
@@ -199,9 +260,9 @@ pub(super) fn run_import(
     path: &Path,
 ) {
     match import_from_path(path, io.repo.as_ref(), io.secrets.as_ref()) {
-        Ok((stats, skipped_secrets)) => {
+        Ok(outcome) => {
             refresh_after_import(io, state, ui);
-            io.push_toast(summary_message(&stats, skipped_secrets), TOAST_SUCCESS);
+            io.push_toast(summary_message(&outcome), TOAST_SUCCESS);
         }
         Err(e) => {
             tracing::warn!("import failed: {e}");
@@ -288,16 +349,18 @@ mod tests {
 
         let dst_repo = SqliteRepository::open_in_memory().expect("open dest db");
         let mock_store = MockStore::default();
-        let (stats, skipped_secrets) =
+        let outcome =
             import_from_path(&path, &dst_repo, &mock_store).expect("import should succeed");
 
-        assert_eq!(stats.groups_imported, 1);
-        assert_eq!(stats.connections_imported, 1);
-        assert_eq!(stats.credentials_imported, 1);
+        assert_eq!(outcome.stats.groups_imported, 1);
+        assert_eq!(outcome.stats.connections_imported, 1);
+        assert_eq!(outcome.stats.credentials_imported, 1);
         // The export carried no secrets (excluded by default), so nothing to
         // skip and nothing written to the keychain on import either.
-        assert_eq!(stats.secrets_imported, 0);
-        assert_eq!(skipped_secrets, 0);
+        assert_eq!(outcome.stats.secrets_imported, 0);
+        assert_eq!(outcome.skipped_secrets, 0);
+        // The native `.json` path never produces foreign-format warnings.
+        assert_eq!(outcome.warnings, 0);
 
         let groups = dst_repo.list_groups().expect("list groups");
         assert_eq!(groups.len(), 1);
@@ -327,6 +390,39 @@ mod tests {
         let mock_store = MockStore::default();
         let err = import_from_path(&path, &repo, &mock_store).unwrap_err();
         assert!(err.contains("empty"));
+    }
+
+    /// P9.2: `.rjson` (RoyalTS) dispatch — `import_from_path` routes to
+    /// `cm_storage::import` instead of the native JSON path, and the
+    /// warning count (the Web/VNC node skipped by the shared fixture) flows
+    /// through to the returned [`ImportOutcome`].
+    #[test]
+    fn import_from_path_dispatches_rjson_extension_to_the_royalts_importer() {
+        // Shared with `cm-storage`'s own fixture-driven parser tests — a
+        // sanitized, hand-authored sample with no real hosts/secrets.
+        let fixture_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../cm-storage/tests/fixtures/royalts_sample.rjson"
+        );
+        let repo = SqliteRepository::open_in_memory().expect("open db");
+        let mock_store = MockStore::default();
+
+        let outcome = import_from_path(fixture_path.as_ref(), &repo, &mock_store)
+            .expect("royalts import should succeed");
+
+        // Folders -> groups, RDP + SSH connections, the deduped credential
+        // and its plaintext secret, and the skipped VNC node all resolved
+        // via the shared cm-storage seam — see that crate's tests for the
+        // detailed field-level assertions; here we only need to confirm the
+        // *dispatch* wired the counts through to the UI-facing outcome.
+        assert_eq!(outcome.stats.groups_imported, 3); // Production, Web Tier, Legacy Family Folder
+        assert_eq!(outcome.stats.credentials_imported, 1); // deduped
+        assert_eq!(outcome.stats.secrets_imported, 1);
+        assert_eq!(outcome.skipped_secrets, 0);
+        assert_eq!(outcome.warnings, 1); // the skipped VNC node
+
+        let msg = summary_message(&outcome);
+        assert!(msg.contains("1 warning(s)"));
     }
 
     /// Builds an [`ImportExportHandles`] over an in-memory repo/mock keychain
@@ -383,14 +479,41 @@ mod tests {
             secrets_imported: 1,
             settings_imported: 0,
         };
-        let msg = summary_message(&stats, 1);
+        let msg = summary_message(&ImportOutcome {
+            stats: stats.clone(),
+            skipped_secrets: 1,
+            warnings: 0,
+        });
         assert!(msg.contains("1 group(s)"));
         assert!(msg.contains("3 connection(s)"));
         assert!(msg.contains("2 credential(s)"));
         assert!(msg.contains("1 secret(s) skipped"));
+        assert!(!msg.contains("warning"));
 
-        let clean = summary_message(&stats, 0);
+        let clean = summary_message(&ImportOutcome {
+            stats: stats.clone(),
+            skipped_secrets: 0,
+            warnings: 0,
+        });
         assert!(!clean.contains("skipped"));
+    }
+
+    #[test]
+    fn summary_message_reports_foreign_import_warnings() {
+        let stats = ImportStats {
+            credential_folders_imported: 0,
+            credentials_imported: 1,
+            groups_imported: 1,
+            connections_imported: 2,
+            secrets_imported: 1,
+            settings_imported: 0,
+        };
+        let msg = summary_message(&ImportOutcome {
+            stats,
+            skipped_secrets: 0,
+            warnings: 2,
+        });
+        assert!(msg.contains("2 warning(s)"));
     }
 
     // ---- tiny test helper ---------------------------------------------------
