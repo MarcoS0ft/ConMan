@@ -436,6 +436,17 @@ fn wire_delete_conn_row(ctx: &Ctx) {
     });
 }
 
+/// Item (d): after a save, should the connection's OLD Inline secret (if
+/// any) be deleted from the keychain? Only when it WAS Inline before this
+/// save AND is no longer Inline now -- staying Inline (even across a
+/// blank/untouched password field) must never touch the keychain entry it
+/// still owns. Storage already deletes `conn:<id>:password` when the
+/// connection itself is deleted (P9.6-A Decision 2); this is specifically the
+/// mode-switch case, which is cm-ui's to handle.
+pub(super) fn should_delete_inline_secret(old_was_inline: bool, new_cred_mode: i32) -> bool {
+    old_was_inline && new_cred_mode != 1
+}
+
 /// P9.6-A Phase C: the `CredentialSource` to save, from the mode selector +
 /// its mode-specific fields. `typed_password_present` is whether the caller's
 /// (already-captured, about-to-be-cleared) transient password field was
@@ -522,6 +533,14 @@ fn wire_profile_save(ctx: &Ctx) {
                     .map(|c| c.created_at)
                     .unwrap_or(now)
             };
+            // Item (d) handoff: was this connection Inline *before* this save?
+            // (`form.id == 0` -- a brand-new connection -- can't have been.)
+            let old_was_inline = {
+                let st = state.borrow();
+                st.conn_tree.conn_by_id(form.id as i64).is_some_and(|c| {
+                    matches!(c.credential_source, Some(CredentialSource::Inline { .. }))
+                })
+            };
             let typed_password = form.inline_password.to_string();
             let credential_source = credential_source_from_form(
                 form.cred_mode,
@@ -570,6 +589,14 @@ fn wire_profile_save(ctx: &Ctx) {
                     tracing::warn!("inline keychain store failed: {e}");
                 }
             }
+            // Item (d): switching AWAY from Inline deletes its keychain entry.
+            if should_delete_inline_secret(old_was_inline, form.cred_mode) {
+                let key_ref = CredentialRef::for_connection(saved_id, CredentialPurpose::Password);
+                if let Err(e) = secrets_ps.delete(&key_ref) {
+                    tracing::warn!("inline keychain delete-on-switch failed: {e}");
+                }
+            }
+
             ui.set_profile_editor_open(false);
             let mut st = state.borrow_mut();
             if let Err(e) = st.conn_tree.reload(repo_ps.as_ref()) {
@@ -1498,5 +1525,27 @@ mod tests {
                 has_secret: false,
             })
         );
+    }
+
+    // -- should_delete_inline_secret (item d) ----------------------------------
+
+    #[test]
+    fn should_delete_inline_secret_switching_away_from_inline() {
+        assert!(should_delete_inline_secret(true, 0)); // -> Reference
+        assert!(should_delete_inline_secret(true, 2)); // -> Prompt
+    }
+
+    #[test]
+    fn should_delete_inline_secret_staying_inline_never_deletes() {
+        // Even across a blank/untouched password field on this save -- the
+        // keychain entry it already owns must survive.
+        assert!(!should_delete_inline_secret(true, 1));
+    }
+
+    #[test]
+    fn should_delete_inline_secret_was_not_inline_nothing_to_delete() {
+        assert!(!should_delete_inline_secret(false, 0));
+        assert!(!should_delete_inline_secret(false, 1));
+        assert!(!should_delete_inline_secret(false, 2));
     }
 }
