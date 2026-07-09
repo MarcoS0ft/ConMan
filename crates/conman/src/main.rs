@@ -179,12 +179,25 @@ fn main() -> ExitCode {
     // that a subscriber exists and thread-spawning is unrestricted — the
     // env-var-setting half already ran above, before `logging::init()`. A
     // `None` here (agent-mode disabled, or the feature isn't compiled in)
-    // means no listener at all. `_agent_mode_handle` isn't consumed yet —
-    // see `agent_mode`'s module doc for the P8.6-B seam this is left for.
+    // means no listener at all.
     #[cfg(feature = "agent-mode")]
-    let _agent_mode_handle = agent_mode_prepared.map(agent_mode::spawn);
+    let agent_mode_handle = agent_mode_prepared.map(agent_mode::spawn);
 
-    let config = match build_config(repo, activation_rx) {
+    // P8.6-B: mirror the handle's cm-ui-relevant fields into the
+    // cm-ui-owned `AgentModeConfig` (cm-ui cannot depend on conman's
+    // `agent_mode::AgentModeHandle` directly -- see that type's doc comment).
+    // Always constructed (as `None` outside the feature) so `build_config`'s
+    // signature stays the same regardless of which features this binary was
+    // built with.
+    #[cfg(feature = "agent-mode")]
+    let agent_mode_config = agent_mode_handle.map(|h| cm_ui::AgentModeConfig {
+        external_port: h.external_port,
+        scopes: h.scopes,
+    });
+    #[cfg(not(feature = "agent-mode"))]
+    let agent_mode_config: Option<cm_ui::AgentModeConfig> = None;
+
+    let config = match build_config(repo, activation_rx, agent_mode_config) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("fatal: failed to initialise storage: {e}");
@@ -248,9 +261,13 @@ fn init_keyring() {
 ///
 /// `activation_rx` (P6.16) is threaded straight through from the
 /// single-instance guard acquired in `main` into the returned [`AppConfig`].
+///
+/// `agent_mode` (P8.6-B) is likewise threaded straight through -- `None`
+/// unless `main` built (and the user enabled) the agent-mode proxy.
 fn build_config(
     repo: SqliteRepository,
     activation_rx: Option<Receiver<()>>,
+    agent_mode: Option<cm_ui::AgentModeConfig>,
 ) -> Result<AppConfig, Box<dyn std::error::Error>> {
     // Seed demo data only on the very first launch, gated on a persisted flag.
     // Seed demo data only when the DB is genuinely empty (no flag AND no groups).
@@ -300,6 +317,7 @@ fn build_config(
         session_provider,
         activation_rx,
         first_launch,
+        agent_mode,
     })
 }
 
@@ -470,7 +488,7 @@ mod demo_seed_gating_tests {
         let db_path = dir.path().join("ds-test.sqlite");
         let repo = SqliteRepository::open(&db_path).expect("open fresh db");
 
-        let config = build_config(repo, None).expect("build_config");
+        let config = build_config(repo, None, None).expect("build_config");
 
         assert!(
             config.first_launch,
@@ -492,7 +510,7 @@ mod demo_seed_gating_tests {
         let db_path = dir.path().join("ds-test.sqlite");
         let repo = SqliteRepository::open(&db_path).expect("open fresh db");
 
-        let config = build_config(repo, None).expect("build_config");
+        let config = build_config(repo, None, None).expect("build_config");
 
         assert!(config.first_launch, "brand-new DB must report first launch");
         let groups = config.repo.list_groups().expect("list_groups");

@@ -22,21 +22,21 @@
 //!    spawns are unrestricted from then on), takes the [`Prepared`] value
 //!    [`prepare`] returned and starts the accept-loop thread.
 //!
-//! ## The P8.6-B seam (not wired yet — noted for ui-dev)
-//! [`spawn`] returns an [`AgentModeHandle`] carrying the external/internal
-//! ports and an `Arc<RwLock<ScopeSet>>` the Settings UI's live scope-reload
-//! is meant to write into (P8.6-impl.md's "Reload behavior"). `main.rs`
-//! currently just holds this value without threading it anywhere — `cm-ui`
-//! cannot reach back into `conman` (the dependency points the other way), so
-//! P8.6-B needs to add a slot for this handle to `cm_ui::AppConfig` (the
-//! same injection pattern already used for `secrets`/`session_provider`) so
-//! the Settings section can (a) display the listening port + loopback host,
-//! (b) show the persistent active indicator, and (c) write a new `ScopeSet`
-//! into the handle's lock when the user changes a scope checkbox. Turning
-//! `automation.enabled` off at runtime does **not** stop an already-running
-//! listener this session (only scope changes are live-reloadable per the
-//! spec) — full disable takes effect on next launch; flagged for Fable/user
-//! review alongside the rest of this design.
+//! ## The P8.6-B seam (wired)
+//! [`spawn`] returns an [`AgentModeHandle`] carrying the external port and an
+//! `Arc<RwLock<ScopeSet>>` the Settings UI's live scope-reload writes into
+//! (P8.6-impl.md's "Reload behavior"). `main.rs` mirrors the
+//! cm-ui-relevant fields into `cm_ui::AgentModeConfig` (`cm-ui` cannot depend
+//! on `conman` directly -- the dependency points the other way) and threads
+//! it into `AppConfig` (the same injection pattern already used for
+//! `secrets`/`session_provider`), so the Settings section can (a) display
+//! the listening port + loopback host, (b) show the persistent active
+//! indicator, and (c) write a new `ScopeSet` into the handle's lock when the
+//! user changes a scope checkbox. Turning `automation.enabled` off at
+//! runtime does **not** stop an already-running listener this session (only
+//! scope changes are live-reloadable per the spec) — full disable takes
+//! effect on next launch; flagged for Fable/user review alongside the rest
+//! of this design.
 
 mod proxy;
 
@@ -57,11 +57,9 @@ pub(crate) struct Prepared {
 /// Returned by [`spawn`] — see the module doc's "P8.6-B seam" section for
 /// what this is for.
 pub(crate) struct AgentModeHandle {
-    #[allow(dead_code)] // consumed by P8.6-B once AppConfig carries this handle
     pub(crate) external_port: u16,
-    #[allow(dead_code)] // consumed by P8.6-B once AppConfig carries this handle
+    #[allow(dead_code)] // only used for the startup log line above; not surfaced to cm-ui
     pub(crate) internal_port: u16,
-    #[allow(dead_code)] // consumed by P8.6-B's Settings-reload path
     pub(crate) scopes: Arc<RwLock<ScopeSet>>,
 }
 

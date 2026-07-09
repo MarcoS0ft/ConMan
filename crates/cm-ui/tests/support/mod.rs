@@ -82,6 +82,10 @@ pub(crate) fn harness_with(
         session_provider: provider.clone(),
         activation_rx: None,
         first_launch,
+        // P8.6-B: no suite drives the agent-mode proxy (that's conman's own
+        // process, out of scope for this in-process harness) -- every
+        // scenario runs as if agent-mode were off.
+        agent_mode: None,
     };
     let harness = cm_ui::build_for_test(config);
     // The testing backend's default window is 800x600 physical px
