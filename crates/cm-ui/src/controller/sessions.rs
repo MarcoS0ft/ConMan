@@ -2939,7 +2939,7 @@ mod tests {
             "conn".to_owned(),
             ConnectionKind::Ssh,
             ConnectionSettings::Ssh(ssh_settings(auth_method)),
-            credential.map(CredentialId::new),
+            credential.map(|id| cm_core::CredentialSource::Object(CredentialId::new(id))),
             0,
             0,
             0,
@@ -2959,7 +2959,7 @@ mod tests {
                 domain: Some("CORP".to_owned()),
                 ..RdpSettings::default()
             }),
-            credential.map(CredentialId::new),
+            credential.map(|id| cm_core::CredentialSource::Object(CredentialId::new(id))),
             0,
             0,
             0,
@@ -2985,7 +2985,7 @@ mod tests {
                 domain: None,
                 ..RdpSettings::default()
             }),
-            credential.map(CredentialId::new),
+            credential.map(|id| cm_core::CredentialSource::Object(CredentialId::new(id))),
             0,
             0,
             0,

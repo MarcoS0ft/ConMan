@@ -506,7 +506,7 @@ mod tests {
             "web-01".to_string(),
             ConnectionKind::LocalTerminal,
             ConnectionSettings::Local(LocalSettings::default()),
-            Some(cred_id),
+            Some(cm_core::CredentialSource::Object(cred_id)),
             0,
             0,
             0,
