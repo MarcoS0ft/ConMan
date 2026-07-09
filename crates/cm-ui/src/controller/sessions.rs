@@ -2375,6 +2375,28 @@ pub(super) fn reconnect_rdp_tab(
     // connect stored in `RdpConnectInfo`.
     apply_pane_resolution(state, &mut settings);
     let identity = format!("{}@{}:{}", auth.username, settings.host, settings.port);
+    // P8.6-B (Fable review fixup): Reconnect is an execute-scope action too --
+    // an agent driving the ErrorOverlay's "Reconnect" button re-establishes a
+    // live session with stored credentials, same as a fresh launch. See
+    // `open_ssh_tab`'s identical comment for the gate's rationale/timing
+    // proof. The old session is already shut down by this point (the caller,
+    // `wire_reconnect`, does that before dispatching), so on a block the tab
+    // just stays in the Failed state `fail_reconnect_in_place` leaves it in --
+    // never a silent no-op.
+    if agent_mode_execute_blocked(&state.borrow().agent_mode) {
+        tracing::warn!(
+            conn = %identity,
+            "agent mode: reconnect blocked while automation is active without execute scope"
+        );
+        fail_reconnect_in_place(
+            state,
+            tab_model,
+            ui,
+            tab_idx,
+            "agent mode: execute scope not granted".to_string(),
+        );
+        return;
+    }
     let auth_source = match provenance {
         AuthProvenance::Direct => RdpAuthSource::Direct(auth.clone()),
         AuthProvenance::Credential(id) => RdpAuthSource::Credential(id),
@@ -2436,6 +2458,22 @@ pub(super) fn reconnect_ssh_tab(
 ) {
     let size = state.borrow().current_grid();
     let identity = format!("{}@{}:{}", settings.username, settings.host, settings.port);
+    // P8.6-B (Fable review fixup): see `reconnect_rdp_tab`'s identical
+    // comment -- Reconnect is an execute-scope action, gated the same way.
+    if agent_mode_execute_blocked(&state.borrow().agent_mode) {
+        tracing::warn!(
+            conn = %identity,
+            "agent mode: reconnect blocked while automation is active without execute scope"
+        );
+        fail_reconnect_in_place(
+            state,
+            tab_model,
+            ui,
+            tab_idx,
+            "agent mode: execute scope not granted".to_string(),
+        );
+        return;
+    }
     let auth_source = match provenance {
         AuthProvenance::Direct => SshAuthSource::Direct(auth.clone()),
         AuthProvenance::Credential(id) => SshAuthSource::Credential(id),

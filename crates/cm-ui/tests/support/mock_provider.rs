@@ -7,6 +7,7 @@
 //! "then resolves to failure" scenarios deterministic and instant: nothing
 //! ever actually connects, so there is nothing to race or wait on.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 
@@ -69,12 +70,21 @@ impl Session for ScriptedSession {
 ///   `Arc` from the test to move the session through its lifecycle.
 pub(crate) struct MockSessionProvider {
     next_remote_status: Mutex<Arc<Mutex<SessionStatus>>>,
+    // P8.6-B (Fable review fixup): the execute-gate tests need to prove a
+    // *blocked* reconnect/connect-in-split never dials the provider at all --
+    // not just that the resulting tab looks failed (which a normal connect
+    // error would also produce). A plain call count is enough; nothing needs
+    // the individual call's arguments.
+    ssh_connect_calls: AtomicUsize,
+    rdp_connect_calls: AtomicUsize,
 }
 
 impl MockSessionProvider {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             next_remote_status: Mutex::new(Arc::new(Mutex::new(SessionStatus::Connected))),
+            ssh_connect_calls: AtomicUsize::new(0),
+            rdp_connect_calls: AtomicUsize::new(0),
         })
     }
 
@@ -86,6 +96,18 @@ impl MockSessionProvider {
             .next_remote_status
             .lock()
             .expect("MockSessionProvider.next_remote_status poisoned") = cell;
+    }
+
+    /// Total `connect_ssh` calls handled so far -- the execute-gate tests'
+    /// proof that a blocked reconnect/connect-in-split never reached the
+    /// provider.
+    pub(crate) fn ssh_connect_count(&self) -> usize {
+        self.ssh_connect_calls.load(Ordering::SeqCst)
+    }
+
+    /// RDP counterpart to [`Self::ssh_connect_count`].
+    pub(crate) fn rdp_connect_count(&self) -> usize {
+        self.rdp_connect_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -107,6 +129,7 @@ impl SessionProvider for MockSessionProvider {
         _verifier: Arc<dyn HostKeyVerifier>,
         _size: TerminalSize,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
+        self.ssh_connect_calls.fetch_add(1, Ordering::SeqCst);
         let cell = self
             .next_remote_status
             .lock()
@@ -121,6 +144,7 @@ impl SessionProvider for MockSessionProvider {
         _auth: RdpAuthInput,
         _verifier: Arc<dyn CertVerifier>,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
+        self.rdp_connect_calls.fetch_add(1, Ordering::SeqCst);
         let cell = self
             .next_remote_status
             .lock()

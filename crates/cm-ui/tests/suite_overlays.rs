@@ -33,6 +33,7 @@ fn overlays_suite() {
     connecting_resolves_to_error_overlay_with_reconnect_and_edit();
     background_tab_failure_toasts_and_auto_expires();
     switching_tabs_shows_each_tabs_own_identity_not_the_others();
+    reconnect_is_refused_when_agent_mode_lacks_execute_scope();
 }
 
 fn toast_count(ui: &cm_ui::AppWindow) -> usize {
@@ -255,5 +256,61 @@ fn switching_tabs_shows_each_tabs_own_identity_not_the_others() {
         h.ui.get_session_identity().contains("host-b"),
         "switching to tab 2 (host-b) must show host-b's identity, not host-a's; got {:?}",
         h.ui.get_session_identity()
+    );
+}
+
+/// P8.6-B (Fable review fixup): Reconnect is an execute-scope action -- an
+/// agent driving the ErrorOverlay's "Reconnect" button re-establishes a live
+/// session with stored credentials, same as any fresh launch. Uses
+/// `support::harness_with_agent_mode` (every other suite in this file runs
+/// with agent-mode off), starting with NO write-tool interaction in flight
+/// (`agent_mode_fixture(0, ..., execute: false)`) so the seed quick-connect
+/// itself -- a stand-in for an earlier, unrelated connect -- goes through
+/// ungated, then flipping the shared `mcp_interaction_count` to 1 right
+/// before driving Reconnect, mirroring exactly what the real proxy's
+/// `McpInteractionGuard` does around an agent's `click_element` call: the
+/// adversarial case Fable's review flagged -- write is granted (so the click
+/// itself is never denied at the proxy layer, out of this in-process
+/// harness's reach anyway), execute is not.
+fn reconnect_is_refused_when_agent_mode_lacks_execute_scope() {
+    let agent_mode = support::agent_mode_fixture(0, true, true, false);
+    let interaction_count = agent_mode.mcp_interaction_count.clone();
+    let (h, _repo, provider) = support::harness_with_agent_mode(true, Some(agent_mode));
+    let cell = connect_ssh_via_quick_connect(&h, &provider, "mock-host");
+    assert_eq!(
+        provider.ssh_connect_count(),
+        1,
+        "seed: the initial quick-connect (no interaction in flight yet) must have \
+         dialed the provider exactly once"
+    );
+
+    *cell.lock().expect("cell poisoned") = SessionStatus::Failed("mock connect failure".into());
+    let resolved = pump_until(50, || h.ui.get_overlay_error());
+    assert!(
+        resolved,
+        "error overlay must appear before Reconnect can be driven at all"
+    );
+
+    // Simulate the agent's write-tool call landing on the Reconnect button:
+    // the proxy would have incremented this right before forwarding the
+    // click that triggers `on_reconnect`.
+    interaction_count.store(1, std::sync::atomic::Ordering::SeqCst);
+    find_by_id(&h.ui, "ErrorOverlay::error-reconnect-btn").invoke_accessible_default_action();
+    pump_ticks(1);
+
+    assert_eq!(
+        provider.ssh_connect_count(),
+        1,
+        "a blocked reconnect must never dial the provider a second time"
+    );
+    assert!(
+        h.ui.get_overlay_error(),
+        "the tab must stay in the Failed/error-overlay state, not silently succeed"
+    );
+    assert!(
+        h.ui.get_error_reason()
+            .contains("execute scope not granted"),
+        "the error overlay must surface the gate's own reason, got {:?}",
+        h.ui.get_error_reason()
     );
 }

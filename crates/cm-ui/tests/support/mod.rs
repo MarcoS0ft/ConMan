@@ -73,6 +73,26 @@ pub(crate) fn harness_with(
     Arc<dyn ConnectionRepository>,
     Arc<MockSessionProvider>,
 ) {
+    // P8.6-B: no suite drives the agent-mode proxy (that's conman's own
+    // process, out of scope for this in-process harness) -- every ordinary
+    // scenario runs as if agent-mode were off. See `harness_with_agent_mode`
+    // for the execute-gate suites, which need a live `AgentModeConfig`.
+    harness_with_agent_mode(first_launch, None)
+}
+
+/// Like [`harness_with`], but lets the caller install a live
+/// `cm_ui::AgentModeConfig` -- the P8.6-B execute-gate suites (Reconnect /
+/// "Connect in split") need this to exercise `agent_mode_execute_blocked`'s
+/// real call sites end to end, not just the pure decision function
+/// `controller::sessions` already unit-tests in isolation.
+pub(crate) fn harness_with_agent_mode(
+    first_launch: bool,
+    agent_mode: Option<cm_ui::AgentModeConfig>,
+) -> (
+    TestHarness,
+    Arc<dyn ConnectionRepository>,
+    Arc<MockSessionProvider>,
+) {
     let repo: Arc<dyn ConnectionRepository> =
         Arc::new(SqliteRepository::open_in_memory().expect("open in-memory SqliteRepository"));
     let provider = MockSessionProvider::new();
@@ -82,10 +102,7 @@ pub(crate) fn harness_with(
         session_provider: provider.clone(),
         activation_rx: None,
         first_launch,
-        // P8.6-B: no suite drives the agent-mode proxy (that's conman's own
-        // process, out of scope for this in-process harness) -- every
-        // scenario runs as if agent-mode were off.
-        agent_mode: None,
+        agent_mode,
     };
     let harness = cm_ui::build_for_test(config);
     // The testing backend's default window is 800x600 physical px
@@ -101,6 +118,31 @@ pub(crate) fn harness_with(
         .window()
         .set_size(slint::LogicalSize::new(1600.0, 1200.0));
     (harness, repo, provider)
+}
+
+/// Builds an `AgentModeConfig` with a permanently-elevated
+/// `mcp_interaction_count` (an agent write-tool call is "in flight" for the
+/// whole scenario, not just a real ~50ms window) and the given granted
+/// scopes -- mirrors `controller::sessions`'s own private
+/// `tests::agent_mode_fixture` (that module's unit tests cover the pure
+/// `agent_mode_execute_blocked` decision in isolation; this one lets the
+/// element suites drive the real Reconnect / "Connect in split" call sites
+/// end to end against the same scenario).
+pub(crate) fn agent_mode_fixture(
+    interaction_count: usize,
+    read: bool,
+    write: bool,
+    execute: bool,
+) -> cm_ui::AgentModeConfig {
+    cm_ui::AgentModeConfig {
+        external_port: 0,
+        scopes: Arc::new(std::sync::RwLock::new(cm_core::ScopeSet {
+            read,
+            write,
+            execute,
+        })),
+        mcp_interaction_count: Arc::new(std::sync::atomic::AtomicUsize::new(interaction_count)),
+    }
 }
 
 /// Finds a single element by its fully-qualified Slint id

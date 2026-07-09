@@ -29,6 +29,7 @@ fn panes_suite() {
     split_h_then_v_grows_pane_count();
     focus_move_updates_active_pane();
     broadcast_toggle_and_target_menu();
+    connect_in_split_is_refused_when_agent_mode_lacks_execute_scope();
 }
 
 fn active_tab_pane_count(h: &cm_ui::TestHarness) -> i32 {
@@ -129,5 +130,82 @@ fn broadcast_toggle_and_target_menu() {
         h.ui.get_broadcast_target_label().as_str(),
         "1 of 3 panes",
         "selecting exactly Pane 2 must produce an honest \"1 of 3 panes\" label"
+    );
+}
+
+/// P8.6-B (Fable review fixup): "Connect in split" establishes a live
+/// session with stored credentials exactly like a fresh launch, so it's an
+/// execute-scope action too -- gated identically to Reconnect (see
+/// `suite_overlays.rs`'s sibling test, which has the fuller comment on why
+/// `support::harness_with_agent_mode`/`agent_mode_fixture` exist, and on why
+/// the fixture starts with no interaction in flight and the shared counter
+/// is only flipped to 1 right before the gated action). Seeds one SSH
+/// connection via the real New-connection -> Save journey with
+/// `auth_method: Agent` so `resolve_ssh_auth` succeeds without needing any
+/// stored credential (keeps this scenario about the gate only, not
+/// credential resolution), then drives the exact callback the tree's
+/// "Connect in split" context-menu item calls
+/// (`on_connect_in_split_row` -- `controller::tree_ctl::wire_connect_in_split_row`).
+fn connect_in_split_is_refused_when_agent_mode_lacks_execute_scope() {
+    let agent_mode = support::agent_mode_fixture(0, true, true, false);
+    let interaction_count = agent_mode.mcp_interaction_count.clone();
+    let (h, repo, provider) = support::harness_with_agent_mode(true, Some(agent_mode));
+
+    h.ui.invoke_new_connection(0);
+    {
+        let mut form = h.ui.get_profile_form();
+        form.name = "Split Target".into();
+        form.host = "mock-split-host".into();
+        form.auth_method = 2; // Agent -- no stored credential needed to resolve.
+        h.ui.set_profile_form(form);
+    }
+    find_by_id(&h.ui, "ProfileEditor::profile-save-btn").invoke_accessible_default_action();
+    let saved = repo.list_connections().expect("list_connections");
+    let conn_id = saved
+        .iter()
+        .find(|c| c.name == "Split Target")
+        .expect("connection was saved")
+        .id
+        .get();
+
+    let pane_count_before = active_tab_pane_count(&h);
+    assert_eq!(
+        provider.ssh_connect_count(),
+        0,
+        "seed: no connect attempt yet"
+    );
+
+    // Simulate the agent's write-tool call landing on "Connect in split":
+    // the proxy would have incremented this right before forwarding the
+    // click that triggers `on_connect_in_split_row`.
+    interaction_count.store(1, std::sync::atomic::Ordering::SeqCst);
+    h.ui.invoke_connect_in_split_row(conn_id as i32);
+    pump_ticks(1);
+
+    assert_eq!(
+        provider.ssh_connect_count(),
+        0,
+        "a blocked connect-in-split must never dial the provider"
+    );
+    assert_eq!(
+        active_tab_pane_count(&h),
+        pane_count_before,
+        "a blocked connect-in-split must never commit a new pane"
+    );
+
+    let toasts = h.ui.get_toasts();
+    assert_eq!(
+        toasts.row_count(),
+        1,
+        "the refusal must surface as a toast -- there is no per-pane error overlay"
+    );
+    assert!(
+        toasts
+            .row_data(0)
+            .expect("toast row")
+            .message
+            .contains("execute scope not granted"),
+        "the toast must surface the gate's own reason, got {:?}",
+        toasts.row_data(0).map(|t| t.message)
     );
 }
