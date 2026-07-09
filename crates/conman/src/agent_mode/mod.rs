@@ -41,6 +41,7 @@
 mod proxy;
 
 use std::net::TcpListener;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 
 use cm_core::{ConnectionRepository, ScopeSet, SettingsService};
@@ -61,6 +62,12 @@ pub(crate) struct AgentModeHandle {
     #[allow(dead_code)] // only used for the startup log line above; not surfaced to cm-ui
     pub(crate) internal_port: u16,
     pub(crate) scopes: Arc<RwLock<ScopeSet>>,
+    /// P8.6-B item 4 (the execute-scope launch gate): mirrors 1:1 into
+    /// `cm_ui::AgentModeConfig::mcp_interaction_count` -- see that field's
+    /// doc comment for the full "why a counter, not a bool" + timing-proof
+    /// rationale. `proxy::run` increments/decrements the SAME `Arc` around
+    /// every forwarded write-scoped `tools/call`.
+    pub(crate) mcp_interaction_count: Arc<AtomicUsize>,
 }
 
 /// Binds the external (agent-facing) loopback listener and picks an internal
@@ -141,6 +148,7 @@ pub(crate) fn spawn(prepared: Prepared) -> AgentModeHandle {
         .map(|a| a.port())
         .unwrap_or(0);
     let scopes = Arc::new(RwLock::new(scopes));
+    let mcp_interaction_count = Arc::new(AtomicUsize::new(0));
 
     tracing::info!(
         external_port,
@@ -149,11 +157,20 @@ pub(crate) fn spawn(prepared: Prepared) -> AgentModeHandle {
     );
 
     let scopes_for_thread = Arc::clone(&scopes);
-    std::thread::spawn(move || proxy::run(external_listener, internal_port, scopes_for_thread));
+    let count_for_thread = Arc::clone(&mcp_interaction_count);
+    std::thread::spawn(move || {
+        proxy::run(
+            external_listener,
+            internal_port,
+            scopes_for_thread,
+            count_for_thread,
+        )
+    });
 
     AgentModeHandle {
         external_port,
         internal_port,
         scopes,
+        mcp_interaction_count,
     }
 }

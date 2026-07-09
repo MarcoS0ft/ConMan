@@ -293,6 +293,19 @@ struct State {
     /// active tab's pane count is `> 1` — single-pane tabs (the common case)
     /// never touch this model, keeping the feature zero-cost when unsplit.
     pane_model: Rc<VecModel<crate::PaneCell>>,
+    /// P8.6-B: `Some(_)` only when the composition root actually started the
+    /// agent-mode proxy this session -- see [`crate::AgentModeConfig`]'s doc
+    /// comment. Lives on `State` (like `session_provider` above) so every
+    /// launch function (`sessions::open_ssh_tab`/`open_rdp_tab`, quick-connect,
+    /// broadcast) -- all of which already take `state: &Rc<RefCell<State>>`,
+    /// not the wider `Ctx` -- can reach it for the execute-scope gate without
+    /// widening their signatures. Unconditional field for the same reason
+    /// `AppConfig`'s is; only the code that *reads* it for a real decision
+    /// (`settings_ctl`'s agent-mode wiring, `sessions::agent_mode_execute_blocked`)
+    /// is `#[cfg(feature = "agent-mode")]`-gated -- a non-agent-mode build
+    /// never meaningfully reads it (it's always `None` there).
+    #[allow(dead_code)]
+    agent_mode: Option<crate::AgentModeConfig>,
 }
 
 impl State {
@@ -372,15 +385,6 @@ pub(crate) struct Ctx {
     bc_check_model: Rc<VecModel<bool>>,
     bc_group_model: Rc<VecModel<SharedString>>,
     bc_draft: Rc<RefCell<BTreeSet<usize>>>,
-    /// P8.6-B: `Some(_)` only when the composition root actually started the
-    /// agent-mode proxy this session -- see [`crate::AgentModeConfig`]'s doc
-    /// comment. Unconditional field for the same reason `AppConfig`'s is;
-    /// only the code that *reads* it (`settings_ctl`'s agent-mode wiring, and
-    /// eventually the execute-scope launch gate) is
-    /// `#[cfg(feature = "agent-mode")]`-gated -- so a non-agent-mode build
-    /// never reads it at all.
-    #[allow(dead_code)]
-    agent_mode: Option<crate::AgentModeConfig>,
 }
 
 /// Shared assembly behind [`run`] (production) and [`build_for_test`] (P8.2's
@@ -516,6 +520,8 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         launchpad_recents_model: launchpad_recents_model.clone(),
         // P6.11: see the field doc comment.
         pane_model: pane_model.clone(),
+        // P8.6-B: see the field doc comment.
+        agent_mode,
     }));
 
     {
@@ -578,7 +584,6 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         bc_check_model: bc_check_model.clone(),
         bc_group_model: bc_group_model.clone(),
         bc_draft: bc_draft.clone(),
-        agent_mode,
     };
 
     tabs::wire_tabs(&ctx);

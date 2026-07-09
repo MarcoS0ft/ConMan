@@ -79,6 +79,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -469,6 +470,31 @@ fn forward_and_filter_tools_list(
     }
 }
 
+/// P8.6-B item 4 (the execute-scope launch gate): RAII guard incrementing
+/// `count` on construction and decrementing on drop, so the gate's window
+/// closes even on an early return or (however unlikely) a panic between the
+/// increment and decrement -- more robust than a manual paired
+/// increment/decrement. See `cm_ui::AgentModeConfig::mcp_interaction_count`'s
+/// doc comment for why this is a count, not a bool, and for the proof that
+/// this window actually covers any launch callback a write tool could
+/// trigger (the vendored Slint MCP server dispatches the click/key event
+/// synchronously, inline, before its async handler returns -- strictly
+/// before this guard's `forward()` call, which brackets it, returns).
+struct McpInteractionGuard<'a>(&'a AtomicUsize);
+
+impl<'a> McpInteractionGuard<'a> {
+    fn enter(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for McpInteractionGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Inspects one already-parsed request and decides what to send back: gate
 /// `tools/call`, filter `tools/list`, forward everything else untouched.
 ///
@@ -483,7 +509,14 @@ fn process(
     req: &ParsedRequest,
     internal_port: u16,
     scopes: &Arc<RwLock<ScopeSet>>,
+    mcp_interaction_count: &Arc<AtomicUsize>,
 ) -> (u16, String, Vec<u8>) {
+    // P8.6-B item 4: whether this specific request, if it falls through to
+    // the plain forward below, is a Write-scoped `tools/call` -- the only
+    // case the execute-gate cares about (Read tools can't launch anything;
+    // everything else here is either denied above or isn't a tool call at
+    // all).
+    let mut is_write_tool_call = false;
     if req.method.eq_ignore_ascii_case("POST")
         && let Ok(body_str) = std::str::from_utf8(&req.body)
         && let Ok(rpc) = serde_json::from_str::<Value>(body_str)
@@ -539,6 +572,7 @@ fn process(
                     return (200, "application/json".to_string(), body);
                 }
                 // In scope: fall through to the plain forward below.
+                is_write_tool_call = ToolScope::classify(tool_name) == ToolScope::Write;
             } else if method == "tools/list" {
                 let granted_copy = *granted;
                 drop(granted); // release the read lock before the blocking forward call
@@ -546,7 +580,12 @@ fn process(
             }
         }
     }
-    forward_verbatim(req, internal_port)
+    if is_write_tool_call {
+        let _guard = McpInteractionGuard::enter(mcp_interaction_count);
+        forward_verbatim(req, internal_port)
+    } else {
+        forward_verbatim(req, internal_port)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -557,7 +596,12 @@ fn process(
 /// pipelining — see the module doc), replies to each, and stops on EOF or
 /// `Connection: close`. Never panics on a malformed request — a parse
 /// failure just ends this connection (the agent client can reconnect).
-fn handle_client(mut stream: TcpStream, internal_port: u16, scopes: Arc<RwLock<ScopeSet>>) {
+fn handle_client(
+    mut stream: TcpStream,
+    internal_port: u16,
+    scopes: Arc<RwLock<ScopeSet>>,
+    mcp_interaction_count: Arc<AtomicUsize>,
+) {
     if stream.set_read_timeout(Some(IO_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
     {
@@ -574,7 +618,8 @@ fn handle_client(mut stream: TcpStream, internal_port: u16, scopes: Arc<RwLock<S
             }
         };
         let close_after = req.close_after;
-        let (status, content_type, body) = process(&req, internal_port, &scopes);
+        let (status, content_type, body) =
+            process(&req, internal_port, &scopes, &mcp_interaction_count);
         if write_response(&mut stream, status, &content_type, &body).is_err() {
             return;
         }
@@ -588,12 +633,20 @@ fn handle_client(mut stream: TcpStream, internal_port: u16, scopes: Arc<RwLock<S
 /// lifetime of the process. Never panics on an accept error — logs and
 /// keeps serving subsequent connections (mirrors `qa_harness.rs`'s
 /// `listen_loop`).
-pub(crate) fn run(listener: TcpListener, internal_port: u16, scopes: Arc<RwLock<ScopeSet>>) {
+pub(crate) fn run(
+    listener: TcpListener,
+    internal_port: u16,
+    scopes: Arc<RwLock<ScopeSet>>,
+    mcp_interaction_count: Arc<AtomicUsize>,
+) {
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
                 let scopes = Arc::clone(&scopes);
-                std::thread::spawn(move || handle_client(stream, internal_port, scopes));
+                let mcp_interaction_count = Arc::clone(&mcp_interaction_count);
+                std::thread::spawn(move || {
+                    handle_client(stream, internal_port, scopes, mcp_interaction_count)
+                });
             }
             Err(e) => tracing::warn!("agent-mode: accept error: {e}"),
         }
@@ -610,6 +663,13 @@ mod tests {
             write,
             execute,
         }
+    }
+
+    /// A fresh, zero execute-gate counter -- these `process()` tests exercise
+    /// the read/write scope gate, not the execute-gate counter itself (see
+    /// `mcp_interaction_count_*` tests below for that).
+    fn no_interactions() -> Arc<AtomicUsize> {
+        Arc::new(AtomicUsize::new(0))
     }
 
     // ── ToolScope::classify: all 14 tools, exact partition ─────────────────
@@ -750,6 +810,25 @@ mod tests {
         port
     }
 
+    /// Like [`spawn_mock_internal_server`], but delays the response by
+    /// `delay` -- lets a test observe the execute-gate counter's value
+    /// *while* a `forward()` call is still in flight, not just its net-zero
+    /// value afterward (the P8.6-B item 4 mechanism this whole module exists
+    /// to prove: the window has to actually be open during the call).
+    fn spawn_slow_mock_internal_server(status: u16, body: Vec<u8>, delay: Duration) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let port = listener.local_addr().expect("local_addr").port();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let _ = read_request(&mut stream);
+            std::thread::sleep(delay);
+            let _ = write_response(&mut stream, status, "application/json", &body);
+        });
+        port
+    }
+
     fn parsed_request(method: &str, path: &str, body: &[u8]) -> ParsedRequest {
         ParsedRequest {
             method: method.to_string(),
@@ -784,7 +863,7 @@ mod tests {
             "/mcp",
             br#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_windows","arguments":{}}}"#,
         );
-        let (status, _content_type, body) = process(&req, port, &scopes_lock);
+        let (status, _content_type, body) = process(&req, port, &scopes_lock, &no_interactions());
         assert_eq!(status, 200);
         assert_eq!(body, canned, "an in-scope call must forward, not be gated");
     }
@@ -806,7 +885,8 @@ mod tests {
             "/mcp",
             br#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"click_element","arguments":{}}}"#,
         );
-        let (status, content_type, body) = process(&req, unused_port, &scopes_lock);
+        let (status, content_type, body) =
+            process(&req, unused_port, &scopes_lock, &no_interactions());
         assert_eq!(status, 200, "a JSON-RPC-level error is still HTTP 200");
         assert_eq!(content_type, "application/json");
         let parsed: Value = serde_json::from_slice(&body).expect("valid JSON-RPC error body");
@@ -844,7 +924,8 @@ mod tests {
             "/mcp",
             br#"[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"click_element","arguments":{}}}]"#,
         );
-        let (status, content_type, body) = process(&req, unused_port(), &everything);
+        let (status, content_type, body) =
+            process(&req, unused_port(), &everything, &no_interactions());
         assert_eq!(status, 200, "a JSON-RPC-level error is still HTTP 200");
         assert_eq!(content_type, "application/json");
         let parsed: Value = serde_json::from_slice(&body).expect("valid JSON-RPC error body");
@@ -870,7 +951,8 @@ mod tests {
             "/not-mcp",
             br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"click_element","arguments":{}}}"#,
         );
-        let (status, content_type, body) = process(&req, unused_port(), &everything);
+        let (status, content_type, body) =
+            process(&req, unused_port(), &everything, &no_interactions());
         assert_eq!(status, 200, "a JSON-RPC-level error is still HTTP 200");
         assert_eq!(content_type, "application/json");
         let parsed: Value = serde_json::from_slice(&body).expect("valid JSON-RPC error body");
@@ -894,7 +976,8 @@ mod tests {
             "/other",
             br#"{"jsonrpc":"2.0","id":8,"method":"tools/list"}"#,
         );
-        let (status, _content_type, body) = process(&req, unused_port(), &everything);
+        let (status, _content_type, body) =
+            process(&req, unused_port(), &everything, &no_interactions());
         assert_eq!(status, 200);
         let parsed: Value = serde_json::from_slice(&body).expect("valid JSON-RPC error body");
         assert_eq!(parsed["error"]["code"], -32002);
@@ -923,7 +1006,7 @@ mod tests {
             "/mcp",
             br#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         );
-        let (status, _content_type, body) = process(&req, port, &scopes_lock);
+        let (status, _content_type, body) = process(&req, port, &scopes_lock, &no_interactions());
         assert_eq!(status, 200);
         let parsed: Value = serde_json::from_slice(&body).expect("valid JSON");
         let names: Vec<&str> = parsed["result"]["tools"]
@@ -949,11 +1032,107 @@ mod tests {
         let port = spawn_mock_internal_server(204, canned.clone());
         let scopes_lock = Arc::new(RwLock::new(ScopeSet::default())); // nothing granted
         let req = parsed_request("OPTIONS", "/mcp", b"");
-        let (status, _content_type, body) = process(&req, port, &scopes_lock);
+        let (status, _content_type, body) = process(&req, port, &scopes_lock, &no_interactions());
         assert_eq!(
             status, 204,
             "a non-JSON-RPC request must pass through even with zero scopes granted"
         );
         assert_eq!(body, canned);
+    }
+
+    // ── P8.6-B item 4: the execute-gate counter ────────────────────────────
+
+    #[test]
+    fn mcp_interaction_count_is_elevated_only_while_a_write_tool_call_is_in_flight() {
+        let canned = br#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#.to_vec();
+        let port = spawn_slow_mock_internal_server(200, canned, Duration::from_millis(200));
+        let scopes_lock = Arc::new(RwLock::new(scopes(true, true, false))); // write granted
+        let count = Arc::new(AtomicUsize::new(0));
+        let req = parsed_request(
+            "POST",
+            "/mcp",
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"click_element","arguments":{}}}"#,
+        );
+
+        assert_eq!(count.load(Ordering::SeqCst), 0, "idle before the call");
+
+        let handle = {
+            let count = Arc::clone(&count);
+            let scopes_lock = Arc::clone(&scopes_lock);
+            std::thread::spawn(move || process(&req, port, &scopes_lock, &count))
+        };
+
+        // Give forward()'s connect+send time to happen but land well inside
+        // the mock server's artificial 200ms delay.
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "counter must be elevated while the write-tool call is in flight -- \
+             this is the window the execute-scope launch gate relies on"
+        );
+
+        handle.join().expect("process thread must not panic");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "counter must return to 0 once forward() returns"
+        );
+    }
+
+    #[test]
+    fn mcp_interaction_count_never_increments_for_a_read_tool_call() {
+        let canned = br#"{"jsonrpc":"2.0","id":1,"result":{}}"#.to_vec();
+        let port = spawn_slow_mock_internal_server(200, canned, Duration::from_millis(100));
+        let scopes_lock = Arc::new(RwLock::new(scopes(true, true, false)));
+        let count = Arc::new(AtomicUsize::new(0));
+        let req = parsed_request(
+            "POST",
+            "/mcp",
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_windows","arguments":{}}}"#,
+        );
+
+        let handle = {
+            let count = Arc::clone(&count);
+            let scopes_lock = Arc::clone(&scopes_lock);
+            std::thread::spawn(move || process(&req, port, &scopes_lock, &count))
+        };
+
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "a read tool must never elevate the execute-gate counter -- it can't launch anything"
+        );
+
+        handle.join().expect("process thread must not panic");
+    }
+
+    #[test]
+    fn mcp_interaction_count_decrements_even_when_the_write_tool_call_is_denied() {
+        // A write tool DENIED by scope never reaches the fallthrough forward
+        // at all -- the counter must never increment for it in the first
+        // place (there's nothing to decrement).
+        let scopes_lock = Arc::new(RwLock::new(scopes(true, false, false))); // read-only
+        let count = Arc::new(AtomicUsize::new(0));
+        let req = parsed_request(
+            "POST",
+            "/mcp",
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"click_element","arguments":{}}}"#,
+        );
+        let unused_port = TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr")
+            .port();
+
+        let (status, _content_type, _body) = process(&req, unused_port, &scopes_lock, &count);
+
+        assert_eq!(status, 200, "a JSON-RPC-level error is still HTTP 200");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "a denied write tool call must never touch the execute-gate counter"
+        );
     }
 }

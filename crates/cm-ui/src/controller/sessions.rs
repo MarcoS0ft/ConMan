@@ -50,6 +50,8 @@ fn wire_key_input(ctx: &Ctx) {
         let state = ctx.state.clone();
         let pal_model_kb = ctx.palette_model.clone();
         let tab_model_kb = ctx.tab_model.clone();
+        let toast_model_kb = ctx.toast_model.clone();
+        let toast_next_id_kb = ctx.toast_next_id.clone();
         let weak_kb = ctx.ui.as_weak();
         move |text, special, mods| {
             let Some(ui) = weak_kb.upgrade() else { return };
@@ -220,6 +222,29 @@ fn wire_key_input(ctx: &Ctx) {
                 // identical to the pre-P6.11 "always all panes" behavior. See
                 // `panes::broadcast_fan_out` for the (unit-tested) targeting logic.
                 if ui.get_broadcast_active() {
+                    // P8.6-B item 4: the execute-scope gate also covers
+                    // broadcast (fanning input out to multiple already-open
+                    // sessions at once) -- see open_ssh_tab's identical
+                    // comment for the mechanism/rationale.
+                    if agent_mode_execute_blocked(&st.agent_mode) {
+                        tracing::warn!(
+                            "agent mode: broadcast blocked while automation is active without execute scope"
+                        );
+                        let id = {
+                            let mut n = toast_next_id_kb.borrow_mut();
+                            let id = *n;
+                            *n += 1;
+                            id
+                        };
+                        toast_model_kb.push(ToastEntry {
+                            id,
+                            message: SharedString::from(
+                                "agent mode: execute scope not granted -- broadcast blocked",
+                            ),
+                            kind: 3, // error
+                        });
+                        return;
+                    }
                     panes::broadcast_fan_out(tab, &evs);
                     return;
                 }
@@ -2087,6 +2112,32 @@ fn fail_reconnect_in_place(
     set_error_overlay(ui, &reason);
 }
 
+/// P8.6-B item 4: the execute-scope launch/broadcast gate. True only when
+/// an agent write-tool call (`click_element`/`invoke_accessibility_action`/
+/// `dispatch_key_event`) is *actually in flight* through the proxy
+/// (`AgentModeConfig::mcp_interaction_active`) AND `execute` isn't granted.
+///
+/// A human-initiated launch is never inside that window (nothing sets the
+/// counter except the proxy forwarding an agent's own write-tool call), so
+/// this never gates a plain user click. The one accepted exception is the
+/// fail-safe over-restriction documented on `mcp_interaction_active`: a
+/// human click that happens to land in the same (short, tens-of-
+/// milliseconds) window as an unrelated agent write-tool call is spuriously
+/// refused too -- over-restricting, never under-restricting, and rare
+/// enough (and cheap enough to just retry) to accept for v1.
+pub(super) fn agent_mode_execute_blocked(agent_mode: &Option<crate::AgentModeConfig>) -> bool {
+    match agent_mode {
+        Some(cfg) if cfg.mcp_interaction_active() => {
+            let granted = cfg
+                .scopes
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            !granted.execute
+        }
+        _ => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn open_ssh_tab(
     state: &Rc<RefCell<State>>,
@@ -2101,6 +2152,26 @@ pub(super) fn open_ssh_tab(
     let size = state.borrow().current_grid();
     let identity = format!("{}@{}:{}", settings.username, settings.host, settings.port);
     let title = format!("SSH {}", settings.host);
+    // P8.6-B item 4: the execute-scope launch gate. Covers every caller of
+    // this function -- tree-launched connections, split-pane connects,
+    // quick-connect, and the debug autoinit hook -- since they all funnel
+    // through here rather than dialing `connect_ssh` themselves.
+    if agent_mode_execute_blocked(&state.borrow().agent_mode) {
+        tracing::warn!(
+            conn = %identity,
+            "agent mode: launch blocked while automation is active without execute scope"
+        );
+        push_auth_failed_tab(
+            state,
+            tab_model,
+            ui,
+            title,
+            identity,
+            "agent mode: execute scope not granted".to_string(),
+            origin_connection_id,
+        );
+        return;
+    }
     // Only `Direct` (quick-connect / debug autoinit) clones the auth for
     // reconnect -- `Credential`-sourced auth is re-resolved fresh each time
     // (P6.4: never cache the fetched secret in `Tab` state).
@@ -2207,6 +2278,24 @@ pub(super) fn open_rdp_tab(
     apply_pane_resolution(state, &mut settings);
     let title = format!("RDP {}", settings.host);
     let identity = format!("{}@{}:{}", auth.username, settings.host, settings.port);
+    // P8.6-B item 4: the execute-scope launch gate -- see open_ssh_tab's
+    // identical comment.
+    if agent_mode_execute_blocked(&state.borrow().agent_mode) {
+        tracing::warn!(
+            conn = %identity,
+            "agent mode: launch blocked while automation is active without execute scope"
+        );
+        push_auth_failed_tab(
+            state,
+            tab_model,
+            ui,
+            title,
+            identity,
+            "agent mode: execute scope not granted".to_string(),
+            origin_connection_id,
+        );
+        return;
+    }
     // Only `Direct` (quick-connect / debug autoinit) clones the auth for
     // reconnect -- `Credential`-sourced auth is re-resolved fresh each time
     // (P6.4/P6.12: never cache the fetched secret in `Tab` state).
@@ -3806,5 +3895,53 @@ mod tests {
             auth.expect_err("connection no longer exists"),
             AuthResolveError::NoCredentialAssigned
         );
+    }
+
+    // ── P8.6-B item 4: agent_mode_execute_blocked (the execute-gate) ──────────
+
+    fn agent_mode_fixture(
+        interaction_count: usize,
+        read: bool,
+        write: bool,
+        execute: bool,
+    ) -> crate::AgentModeConfig {
+        crate::AgentModeConfig {
+            external_port: 0,
+            scopes: Arc::new(std::sync::RwLock::new(cm_core::ScopeSet {
+                read,
+                write,
+                execute,
+            })),
+            mcp_interaction_count: Arc::new(std::sync::atomic::AtomicUsize::new(interaction_count)),
+        }
+    }
+
+    #[test]
+    fn execute_gate_never_blocks_when_agent_mode_is_off() {
+        assert!(!agent_mode_execute_blocked(&None));
+    }
+
+    #[test]
+    fn execute_gate_never_blocks_when_no_write_interaction_is_in_flight() {
+        // Agent mode is on, execute is even NOT granted -- but nothing is
+        // actually mid-flight, so this must be indistinguishable from a
+        // plain human click: never blocked.
+        let cfg = agent_mode_fixture(0, true, true, false);
+        assert!(!agent_mode_execute_blocked(&Some(cfg)));
+    }
+
+    #[test]
+    fn execute_gate_does_not_block_when_execute_is_granted() {
+        let cfg = agent_mode_fixture(1, true, true, true);
+        assert!(!agent_mode_execute_blocked(&Some(cfg)));
+    }
+
+    #[test]
+    fn execute_gate_blocks_a_write_tool_in_flight_without_execute_granted() {
+        // The adversarial case Fable will test: write granted, execute not,
+        // and an agent write-tool call (e.g. click_element on Connect) is
+        // actually in flight right now.
+        let cfg = agent_mode_fixture(1, true, true, false);
+        assert!(agent_mode_execute_blocked(&Some(cfg)));
     }
 }

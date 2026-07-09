@@ -125,7 +125,7 @@ fn wire_agent_mode_enabled_changed(ctx: &Ctx) {
 fn wire_agent_mode_scope_read_changed(ctx: &Ctx) {
     ctx.ui.on_agent_mode_scope_read_changed({
         let repo_s = ctx.repo.clone();
-        let agent_mode = ctx.agent_mode.clone();
+        let agent_mode = ctx.state.borrow().agent_mode.clone();
         let weak = ctx.ui.as_weak();
         move |_| {
             let Some(ui) = weak.upgrade() else { return };
@@ -139,7 +139,7 @@ fn wire_agent_mode_scope_read_changed(ctx: &Ctx) {
 fn wire_agent_mode_scope_write_changed(ctx: &Ctx) {
     ctx.ui.on_agent_mode_scope_write_changed({
         let repo_s = ctx.repo.clone();
-        let agent_mode = ctx.agent_mode.clone();
+        let agent_mode = ctx.state.borrow().agent_mode.clone();
         let weak = ctx.ui.as_weak();
         move |_| {
             let Some(ui) = weak.upgrade() else { return };
@@ -153,7 +153,7 @@ fn wire_agent_mode_scope_write_changed(ctx: &Ctx) {
 fn wire_agent_mode_scope_execute_changed(ctx: &Ctx) {
     ctx.ui.on_agent_mode_scope_execute_changed({
         let repo_s = ctx.repo.clone();
-        let agent_mode = ctx.agent_mode.clone();
+        let agent_mode = ctx.state.borrow().agent_mode.clone();
         let weak = ctx.ui.as_weak();
         move |_| {
             let Some(ui) = weak.upgrade() else { return };

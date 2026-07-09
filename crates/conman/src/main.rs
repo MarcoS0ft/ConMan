@@ -193,6 +193,7 @@ fn main() -> ExitCode {
     let agent_mode_config = agent_mode_handle.map(|h| cm_ui::AgentModeConfig {
         external_port: h.external_port,
         scopes: h.scopes,
+        mcp_interaction_count: h.mcp_interaction_count,
     });
     #[cfg(not(feature = "agent-mode"))]
     let agent_mode_config: Option<cm_ui::AgentModeConfig> = None;
