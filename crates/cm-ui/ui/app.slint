@@ -251,7 +251,13 @@ component RdpSurface inherits Rectangle {
             source: frame;
             width: 100%;
             height: 100%;
-            image-fit: fill;
+            // P9.5 #10: `contain` (not `fill`) -- the controller now
+            // negotiates the RDP desktop at the pane's live pixel size (see
+            // `sessions::apply_pane_resolution`), so this is a 1:1 no-op in
+            // the common case; `contain` only matters (no distortion,
+            // letterboxed instead) for the brief window before a resize
+            // settles, or if a server clamps the requested resolution.
+            image-fit: contain;
             image-rendering: pixelated;
         }
 
@@ -362,7 +368,14 @@ component ConnectionRow inherits Rectangle {
     // P8.1: position within the flattened tree, supplied by the `for` loop.
     in property <int> row-index: 0;
     in property <int> row-count: 0;
-    callback activated();       // open session tab (leaf)
+    // P9.5 #2: single click on a leaf row selects/highlights (`selected`);
+    // double click launches (`activated`). Groups aren't affected -- a
+    // single click still expands/collapses (`toggled`), which was never the
+    // "launches accidentally" complaint. Keyboard Enter and the context
+    // menu's "Connect" still call `activated()` directly (see `touch`
+    // below) -- only the plain mouse click path changes.
+    callback activated();       // open session tab (leaf) -- double-click
+    callback selected();        // select/highlight (leaf) -- single-click
     callback toggled();         // expand / collapse group
     callback edit-clicked();    // open profile / group editor
     callback new-sub();         // new child item under this group
@@ -385,11 +398,43 @@ component ConnectionRow inherits Rectangle {
     accessible-item-selected: data.selected;
     accessible-action-default => { if (data.is-group) { root.toggled(); } else { root.activated(); } }
 
+    // P9.5 #1: latched by each action button's `hover-changed` callback
+    // (see IconButton in components.slint) -- one property per button since
+    // they're all conditionally instantiated `if root.action-hover`, and
+    // Slint won't let `action-hover`'s own formula read a conditional
+    // instance's property from outside its conditional ("Cannot access
+    // id"). Each defaults to `false` and is written ONLY by its own
+    // button's callback, so there's no shared-write race between buttons.
+    property <bool> move-up-hover: false;
+    property <bool> move-down-hover: false;
+    property <bool> new-child-hover: false;
+    property <bool> edit-hover: false;
+    property <bool> delete-hover: false;
+
+    // Whether ANY part of the row -- background OR the action-icon strip
+    // itself -- currently has the pointer over it. `touch.has-hover` ALONE
+    // is not stable here: `touch` and the action-icon strip are overlapping
+    // siblings, and Slint delivers a pointer-move to only the topmost hit
+    // item, so the moment the cursor reaches an icon button, THAT button's
+    // own TouchArea (not `touch`) receives the move and `touch.has-hover`
+    // drops back to false. Since the icon strip's very existence used to be
+    // gated on `touch.has-hover` alone, that flip destroyed the strip (and
+    // its buttons) out from under the pointer, which handed hover back to
+    // `touch`, recreating it -- an oscillation the user saw as
+    // flicker/unclickable icons. ORing in every button's latched hover
+    // state keeps the combined signal true continuously as the pointer
+    // crosses from the row background onto a button: exactly one of these
+    // TouchAreas is hovering the pointer at any instant, so the OR never
+    // has a gap.
+    property <bool> action-hover: touch.has-hover
+        || root.move-up-hover || root.move-down-hover || root.new-child-hover
+        || root.edit-hover || root.delete-hover;
+
     height: Theme.tree-row-height;
     border-radius: Theme.radius-sm;
     background: data.selected ? Theme.color-accent-subtle
               : root.highlighted ? Theme.color-accent-subtle.with-alpha(0.5)
-              : touch.has-hover ? Theme.color-hover : transparent;
+              : root.action-hover ? Theme.color-hover : transparent;
 
     // Accent rail (selected connection).
     Rectangle {
@@ -400,10 +445,19 @@ component ConnectionRow inherits Rectangle {
     }
 
     // Base touch — FIRST interactive child; content layer on top captures first.
+    // P9.5 #2: single click selects a leaf row; double click launches it
+    // (`clicked` fires on every physical click, `double-clicked` fires
+    // additionally on the 2nd/4th/... click of a rapid sequence -- Slint's
+    // own click-count tracking, no hand-rolled timer needed). Groups keep
+    // single-click-to-toggle, unaffected -- that was never the "launches
+    // accidentally" complaint.
     touch := TouchArea {
         clicked => {
             if (data.is-group) { root.toggled(); }
-            else { root.activated(); }
+            else { root.selected(); }
+        }
+        double-clicked => {
+            if (!data.is-group) { root.activated(); }
         }
     }
 
@@ -512,8 +566,10 @@ component ConnectionRow inherits Rectangle {
             }
         }
 
-        // Hover action buttons (shown only while the pointer is over the row).
-        if touch.has-hover : HorizontalLayout {
+        // Hover action buttons (shown only while the pointer is over the
+        // row). Gated on `root.action-hover`, not the base `touch.has-hover`
+        // alone -- see the property's doc comment above for why (P9.5 #1).
+        if root.action-hover : HorizontalLayout {
             spacing: Theme.gap-hairline;
             alignment: center;
             // ↑ / ↓ reorder within the same parent.
@@ -522,12 +578,14 @@ component ConnectionRow inherits Rectangle {
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 tooltip: "Move up";
                 clicked => { root.move-up(); }
+                hover-changed(h) => { root.move-up-hover = h; }
             }
             move-down-btn := IconButton {
                 glyph: "\u{EAB4}";   // ChevronDown
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 tooltip: "Move down";
                 clicked => { root.move-down(); }
+                hover-changed(h) => { root.move-down-hover = h; }
             }
             // Group: new-child + edit; Connection: edit (pencil).
             if data.is-group : new-child-btn := IconButton {
@@ -535,12 +593,14 @@ component ConnectionRow inherits Rectangle {
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 tooltip: "New child";
                 clicked => { root.new-sub(); }
+                hover-changed(h) => { root.new-child-hover = h; }
             }
             edit-row-btn := IconButton {
                 glyph: "\u{F03EB}";   // Edit (pencil)
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 tooltip: data.is-group ? "Edit group" : "Edit";
                 clicked => { root.edit-clicked(); }
+                hover-changed(h) => { root.edit-hover = h; }
             }
             delete-row-btn := IconButton {
                 glyph: "\u{EA81}";   // Delete (trash)
@@ -548,6 +608,7 @@ component ConnectionRow inherits Rectangle {
                 glyph-color: Theme.color-error;
                 tooltip: "Delete";
                 clicked => { root.delete-clicked(); }
+                hover-changed(h) => { root.delete-hover = h; }
             }
         }
     }
@@ -1003,6 +1064,9 @@ export component AppWindow inherits Window {
     callback open-palette();
     callback quick-connect();
     callback row-activated(int);
+    // P9.5 #2: fired on a single click on a leaf connection row (select,
+    // as opposed to `row-activated`'s double-click launch).
+    callback row-selected(int);
     callback toggle-broadcast();
     callback palette-edited(string);
     callback palette-activated(int);
@@ -1266,6 +1330,7 @@ export component AppWindow inherits Window {
                                     row-count: connections.length;
                                     highlighted: idx == conn-tree-focus.kb-idx;
                                     activated     => { root.row-activated(idx); }
+                                    selected      => { root.row-selected(idx); }
                                     toggled       => { root.toggle-conn-row(idx); }
                                     edit-clicked  => {
                                         if (conn.is-group) { root.edit-group(conn.id); }

@@ -78,6 +78,24 @@ export component IconButton {
   in property <color>  glyph-color: Theme.color-text-secondary;
   // P5.3b: optional tooltip text shown above the button on hover.
   in property <string> tooltip: "";
+  // P9.5 #1: exposes this button's own hover state so a container (e.g. a
+  // hoverable list row with an action-icon strip) can OR it together with
+  // its own hover TouchArea -- see `ConnectionRow` in app.slint for why a
+  // bare `touch.has-hover` on the container alone is unstable once an
+  // overlapping child TouchArea (like this button's) is what's actually
+  // receiving pointer-move events.
+  out property <bool> hovered: touch.has-hover;
+  // Fires whenever `hovered` changes. A container can't reach into an
+  // `if`-conditional instance's properties from outside that conditional
+  // (Slint compile error: "Cannot access id") -- e.g. `ConnectionRow`'s
+  // action-icon strip only exists `if action-hover`, so its own
+  // `move-up-btn.hovered` etc. can't be read from `action-hover`'s own
+  // formula. This callback sidesteps that: the conditional instance can
+  // still freely CALL OUT to its enclosing scope (exactly how `clicked`
+  // already works from inside that same conditional), letting the parent
+  // latch the value into its own plain property.
+  callback hover-changed(bool);
+  changed hovered => { root.hover-changed(root.hovered); }
   callback clicked();
 
   // P8.1: icon-only button — the visible tooltip text IS the accessible label
