@@ -7,7 +7,7 @@ use cm_core::{
     CredentialRef, CredentialSource, Group, GroupId, LocalSettings, RdpSettings, Secret,
     SshAuthMethod, SshSettings,
 };
-use cm_session::PaneLayout;
+use cm_session::{PaneLayout, SessionStatus};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::keys::KeysPanel;
@@ -920,7 +920,12 @@ fn wire_reorder_group_row(ctx: &Ctx) {
 /// so the "a plain selection-only change produces zero Push/RemoveLast ops"
 /// claim above is directly unit-testable without a `VecModel`/`AppWindow`.
 pub(super) fn refresh_conn_model(state: &State, conn_model: &Rc<VecModel<ConnRow>>) {
-    let flat = state.conn_tree.flat_filtered(&state.conn_filter);
+    let flat = state
+        .conn_tree
+        .flat_filtered(&state.conn_filter)
+        .into_iter()
+        .map(|row| overlay_live_status(state, row))
+        .collect();
     let old: Vec<ConnRow> = (0..conn_model.row_count())
         .filter_map(|i| conn_model.row_data(i))
         .collect();
@@ -933,6 +938,43 @@ pub(super) fn refresh_conn_model(state: &State, conn_model: &Rc<VecModel<ConnRow
             }
         }
     }
+}
+
+/// P9.10 #4: `ConnRow.status` used to be hardcoded `"disconnected"` at
+/// construction (`tree::ConnTree::make_conn_row`) and never touched again --
+/// an inert dot the user correctly flagged ("we have the connection status
+/// pill on the navbar... but they don't really do anything"). Overlays the
+/// row with the BEST live tab's status for that connection id (precedence
+/// connected > connecting > whatever `make_conn_row` already set), via the
+/// same `Tab::origin_connection_id` reverse-lookup the tab context menu's
+/// "Duplicate" (P9.10 #1) and the ErrorOverlay's "Edit…" button already rely
+/// on for the opposite direction (tab -> connection). Multiple tabs can
+/// share one `origin_connection_id` (e.g. Duplicate, or two tree launches of
+/// the same saved connection) -- connected wins over connecting, matching
+/// "this connection has SOME live session" being the more useful signal than
+/// any single tab's state.
+fn overlay_live_status(state: &State, mut row: ConnRow) -> ConnRow {
+    if row.is_group {
+        return row;
+    }
+    let mut best: Option<&'static str> = None;
+    for tab in &state.tabs {
+        if tab.origin_connection_id != Some(row.id) {
+            continue;
+        }
+        match tab.session.status() {
+            SessionStatus::Connected => {
+                best = Some("connected");
+                break; // Nothing outranks "connected" -- stop looking.
+            }
+            SessionStatus::Connecting if best.is_none() => best = Some("connecting"),
+            _ => {}
+        }
+    }
+    if let Some(status) = best {
+        row.status = SharedString::from(status);
+    }
+    row
 }
 
 /// The minimal sequence of `VecModel` operations to turn `old` into `new`.

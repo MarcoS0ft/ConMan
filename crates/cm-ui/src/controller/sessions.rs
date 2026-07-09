@@ -21,7 +21,7 @@ use slint::{ComponentHandle, Image, Model, SharedString, Timer, TimerMode, VecMo
 
 use crate::input;
 use crate::keys::KeysPanel;
-use crate::{AppWindow, KbdPromptRow, TabItem, ToastEntry};
+use crate::{AppWindow, ConnRow, KbdPromptRow, TabItem, ToastEntry};
 
 use super::*;
 
@@ -2601,7 +2601,7 @@ pub(super) fn reconnect_ssh_tab(
 ///
 /// Extracted from [`tick`]'s per-tab loop body (P6.1 function-size budget) --
 /// pure code move, identical logic, same field-by-field mutation of `st`. The
-/// 8-parameter signature mirrors `tick`'s own (state access + the 3 model/ui
+/// 9-parameter signature mirrors `tick`'s own (state access + the model/ui
 /// handles it forwards); bundling them would be a needless intermediate type
 /// for a single private call site.
 #[allow(clippy::too_many_arguments)]
@@ -2610,6 +2610,7 @@ fn tick_tab(
     i: usize,
     active: usize,
     target: Option<(u32, u32)>,
+    conn_model: &Rc<VecModel<ConnRow>>,
     tab_model: &Rc<VecModel<TabItem>>,
     toast_model: &Rc<VecModel<ToastEntry>>,
     toast_next_id: &Rc<RefCell<i32>>,
@@ -2814,6 +2815,17 @@ fn tick_tab(
         }
         item.status = SharedString::from(dot);
         tab_model.set_row_data(i, item);
+
+        // P9.10 #4: refresh the connection tree's live-status overlay right
+        // where a tab's own status transition is ALREADY detected (this
+        // `if`'s whole condition), rather than adding a new unconditional
+        // per-tick poll -- a tab with no `origin_connection_id` (a local
+        // shell, or a quick-connect with nothing stored to point back to)
+        // has no tree row to update, so skip the (otherwise harmless but
+        // pointless) whole-tree walk for those.
+        if st.tabs[i].origin_connection_id.is_some() {
+            tree_ctl::refresh_conn_model(st, conn_model);
+        }
     }
 
     if i == active {
@@ -2826,6 +2838,7 @@ fn tick_tab(
 pub(super) fn tick(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,
+    conn_model: &Rc<VecModel<ConnRow>>,
     toast_model: &Rc<VecModel<ToastEntry>>,
     toast_next_id: &Rc<RefCell<i32>>,
     ui: &AppWindow,
@@ -2876,6 +2889,7 @@ pub(super) fn tick(
             i,
             active,
             target,
+            conn_model,
             tab_model,
             toast_model,
             toast_next_id,
@@ -3040,12 +3054,20 @@ pub(super) fn wire_tick(ctx: &Ctx) -> Timer {
     let redraw = Timer::default();
     let state = ctx.state.clone();
     let tab_model = ctx.tab_model.clone();
+    let conn_model = ctx.conn_model.clone();
     let toast_model = ctx.toast_model.clone();
     let toast_next_id = ctx.toast_next_id.clone();
     let weak = ctx.ui.as_weak();
     redraw.start(TimerMode::Repeated, REDRAW_INTERVAL, move || {
         if let Some(ui) = weak.upgrade() {
-            tick(&state, &tab_model, &toast_model, &toast_next_id, &ui);
+            tick(
+                &state,
+                &tab_model,
+                &conn_model,
+                &toast_model,
+                &toast_next_id,
+                &ui,
+            );
         }
     });
     redraw
