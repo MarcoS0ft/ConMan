@@ -760,7 +760,13 @@ pub(super) fn connect_in_split(
         cm_core::ConnectionSettings::Ssh(s) => {
             let resolved = {
                 let st = state.borrow();
-                sessions::resolve_ssh_auth(&conn, st.conn_tree.groups(), s, secrets.as_ref())
+                sessions::resolve_ssh_auth(
+                    &conn,
+                    st.conn_tree.groups(),
+                    s,
+                    secrets.as_ref(),
+                    st.keys_panel.credentials(),
+                )
             };
             let auth = match resolved {
                 Ok(a) => a,
