@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use cm_core::terminal::GridSnapshot;
 use cm_core::{
-    Connection, ConnectionSettings, CredentialPurpose, CredentialRef, Group, LocalSettings,
-    RdpSettings, Secret, SshAuthMethod, SshSettings,
+    Connection, ConnectionSettings, CredentialPurpose, Group, LocalSettings, RdpSettings, Secret,
+    SshAuthMethod, SshSettings,
 };
 use cm_session::{
     CertDecision, CertInfo, CertVerifier, FailedSession, FocusDir, FrameUpdate, HostKeyDecision,
@@ -1204,7 +1204,13 @@ pub(super) fn launch_saved_connection(
         ConnectionSettings::Ssh(s) => {
             let resolved = {
                 let st = state.borrow();
-                resolve_ssh_auth(conn, st.conn_tree.groups(), s, secrets.as_ref())
+                resolve_ssh_auth(
+                    conn,
+                    st.conn_tree.groups(),
+                    s,
+                    secrets.as_ref(),
+                    st.keys_panel.credentials(),
+                )
             };
             match resolved {
                 Ok(auth) => {
@@ -1367,7 +1373,7 @@ fn resolve_ssh_reconnect(
             let conn = connections.iter().find(|c| c.id == *conn_id);
             let result = conn
                 .ok_or(AuthResolveError::NoCredentialAssigned)
-                .and_then(|c| resolve_ssh_auth(c, groups, &ci.settings, secrets));
+                .and_then(|c| resolve_ssh_auth(c, groups, &ci.settings, secrets, credentials));
             let settings = match conn {
                 Some(c) => effective_ssh_settings(c, groups, &ci.settings, credentials),
                 None => ci.settings.clone(),
@@ -1674,44 +1680,33 @@ impl std::fmt::Display for AuthResolveError {
     }
 }
 
-/// Fetches the secret for `(credential_id, purpose)`. `Ok(None)` means the
-/// purpose was never stored — valid for optional purposes (an SSH key with no
-/// passphrase); callers that require the purpose use [`require_secret`].
-fn fetch_secret(
-    secrets: &dyn cm_core::CredentialStore,
-    id: cm_core::CredentialId,
-    purpose: CredentialPurpose,
-) -> Result<Option<Secret>, AuthResolveError> {
-    secrets
-        .get(&CredentialRef::new(id, purpose))
-        .map_err(|e| AuthResolveError::Backend(e.to_string()))
-}
-
-/// Like [`fetch_secret`], but "not stored" is itself the error — for purposes
-/// that are mandatory once a credential of the relevant kind is assigned.
-fn require_secret(
-    secrets: &dyn cm_core::CredentialStore,
-    id: cm_core::CredentialId,
-    purpose: CredentialPurpose,
-) -> Result<Secret, AuthResolveError> {
-    fetch_secret(secrets, id, purpose)?.ok_or(AuthResolveError::NotFoundInKeychain)
-}
+// P9.6-A Phase C: `fetch_secret`/`require_secret` (the old Object-only,
+// credential-id-keyed keychain fetch) are gone -- `resolve_auth` below wraps
+// `cm_core::resolve_connection_auth`, which does the equivalent lookup for
+// every credential source (Object/Inline/Prompt/inherit) uniformly.
 
 /// BUG-cred-username-auth: the effective username actually sent to
 /// authenticate a connection. Precedence (see `cm_core::Credential::username`
-/// doc comment):
+/// doc comment), extended for P9.6-A's `CredentialSource` without pulling in
+/// a `CredentialStore` (this function is display/settings-only, no keychain
+/// I/O, so its signature -- and every caller that has no store handy, e.g.
+/// tree/profile-editor display -- stays unchanged):
 ///
-/// 1. the resolved credential's own `username` -- when [`resolve_effective_credential`]
-///    (own credential, or inherited from the nearest ancestor group's
-///    default) finds one, AND its `username` is non-empty. The credential
-///    object is the source of truth once assigned: this is what makes a
-///    credentialed RoyalTS-imported connection (which carries no inline
-///    username at all) authenticate with the right user instead of an empty
-///    one.
-/// 2. else `inline_username` -- the connection's own typed username (Quick
-///    Connect with inline creds, an explicit override, or any connection
-///    with no credential assigned).
-/// 3. else empty -- unchanged behavior for callers that require a non-empty
+/// 1. [`cm_core::CredentialSource::Inline`]'s own `username`, when non-empty
+///    -- the mode-selector's Inline fields are authoritative once chosen,
+///    same "most specific wins" the object case already followed.
+/// 2. else, for `Object`/inherit (the only sources that existed before
+///    P9.6-A): the resolved credential's own `username` -- when
+///    [`resolve_effective_credential`] (own credential, or inherited from the
+///    nearest ancestor group's default) finds one, AND its `username` is
+///    non-empty. The credential object is the source of truth once assigned:
+///    this is what makes a credentialed RoyalTS-imported connection (which
+///    carries no inline username at all) authenticate with the right user
+///    instead of an empty one.
+/// 3. else `inline_username` -- the connection's own typed username (Quick
+///    Connect with inline creds, an explicit override, `Prompt` mode, or any
+///    connection with no credential assigned).
+/// 4. else empty -- unchanged behavior for callers that require a non-empty
 ///    username (surfaces as the existing auth error).
 ///
 /// [`resolve_effective_credential`]: cm_core::resolve_effective_credential
@@ -1721,6 +1716,11 @@ pub(super) fn effective_auth_username(
     inline_username: &str,
     credentials: &[cm_core::Credential],
 ) -> String {
+    if let Some(cm_core::CredentialSource::Inline { username, .. }) = &conn.credential_source
+        && !username.is_empty()
+    {
+        return username.clone();
+    }
     let cred_username = cm_core::resolve_effective_credential(conn, groups).and_then(|id| {
         credentials
             .iter()
@@ -1750,34 +1750,105 @@ pub(super) fn effective_ssh_settings(
     settings
 }
 
-/// Resolves the real [`SshAuthInput`] for a tree-launched SSH connection:
-/// [`cm_core::resolve_effective_credential`] (own credential → nearest
-/// ancestor group default), then a keychain fetch keyed by credential id +
-/// purpose, per `settings.auth_method`. Never falls back to an empty/placeholder
-/// password — a missing assignment or keychain entry is a typed
-/// [`AuthResolveError`] the caller turns into the auth-error overlay instead
-/// of attempting to connect.
+/// P9.6-A Phase C: whether `conn` has ANY credential source that could
+/// actually produce a secret -- i.e. `resolve_connection_auth` finding no
+/// secret means "this purpose was never stored" (`NotFoundInKeychain`)
+/// rather than "nothing is configured at all" (`NoCredentialAssigned`).
+/// `Prompt` counts as "nothing assigned" here: it explicitly opts out of any
+/// stored secret, and ConMan has no live connect-time prompt UX yet (per the
+/// P9.6 design brief's non-goals) -- so today it fails exactly like an
+/// unassigned connection always has, surfacing the same auth-error overlay
+/// rather than inventing a prompt flow this phase doesn't build.
+fn has_assigned_credential_source(conn: &Connection, groups: &[Group]) -> bool {
+    match &conn.credential_source {
+        Some(cm_core::CredentialSource::Object(_)) => true,
+        Some(cm_core::CredentialSource::Inline { has_secret, .. }) => *has_secret,
+        Some(cm_core::CredentialSource::Prompt) => false,
+        None => cm_core::resolve_effective_credential(conn, groups).is_some(),
+    }
+}
+
+/// Maps a missing secret from [`cm_core::resolve_connection_auth`] to the
+/// right [`AuthResolveError`] variant -- see
+/// [`has_assigned_credential_source`] for the distinction.
+fn no_secret_error(conn: &Connection, groups: &[Group]) -> AuthResolveError {
+    if has_assigned_credential_source(conn, groups) {
+        AuthResolveError::NotFoundInKeychain
+    } else {
+        AuthResolveError::NoCredentialAssigned
+    }
+}
+
+/// Thin wrapper around [`cm_core::resolve_connection_auth`] mapping its
+/// (secret-free, per `cm_core::CredentialError`'s own contract) backend
+/// error into [`AuthResolveError::Backend`].
+fn resolve_auth(
+    conn: &Connection,
+    groups: &[Group],
+    credentials: &[cm_core::Credential],
+    secrets: &dyn cm_core::CredentialStore,
+    purpose: CredentialPurpose,
+) -> Result<cm_core::ResolvedAuth, AuthResolveError> {
+    cm_core::resolve_connection_auth(conn, groups, credentials, secrets, purpose)
+        .map_err(|e| AuthResolveError::Backend(e.to_string()))
+}
+
+/// Resolves the real [`SshAuthInput`] for a tree-launched SSH connection --
+/// P9.6-A Phase C: a thin adapter over [`cm_core::resolve_connection_auth`]
+/// (Object/inherit, Inline, and Prompt credential sources), per
+/// `settings.auth_method`. Never falls back to an empty/placeholder password
+/// — a missing assignment or keychain entry is a typed [`AuthResolveError`]
+/// the caller turns into the auth-error overlay instead of attempting to
+/// connect.
 pub(super) fn resolve_ssh_auth(
     conn: &Connection,
     groups: &[Group],
     settings: &SshSettings,
     secrets: &dyn cm_core::CredentialStore,
+    credentials: &[cm_core::Credential],
 ) -> Result<SshAuthInput, AuthResolveError> {
     // Agent auth needs no stored secret (Windows ssh-agent support is P6.13).
     if matches!(settings.auth_method, SshAuthMethod::Agent) {
         return Ok(SshAuthInput::Agent);
     }
-    let cred_id = cm_core::resolve_effective_credential(conn, groups)
-        .ok_or(AuthResolveError::NoCredentialAssigned)?;
     match settings.auth_method {
         SshAuthMethod::Password => {
-            let secret = require_secret(secrets, cred_id, CredentialPurpose::Password)?;
+            let resolved = resolve_auth(
+                conn,
+                groups,
+                credentials,
+                secrets,
+                CredentialPurpose::Password,
+            )?;
+            let secret = resolved
+                .secret
+                .ok_or_else(|| no_secret_error(conn, groups))?;
             Ok(SshAuthInput::Password(secret))
         }
         SshAuthMethod::PublicKey { .. } => {
-            let key_pem = require_secret(secrets, cred_id, CredentialPurpose::SshKey)?;
-            // Passphrase is optional -- CredentialKind::SshKey has none.
-            let passphrase = fetch_secret(secrets, cred_id, CredentialPurpose::SshPassphrase)?;
+            let resolved_key = resolve_auth(
+                conn,
+                groups,
+                credentials,
+                secrets,
+                CredentialPurpose::SshKey,
+            )?;
+            let key_pem = resolved_key
+                .secret
+                .ok_or_else(|| no_secret_error(conn, groups))?;
+            // Passphrase is optional -- CredentialKind::SshKey has none, and
+            // Inline never carries a key/passphrase at all (password-only,
+            // per the P9.6 non-goals) -- either way a miss here is `None`,
+            // not an error, matching `fetch_secret`'s old optional-purpose
+            // contract.
+            let passphrase = resolve_auth(
+                conn,
+                groups,
+                credentials,
+                secrets,
+                CredentialPurpose::SshPassphrase,
+            )?
+            .secret;
             Ok(SshAuthInput::KeyMaterial {
                 key_pem,
                 passphrase,
@@ -1787,14 +1858,16 @@ pub(super) fn resolve_ssh_auth(
     }
 }
 
-/// Resolves the real [`RdpAuthInput`] for a tree-launched RDP connection:
-/// same credential-resolution chain as [`resolve_ssh_auth`], password-only
-/// (ConMan has no RDP key-based auth). `domain` always comes from the
-/// connection's own settings -- credentials have no domain field
-/// (BUG-cred-username-auth: `username` now follows
-/// [`effective_auth_username`]'s precedence -- the assigned credential's own
-/// username wins over `settings.username` when non-empty, since a
-/// RoyalTS-imported connection carries no inline username at all).
+/// Resolves the real [`RdpAuthInput`] for a tree-launched RDP connection --
+/// P9.6-A Phase C: a thin adapter over [`cm_core::resolve_connection_auth`],
+/// password-only (ConMan has no RDP key-based auth), same credential-source
+/// coverage as [`resolve_ssh_auth`].
+///
+/// `domain`: [`cm_core::ResolvedAuth::domain`] is populated ONLY for
+/// `Inline` (a credential object has no domain field, and `Prompt`/inherit
+/// carry none either) -- so an Inline connection's own typed domain wins,
+/// and everything else falls back to the connection's own
+/// [`RdpSettings::domain`] exactly as before P9.6-A.
 pub(super) fn resolve_rdp_auth(
     conn: &Connection,
     groups: &[Group],
@@ -1802,19 +1875,20 @@ pub(super) fn resolve_rdp_auth(
     secrets: &dyn cm_core::CredentialStore,
     credentials: &[cm_core::Credential],
 ) -> Result<RdpAuthInput, AuthResolveError> {
-    let cred_id = cm_core::resolve_effective_credential(conn, groups)
-        .ok_or(AuthResolveError::NoCredentialAssigned)?;
-    let password = require_secret(secrets, cred_id, CredentialPurpose::Password)?;
-    let username = effective_auth_username(
+    let resolved = resolve_auth(
         conn,
         groups,
-        settings.username.as_deref().unwrap_or(""),
         credentials,
-    );
+        secrets,
+        CredentialPurpose::Password,
+    )?;
+    let password = resolved
+        .secret
+        .ok_or_else(|| no_secret_error(conn, groups))?;
     Ok(RdpAuthInput {
-        username,
+        username: resolved.username,
         password,
-        domain: settings.domain.clone(),
+        domain: resolved.domain.or_else(|| settings.domain.clone()),
     })
 }
 
@@ -2719,7 +2793,7 @@ mod tests {
 
     use cm_core::{
         ConnectionId, ConnectionKind, Credential, CredentialError, CredentialId, CredentialKind,
-        GroupId,
+        CredentialRef, GroupId,
     };
 
     #[test]
@@ -2939,7 +3013,7 @@ mod tests {
             "conn".to_owned(),
             ConnectionKind::Ssh,
             ConnectionSettings::Ssh(ssh_settings(auth_method)),
-            credential.map(CredentialId::new),
+            credential.map(|id| cm_core::CredentialSource::Object(CredentialId::new(id))),
             0,
             0,
             0,
@@ -2959,7 +3033,7 @@ mod tests {
                 domain: Some("CORP".to_owned()),
                 ..RdpSettings::default()
             }),
-            credential.map(CredentialId::new),
+            credential.map(|id| cm_core::CredentialSource::Object(CredentialId::new(id))),
             0,
             0,
             0,
@@ -2985,7 +3059,7 @@ mod tests {
                 domain: None,
                 ..RdpSettings::default()
             }),
-            credential.map(CredentialId::new),
+            credential.map(|id| cm_core::CredentialSource::Object(CredentialId::new(id))),
             0,
             0,
             0,
@@ -3014,7 +3088,7 @@ mod tests {
             "s3cret",
         );
         let settings = ssh_settings(SshAuthMethod::Password);
-        let auth = resolve_ssh_auth(&conn, &[], &settings, &store).expect("should resolve");
+        let auth = resolve_ssh_auth(&conn, &[], &settings, &store, &[]).expect("should resolve");
         match auth {
             SshAuthInput::Password(s) => assert_eq!(s.expose(), b"s3cret"),
             other => panic!("expected Password, got {other:?}"),
@@ -3031,7 +3105,7 @@ mod tests {
             "grouppw",
         );
         let settings = ssh_settings(SshAuthMethod::Password);
-        let auth = resolve_ssh_auth(&conn, &[group], &settings, &store)
+        let auth = resolve_ssh_auth(&conn, &[group], &settings, &store, &[])
             .expect("should resolve via inherited group default");
         match auth {
             SshAuthInput::Password(s) => assert_eq!(s.expose(), b"grouppw"),
@@ -3047,7 +3121,7 @@ mod tests {
             .with(CredentialId::new(1), CredentialPurpose::Password, "ownpw")
             .with(CredentialId::new(7), CredentialPurpose::Password, "grouppw");
         let settings = ssh_settings(SshAuthMethod::Password);
-        let auth = resolve_ssh_auth(&conn, &[group], &settings, &store)
+        let auth = resolve_ssh_auth(&conn, &[group], &settings, &store, &[])
             .expect("should resolve to the connection's own credential");
         match auth {
             SshAuthInput::Password(s) => assert_eq!(s.expose(), b"ownpw"),
@@ -3060,7 +3134,7 @@ mod tests {
         let conn = make_ssh_conn(None, None, SshAuthMethod::Password);
         let store = MockCredentialStore::new();
         let settings = ssh_settings(SshAuthMethod::Password);
-        let err = resolve_ssh_auth(&conn, &[], &settings, &store)
+        let err = resolve_ssh_auth(&conn, &[], &settings, &store, &[])
             .expect_err("should fail: no credential assigned anywhere");
         assert_eq!(err, AuthResolveError::NoCredentialAssigned);
         assert_eq!(err.to_string(), "No credential assigned");
@@ -3071,7 +3145,7 @@ mod tests {
         let conn = make_ssh_conn(None, Some(2), SshAuthMethod::Password);
         let store = MockCredentialStore::new(); // nothing stored for id 2
         let settings = ssh_settings(SshAuthMethod::Password);
-        let err = resolve_ssh_auth(&conn, &[], &settings, &store)
+        let err = resolve_ssh_auth(&conn, &[], &settings, &store, &[])
             .expect_err("should fail: keychain has no entry");
         assert_eq!(err, AuthResolveError::NotFoundInKeychain);
         assert_eq!(err.to_string(), "Credential not found in keychain");
@@ -3083,7 +3157,7 @@ mod tests {
         let store =
             MockCredentialStore::new().failing(CredentialId::new(3), CredentialPurpose::Password);
         let settings = ssh_settings(SshAuthMethod::Password);
-        let err = resolve_ssh_auth(&conn, &[], &settings, &store)
+        let err = resolve_ssh_auth(&conn, &[], &settings, &store, &[])
             .expect_err("should surface the backend error");
         assert!(matches!(err, AuthResolveError::Backend(_)));
     }
@@ -3100,8 +3174,8 @@ mod tests {
             "PEM-TEXT",
         );
         let settings = ssh_settings(auth_method);
-        let auth =
-            resolve_ssh_auth(&conn, &[], &settings, &store).expect("should resolve key material");
+        let auth = resolve_ssh_auth(&conn, &[], &settings, &store, &[])
+            .expect("should resolve key material");
         match auth {
             SshAuthInput::KeyMaterial {
                 key_pem,
@@ -3128,7 +3202,7 @@ mod tests {
                 "hunter2",
             );
         let settings = ssh_settings(auth_method);
-        let auth = resolve_ssh_auth(&conn, &[], &settings, &store)
+        let auth = resolve_ssh_auth(&conn, &[], &settings, &store, &[])
             .expect("should resolve key material with passphrase");
         match auth {
             SshAuthInput::KeyMaterial {
@@ -3150,7 +3224,7 @@ mod tests {
         let conn = make_ssh_conn(None, None, SshAuthMethod::Agent);
         let store = MockCredentialStore::new();
         let settings = ssh_settings(SshAuthMethod::Agent);
-        let auth = resolve_ssh_auth(&conn, &[], &settings, &store)
+        let auth = resolve_ssh_auth(&conn, &[], &settings, &store, &[])
             .expect("agent auth needs no stored credential");
         assert!(matches!(auth, SshAuthInput::Agent));
     }
@@ -3309,7 +3383,30 @@ mod tests {
     /// credential assigned still uses the inline username unchanged.
     #[test]
     fn resolve_rdp_auth_uses_inline_username_when_no_credential_username() {
-        let conn = make_rdp_conn(None, Some(6));
+        let settings = RdpSettings {
+            host: "10.0.0.2".to_owned(),
+            username: Some("typed-user".to_owned()),
+            domain: Some("CORP".to_owned()),
+            ..RdpSettings::default()
+        };
+        // Build `conn` with these same settings directly, rather than via
+        // `make_rdp_conn` (which hardcodes its own, different username).
+        // `resolve_connection_auth`'s username fallback reads `conn.settings`
+        // directly, not the `settings` param passed to `resolve_rdp_auth` --
+        // in production the two are always the same object, so a mismatched
+        // pair here would only be a test artifact, not a real scenario.
+        let conn = Connection::new(
+            ConnectionId::new(2),
+            None,
+            "rdp-conn".to_owned(),
+            ConnectionKind::Rdp,
+            ConnectionSettings::Rdp(settings.clone()),
+            Some(cm_core::CredentialSource::Object(CredentialId::new(6))),
+            0,
+            0,
+            0,
+        )
+        .unwrap();
         let store = MockCredentialStore::new().with(
             CredentialId::new(6),
             CredentialPurpose::Password,
@@ -3317,12 +3414,6 @@ mod tests {
         );
         // Credential #6 exists but has no username of its own.
         let credentials = vec![make_credential(6, None)];
-        let settings = RdpSettings {
-            host: "10.0.0.2".to_owned(),
-            username: Some("typed-user".to_owned()),
-            domain: Some("CORP".to_owned()),
-            ..RdpSettings::default()
-        };
         let auth =
             resolve_rdp_auth(&conn, &[], &settings, &store, &credentials).expect("should resolve");
         assert_eq!(auth.username, "typed-user");
@@ -3387,8 +3478,8 @@ mod tests {
             "PEM-TEXT",
         );
         let settings = ssh_settings(auth_method);
-        let auth =
-            resolve_ssh_auth(&conn, &[], &settings, &store).expect("should resolve key material");
+        let auth = resolve_ssh_auth(&conn, &[], &settings, &store, &[])
+            .expect("should resolve key material");
         match auth {
             SshAuthInput::KeyMaterial { key_pem, .. } => assert_eq!(key_pem.expose(), b"PEM-TEXT"),
             other => panic!("expected KeyMaterial, got {other:?}"),

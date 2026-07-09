@@ -4,7 +4,8 @@ use std::rc::Rc;
 
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionSettings, CredentialId, CredentialPurpose,
-    CredentialRef, Group, GroupId, LocalSettings, RdpSettings, SshAuthMethod, SshSettings,
+    CredentialRef, CredentialSource, Group, GroupId, LocalSettings, RdpSettings, SshAuthMethod,
+    SshSettings,
 };
 use cm_session::PaneLayout;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
@@ -150,6 +151,21 @@ fn wire_new_group(ctx: &Ctx) {
     });
 }
 
+/// P9.6-A mechanical fix: the credential-object id a connection points at
+/// directly (not counting group inheritance) -- what `Connection::credential:
+/// Option<CredentialId>` used to BE before it became `credential_source:
+/// Option<CredentialSource>`. `None` for every other source (inherit/Inline/
+/// Prompt), matching that field's old meaning exactly. Used by the profile
+/// editor's dropdown-selection display (`cred_name_idx`/
+/// `KeysPanel::resolve_effective`) until the mode-selector UI (Inline/Prompt)
+/// lands -- see the P9.6 Phase C task doc.
+pub(super) fn object_credential_id(source: &Option<CredentialSource>) -> Option<CredentialId> {
+    match source {
+        Some(CredentialSource::Object(id)) => Some(*id),
+        _ => None,
+    }
+}
+
 fn wire_edit_conn(ctx: &Ctx) {
     ctx.ui.on_edit_conn({
         let state = ctx.state.clone();
@@ -163,12 +179,15 @@ fn wire_edit_conn(ctx: &Ctx) {
             let (kind, host, port, username, auth_method, rdp_domain, rdp_resolution) =
                 profile_fields_from_conn(conn);
             let cred_sel_idx = cred_name_idx(
-                conn.credential,
+                object_credential_id(&conn.credential_source),
                 st.keys_panel.credentials(),
                 st.keys_panel.folders(),
             );
-            let (eff_cred_id, inherited) =
-                KeysPanel::resolve_effective(conn.credential, conn.group_id, st.conn_tree.groups());
+            let (eff_cred_id, inherited) = KeysPanel::resolve_effective(
+                object_credential_id(&conn.credential_source),
+                conn.group_id,
+                st.conn_tree.groups(),
+            );
             let eff_name = KeysPanel::cred_display_name(eff_cred_id, st.keys_panel.credentials());
             let selected_group_idx = group_name_idx(conn.group_id, st.conn_tree.groups());
             let form = ConnProfile {
@@ -236,13 +255,32 @@ pub(super) fn duplicate_connection(
     sort: i64,
     now: i64,
 ) -> Result<Connection, cm_core::DomainError> {
+    // P9.6-A: copy the credential source as-is for Object/Prompt/inherit --
+    // unaffected by the new connection getting a fresh id. Inline is the one
+    // exception: its secret lives in the keychain keyed to `src`'s OWN
+    // connection id (`CredentialRef::for_connection`), which this pure
+    // mapping function has no store handle to copy -- so the duplicate keeps
+    // the inline username/domain but reports `has_secret: false` rather than
+    // claiming a secret that doesn't actually exist at the new connection's
+    // key. (Copying the inline secret too is a reasonable follow-up once
+    // `duplicate_connection`'s caller threads a `CredentialStore` through.)
+    let credential_source = match &src.credential_source {
+        Some(CredentialSource::Inline {
+            username, domain, ..
+        }) => Some(CredentialSource::Inline {
+            username: username.clone(),
+            domain: domain.clone(),
+            has_secret: false,
+        }),
+        other => other.clone(),
+    };
     Connection::new(
         ConnectionId::new(0),
         src.group_id,
         format!("{} (copy)", src.name),
         src.kind,
         src.settings.clone(),
-        src.credential,
+        credential_source,
         sort,
         now,
         now,
@@ -386,13 +424,18 @@ fn wire_profile_save(ctx: &Ctx) {
                     .map(|c| c.created_at)
                     .unwrap_or(now)
             };
+            // P9.6-A: the dropdown only ever selects a saved credential OBJECT
+            // (or "Inherit from group", cred_id == None) -- Inline/Prompt mode
+            // selection is the editor UI item (c) adds later. `None` stays
+            // `None` (inherit), preserving today's behavior exactly.
+            let credential_source = cred_id.map(CredentialSource::Object);
             let conn = match Connection::new(
                 ConnectionId::new(form.id as i64),
                 group_id,
                 form.name.to_string(),
                 kind,
                 settings,
-                cred_id,
+                credential_source,
                 sort,
                 created_at,
                 now,
@@ -898,7 +941,7 @@ mod tests {
                 username: "deploy".to_owned(),
                 auth_method: SshAuthMethod::Agent,
             }),
-            Some(CredentialId::new(9)),
+            Some(CredentialSource::Object(CredentialId::new(9))),
             3,
             1_000,
             1_000,
@@ -912,7 +955,7 @@ mod tests {
         assert_eq!(dup.group_id, src.group_id);
         assert_eq!(dup.kind, src.kind);
         assert_eq!(dup.settings, src.settings);
-        assert_eq!(dup.credential, src.credential);
+        assert_eq!(dup.credential_source, src.credential_source);
         assert_eq!(dup.sort, 4);
         assert_eq!(dup.created_at, 2_000);
         assert_eq!(dup.updated_at, 2_000);
