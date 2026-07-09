@@ -798,7 +798,7 @@ mod tests {
     #[test]
     fn form_to_ssh_auth_password() {
         let auth_method: i32 = 1;
-        let secret_raw = "dummy-password".to_owned();
+        let secret_raw = "test-secret".to_owned();
         let pass_raw = String::new();
         let auth = match auth_method {
             0 => SshAuthInput::Key {
