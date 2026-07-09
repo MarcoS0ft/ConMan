@@ -487,6 +487,9 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
             cred_model: cred_model.clone(),
             toast_model: toast_model.clone(),
             toast_next_id: toast_next_id.clone(),
+            // P9.4: no import is ever mid-password-prompt at startup.
+            pending_import_path: Rc::new(RefCell::new(None)),
+            pending_import_password: Rc::new(RefCell::new(String::new())),
         },
         // P6.15: see the field doc comment.
         session_provider,
@@ -568,6 +571,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
     palette::wire_palette(&ctx);
     overlays::wire_overlays(&ctx);
     launchpad::wire_launchpad(&ctx);
+    import_export::wire_import_export(&ctx);
 
     // -- Redraw timer ---------------------------------------------------------
     let redraw = sessions::wire_tick(&ctx);

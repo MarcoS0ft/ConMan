@@ -36,6 +36,27 @@
 //! Part-C1's real accept-reaches-Connected round trip) is where the full,
 //! real, threaded path is actually exercised end to end -- see
 //! `memos/P8.4-qa-gate-rubric.md`'s mapping table.
+//!
+//! ## P9.4: `ImportPasswordDialog` has the identical honest limit
+//! `run_import`/`ImportExportHandles` (`controller/import_export.rs`) are
+//! `pub(super)` -- unreachable from an integration test -- and the only
+//! existing way to drive `run_import` without the (blocking, un-automatable)
+//! native file picker is `CONMAN_AUTOIMPORT`, which `util::wire_env_hooks`
+//! only wires from the real `run()`, not `build_for_test` (this harness's
+//! `assemble` seam) -- so the real `ImportError::PasswordRequired` ->
+//! dialog-opens -> submit -> `import_from_path_with_password` retry round
+//! trip against an actual file genuinely cannot be driven from here, same
+//! structural reason as the host-key/cert dialogs above. What *is* covered:
+//! the dialog's manifest (file name rendering, field/button presence) and
+//! that submit/cancel (the real `on_import_password_submit`/
+//! `on_import_password_cancel` wiring) safely close it -- played the same
+//! "set the properties the real caller would set" way, `pending_import_path`
+//! left `None` (nothing to retry against) so submit exercises its
+//! nothing-pending no-op branch rather than a real re-import. The dialog
+//! dispatch logic itself (`.csv`/`.xml` routing, `PasswordRequired` mapping,
+//! `import_from_path_with_password`) is covered by dialog-free unit tests in
+//! `controller/import_export.rs`'s own `#[cfg(test)]` module -- the seam the
+//! module's own doc says is where that belongs.
 
 #![cfg(feature = "ui-introspection")]
 
@@ -51,6 +72,8 @@ fn verifier_dialogs_suite() {
     host_key_mismatch_manifest_and_reject_closes();
     cert_unknown_manifest_and_accept_remember_closes();
     cert_mismatch_manifest_and_reject_closes();
+    import_password_dialog_manifest_and_submit_closes();
+    import_password_dialog_cancel_closes();
 }
 
 /// Unknown-host-key TOFU: "Reject" (secondary) / "Accept & continue"
@@ -178,5 +201,55 @@ fn cert_mismatch_manifest_and_reject_closes() {
     assert!(
         !h.ui.get_cert_dialog_open(),
         "Reject must close the cert-mismatch dialog"
+    );
+}
+
+/// P9.4: the mRemoteNG import password prompt -- manifest (file name
+/// rendering, field + button presence) and that Import (the real
+/// `on_import_password_submit` wiring) closes the dialog. `pending_import_
+/// path` is never populated here (see the module doc's honest-limit note),
+/// so this exercises submit's nothing-pending no-op branch, not a real
+/// retry -- the retry logic itself is unit-tested dialog-free in
+/// `controller/import_export.rs`.
+fn import_password_dialog_manifest_and_submit_closes() {
+    let (h, _repo, _provider) = harness();
+    h.ui.set_import_password_file_name("confCons.xml".into());
+    h.ui.set_import_password_open(true);
+    pump_ticks(1);
+
+    let dialog = find_singleton(&h.ui, "ImportPasswordDialog");
+    assert_eq!(
+        dialog.accessible_label().as_deref(),
+        Some("Import password dialog")
+    );
+    find_by_id(&h.ui, "ImportPasswordDialog::import-password-field");
+    find_by_id(&h.ui, "ImportPasswordDialog::import-password-cancel-btn");
+    let submit_btn = find_by_id(&h.ui, "ImportPasswordDialog::import-password-submit-btn");
+
+    // Typing into the password field -- proves `on_import_password_edited`
+    // doesn't panic; never re-displayed/asserted against (P8.1b no-leak
+    // shape, same as `KbdInteractiveDialog`'s answers).
+    h.ui.invoke_import_password_edited("mock-password".into());
+
+    submit_btn.invoke_accessible_default_action();
+    assert!(
+        !h.ui.get_import_password_open(),
+        "Import must close the password dialog"
+    );
+}
+
+/// Cancel (the real `on_import_password_cancel` wiring) closes the dialog
+/// too, without attempting any import.
+fn import_password_dialog_cancel_closes() {
+    let (h, _repo, _provider) = harness();
+    h.ui.set_import_password_file_name("confCons.xml".into());
+    h.ui.set_import_password_open(true);
+    pump_ticks(1);
+
+    find_by_id(&h.ui, "ImportPasswordDialog::import-password-cancel-btn")
+        .invoke_accessible_default_action();
+    assert!(
+        !h.ui.get_import_password_open(),
+        "Cancel must close the password dialog"
     );
 }
