@@ -965,6 +965,12 @@ fn excluded_settings_keys_are_not_exported() {
     // pinned "accelerated" imported on a GPU-less machine would crash it.
     src.set_setting("render.backend", "accelerated")
         .expect("set render backend");
+    // Agent-mode automation posture (P8.6) — must NOT travel: a DB copy must
+    // never silently arrive with automation already enabled/scoped.
+    src.set_setting("automation.enabled", "1")
+        .expect("set automation enabled");
+    src.set_setting("automation.scopes", "read,write,execute")
+        .expect("set automation scopes");
     // A normal key that SHOULD travel.
     src.set_setting("ui.theme_mode", "0").expect("set theme");
 
@@ -984,6 +990,14 @@ fn excluded_settings_keys_are_not_exported() {
         "render.backend must be excluded — it is machine-specific hardware \
          capability, and the importing machine must re-probe"
     );
+    assert!(
+        !keys.contains(&"automation.enabled"),
+        "automation.enabled must be excluded — per-machine security posture"
+    );
+    assert!(
+        !keys.contains(&"automation.scopes"),
+        "automation.scopes must be excluded — per-machine security posture"
+    );
     assert!(keys.contains(&"ui.theme_mode"), "normal key must be kept");
 
     // The serialised JSON must not mention the excluded keys at all.
@@ -992,6 +1006,8 @@ fn excluded_settings_keys_are_not_exported() {
     assert!(!json.contains("first_run_seeded"));
     assert!(!json.contains("render.backend"));
     assert!(!json.contains("\"accelerated\""));
+    assert!(!json.contains("automation.enabled"));
+    assert!(!json.contains("automation.scopes"));
 }
 
 #[test]

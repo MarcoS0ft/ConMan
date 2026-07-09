@@ -42,8 +42,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cm_core::{
     Connection, ConnectionId, ConnectionRepository, Credential, CredentialFolder,
     CredentialFolderId, CredentialId, CredentialKind, CredentialPurpose, CredentialRef,
-    CredentialSource, CredentialStore, Group, GroupId, KEY_FIRST_RUN_SEEDED, KEY_RENDERER_BACKEND,
-    KEY_SESSION_TABS, Secret,
+    CredentialSource, CredentialStore, Group, GroupId, KEY_AUTOMATION_ENABLED,
+    KEY_AUTOMATION_SCOPES, KEY_FIRST_RUN_SEEDED, KEY_RENDERER_BACKEND, KEY_SESSION_TABS, Secret,
 };
 use serde::{Deserialize, Serialize};
 
@@ -79,8 +79,18 @@ pub const MIN_SUPPORTED_VERSION: u32 = 1;
 ///   would crash on launch, defeating the renderer probe/fallback entirely —
 ///   the importing machine must always re-probe (its absence collapses to
 ///   "auto", see [`cm_core::SettingsService::load_renderer_backend`]).
-const EXPORT_EXCLUDED_SETTING_KEYS: &[&str] =
-    &[KEY_SESSION_TABS, KEY_FIRST_RUN_SEEDED, KEY_RENDERER_BACKEND];
+/// - [`KEY_AUTOMATION_ENABLED`] / [`KEY_AUTOMATION_SCOPES`] (P8.6): the
+///   agent-mode automation master enable + granted scopes are per-machine
+///   security posture, not connection data — a DB copied to another machine
+///   (or a shared/backed-up envelope) must never silently arrive with
+///   automation already enabled or scoped there.
+const EXPORT_EXCLUDED_SETTING_KEYS: &[&str] = &[
+    KEY_SESSION_TABS,
+    KEY_FIRST_RUN_SEEDED,
+    KEY_RENDERER_BACKEND,
+    KEY_AUTOMATION_ENABLED,
+    KEY_AUTOMATION_SCOPES,
+];
 
 /// Upper bound on topological-sort passes to guard against cyclic or otherwise
 /// malformed input from untrusted JSON.
