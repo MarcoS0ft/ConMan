@@ -15,7 +15,10 @@
 //! * **Secrets are never logged.** [`cm_core::Secret`] has a custom
 //!   `Debug` / `Display` that emits `"<redacted>"`.  This crate never
 //!   formats, prints, or clones the raw bytes for any purpose other than
-//!   passing them directly to the OS keychain API.
+//!   passing them directly to the OS keychain API. [`CredentialStore`]
+//!   failures/lookups (P9.8 H2-H6) are logged with `service`/
+//!   [`CredentialRef::purpose_str`]/`error` only — never [`CredentialRef::account`]
+//!   (which encodes id material) and never a secret value.
 //!
 //! * **Entry cache.** `keyring` 3.x creates a fresh in-memory
 //!   [`keyring::mock`] credential on each [`keyring::Entry::new`] call.  To
@@ -98,8 +101,14 @@ impl KeyringStore {
             return Ok(Arc::clone(entry));
         }
 
-        let entry = keyring::Entry::new(key.service(), key.account())
-            .map_err(|e| CredentialError::Backend(e.to_string()))?;
+        let entry = keyring::Entry::new(key.service(), key.account()).map_err(|e| {
+            tracing::error!(
+                service = %key.service(),
+                error = %e,
+                "failed to create keychain entry"
+            );
+            CredentialError::Backend(e.to_string())
+        })?;
         let arc = Arc::new(entry);
         guard.insert(cache_key, Arc::clone(&arc));
         Ok(arc)
@@ -133,7 +142,14 @@ impl CredentialStore for KeyringStore {
     fn store(&self, key: &CredentialRef, secret: &Secret) -> Result<(), CredentialError> {
         self.entry_for(key)?
             .set_secret(secret.expose())
-            .map_err(|e| CredentialError::Backend(e.to_string()))
+            .map_err(|e| {
+                tracing::error!(
+                    purpose = key.purpose_str().unwrap_or("unknown"),
+                    error = %e,
+                    "keychain store failed"
+                );
+                CredentialError::Backend(e.to_string())
+            })
     }
 
     /// Returns the secret stored under `key`, or `None` if no entry exists.
@@ -142,9 +158,30 @@ impl CredentialStore for KeyringStore {
     /// keychain error is propagated as [`CredentialError::Backend`].
     fn get(&self, key: &CredentialRef) -> Result<Option<Secret>, CredentialError> {
         match self.entry_for(key)?.get_secret() {
-            Ok(bytes) => Ok(Some(Secret::new(bytes))),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(CredentialError::Backend(e.to_string())),
+            Ok(bytes) => {
+                tracing::debug!(
+                    purpose = key.purpose_str().unwrap_or("unknown"),
+                    hit = true,
+                    "keychain get"
+                );
+                Ok(Some(Secret::new(bytes)))
+            }
+            Err(keyring::Error::NoEntry) => {
+                tracing::debug!(
+                    purpose = key.purpose_str().unwrap_or("unknown"),
+                    hit = false,
+                    "keychain get"
+                );
+                Ok(None)
+            }
+            Err(e) => {
+                tracing::error!(
+                    purpose = key.purpose_str().unwrap_or("unknown"),
+                    error = %e,
+                    "keychain get failed"
+                );
+                Err(CredentialError::Backend(e.to_string()))
+            }
         }
     }
 
@@ -155,7 +192,14 @@ impl CredentialStore for KeyringStore {
     fn delete(&self, key: &CredentialRef) -> Result<(), CredentialError> {
         match self.entry_for(key)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(CredentialError::Backend(e.to_string())),
+            Err(e) => {
+                tracing::error!(
+                    purpose = key.purpose_str().unwrap_or("unknown"),
+                    error = %e,
+                    "keychain delete failed"
+                );
+                Err(CredentialError::Backend(e.to_string()))
+            }
         }
     }
 }

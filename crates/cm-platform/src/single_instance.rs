@@ -137,9 +137,20 @@ fn instance_port() -> u16 {
 fn acquire_on_port(port: u16) -> AcquireOutcome {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     match TcpListener::bind(addr) {
-        Ok(listener) => AcquireOutcome::Acquired(InstanceGuard { listener }),
+        Ok(listener) => {
+            tracing::debug!(port, "single-instance: acquired primary lock");
+            AcquireOutcome::Acquired(InstanceGuard { listener })
+        }
         Err(bind_err) => probe_existing(addr, &bind_err),
     }
+}
+
+/// Builds an `Unavailable` outcome, logging once at the point of
+/// construction — every "port occupied and ___" case in [`probe_existing`]
+/// funnels through this so the WARN and the variant can never drift apart.
+fn unavailable(port: u16, reason: String) -> AcquireOutcome {
+    tracing::warn!(port, reason = %reason, "single-instance: lock port unavailable");
+    AcquireOutcome::Unavailable(reason)
 }
 
 /// Upper bound on a single handshake line, in bytes. Both fixed protocol
@@ -191,35 +202,44 @@ fn probe_existing(addr: SocketAddr, bind_err: &std::io::Error) -> AcquireOutcome
     let mut stream = match TcpStream::connect_timeout(&addr, IO_TIMEOUT) {
         Ok(s) => s,
         Err(connect_err) => {
-            return AcquireOutcome::Unavailable(format!(
-                "port {} unavailable (bind: {bind_err}) and not connectable ({connect_err})",
-                addr.port()
-            ));
+            return unavailable(
+                addr.port(),
+                format!(
+                    "port {} unavailable (bind: {bind_err}) and not connectable ({connect_err})",
+                    addr.port()
+                ),
+            );
         }
     };
     if stream.set_read_timeout(Some(IO_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
     {
-        return AcquireOutcome::Unavailable(format!(
-            "port {} occupied; could not configure the probe socket",
-            addr.port()
-        ));
+        return unavailable(
+            addr.port(),
+            format!(
+                "port {} occupied; could not configure the probe socket",
+                addr.port()
+            ),
+        );
     }
     if stream
         .write_all(format!("{HANDSHAKE_REQUEST}\n").as_bytes())
         .is_err()
     {
-        return AcquireOutcome::Unavailable(format!(
-            "port {} occupied; handshake write failed",
-            addr.port()
-        ));
+        return unavailable(
+            addr.port(),
+            format!("port {} occupied; handshake write failed", addr.port()),
+        );
     }
     match read_bounded_line(&mut stream) {
         Ok(Some(reply)) if reply.trim_end() == HANDSHAKE_REPLY => AcquireOutcome::AlreadyRunning,
-        _ => AcquireOutcome::Unavailable(format!(
-            "port {} occupied by a process that did not answer the ConMan handshake",
-            addr.port()
-        )),
+        _ => unavailable(
+            addr.port(),
+            format!(
+                "port {} occupied by a process that did not answer the ConMan handshake",
+                addr.port()
+            ),
+        ),
     }
 }
 

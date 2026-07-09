@@ -685,6 +685,14 @@ mod tests {
         assert_eq!(decoded, b"dummy-pw-1");
     }
 
+    /// The fixture's "Shared" container carries its own encrypted `Password`
+    /// — but a `Container` never becomes a `Connection`/credential itself
+    /// (only `Type="Connection"` nodes do), so there is no direct test of
+    /// "Shared"'s own secret in isolation. This test *is* that coverage: it
+    /// proves the container's password is real, reachable, decryptable
+    /// ciphertext by resolving it through the one child that inherits it. If
+    /// this test ever seems to have "gone missing" from a search for
+    /// "Shared" + "password", it hasn't — this is it.
     #[test]
     fn inherited_password_resolves_from_the_enclosing_container() {
         let (envelope, _warnings) = parse(FIXTURE, "mR3m").expect("fixture should parse");
@@ -763,5 +771,106 @@ mod tests {
 </Connections>"#;
         let err = parse(xml, "mR3m").expect_err("non-GCM mode must be rejected cleanly");
         assert!(matches!(err, ImportExportError::Malformed(_)));
+    }
+
+    /// `full_file_encryption_is_a_clean_unsupported_error` and
+    /// `legacy_non_gcm_scheme_is_a_clean_unsupported_error` (above) both use
+    /// an unprefixed `<Connections>` root too, but neither ever reaches node
+    /// parsing (they error out on the root attrs first). This is the actual
+    /// happy-path coverage: an unprefixed legacy root whose child `<Node>`
+    /// really does parse into a connection, proving `is_local_name`'s
+    /// prefix-agnostic match works end to end, not just "doesn't crash
+    /// before erroring."
+    #[test]
+    fn unprefixed_legacy_root_parses_a_real_connection() {
+        let xml = r#"<?xml version="1.0"?>
+<Connections Name="Connections" EncryptionEngine="AES" BlockCipherMode="GCM"
+    KdfIterations="1000" FullFileEncryption="false"
+    Protected="A5nqyoRWQqkL2KxoR2BJSxOSeEozs1oQ1i9qvQjnlolWAGtXVY1lGBiHshF19wcFpkRF7QvACHLq1yjSeBOp"
+    ConfVersion="2.6">
+  <Node Name="legacy-root-conn" Type="Connection" Protocol="SSH2"
+      Hostname="legacy.example.test" Username="root" />
+</Connections>"#;
+        let (envelope, _warnings) =
+            parse(xml, "mR3m").expect("unprefixed root should parse just like the mrng: one");
+        assert!(
+            envelope
+                .connections
+                .iter()
+                .any(|c| c.name == "legacy-root-conn"),
+            "the connection under the unprefixed root must still parse"
+        );
+    }
+
+    #[test]
+    fn node_missing_type_is_skipped_with_a_counted_warning() {
+        let xml = r#"<?xml version="1.0"?>
+<mrng:Connections xmlns:mrng="http://mremoteng.org" Name="Connections"
+    EncryptionEngine="AES" BlockCipherMode="GCM" KdfIterations="1000"
+    FullFileEncryption="false" ConfVersion="2.6">
+  <Node Name="no-type-node" Hostname="notype.example.test" />
+  <Node Name="good-conn" Type="Connection" Protocol="SSH2"
+      Hostname="good.example.test" Username="root" />
+</mrng:Connections>"#;
+        let (envelope, warnings) =
+            parse(xml, "mR3m").expect("a missing-Type node must not fail the whole parse");
+        assert!(
+            !envelope
+                .connections
+                .iter()
+                .any(|c| c.name == "no-type-node"),
+            "a node with no Type must not produce a connection"
+        );
+        assert!(
+            envelope.connections.iter().any(|c| c.name == "good-conn"),
+            "the sibling node must still parse"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("missing 'Type'")),
+            "the missing-Type node must be a counted warning: {warnings:?}"
+        );
+    }
+
+    /// The subtlest branch in `ParseCtx::decrypt`: once the password has been
+    /// confirmed correct (via the root's `Protected` canary here), a LATER
+    /// field that still fails to decrypt is that one field being
+    /// corrupt/unusual — not a wrong password for the whole file. This
+    /// connection's `Password` is real ciphertext, but encrypted under a
+    /// different password entirely (reused from
+    /// `tests/import_mremoteng.rs`'s custom-password fixture) — decrypting it
+    /// with the confirmed "mR3m" must fail the GCM tag, hit the `Ok(None)`
+    /// path, and become a counted warning + a credential-less connection,
+    /// never a re-triggered `PasswordRequired` for the whole file.
+    #[test]
+    fn a_single_corrupt_field_after_password_confirmation_is_a_warning_not_a_hard_failure() {
+        let xml = r#"<?xml version="1.0"?>
+<mrng:Connections xmlns:mrng="http://mremoteng.org" Name="Connections"
+    EncryptionEngine="AES" BlockCipherMode="GCM" KdfIterations="1000"
+    FullFileEncryption="false"
+    Protected="A5nqyoRWQqkL2KxoR2BJSxOSeEozs1oQ1i9qvQjnlolWAGtXVY1lGBiHshF19wcFpkRF7QvACHLq1yjSeBOp"
+    ConfVersion="2.6">
+  <Node Name="corrupt-pw-conn" Type="Connection" Protocol="SSH2"
+      Hostname="corrupt.example.test" Username="svc"
+      Password="Mgr1rTSfK8KlOpiVc0tDB8WUnd5dNg33VZDo7BmMoNkIR+nkTFAQZnuBU+NE42prNvsZCQGYM3dqHFiTug==" />
+</mrng:Connections>"#;
+        let (envelope, warnings) =
+            parse(xml, "mR3m").expect("one corrupt field must not fail the whole parse");
+        let conn = envelope
+            .connections
+            .iter()
+            .find(|c| c.name == "corrupt-pw-conn")
+            .expect("the connection must still import");
+        assert_eq!(
+            conn.credential_source, None,
+            "no credential -- the field couldn't be decrypted"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("could not be decrypted")),
+            "the corrupt field must be a counted warning: {warnings:?}"
+        );
     }
 }

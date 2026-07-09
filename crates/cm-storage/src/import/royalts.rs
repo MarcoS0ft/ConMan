@@ -123,6 +123,10 @@ struct ParseCtx {
     /// [`CredentialId`] minted for it. Built in pass 1, consulted in pass 2 —
     /// this map *is* the dedupe: one entry per unique RoyalTS credential ID.
     cred_guid_to_id: HashMap<String, CredentialId>,
+    /// Running count of credential nodes skipped because their GUID was
+    /// already registered (P9.8 G8) — logged as a count only, never the GUID
+    /// itself.
+    credential_dedup_count: usize,
     next_group_id: i64,
     next_cred_id: i64,
     next_conn_id: i64,
@@ -224,6 +228,11 @@ fn register_credential(node: &Value, ctx: &mut ParseCtx) {
         return;
     };
     if ctx.cred_guid_to_id.contains_key(&guid) {
+        ctx.credential_dedup_count += 1;
+        tracing::debug!(
+            count = ctx.credential_dedup_count,
+            "royalts: credential deduped"
+        );
         return; // Already registered — defensive dedupe guard.
     }
 

@@ -554,8 +554,9 @@ fn import_connections(
 
 /// Write imported secrets to the keychain under the *new* credential IDs.
 ///
-/// Errors on individual entries are non-fatal (skipped silently) to keep the
-/// importer defensive against partial or malformed secret data.
+/// Errors on individual entries are non-fatal — logged (never silently) and
+/// skipped, to keep the importer defensive against partial or malformed
+/// secret data without aborting the whole batch.
 fn import_secrets(
     secrets: &[ExportedSecret],
     cred_id_map: &HashMap<CredentialId, CredentialId>,
@@ -565,15 +566,29 @@ fn import_secrets(
     for entry in secrets {
         // Remap old → new credential ID.
         let Some(&new_cred_id) = cred_id_map.get(&entry.credential_id) else {
-            continue; // Credential not in this import batch.
+            tracing::warn!(
+                credential_id = entry.credential_id.get(),
+                "skipping imported secret: credential not in this import batch"
+            );
+            continue;
         };
 
         let Some(purpose) = parse_purpose(&entry.purpose) else {
-            continue; // Unknown purpose string in untrusted input.
+            tracing::warn!(
+                credential_id = new_cred_id.get(),
+                purpose = %entry.purpose,
+                "skipping imported secret: unrecognized purpose"
+            );
+            continue;
         };
 
         let Ok(raw) = from_hex(&entry.secret_hex) else {
-            continue; // Malformed hex.
+            tracing::warn!(
+                credential_id = new_cred_id.get(),
+                purpose = purpose.as_str(),
+                "skipping imported secret: malformed hex"
+            );
+            continue;
         };
 
         let key = CredentialRef::new(new_cred_id, purpose);
@@ -602,15 +617,29 @@ fn import_connection_secrets(
 ) {
     for entry in secrets {
         let Some(&new_conn_id) = conn_id_map.get(&entry.connection_id) else {
-            continue; // Connection not in this import batch.
+            tracing::warn!(
+                connection_id = entry.connection_id.get(),
+                "skipping imported connection secret: connection not in this import batch"
+            );
+            continue;
         };
 
         let Some(purpose) = parse_purpose(&entry.purpose) else {
-            continue; // Unknown purpose string in untrusted input.
+            tracing::warn!(
+                connection_id = new_conn_id.get(),
+                purpose = %entry.purpose,
+                "skipping imported connection secret: unrecognized purpose"
+            );
+            continue;
         };
 
         let Ok(raw) = from_hex(&entry.secret_hex) else {
-            continue; // Malformed hex.
+            tracing::warn!(
+                connection_id = new_conn_id.get(),
+                purpose = purpose.as_str(),
+                "skipping imported connection secret: malformed hex"
+            );
+            continue;
         };
 
         let key = CredentialRef::for_connection(new_conn_id, purpose);
