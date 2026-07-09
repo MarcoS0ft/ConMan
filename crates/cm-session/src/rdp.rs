@@ -1485,6 +1485,20 @@ fn publish_frame(image: &DecodedImage, tx: &SyncSender<FrameUpdate>) {
 // Unit tests
 // ---------------------------------------------------------------------------
 
+/// Counts distinct `(r, g, b)` triples in a [`FrameUpdate`]'s RGBA buffer
+/// (ignoring alpha). Test-only helper (P9.7 Slice 1 hardening) used both to
+/// pick the "richest" frame in a content window and, on that chosen frame,
+/// to assert real variety -- one source of truth for what "distinct color"
+/// means in `rdp_connect_live_host`, which also documents the
+/// `PixelFormat::RgbA32` byte-order justification.
+#[cfg(test)]
+fn distinct_rgb_count(rgba: &[u8]) -> usize {
+    rgba.chunks_exact(4)
+        .map(|p| (p[0], p[1], p[2]))
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2288,6 +2302,24 @@ mod tests {
     /// #9/#11 black-screen root cause (alpha = wire-padding 0x00 while RGB is
     /// valid) as a documented invariant, so a future alpha "cleanup" can't
     /// silently reintroduce it. See the assertions' own comments below.
+    ///
+    /// **Hardening (found during coordinator re-verification against a real
+    /// xrdp host, master `b397e4c`):** this live smoke was flaky in two ways
+    /// unrelated to the RDP decode/resolution code itself (both confirmed
+    /// correct by a clean run):
+    /// - The old code asserted variety against whichever frame happened to
+    ///   be the *first* non-empty one, which can be a solid xrdp
+    ///   greeter/background frame that arrives before real desktop content --
+    ///   a spurious "1 distinct RGB value" failure. Now it keeps collecting
+    ///   frames for a bounded window after first content and asserts against
+    ///   the richest (most colorful) one seen, only failing if real content
+    ///   never arrives in that window.
+    /// - The fixed 15 s connect-wait can trip on this host's own
+    ///   reconnect-throttling (a same-user RDP reconnect attempted right
+    ///   after a prior disconnect gets held/rejected server-side for ~20 s --
+    ///   see the `test-hosts` memo). The timeout is now tunable via
+    ///   `CONMAN_LIVE_RDP_TIMEOUT_SECS` (default unchanged, 15) and a single
+    ///   connect attempt that times out gets one retry after a cooldown.
     #[tokio::test]
     #[ignore = "opt-in: set CONMAN_LIVE_RDP_HOST/_USER/_PASSWORD to run against a real host"]
     async fn rdp_connect_live_host() {
@@ -2306,6 +2338,16 @@ mod tests {
             }
         };
 
+        // Hardening: tunable connect-wait, defaulting to the original 15 s.
+        // A real target's reconnect-throttling (or general slow-host
+        // variance) shouldn't be a false failure of a gate meant to catch
+        // real decode/negotiation regressions.
+        let timeout_secs: u64 = std::env::var("CONMAN_LIVE_RDP_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(15);
+        let connect_timeout = std::time::Duration::from_secs(timeout_secs);
+
         let cfg = cm_core::RdpSettings {
             host,
             port: 3389,
@@ -2320,37 +2362,94 @@ mod tests {
             password: Secret::from_string(password),
             domain: None,
         };
-        let verifier = FixedCertVerifier::new(CertDecision::AcceptAndRemember);
-        let store = CertStore::new();
 
-        let session = RdpSession::connect(&cfg, auth, verifier, store)
-            .expect("session construction must succeed");
+        /// One connect attempt: spawn the session and wait up to `timeout`
+        /// for `Connected`. Returns the connected session, or an error
+        /// string describing what went wrong (never panics -- the caller
+        /// decides whether to retry).
+        async fn try_connect(
+            cfg: &cm_core::RdpSettings,
+            auth: RdpAuthInput,
+            timeout: std::time::Duration,
+        ) -> Result<RdpSession, String> {
+            let verifier = FixedCertVerifier::new(CertDecision::AcceptAndRemember);
+            let store = CertStore::new();
+            let session = RdpSession::connect(cfg, auth, verifier, store)
+                .map_err(|e| format!("session construction failed: {e}"))?;
 
-        // Wait up to 15 s for Connected status.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        loop {
-            match session.status() {
-                SessionStatus::Connected => break,
-                SessionStatus::Failed(e) => panic!("RDP connect failed: {e}"),
-                SessionStatus::Disconnected => panic!("disconnected before connected"),
-                _ => {}
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                match session.status() {
+                    SessionStatus::Connected => return Ok(session),
+                    SessionStatus::Failed(e) => return Err(format!("RDP connect failed: {e}")),
+                    SessionStatus::Disconnected => {
+                        return Err("disconnected before connected".to_owned());
+                    }
+                    _ => {}
+                }
+                if std::time::Instant::now() > deadline {
+                    session.shutdown();
+                    return Err(format!(
+                        "timed out waiting for Connected status ({}s)",
+                        timeout.as_secs()
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
-            if std::time::Instant::now() > deadline {
-                panic!("timed out waiting for Connected status");
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
 
-        // Wait for at least one FrameUpdate.
+        // Hardening: one retry after a cooldown if the first attempt times
+        // out. This host's reconnect-throttle (empirically ~20 s) is the
+        // known cause; other failure kinds (auth rejected, disconnected) are
+        // not retried -- they're real signal, not host flakiness.
+        let session = match try_connect(&cfg, auth.clone(), connect_timeout).await {
+            Ok(session) => session,
+            Err(e) if e.contains("timed out waiting for Connected") => {
+                eprintln!(
+                    "rdp_connect_live_host: first connect attempt timed out ({e}) -- \
+                     retrying once after a cooldown (likely reconnect-throttling)"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                try_connect(&cfg, auth, connect_timeout)
+                    .await
+                    .unwrap_or_else(|e| panic!("RDP connect failed on retry too: {e}"))
+            }
+            Err(e) => panic!("{e}"),
+        };
+
+        // Wait for at least one FrameUpdate, then keep draining for a
+        // bounded window to let real desktop content replace any initial
+        // solid xrdp greeter/background frame; assert against the richest
+        // (most colorful) frame seen rather than whichever arrived first.
         let Surface::Framebuffer(rx) = session.surface() else {
             panic!("expected Framebuffer surface");
         };
 
         // xrdp can take ~10–12 s to deliver the first desktop bitmap after
-        // initial cursor-setup frames.  15 s gives a comfortable margin.
-        let frame = rx
-            .recv_timeout(std::time::Duration::from_secs(15))
-            .expect("must receive a frame within 15 s");
+        // initial cursor-setup frames; `connect_timeout` gives a comfortable
+        // margin (same knob as the connect-wait, for one dial to turn).
+        let first_frame = rx
+            .recv_timeout(connect_timeout)
+            .expect("must receive a frame within the timeout");
+
+        let content_window_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut richest_frame = first_frame;
+        let mut richest_variety = distinct_rgb_count(&richest_frame.rgba);
+        while let Some(remaining) =
+            content_window_deadline.checked_duration_since(std::time::Instant::now())
+        {
+            match rx.recv_timeout(remaining) {
+                Ok(frame) => {
+                    let variety = distinct_rgb_count(&frame.rgba);
+                    if variety > richest_variety {
+                        richest_variety = variety;
+                        richest_frame = frame;
+                    }
+                }
+                Err(_) => break, // no more frames arriving in the window
+            }
+        }
+        let frame = richest_frame;
 
         assert_eq!(
             frame.rgba.len(),
@@ -2405,14 +2504,17 @@ mod tests {
         // floor (a real xrdp desktop -- wallpaper, taskbar, anti-aliased
         // text -- has hundreds to thousands), chosen to avoid flaking
         // against an unknown target's visual complexity while still
-        // catching a truly uniform fill (which has exactly 1).
+        // catching a truly uniform fill (which has exactly 1). This now
+        // runs against the richest frame in the content window, not
+        // whichever frame happened to arrive first (hardening above).
         let distinct_rgb: std::collections::HashSet<(u8, u8, u8)> =
             pixels.iter().map(|&(r, g, b, _)| (r, g, b)).collect();
         assert!(
             distinct_rgb.len() > 8,
             "framebuffer has only {} distinct RGB value(s) -- expected real \
              desktop content (anti-aliased text/window chrome/wallpaper), \
-             not a uniform solid-color fill",
+             not a uniform solid-color fill, even after collecting frames \
+             for a 3s content window",
             distinct_rgb.len()
         );
 
