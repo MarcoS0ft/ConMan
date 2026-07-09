@@ -53,10 +53,10 @@ slint = { version = "1.17", default-features = false, features = [
 ] }
 # Structured logging (P6.3, new dep — pre-approved by the P6.3 spec, all
 # MIT-licensed): the composition root is the only place that installs a
-# subscriber. Console layer in debug; a rotating file layer under
-# `cm_platform::app_log_dir()` in release, since `windows_subsystem =
-# "windows"` swallows stderr there. `env-filter` backs the `CONMAN_LOG`
-# override (RUST_LOG-compatible syntax).
+# subscriber. A rotating file layer under `cm_platform::app_log_dir()` in both
+# builds (P9.8 §2a), plus a console layer in debug only, since
+# `windows_subsystem = "windows"` swallows stderr in release. `env-filter`
+# backs the `CONMAN_LOG` override (RUST_LOG-compatible syntax).
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"

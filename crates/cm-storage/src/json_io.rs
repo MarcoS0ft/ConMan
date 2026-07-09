@@ -476,8 +476,14 @@ fn import_secrets(
 
         let key = CredentialRef::new(new_cred_id, purpose);
         let secret = Secret::new(raw);
-        if store.store(&key, &secret).is_ok() {
-            stats.secrets_imported += 1;
+        match store.store(&key, &secret) {
+            Ok(()) => stats.secrets_imported += 1,
+            Err(e) => tracing::warn!(
+                credential_id = new_cred_id.get(),
+                purpose = purpose.as_str(),
+                error = %e,
+                "keychain store failed for imported secret"
+            ),
         }
     }
 }
@@ -498,13 +504,24 @@ fn collect_secrets(credentials: &[Credential], store: &dyn CredentialStore) -> V
         };
         for &purpose in purposes {
             let key = CredentialRef::new(cred.id, purpose);
-            // Absent or error → silently skip; export continues.
-            if let Ok(Some(secret)) = store.get(&key) {
-                out.push(ExportedSecret {
+            // Absent or error → skip; export continues (never fatal).
+            match store.get(&key) {
+                Ok(Some(secret)) => out.push(ExportedSecret {
                     credential_id: cred.id,
                     purpose: purpose.as_str().to_string(),
                     secret_hex: to_hex(secret.expose()),
-                });
+                }),
+                Ok(None) => tracing::debug!(
+                    credential_id = cred.id.get(),
+                    purpose = purpose.as_str(),
+                    "secret absent during export"
+                ),
+                Err(e) => tracing::debug!(
+                    credential_id = cred.id.get(),
+                    purpose = purpose.as_str(),
+                    error = %e,
+                    "secret unreadable during export"
+                ),
             }
         }
     }

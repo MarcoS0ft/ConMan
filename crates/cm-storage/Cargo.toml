@@ -15,6 +15,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# Structured logging (P9.8): DB open/migration/import diagnostics. The
+# composition root (`conman`) installs the subscriber; this crate only calls
+# the `tracing::*` macros.
+tracing = "0.1"
 
 [dev-dependencies]
 # Provides NamedTempFile / TempDir for the file-backed persistence test.
