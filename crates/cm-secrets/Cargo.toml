@@ -13,6 +13,10 @@ cm-core = { path = "../cm-core" }
 # want for CI.  For production use on Linux, the binary should enable the appropriate
 # feature and call `keyring::set_default_credential_builder` as needed.
 keyring = { version = "3.6" }
+# Structured logging (P9.8): backend-name/error diagnostics only — never a
+# secret value. The composition root (`conman`) installs the subscriber; this
+# crate only calls the `tracing::*` macros.
+tracing = "0.1"
 
 [lints]
 workspace = true

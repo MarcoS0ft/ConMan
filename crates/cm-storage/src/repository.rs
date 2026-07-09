@@ -37,9 +37,20 @@ impl SqliteRepository {
     /// Opens (or creates) a SQLite database at `path` and applies any pending
     /// schema migrations.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, StorageError> {
-        let conn =
-            rusqlite::Connection::open(path).map_err(|e| StorageError::Open(e.to_string()))?;
-        Self::initialize(conn)
+        let path = path.as_ref();
+        let start = std::time::Instant::now();
+        tracing::info!(path = %path.display(), "opening SQLite database");
+        let conn = rusqlite::Connection::open(path).map_err(|e| {
+            tracing::error!(path = %path.display(), error = %e, "failed to open database");
+            StorageError::Open(e.to_string())
+        })?;
+        let repo = Self::initialize(conn)?;
+        tracing::info!(
+            path = %path.display(),
+            elapsed_ms = start.elapsed().as_millis(),
+            "database ready"
+        );
+        Ok(repo)
     }
 
     /// Opens an in-memory database (data is lost when the repository is
@@ -51,8 +62,12 @@ impl SqliteRepository {
     }
 
     fn initialize(mut conn: rusqlite::Connection) -> Result<Self, StorageError> {
-        // WAL is a no-op for in-memory DBs; silently ignored.
-        let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
+        // WAL is a no-op for in-memory DBs; silently ignored. A genuine
+        // failure (e.g. a filesystem that doesn't support WAL) still falls
+        // back to the default journal mode, but is worth a WARN.
+        if conn.execute_batch("PRAGMA journal_mode=WAL;").is_err() {
+            tracing::warn!("WAL journal mode unavailable; using default");
+        }
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(|e| StorageError::Migration(e.to_string()))?;
         run_migrations(&mut conn)?;
