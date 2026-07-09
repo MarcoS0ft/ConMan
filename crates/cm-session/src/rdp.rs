@@ -466,7 +466,14 @@ pub enum RdpError {
     CredentialsRequired,
     #[error("Certificate rejected: {0}")]
     CertRejected(String),
-    #[error("Authentication failed: {0}")]
+    /// A `connect_finalize` (CredSSP/NLA) authentication failure — bad
+    /// username/password/domain, or an unsupported Kerberos/KDC round-trip.
+    /// The string is a clean, user-facing message; the raw ironrdp error
+    /// (which embeds an internal `[CredSSP @ <file>:<line>]` protocol/source
+    /// trace — see `ironrdp_error::Error`'s `Display` impl) is logged via
+    /// `tracing` at the [`map_finalize_error`] call site instead, never
+    /// surfaced here (P9.5 item 5).
+    #[error("{0}")]
     Auth(String),
     #[error("Session error: {0}")]
     Session(String),
@@ -531,9 +538,21 @@ fn credssp_requires_credentials(should_perform_credssp: bool, password: &[u8]) -
 /// `RdpError::Auth`. All other `connect_finalize` failures pass through
 /// unchanged as `RdpError::Protocol`, matching [`map_negotiation_error`]'s
 /// fallback behavior.
+///
+/// **P9.5 item 5:** `e.to_string()` for a `Credssp` failure renders as
+/// `[CredSSP @ <vendored-source-file>:<line>] <sspi message>` (the
+/// `ironrdp_error::Error<Kind>` `Display` impl always prefixes the error's
+/// context + call-site source location). That internal plumbing is
+/// meaningless to a user and was leaking straight into the `ErrorOverlay`
+/// (`Authentication failed [ CredSSP @ … ]`). The raw detail is still useful
+/// for debugging, so it's logged here via `tracing` and *not* placed in the
+/// `RdpError` reason string — the user only ever sees the clean message.
 fn map_finalize_error(e: ConnectorError) -> RdpError {
     if matches!(e.kind(), ConnectorErrorKind::Credssp(_)) {
-        return RdpError::Auth(e.to_string());
+        tracing::debug!(error = %e, "rdp: CredSSP/NLA authentication failed (connect_finalize)");
+        return RdpError::Auth(
+            "Authentication failed — check the username, password, and domain.".to_owned(),
+        );
     }
     RdpError::Protocol(e.to_string())
 }
@@ -1933,6 +1952,34 @@ mod tests {
         let mapped = map_finalize_error(err);
 
         assert!(matches!(mapped, RdpError::Auth(_)), "got: {mapped:?}");
+    }
+
+    /// P9.5 item 5: the mapped `RdpError::Auth` message is clean and
+    /// user-facing — no `[CredSSP @ …]` internal protocol/source-location
+    /// trace (which `e.to_string()` on the raw `ConnectorError` embeds, per
+    /// `ironrdp_error::Error<Kind>`'s `Display` impl). The raw detail must
+    /// only reach the `tracing` log, never the reason string the
+    /// `ErrorOverlay` renders.
+    #[test]
+    fn map_finalize_error_credssp_kind_message_is_clean() {
+        let sspi_err = ironrdp_connector::sspi::Error::new(
+            ironrdp_connector::sspi::ErrorKind::LogonDenied,
+            "the referenced account is currently locked out",
+        );
+        let err = ConnectorError::new(
+            "CredSSP",
+            ironrdp_connector::ConnectorErrorKind::Credssp(sspi_err),
+        );
+
+        let mapped = map_finalize_error(err);
+        let msg = mapped.to_string();
+
+        assert_eq!(
+            msg, "Authentication failed — check the username, password, and domain.",
+            "got: {msg:?}"
+        );
+        assert!(!msg.contains("CredSSP @"), "leaked internal trace: {msg:?}");
+        assert!(!msg.contains(".rs:"), "leaked source location: {msg:?}");
     }
 
     /// A non-CredSSP `connect_finalize` failure (e.g. a plain TLS-only-path
