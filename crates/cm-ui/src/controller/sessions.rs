@@ -2437,6 +2437,21 @@ pub(super) fn reconnect_rdp_tab(
             ui.set_overlay_error(false);
             ui.set_connecting_kind(SharedString::from("RDP"));
             ui.set_rdp_active(true);
+            // .99 GPU verify Bug B: `root.rdp-frame` is a single AppWindow-
+            // level property (app.slint's RdpSurface reads `root.rdp-frame`
+            // for whichever tab is active) -- it is only ever WRITTEN when a
+            // new `FrameUpdate` actually drains for the active tab
+            // (`tick_tab`'s `Surface::Framebuffer` arm, below). Clearing
+            // `tab.last_frame` above (the Rust-side model) does nothing to
+            // that UI property on its own, so without this the OLD frame --
+            // from the session that was just torn down -- stays bound and
+            // visible for however long the new handshake takes to deliver
+            // its first decoded frame. `reconnect_rdp_tab` only ever
+            // operates on the active tab (the ErrorOverlay's Reconnect
+            // button is always for the tab it's showing on), so blanking
+            // here, right when the reconnect is committed to, closes that
+            // window immediately rather than waiting for the next tick.
+            ui.set_rdp_frame(Image::default());
         }
         Err(e) => {
             tracing::warn!("RDP reconnect error: {e}");
@@ -2508,6 +2523,13 @@ pub(super) fn reconnect_ssh_tab(
             ui.set_overlay_connecting(true);
             ui.set_overlay_error(false);
             ui.set_connecting_kind(SharedString::from("SSH"));
+            // .99 GPU verify Bug B: same stale-frame class as
+            // `reconnect_rdp_tab`'s identical comment -- `root.frame` is the
+            // same kind of single AppWindow-level property (`render_frame`'s
+            // output), only ever rewritten when a new `GridSnapshot` drains
+            // for the active tab. Blank it here too so a terminal reconnect
+            // can't briefly show the just-torn-down session's last screen.
+            ui.set_frame(Image::default());
         }
         Err(e) => {
             tracing::warn!("SSH reconnect error: {e}");
@@ -2885,16 +2907,28 @@ pub(super) fn render_active(st: &mut State, ui: &AppWindow) {
     if let Some(tab) = st.tabs.get_mut(active) {
         match &tab.session.surface() {
             Surface::TerminalGrid(_) => {
-                if let Some(snap) = tab.last.clone() {
-                    let img = render_frame(tab, &snap, target);
-                    ui.set_frame(img);
-                }
+                // .99 GPU verify Bug B: `root.frame`/`root.rdp-frame` are
+                // single AppWindow-level properties shared by whatever tab
+                // is active (app.slint's TerminalSurface/RdpSurface both
+                // read `root.frame`/`root.rdp-frame`, never a per-tab
+                // value) -- they only get overwritten when a snapshot/frame
+                // actually exists to render. Skipping the setter entirely
+                // when there isn't one yet (a brand-new tab, or one whose
+                // `last`/`last_frame` a reconnect just cleared) used to
+                // leave whatever the PREVIOUSLY active tab last rendered
+                // still bound -- the "another tab's content bleeds through"
+                // half of the bug report. Always write it, falling back to
+                // a blank `Image` (same convention `panes.rs` already uses
+                // via `unwrap_or_default()` for a pane with no frame yet).
+                let img = match tab.last.clone() {
+                    Some(snap) => render_frame(tab, &snap, target),
+                    None => Image::default(),
+                };
+                ui.set_frame(img);
                 ui.set_rdp_active(false);
             }
             Surface::Framebuffer(_) => {
-                if let Some(img) = tab.last_frame.clone() {
-                    ui.set_rdp_frame(img);
-                }
+                ui.set_rdp_frame(tab.last_frame.clone().unwrap_or_default());
                 ui.set_rdp_active(true);
             }
         }
