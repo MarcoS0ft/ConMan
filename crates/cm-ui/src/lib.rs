@@ -53,6 +53,77 @@ pub use terminal_renderer::{
     CellMetrics, FontSet, GlyphSource, Rgb, TerminalRenderer, TerminalTheme,
 };
 
+/// P8.6-B: what the `conman` composition root exposes to the Settings UI
+/// (and, once confirmed, the execute-scope launch gate) about the agent-mode
+/// scope-enforcement proxy (P8.6-A, `conman/src/agent_mode`). `cm-ui` cannot
+/// depend on `conman` (the dependency points the other way — `conman` is the
+/// binary crate, `cm-ui` the library it links), so this is a plain,
+/// cm-ui-owned mirror of the fields `conman::agent_mode::AgentModeHandle`
+/// carries, populated by `main.rs`'s composition root from its own handle.
+///
+/// Unconditionally defined (not `#[cfg(feature = "agent-mode")]`) so
+/// `AppConfig` itself never needs conditional compilation at its call sites —
+/// only the *code that acts on* `AppConfig::agent_mode` (the Settings UI
+/// wiring, the indicator, the execute-gate) is feature-gated. A build without
+/// the `agent-mode` feature simply never constructs a `Some(_)` here.
+#[derive(Clone)]
+pub struct AgentModeConfig {
+    /// The user-facing (agent-connects-here) loopback port the proxy is
+    /// bound to. Shown in the Settings UI's connection-details copy.
+    pub external_port: u16,
+    /// Live-reloadable granted scopes: the Settings UI's scope checkboxes
+    /// write into this lock on every change; the proxy (running on its own
+    /// thread in `conman`) reads it on every `tools/call` it gates. Shared,
+    /// not owned -- this is the exact `Arc` the proxy thread already holds.
+    pub scopes: Arc<std::sync::RwLock<cm_core::ScopeSet>>,
+    /// The execute-scope launch gate's signal (P8.6-B item 4): a count, not
+    /// a bool, of agent-driven **write**-tool calls (`click_element`/
+    /// `invoke_accessibility_action`/`dispatch_key_event`) currently in
+    /// flight through the proxy. A plain bool would race under concurrent
+    /// agent connections -- each accepted connection gets its own proxy
+    /// thread, so two overlapping write-tool calls could have one clear the
+    /// flag while the other is still in flight, opening a window where its
+    /// own triggered click wouldn't be marked. `> 0` means "an agent write
+    /// interaction is in progress right now" -- see
+    /// [`AgentModeConfig::mcp_interaction_active`].
+    ///
+    /// Verified (not assumed) that the window this counts actually covers
+    /// the launch callback: the vendored Slint MCP server's `click_element`/
+    /// etc. handlers run on Slint's own single-threaded event loop and
+    /// dispatch the pointer/key event *synchronously* (inline, before their
+    /// async handler returns) -- the callback a launch button would fire is
+    /// guaranteed to complete before the proxy's blocking `forward()` call
+    /// (which brackets the increment/decrement) returns.
+    pub mcp_interaction_count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl AgentModeConfig {
+    /// True while at least one agent-driven write-tool call is in flight.
+    /// The execute-scope launch gate refuses a launch when this is true AND
+    /// `execute` isn't granted -- see `sessions::agent_mode_execute_blocked`.
+    ///
+    /// Fail-safe, not fail-open: this can spuriously refuse a **human**
+    /// launch that happens to land in the (short, ~tens-of-milliseconds)
+    /// window while an unrelated agent write-tool call is in flight --
+    /// over-restricting, never under-restricting. Accepted trade-off for
+    /// v1 (documented in the P8.6 delivery memo) -- distinguishing human
+    /// from agent-injected input within the window would need event
+    /// tagging inside Slint itself, out of scope here.
+    pub fn mcp_interaction_active(&self) -> bool {
+        self.mcp_interaction_count
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+    }
+}
+
+impl std::fmt::Debug for AgentModeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentModeConfig")
+            .field("external_port", &self.external_port)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Configuration injected by the `conman` binary at startup.
 ///
 /// `repo` and `secrets` are held as `Arc<dyn Trait>` so the controller can
@@ -87,6 +158,12 @@ pub struct AppConfig {
     /// empty-workspace fallback (there is nothing to restore and no recents
     /// to show yet anyway). `false` for every later launch.
     pub first_launch: bool,
+    /// P8.6-B: `Some(_)` only when `conman` was built with the `agent-mode`
+    /// feature AND the user has `automation.enabled` on (the proxy is
+    /// actually listening). `None` -- agent-mode off, or not compiled in --
+    /// is the default/common case; see [`AgentModeConfig`]'s doc comment for
+    /// why this field itself is never behind a `cfg`.
+    pub agent_mode: Option<AgentModeConfig>,
 }
 
 impl std::fmt::Debug for AppConfig {

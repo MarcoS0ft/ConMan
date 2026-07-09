@@ -1096,6 +1096,20 @@ export component AppWindow inherits Window {
     // Applied on next launch; persisted to render.backend by the controller.
     in-out property <int>    render-backend: 0;
 
+    // ── Automation / Agent mode (P8.6-B) ──────────────────────────────
+    // See SettingsPanel's identically-named properties for the full doc
+    // comments -- these just relay them between the controller and the panel.
+    in property <bool>    agent-mode-available: false;
+    in-out property <bool> agent-mode-enabled: false;
+    in-out property <bool> agent-mode-scope-read: false;
+    in-out property <bool> agent-mode-scope-write: false;
+    in-out property <bool> agent-mode-scope-execute: false;
+    in property <string>  agent-mode-connection-details: "";
+    callback agent-mode-enabled-changed(bool);
+    callback agent-mode-scope-read-changed(bool);
+    callback agent-mode-scope-write-changed(bool);
+    callback agent-mode-scope-execute-changed(bool);
+
     // ── P1.4: Profile editor modal ───────────────────────────────────
     in-out property <bool>        profile-editor-open: false;
     in-out property <ConnProfile> profile-form;
@@ -1578,6 +1592,12 @@ export component AppWindow inherits Window {
                     shell-cwd           <=> root.settings-shell-cwd;
                     startup-behavior    <=> root.startup-behavior;
                     render-backend      <=> root.render-backend;
+                    agent-mode-available            : root.agent-mode-available;
+                    agent-mode-enabled               <=> root.agent-mode-enabled;
+                    agent-mode-scope-read             <=> root.agent-mode-scope-read;
+                    agent-mode-scope-write            <=> root.agent-mode-scope-write;
+                    agent-mode-scope-execute          <=> root.agent-mode-scope-execute;
+                    agent-mode-connection-details    : root.agent-mode-connection-details;
                     // theme-changed is also handled inside SettingsPanel (live recolor);
                     // the callback here persists the choice to the DB.
                     theme-changed(i)    => { root.theme-changed(i); }
@@ -1589,6 +1609,10 @@ export component AppWindow inherits Window {
                     shell-cwd-changed(v)         => { root.settings-shell-cwd-changed(v); }
                     startup-behavior-changed(v)  => { root.startup-behavior-changed(v); }
                     render-backend-changed(v)    => { root.render-backend-changed(v); }
+                    agent-mode-enabled-changed(v)       => { root.agent-mode-enabled-changed(v); }
+                    agent-mode-scope-read-changed(v)    => { root.agent-mode-scope-read-changed(v); }
+                    agent-mode-scope-write-changed(v)   => { root.agent-mode-scope-write-changed(v); }
+                    agent-mode-scope-execute-changed(v) => { root.agent-mode-scope-execute-changed(v); }
                 }
             }
 
@@ -2044,6 +2068,31 @@ export component AppWindow inherits Window {
                             clicked => { root.open-broadcast-target(); }
                         }
                     }
+                    // P8.6-B: persistent active indicator -- shown iff agent-mode is
+                    // both enabled AND actually listening (a non-empty connection
+                    // details string means the proxy bound successfully), in the
+                    // spirit of a screen-share indicator: a security signal that
+                    // must be visible for as long as an agent could be connected,
+                    // not just at the moment it was turned on. Click opens Settings
+                    // (where it can be turned back off).
+                    if agent-mode-enabled && agent-mode-connection-details != "" : Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        height: 18px;
+                        border-radius: Theme.radius-sm - 2px;
+                        background: Theme.color-connecting.with-alpha(0.18);
+                        HorizontalLayout {
+                            padding-left: Theme.space-2; padding-right: Theme.space-2;
+                            spacing: Theme.space-1;
+                            Text { text: "Agent mode"; color: Theme.color-connecting; font-size: Theme.font-xs;
+                                font-family: Theme.font-family-mono; font-weight: 700; vertical-alignment: center; }
+                        }
+                        agent-mode-badge-btn := TouchArea {
+                            accessible-role: button;
+                            accessible-label: "Agent mode active on " + root.agent-mode-connection-details + " -- open Settings";
+                            accessible-action-default => { root.select-panel(2); }
+                            clicked => { root.select-panel(2); }
+                        }
+                    }
                     Rectangle {
                         y: (parent.height - self.height) / 2;
                         height: 18px;
@@ -2150,7 +2199,13 @@ export component AppWindow inherits Window {
     // ── P1.4: Profile editor modal ────────────────────────────────────────
     Modal {
         open: root.profile-editor-open;
-        dismissed => { root.profile-editor-open = false; }
+        // Fable follow-up (P8.6-B): Esc/scrim-click must clear the transient
+        // Inline password too, not just the explicit Cancel button below --
+        // mirrors ProfileEditor's own `cancel` body exactly.
+        dismissed => {
+            root.profile-form.inline-password = "";
+            root.profile-editor-open = false;
+        }
         profile-editor-dialog := ProfileEditor {
             form <=> root.profile-form;
             cred-name-list: root.cred-name-list;

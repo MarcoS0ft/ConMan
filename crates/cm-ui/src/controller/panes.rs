@@ -823,6 +823,27 @@ pub(super) fn connect_in_split(
                 auto_accept,
             });
 
+            // P8.6-B (Fable review fixup): "Connect in split" establishes a
+            // live session with stored credentials exactly like a fresh
+            // launch, so it's an execute-scope action too -- see
+            // `sessions::open_ssh_tab`'s identical comment for the gate's
+            // rationale/timing proof. The split slot is already reserved at
+            // this point, so a block must roll it back like any other
+            // failure below.
+            if sessions::agent_mode_execute_blocked(&state.borrow().agent_mode) {
+                tracing::warn!(
+                    conn = %conn.name,
+                    "agent mode: connect-in-split blocked while automation is active without execute scope"
+                );
+                rollback_split_slot(state);
+                push_toast(
+                    toast_model,
+                    toast_next_id,
+                    format!("{}: agent mode: execute scope not granted", conn.name),
+                );
+                return;
+            }
+
             let provider = state.borrow().session_provider.clone();
             let session = match provider.connect_ssh(&effective_settings, auth, verifier, size) {
                 Ok(sess) => sess,
@@ -917,6 +938,22 @@ pub(super) fn connect_in_split(
                 pending: cert_pending.clone(),
                 auto_accept,
             });
+
+            // P8.6-B (Fable review fixup): see the SSH arm's identical
+            // comment, above.
+            if sessions::agent_mode_execute_blocked(&state.borrow().agent_mode) {
+                tracing::warn!(
+                    conn = %conn.name,
+                    "agent mode: connect-in-split blocked while automation is active without execute scope"
+                );
+                rollback_split_slot(state);
+                push_toast(
+                    toast_model,
+                    toast_next_id,
+                    format!("{}: agent mode: execute scope not granted", conn.name),
+                );
+                return;
+            }
 
             let provider = state.borrow().session_provider.clone();
             let session = match provider.connect_rdp(&s, auth, verifier) {

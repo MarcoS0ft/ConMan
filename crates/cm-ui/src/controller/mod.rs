@@ -293,6 +293,19 @@ struct State {
     /// active tab's pane count is `> 1` — single-pane tabs (the common case)
     /// never touch this model, keeping the feature zero-cost when unsplit.
     pane_model: Rc<VecModel<crate::PaneCell>>,
+    /// P8.6-B: `Some(_)` only when the composition root actually started the
+    /// agent-mode proxy this session -- see [`crate::AgentModeConfig`]'s doc
+    /// comment. Lives on `State` (like `session_provider` above) so every
+    /// launch function (`sessions::open_ssh_tab`/`open_rdp_tab`, quick-connect,
+    /// broadcast) -- all of which already take `state: &Rc<RefCell<State>>`,
+    /// not the wider `Ctx` -- can reach it for the execute-scope gate without
+    /// widening their signatures. Unconditional field for the same reason
+    /// `AppConfig`'s is; only the code that *reads* it for a real decision
+    /// (`settings_ctl`'s agent-mode wiring, `sessions::agent_mode_execute_blocked`)
+    /// is `#[cfg(feature = "agent-mode")]`-gated -- a non-agent-mode build
+    /// never meaningfully reads it (it's always `None` there).
+    #[allow(dead_code)]
+    agent_mode: Option<crate::AgentModeConfig>,
 }
 
 impl State {
@@ -395,6 +408,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
     let secrets = config.secrets;
     let session_provider = config.session_provider;
     let first_launch = config.first_launch;
+    let agent_mode = config.agent_mode;
 
     let ui = AppWindow::new()?;
     let scale = ui.window().scale_factor();
@@ -449,6 +463,8 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         }
     };
     settings_ctl::apply_settings_to_ui(&stored_settings, &ui);
+    #[cfg(feature = "agent-mode")]
+    settings_ctl::apply_agent_mode_to_ui(repo.as_ref(), agent_mode.as_ref(), &ui);
     util::apply_early_env_overrides(&ui);
 
     // Load initial tree data.
@@ -504,6 +520,8 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         launchpad_recents_model: launchpad_recents_model.clone(),
         // P6.11: see the field doc comment.
         pane_model: pane_model.clone(),
+        // P8.6-B: see the field doc comment.
+        agent_mode,
     }));
 
     {

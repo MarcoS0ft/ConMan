@@ -22,25 +22,26 @@
 //!    spawns are unrestricted from then on), takes the [`Prepared`] value
 //!    [`prepare`] returned and starts the accept-loop thread.
 //!
-//! ## The P8.6-B seam (not wired yet — noted for ui-dev)
-//! [`spawn`] returns an [`AgentModeHandle`] carrying the external/internal
-//! ports and an `Arc<RwLock<ScopeSet>>` the Settings UI's live scope-reload
-//! is meant to write into (P8.6-impl.md's "Reload behavior"). `main.rs`
-//! currently just holds this value without threading it anywhere — `cm-ui`
-//! cannot reach back into `conman` (the dependency points the other way), so
-//! P8.6-B needs to add a slot for this handle to `cm_ui::AppConfig` (the
-//! same injection pattern already used for `secrets`/`session_provider`) so
-//! the Settings section can (a) display the listening port + loopback host,
-//! (b) show the persistent active indicator, and (c) write a new `ScopeSet`
-//! into the handle's lock when the user changes a scope checkbox. Turning
-//! `automation.enabled` off at runtime does **not** stop an already-running
-//! listener this session (only scope changes are live-reloadable per the
-//! spec) — full disable takes effect on next launch; flagged for Fable/user
-//! review alongside the rest of this design.
+//! ## The P8.6-B seam (wired)
+//! [`spawn`] returns an [`AgentModeHandle`] carrying the external port and an
+//! `Arc<RwLock<ScopeSet>>` the Settings UI's live scope-reload writes into
+//! (P8.6-impl.md's "Reload behavior"). `main.rs` mirrors the
+//! cm-ui-relevant fields into `cm_ui::AgentModeConfig` (`cm-ui` cannot depend
+//! on `conman` directly -- the dependency points the other way) and threads
+//! it into `AppConfig` (the same injection pattern already used for
+//! `secrets`/`session_provider`), so the Settings section can (a) display
+//! the listening port + loopback host, (b) show the persistent active
+//! indicator, and (c) write a new `ScopeSet` into the handle's lock when the
+//! user changes a scope checkbox. Turning `automation.enabled` off at
+//! runtime does **not** stop an already-running listener this session (only
+//! scope changes are live-reloadable per the spec) — full disable takes
+//! effect on next launch; flagged for Fable/user review alongside the rest
+//! of this design.
 
 mod proxy;
 
 use std::net::TcpListener;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 
 use cm_core::{ConnectionRepository, ScopeSet, SettingsService};
@@ -57,12 +58,16 @@ pub(crate) struct Prepared {
 /// Returned by [`spawn`] — see the module doc's "P8.6-B seam" section for
 /// what this is for.
 pub(crate) struct AgentModeHandle {
-    #[allow(dead_code)] // consumed by P8.6-B once AppConfig carries this handle
     pub(crate) external_port: u16,
-    #[allow(dead_code)] // consumed by P8.6-B once AppConfig carries this handle
+    #[allow(dead_code)] // only used for the startup log line above; not surfaced to cm-ui
     pub(crate) internal_port: u16,
-    #[allow(dead_code)] // consumed by P8.6-B's Settings-reload path
     pub(crate) scopes: Arc<RwLock<ScopeSet>>,
+    /// P8.6-B item 4 (the execute-scope launch gate): mirrors 1:1 into
+    /// `cm_ui::AgentModeConfig::mcp_interaction_count` -- see that field's
+    /// doc comment for the full "why a counter, not a bool" + timing-proof
+    /// rationale. `proxy::run` increments/decrements the SAME `Arc` around
+    /// every forwarded write-scoped `tools/call`.
+    pub(crate) mcp_interaction_count: Arc<AtomicUsize>,
 }
 
 /// Binds the external (agent-facing) loopback listener and picks an internal
@@ -143,6 +148,7 @@ pub(crate) fn spawn(prepared: Prepared) -> AgentModeHandle {
         .map(|a| a.port())
         .unwrap_or(0);
     let scopes = Arc::new(RwLock::new(scopes));
+    let mcp_interaction_count = Arc::new(AtomicUsize::new(0));
 
     tracing::info!(
         external_port,
@@ -151,11 +157,20 @@ pub(crate) fn spawn(prepared: Prepared) -> AgentModeHandle {
     );
 
     let scopes_for_thread = Arc::clone(&scopes);
-    std::thread::spawn(move || proxy::run(external_listener, internal_port, scopes_for_thread));
+    let count_for_thread = Arc::clone(&mcp_interaction_count);
+    std::thread::spawn(move || {
+        proxy::run(
+            external_listener,
+            internal_port,
+            scopes_for_thread,
+            count_for_thread,
+        )
+    });
 
     AgentModeHandle {
         external_port,
         internal_port,
         scopes,
+        mcp_interaction_count,
     }
 }

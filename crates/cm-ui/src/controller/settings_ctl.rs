@@ -18,6 +18,8 @@ pub(super) fn wire_settings_ctl(ctx: &Ctx) {
     wire_settings_shell_cwd_changed(ctx);
     wire_startup_behavior_changed(ctx);
     wire_render_backend_changed(ctx);
+    #[cfg(feature = "agent-mode")]
+    wire_agent_mode_ctl(ctx);
 }
 
 /// Map the Rendering segmented-control index to the persisted `render.backend`
@@ -53,6 +55,144 @@ fn wire_render_backend_changed(ctx: &Ctx) {
             }
         }
     });
+}
+
+// ── P8.6-B: Automation / Agent mode ─────────────────────────────────────────
+// `automation.enabled`/`automation.scopes` are loaded/saved separately from
+// the rest of `AppSettings` (they're deliberately excluded from export --
+// see `EXPORT_EXCLUDED_SETTING_KEYS`, cm-storage), so they get their own
+// startup-apply function (`apply_agent_mode_to_ui`) rather than folding into
+// `apply_settings_to_ui` below.
+
+#[cfg(feature = "agent-mode")]
+fn agent_mode_scopes_from_ui(ui: &AppWindow) -> cm_core::ScopeSet {
+    cm_core::ScopeSet {
+        read: ui.get_agent_mode_scope_read(),
+        write: ui.get_agent_mode_scope_write(),
+        execute: ui.get_agent_mode_scope_execute(),
+    }
+}
+
+/// Persists a new granted-scopes set, then -- if the proxy is actually
+/// running this session (`agent_mode` is `Some`) -- writes it straight into
+/// the shared `Arc<RwLock<ScopeSet>>` the proxy thread reads on every
+/// `tools/call`. This is the P8.6-A "Reload behavior": a scope change takes
+/// effect on the proxy's very next request, no restart needed (only the
+/// master enable/disable toggle is restart-only -- see
+/// `wire_agent_mode_enabled_changed`).
+#[cfg(feature = "agent-mode")]
+fn persist_and_reload_agent_mode_scopes(
+    repo: &dyn cm_core::ConnectionRepository,
+    agent_mode: &Option<crate::AgentModeConfig>,
+    scopes: cm_core::ScopeSet,
+) {
+    let svc = SettingsService::new(repo);
+    if let Err(e) = svc.save_automation_scopes(scopes) {
+        tracing::warn!("save automation.scopes: {e}");
+    }
+    if let Some(cfg) = agent_mode
+        && let Ok(mut guard) = cfg.scopes.write()
+    {
+        *guard = scopes;
+    }
+}
+
+#[cfg(feature = "agent-mode")]
+fn wire_agent_mode_ctl(ctx: &Ctx) {
+    wire_agent_mode_enabled_changed(ctx);
+    wire_agent_mode_scope_read_changed(ctx);
+    wire_agent_mode_scope_write_changed(ctx);
+    wire_agent_mode_scope_execute_changed(ctx);
+}
+
+#[cfg(feature = "agent-mode")]
+fn wire_agent_mode_enabled_changed(ctx: &Ctx) {
+    ctx.ui.on_agent_mode_enabled_changed({
+        let repo_s = ctx.repo.clone();
+        move |v| {
+            // Persist only -- takes effect on next launch (the Settings UI
+            // says "Applied on restart"); see `conman`'s `agent_mode` module
+            // doc for why the running proxy can't be started/stopped live.
+            let svc = SettingsService::new(repo_s.as_ref());
+            if let Err(e) = svc.save_automation_enabled(v) {
+                tracing::warn!("save automation.enabled: {e}");
+            }
+        }
+    });
+}
+
+#[cfg(feature = "agent-mode")]
+fn wire_agent_mode_scope_read_changed(ctx: &Ctx) {
+    ctx.ui.on_agent_mode_scope_read_changed({
+        let repo_s = ctx.repo.clone();
+        let agent_mode = ctx.state.borrow().agent_mode.clone();
+        let weak = ctx.ui.as_weak();
+        move |_| {
+            let Some(ui) = weak.upgrade() else { return };
+            let scopes = agent_mode_scopes_from_ui(&ui);
+            persist_and_reload_agent_mode_scopes(repo_s.as_ref(), &agent_mode, scopes);
+        }
+    });
+}
+
+#[cfg(feature = "agent-mode")]
+fn wire_agent_mode_scope_write_changed(ctx: &Ctx) {
+    ctx.ui.on_agent_mode_scope_write_changed({
+        let repo_s = ctx.repo.clone();
+        let agent_mode = ctx.state.borrow().agent_mode.clone();
+        let weak = ctx.ui.as_weak();
+        move |_| {
+            let Some(ui) = weak.upgrade() else { return };
+            let scopes = agent_mode_scopes_from_ui(&ui);
+            persist_and_reload_agent_mode_scopes(repo_s.as_ref(), &agent_mode, scopes);
+        }
+    });
+}
+
+#[cfg(feature = "agent-mode")]
+fn wire_agent_mode_scope_execute_changed(ctx: &Ctx) {
+    ctx.ui.on_agent_mode_scope_execute_changed({
+        let repo_s = ctx.repo.clone();
+        let agent_mode = ctx.state.borrow().agent_mode.clone();
+        let weak = ctx.ui.as_weak();
+        move |_| {
+            let Some(ui) = weak.upgrade() else { return };
+            let scopes = agent_mode_scopes_from_ui(&ui);
+            persist_and_reload_agent_mode_scopes(repo_s.as_ref(), &agent_mode, scopes);
+        }
+    });
+}
+
+/// Applies the persisted `automation.enabled`/scopes plus the composition
+/// root's live [`crate::AgentModeConfig`] (whether the proxy is actually
+/// listening this session) to the Settings UI. Unconditional call site
+/// (`assemble`, controller/mod.rs); this function itself is feature-gated --
+/// a non-`agent-mode` build never calls it, so `agent-mode-available` stays
+/// at its Slint-compiled default (`false`), keeping the whole section hidden
+/// (see `AgentModeConfig`'s doc comment for the accepted trade-off: the
+/// section's *markup* still compiles into every build's Slint resources --
+/// only the Rust wiring and the listener itself are feature-gated).
+#[cfg(feature = "agent-mode")]
+pub(super) fn apply_agent_mode_to_ui(
+    repo: &dyn cm_core::ConnectionRepository,
+    agent_mode: Option<&crate::AgentModeConfig>,
+    ui: &AppWindow,
+) {
+    ui.set_agent_mode_available(true);
+    let svc = SettingsService::new(repo);
+    match svc.load_automation() {
+        Ok(automation) => {
+            ui.set_agent_mode_enabled(automation.enabled);
+            ui.set_agent_mode_scope_read(automation.scopes.read);
+            ui.set_agent_mode_scope_write(automation.scopes.write);
+            ui.set_agent_mode_scope_execute(automation.scopes.execute);
+        }
+        Err(e) => tracing::warn!("load automation settings: {e}"),
+    }
+    let details = agent_mode
+        .map(|cfg| format!("127.0.0.1:{}", cfg.external_port))
+        .unwrap_or_default();
+    ui.set_agent_mode_connection_details(details.as_str().into());
 }
 
 fn wire_theme_changed(ctx: &Ctx) {
