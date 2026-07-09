@@ -417,20 +417,18 @@ component ConnectionRow inherits Rectangle {
     property <bool> delete-hover: false;
 
     // Whether ANY part of the row -- background OR the action-icon strip
-    // itself -- currently has the pointer over it. `touch.has-hover` ALONE
-    // is not stable here: `touch` and the action-icon strip are overlapping
-    // siblings, and Slint delivers a pointer-move to only the topmost hit
-    // item, so the moment the cursor reaches an icon button, THAT button's
-    // own TouchArea (not `touch`) receives the move and `touch.has-hover`
-    // drops back to false. Since the icon strip's very existence used to be
-    // gated on `touch.has-hover` alone, that flip destroyed the strip (and
-    // its buttons) out from under the pointer, which handed hover back to
-    // `touch`, recreating it -- an oscillation the user saw as
-    // flicker/unclickable icons. ORing in every button's latched hover
-    // state keeps the combined signal true continuously as the pointer
-    // crosses from the row background onto a button: exactly one of these
-    // TouchAreas is hovering the pointer at any instant, so the OR never
-    // has a gap.
+    // itself -- currently has the pointer over it. `touch` (below) no
+    // longer extends under the icon strip at all (P9.5 #1 follow-up, see
+    // `content`'s comment), so this OR exists only to keep the strip
+    // latched-visible across the hand-off from `touch`'s cell to a button's
+    // own cell as the pointer crosses that (now non-overlapping) boundary --
+    // without it, `touch.has-hover` alone would drop to false the instant
+    // the cursor leaves `touch`'s cell and enters the icon strip's, which
+    // would destroy the `if root.action-hover` strip out from under the
+    // pointer (the original P9.5 #1 flicker bug). ORing in every button's
+    // latched hover state keeps the combined signal true continuously as
+    // the pointer crosses that boundary: exactly one of these TouchAreas is
+    // hovering the pointer at any instant, so the OR never has a gap.
     property <bool> action-hover: touch.has-hover
         || root.move-up-hover || root.move-down-hover || root.new-child-hover
         || root.edit-hover || root.delete-hover;
@@ -447,23 +445,6 @@ component ConnectionRow inherits Rectangle {
         y: (parent.height - self.height) / 2;
         border-radius: Theme.radius-xs - 1px;
         background: data.selected ? Theme.color-accent : transparent;
-    }
-
-    // Base touch — FIRST interactive child; content layer on top captures first.
-    // P9.5 #2: single click selects a leaf row; double click launches it
-    // (`clicked` fires on every physical click, `double-clicked` fires
-    // additionally on the 2nd/4th/... click of a rapid sequence -- Slint's
-    // own click-count tracking, no hand-rolled timer needed). Groups keep
-    // single-click-to-toggle, unaffected -- that was never the "launches
-    // accidentally" complaint.
-    touch := TouchArea {
-        clicked => {
-            if (data.is-group) { root.toggled(); }
-            else { root.selected(); }
-        }
-        double-clicked => {
-            if (!data.is-group) { root.activated(); }
-        }
     }
 
     // P6.10 (gap 15): right-click (or the keyboard Menu key, via the shared
@@ -528,44 +509,91 @@ component ConnectionRow inherits Rectangle {
         padding-right: Theme.space-1;
         spacing: Theme.space-2;
 
-        VerticalLayout {
-            alignment: center;
-            if data.is-group : Text {
-                text: data.expanded ? "\u{EAB4}" : "\u{EAB6}";
-                font-family: Theme.font-family-icons;
-                font-size: Theme.icon-xs;
-                color: Theme.color-text-secondary;
-            }
-            if !data.is-group : StatusDot { state: data.status; diameter: 6px; }
-        }
-
-        Text {
-            text: data.label;
-            color: data.is-group ? Theme.color-text
-                 : data.selected ? Theme.color-text : Theme.color-text-secondary;
-            font-size: Theme.font-base;
-            font-family: Theme.font-family;
-            font-weight: data.is-group ? 600 : 500;
-            vertical-alignment: center;
+        // P9.5 #1 follow-up (.99 GPU visual verify, Bug A -- "hover icons
+        // are stable but unclickable"): `touch` used to be a bare sibling of
+        // this WHOLE HorizontalLayout, sized to cover the entire row --
+        // including the pixels the hover action-icon strip (below) renders
+        // into once it exists. That left `touch` and the icon strip as
+        // OVERLAPPING siblings whose relative click priority depended on
+        // Slint's FrontToBack sibling-traversal order (last-declared visited
+        // first) -- correct on paper (confirmed by reading i-slint-core's
+        // actual `send_mouse_event_to_item`/`TouchArea::input_event`), but a
+        // real pointer on real GPU-backed hardware still couldn't reliably
+        // land clicks on the icons, and this headless harness can't
+        // reproduce real-pointer input to prove or disprove why (see
+        // suite_connections_tree.rs's own note: every existing suite drives
+        // callbacks directly, never literal pointer coordinates). Rather
+        // than keep correctness resting on that traversal-order subtlety,
+        // mirror ../SafeTunnel's pattern (apps/windows/ui/detail_pane.slint):
+        // give the clickable row body and the action-icon strip their OWN
+        // adjacent, NON-OVERLAPPING cells in this layout, so a click
+        // physically cannot land on both. `content` below scopes `touch` to
+        // the dot/label/tag cell only; the icon strip is a separate later
+        // cell entirely outside `touch`'s geometry.
+        content := Rectangle {
             horizontal-stretch: 1;
-            overflow: elide;
-        }
 
-        if !data.is-group && data.kind != "" : VerticalLayout {
-            alignment: center;
-            Rectangle {
-                height: Theme.tag-height;
-                border-radius: Theme.radius-xs;
-                background: Theme.color-hover;
-                HorizontalLayout {
-                    padding-left: 5px; padding-right: 5px;
-                    Text {
-                        text: data.kind;
+            // Base touch -- click/double-click for select/launch/toggle.
+            // P9.5 #2: single click selects a leaf row; double click
+            // launches it (`clicked` fires on every physical click,
+            // `double-clicked` fires additionally on the 2nd/4th/... click
+            // of a rapid sequence -- Slint's own click-count tracking, no
+            // hand-rolled timer needed). Groups keep single-click-to-toggle,
+            // unaffected -- that was never the "launches accidentally"
+            // complaint.
+            touch := TouchArea {
+                clicked => {
+                    if (data.is-group) { root.toggled(); }
+                    else { root.selected(); }
+                }
+                double-clicked => {
+                    if (!data.is-group) { root.activated(); }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: Theme.space-2;
+
+                VerticalLayout {
+                    alignment: center;
+                    if data.is-group : Text {
+                        text: data.expanded ? "\u{EAB4}" : "\u{EAB6}";
+                        font-family: Theme.font-family-icons;
+                        font-size: Theme.icon-xs;
                         color: Theme.color-text-secondary;
-                        font-size: Theme.font-xxs;
-                        font-family: Theme.font-family-mono;
-                        font-weight: 600;
-                        vertical-alignment: center;
+                    }
+                    if !data.is-group : StatusDot { state: data.status; diameter: 6px; }
+                }
+
+                Text {
+                    text: data.label;
+                    color: data.is-group ? Theme.color-text
+                         : data.selected ? Theme.color-text : Theme.color-text-secondary;
+                    font-size: Theme.font-base;
+                    font-family: Theme.font-family;
+                    font-weight: data.is-group ? 600 : 500;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+
+                if !data.is-group && data.kind != "" : VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        height: Theme.tag-height;
+                        border-radius: Theme.radius-xs;
+                        background: Theme.color-hover;
+                        HorizontalLayout {
+                            padding-left: 5px; padding-right: 5px;
+                            Text {
+                                text: data.kind;
+                                color: Theme.color-text-secondary;
+                                font-size: Theme.font-xxs;
+                                font-family: Theme.font-family-mono;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
                 }
             }
@@ -573,7 +601,9 @@ component ConnectionRow inherits Rectangle {
 
         // Hover action buttons (shown only while the pointer is over the
         // row). Gated on `root.action-hover`, not the base `touch.has-hover`
-        // alone -- see the property's doc comment above for why (P9.5 #1).
+        // alone -- see the property's doc comment above for why (P9.5 #1). A
+        // separate cell from `content` above, never overlapping it, so a
+        // click here can never also land on `touch`.
         if root.action-hover : HorizontalLayout {
             spacing: Theme.gap-hairline;
             alignment: center;
