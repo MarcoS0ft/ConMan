@@ -2619,6 +2619,22 @@ pub(super) fn frame_to_image(frame: &FrameUpdate) -> Image {
     let bytes = buf.make_mut_bytes();
     let copy_len = bytes.len().min(frame.rgba.len());
     bytes[..copy_len].copy_from_slice(&frame.rgba[..copy_len]);
+    // The RDP desktop framebuffer is always opaque (ironrdp's own
+    // `DecodedImage` treats it that way -- see upstream ironrdp-session's
+    // image.rs comment "Framebuffer is always opaque, so we can skip alpha
+    // channel change"), but several of its fast-path bitmap/tile decoders
+    // (raw 32bpp updates, RemoteFX tile copies) blit source bytes verbatim
+    // and leave the 4th (alpha) byte at whatever the wire padding contained
+    // -- typically `0x00`. Slint's software renderer blits full-frame
+    // `Image`s without honoring per-pixel alpha, so a zero alpha channel was
+    // invisible there; the femtovg (GPU-accelerated) backend performs real
+    // alpha blending and renders an all-zero-alpha frame as fully
+    // transparent -- i.e. a black screen showing the pane's dark background
+    // through it. Force full opacity here so the frame composites
+    // identically on every rendering backend.
+    for px in bytes.chunks_exact_mut(4) {
+        px[3] = 0xff;
+    }
     Image::from_rgba8(buf)
 }
 
@@ -2657,6 +2673,33 @@ mod tests {
         tx.send(3).unwrap();
         assert_eq!(drain_latest(&rx), Some(3));
         assert_eq!(drain_latest(&rx), None);
+    }
+
+    // ── P9.5 item 9/11: RDP black screen on the femtovg backend ─────────
+    // ironrdp's fast-path bitmap/tile decoders copy raw source bytes for the
+    // RGB channels but leave the alpha byte at whatever the wire padding
+    // held (typically 0x00) -- the software renderer blits full-frame
+    // `Image`s without honoring per-pixel alpha, so this went unnoticed
+    // there, but femtovg alpha-blends for real and rendered an all-zero-alpha
+    // frame as fully transparent (black over the pane background).
+    // `frame_to_image` must force every pixel opaque regardless of the
+    // decoded frame's alpha bytes.
+    #[test]
+    fn frame_to_image_forces_full_opacity() {
+        // 2x1 RGBA frame: one pixel with alpha already 0xff, one with the
+        // zero-alpha padding ironrdp's raw-copy decoders leave behind.
+        let frame = FrameUpdate {
+            width: 2,
+            height: 1,
+            rgba: vec![
+                10, 20, 30, 0xff, // pixel 0: alpha already opaque
+                40, 50, 60, 0x00, // pixel 1: zero alpha (the bug trigger)
+            ],
+        };
+        let img = frame_to_image(&frame);
+        let buf = img.to_rgba8().expect("from_rgba8 image round-trips");
+        let bytes = buf.as_bytes();
+        assert_eq!(bytes, &[10, 20, 30, 0xff, 40, 50, 60, 0xff]);
     }
 
     // ── gap 17: Ctrl+Shift direct-shortcut classifier ───────────────────
