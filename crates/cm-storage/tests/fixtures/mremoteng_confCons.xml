@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mrng:Connections xmlns:mrng="http://mremoteng.org" Name="Connections"
+    EncryptionEngine="AES" BlockCipherMode="GCM" KdfIterations="1000"
+    FullFileEncryption="false"
+    Protected="A5nqyoRWQqkL2KxoR2BJSxOSeEozs1oQ1i9qvQjnlolWAGtXVY1lGBiHshF19wcFpkRF7QvACHLq1yjSeBOp"
+    ConfVersion="2.6">
+  <Node Name="Prod" Type="Container">
+    <Node Name="Web" Type="Container">
+      <Node Name="app01-rdp" Type="Connection" Protocol="RDP"
+          Hostname="app01.example.test" Port="3389" Username="admin" Domain="CORP"
+          Password="WY0bX+kl9aR0C8unrNSFTTtX20mq4BmK14Cs/+5e/KZ+EHLcOwUfWvyk6Kd1Cq4L5L6OmPt4W0TLhw=="
+          InheritHostname="false" InheritPassword="false" />
+      <Node Name="app01-ssh" Type="Connection" Protocol="SSH2"
+          Hostname="app01.example.test" Port="22" Username="deploy"
+          Password="Gnt6TheNlSjjWybsnmoYOMHiGbS/z/XKSfXG+Xi9S9+pCQ2zd9P8AV3QixlX0/+lpfQb2YI04fg7aw=="
+          InheritHostname="false" InheritPassword="false" />
+    </Node>
+    <Node Name="Shared" Type="Container"
+        Password="rteQjm+Jzpvrq1NejHIHXHstOs6TJsUO6e3w6+tkmu9pHdJkuXkmypOdBGas0tVkmprwuctsgDDs9I1U9gwd">
+      <Node Name="inherited-conn" Type="Connection" Protocol="SSH2"
+          Hostname="shared01.example.test" Username="svc"
+          InheritPassword="true" />
+    </Node>
+    <Node Name="legacy-vnc" Type="Connection" Protocol="VNC"
+        Hostname="legacy.example.test" Username="admin" />
+    <Node Name="no-host-conn" Type="Connection" Protocol="SSH2" Username="nobody" />
+  </Node>
+</mrng:Connections>

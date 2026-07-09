@@ -169,6 +169,13 @@ pub enum ImportExportError {
     /// A keychain operation failed during a secrets-inclusive export.
     #[error("keychain error during export: {0}")]
     SecretStore(String),
+    /// P9.4: the attempted password did not decrypt an mRemoteNG file's
+    /// encrypted fields (wrong password, or a custom one was never
+    /// supplied). The caller should prompt for the correct password and
+    /// retry via `import::import_from_path_with_password`. Never raised for
+    /// any other import format.
+    #[error("a password is required to decrypt this file's secrets")]
+    PasswordRequired,
 }
 
 /// Statistics returned by a successful [`import`] / [`import_from_json`] call.
