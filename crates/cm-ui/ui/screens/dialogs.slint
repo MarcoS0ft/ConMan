@@ -304,7 +304,7 @@ export component HostKeyDialog inherits Rectangle {
 // stored-fingerprint — previously stored fingerprint (shown only when mismatch=true).
 export component CertDialog inherits Rectangle {
     in property <bool>   mismatch: false;
-    in property <string> host: "192.0.2.10:3389";
+    in property <string> host: "HOSTNAME:3389";
     in property <string> subject: "CN=HOSTNAME";
     in property <string> fingerprint: "SHA256:00:11:22:33:44:55:66:77:88:99";
     in property <string> stored-fingerprint: "";
