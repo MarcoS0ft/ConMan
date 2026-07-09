@@ -125,6 +125,7 @@ impl KeysPanel {
             expanded,
             selected: false,
             depth: depth as i32,
+            used_by_label: SharedString::from(""),
         });
 
         if !expanded {
@@ -170,6 +171,9 @@ impl KeysPanel {
             expanded: false,
             selected,
             depth: depth as i32,
+            // Filled in by `keys_ctl::refresh_cred_model`, which has the
+            // connection list this (connection-unaware) panel doesn't.
+            used_by_label: SharedString::from(""),
         }
     }
 
@@ -273,6 +277,7 @@ impl KeysPanel {
             expanded: true,
             selected: false,
             depth: depth as i32,
+            used_by_label: SharedString::from(""),
         });
         let mut sub_folders: Vec<&CredentialFolder> = self
             .folders

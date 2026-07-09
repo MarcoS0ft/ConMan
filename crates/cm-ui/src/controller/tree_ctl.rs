@@ -4,8 +4,8 @@ use std::rc::Rc;
 
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionSettings, CredentialId, CredentialPurpose,
-    CredentialRef, CredentialSource, Group, GroupId, LocalSettings, RdpSettings, SshAuthMethod,
-    SshSettings,
+    CredentialRef, CredentialSource, Group, GroupId, LocalSettings, RdpSettings, Secret,
+    SshAuthMethod, SshSettings,
 };
 use cm_session::PaneLayout;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
@@ -112,10 +112,17 @@ fn wire_new_connection(ctx: &Ctx) {
                 auth_method: 1,
                 selected_cred_idx: 0,
                 effective_cred_name: SharedString::from(""),
+                effective_cred_username: SharedString::from(""),
                 effective_inherited: false,
                 selected_group_idx,
                 rdp_domain: SharedString::from(""),
                 rdp_resolution: SharedString::from(default_rdp_resolution().as_str()),
+                // P9.6-A Phase C: a new connection starts in Reference mode
+                // (index 0 = "Inherit from group"), matching pre-P9.6 default
+                // behavior exactly.
+                cred_mode: 0,
+                inline_password: SharedString::from(""),
+                inline_has_secret: false,
             };
             drop(st);
             ui.set_profile_form(form);
@@ -155,14 +162,36 @@ fn wire_new_group(ctx: &Ctx) {
 /// directly (not counting group inheritance) -- what `Connection::credential:
 /// Option<CredentialId>` used to BE before it became `credential_source:
 /// Option<CredentialSource>`. `None` for every other source (inherit/Inline/
-/// Prompt), matching that field's old meaning exactly. Used by the profile
-/// editor's dropdown-selection display (`cred_name_idx`/
-/// `KeysPanel::resolve_effective`) until the mode-selector UI (Inline/Prompt)
-/// lands -- see the P9.6 Phase C task doc.
+/// Prompt), matching that field's old meaning exactly. Still what the
+/// Reference-mode dropdown itself resolves (`cred_name_idx`/
+/// `KeysPanel::resolve_effective`, `resolve_cred_from_idx`) -- Inline/Prompt
+/// modes are handled alongside it via `cred_mode_fields`/
+/// `credential_source_from_form`, not by extending this helper's contract.
 pub(super) fn object_credential_id(source: &Option<CredentialSource>) -> Option<CredentialId> {
     match source {
         Some(CredentialSource::Object(id)) => Some(*id),
         _ => None,
+    }
+}
+
+/// P9.6-A Phase C: derives the mode-selector's `cred-mode` (0=Reference,
+/// 1=Inline, 2=Prompt) plus the Inline-only username/domain overrides.
+/// `Inline`'s own `username`/`domain` are the model's authoritative source
+/// for those fields (`resolve_connection_auth`'s Decision 3) -- NOT
+/// `conn.settings`, which `profile_fields_from_conn` already derived and
+/// which the caller overrides with these `Some(_)` values only when Inline.
+/// `has_secret` mirrors the enum's own flag; false for every other source.
+pub(super) fn cred_mode_fields(
+    source: &Option<CredentialSource>,
+) -> (i32, Option<String>, Option<String>, bool) {
+    match source {
+        Some(CredentialSource::Inline {
+            username,
+            domain,
+            has_secret,
+        }) => (1, Some(username.clone()), domain.clone(), *has_secret),
+        Some(CredentialSource::Prompt) => (2, None, None, false),
+        _ => (0, None, None, false),
     }
 }
 
@@ -176,8 +205,16 @@ fn wire_edit_conn(ctx: &Ctx) {
             let Some(conn) = st.conn_tree.conn_by_id(conn_id as i64) else {
                 return;
             };
-            let (kind, host, port, username, auth_method, rdp_domain, rdp_resolution) =
+            let (kind, host, port, mut username, auth_method, mut rdp_domain, rdp_resolution) =
                 profile_fields_from_conn(conn);
+            let (cred_mode, inline_username, inline_domain, inline_has_secret) =
+                cred_mode_fields(&conn.credential_source);
+            if let Some(u) = inline_username {
+                username = u;
+            }
+            if let Some(d) = inline_domain {
+                rdp_domain = d;
+            }
             let cred_sel_idx = cred_name_idx(
                 object_credential_id(&conn.credential_source),
                 st.keys_panel.credentials(),
@@ -189,6 +226,13 @@ fn wire_edit_conn(ctx: &Ctx) {
                 st.conn_tree.groups(),
             );
             let eff_name = KeysPanel::cred_display_name(eff_cred_id, st.keys_panel.credentials());
+            // P9.5 #6: the bound credential's own username, shown read-only
+            // next to its name (Reference mode only -- see `cred-mode == 0`
+            // in profile_editor.slint).
+            let eff_username = eff_cred_id
+                .and_then(|id| st.keys_panel.credentials().iter().find(|c| c.id == id))
+                .and_then(|c| c.username.clone())
+                .unwrap_or_default();
             let selected_group_idx = group_name_idx(conn.group_id, st.conn_tree.groups());
             let form = ConnProfile {
                 id: conn_id,
@@ -201,10 +245,15 @@ fn wire_edit_conn(ctx: &Ctx) {
                 auth_method,
                 selected_cred_idx: cred_sel_idx,
                 effective_cred_name: SharedString::from(eff_name.as_str()),
+                effective_cred_username: SharedString::from(eff_username.as_str()),
                 effective_inherited: inherited,
                 selected_group_idx,
                 rdp_domain: SharedString::from(rdp_domain.as_str()),
                 rdp_resolution: SharedString::from(rdp_resolution.as_str()),
+                cred_mode,
+                // Never populate the actual secret -- only its presence.
+                inline_password: SharedString::from(""),
+                inline_has_secret,
             };
             drop(st);
             ui.set_profile_form(form);
@@ -291,6 +340,7 @@ fn wire_duplicate_conn_row(ctx: &Ctx) {
     ctx.ui.on_duplicate_conn_row({
         let state = ctx.state.clone();
         let conn_model = ctx.conn_model.clone();
+        let cred_model = ctx.cred_model.clone();
         let repo_dup = ctx.repo.clone();
         move |id| {
             let mut st = state.borrow_mut();
@@ -314,6 +364,9 @@ fn wire_duplicate_conn_row(ctx: &Ctx) {
                 tracing::warn!("reload after duplicate failed: {e}");
             }
             refresh_conn_model(&st, &conn_model);
+            // P9.5 #6: a duplicated Object-credentialed connection bumps that
+            // credential's "used by N connections" badge.
+            keys_ctl::refresh_cred_model(&st, &cred_model);
         }
     });
 }
@@ -359,6 +412,7 @@ fn wire_delete_conn_row(ctx: &Ctx) {
     ctx.ui.on_delete_conn_row({
         let state = ctx.state.clone();
         let conn_model = ctx.conn_model.clone();
+        let cred_model = ctx.cred_model.clone();
         let repo_del = ctx.repo.clone();
         move |id, is_group| {
             let mut st = state.borrow_mut();
@@ -375,19 +429,63 @@ fn wire_delete_conn_row(ctx: &Ctx) {
                 tracing::warn!("reload after delete failed: {e}");
             }
             refresh_conn_model(&st, &conn_model);
+            // P9.5 #6: deleting a connection may drop a credential's "used by
+            // N connections" count.
+            keys_ctl::refresh_cred_model(&st, &cred_model);
         }
     });
+}
+
+/// P9.6-A Phase C: the `CredentialSource` to save, from the mode selector +
+/// its mode-specific fields. `typed_password_present` is whether the caller's
+/// (already-captured, about-to-be-cleared) transient password field was
+/// non-empty -- true means "set/replace the stored secret", so `has_secret`
+/// becomes true even for a connection that never had one; blank preserves
+/// whatever `had_secret` already said (loaded from the enum's own flag when
+/// the editor opened -- see `cred_mode_fields`). `domain` is Inline-only for
+/// RDP (SSH has no use for it, per the P9.6 non-goals) -- `is_rdp` gates it
+/// exactly like `profile_editor.slint`'s own Domain field.
+pub(super) fn credential_source_from_form(
+    cred_mode: i32,
+    object_cred_id: Option<CredentialId>,
+    inline_username: &str,
+    inline_domain: &str,
+    is_rdp: bool,
+    typed_password_present: bool,
+    had_secret: bool,
+) -> Option<CredentialSource> {
+    match cred_mode {
+        1 => Some(CredentialSource::Inline {
+            username: inline_username.trim().to_owned(),
+            domain: if is_rdp {
+                let d = inline_domain.trim();
+                if d.is_empty() {
+                    None
+                } else {
+                    Some(d.to_owned())
+                }
+            } else {
+                None
+            },
+            has_secret: typed_password_present || had_secret,
+        }),
+        2 => Some(CredentialSource::Prompt),
+        // 0 (Reference), and any other value defensively: today's behavior.
+        _ => object_cred_id.map(CredentialSource::Object),
+    }
 }
 
 fn wire_profile_save(ctx: &Ctx) {
     ctx.ui.on_profile_save({
         let state = ctx.state.clone();
         let conn_model = ctx.conn_model.clone();
+        let cred_model = ctx.cred_model.clone();
         let repo_ps = ctx.repo.clone();
+        let secrets_ps = ctx.secrets.clone();
         let weak = ctx.ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
-            let form = ui.get_profile_form();
+            let mut form = ui.get_profile_form();
             // Resolve group_id from the dropdown index (selected-group-idx).
             // Falls back to the raw form.group_id when the index is out-of-range
             // (e.g. on an older saved form with no group list loaded yet).
@@ -424,11 +522,16 @@ fn wire_profile_save(ctx: &Ctx) {
                     .map(|c| c.created_at)
                     .unwrap_or(now)
             };
-            // P9.6-A: the dropdown only ever selects a saved credential OBJECT
-            // (or "Inherit from group", cred_id == None) -- Inline/Prompt mode
-            // selection is the editor UI item (c) adds later. `None` stays
-            // `None` (inherit), preserving today's behavior exactly.
-            let credential_source = cred_id.map(CredentialSource::Object);
+            let typed_password = form.inline_password.to_string();
+            let credential_source = credential_source_from_form(
+                form.cred_mode,
+                cred_id,
+                form.username.as_str(),
+                form.rdp_domain.as_str(),
+                kind == ConnectionKind::Rdp,
+                !typed_password.is_empty(),
+                form.inline_has_secret,
+            );
             let conn = match Connection::new(
                 ConnectionId::new(form.id as i64),
                 group_id,
@@ -446,9 +549,26 @@ fn wire_profile_save(ctx: &Ctx) {
                     return;
                 }
             };
-            if let Err(e) = repo_ps.upsert_connection(&conn) {
-                tracing::warn!("upsert connection failed: {e}");
-                return;
+            // SECURITY: clear the transient inline-password field immediately
+            // after capturing it above, before any further ops (mirrors
+            // keys_ctl::wire_cred_save's secret-hygiene ordering).
+            form.inline_password = SharedString::from("");
+            ui.set_profile_form(form.clone());
+
+            let saved_id = match repo_ps.upsert_connection(&conn) {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!("upsert connection failed: {e}");
+                    return;
+                }
+            };
+            // A newly typed Inline password overwrites the stored secret
+            // (keyed to the connection, never the SQLite row -- Decision 2).
+            if form.cred_mode == 1 && !typed_password.is_empty() {
+                let key_ref = CredentialRef::for_connection(saved_id, CredentialPurpose::Password);
+                if let Err(e) = secrets_ps.store(&key_ref, &Secret::from_string(typed_password)) {
+                    tracing::warn!("inline keychain store failed: {e}");
+                }
             }
             ui.set_profile_editor_open(false);
             let mut st = state.borrow_mut();
@@ -457,6 +577,10 @@ fn wire_profile_save(ctx: &Ctx) {
             }
             refresh_conn_model(&st, &conn_model);
             refresh_group_name_list(&st, &ui);
+            // P9.5 #6: a save here may change which credential a connection
+            // directly references -- keep the Keys panel's "used by N
+            // connections" badges in sync.
+            keys_ctl::refresh_cred_model(&st, &cred_model);
         }
     });
 }
@@ -988,10 +1112,14 @@ mod tests {
             auth_method: 1,
             selected_cred_idx: 0,
             effective_cred_name: SharedString::from(""),
+            effective_cred_username: SharedString::from(""),
             effective_inherited: false,
             selected_group_idx: 0,
             rdp_domain: SharedString::from(""),
             rdp_resolution: SharedString::from(""),
+            cred_mode: 0,
+            inline_password: SharedString::from(""),
+            inline_has_secret: false,
         }
     }
 
@@ -1250,5 +1378,125 @@ mod tests {
             GroupId::new(3),
             &groups
         ));
+    }
+
+    // -- cred_mode_fields / credential_source_from_form (P9.6-A Phase C) ------
+
+    #[test]
+    fn cred_mode_fields_none_and_object_are_reference_mode() {
+        assert_eq!(cred_mode_fields(&None), (0, None, None, false));
+        assert_eq!(
+            cred_mode_fields(&Some(CredentialSource::Object(CredentialId::new(9)))),
+            (0, None, None, false)
+        );
+    }
+
+    #[test]
+    fn cred_mode_fields_prompt_is_mode_two_with_no_overrides() {
+        assert_eq!(
+            cred_mode_fields(&Some(CredentialSource::Prompt)),
+            (2, None, None, false)
+        );
+    }
+
+    #[test]
+    fn cred_mode_fields_inline_is_mode_one_with_its_own_username_and_domain() {
+        let source = Some(CredentialSource::Inline {
+            username: "alice".to_owned(),
+            domain: Some("CORP".to_owned()),
+            has_secret: true,
+        });
+        assert_eq!(
+            cred_mode_fields(&source),
+            (1, Some("alice".to_owned()), Some("CORP".to_owned()), true)
+        );
+    }
+
+    #[test]
+    fn credential_source_from_form_reference_mode_maps_dropdown_selection() {
+        // mode 0 (Reference): same as pre-P9.6-A -- `None` selection means
+        // inherit, `Some(id)` an explicit Object.
+        assert_eq!(
+            credential_source_from_form(0, None, "", "", false, false, false),
+            None
+        );
+        assert_eq!(
+            credential_source_from_form(0, Some(CredentialId::new(3)), "", "", false, false, false),
+            Some(CredentialSource::Object(CredentialId::new(3)))
+        );
+    }
+
+    #[test]
+    fn credential_source_from_form_prompt_mode_ignores_every_other_field() {
+        assert_eq!(
+            credential_source_from_form(
+                2,
+                Some(CredentialId::new(3)),
+                "bob",
+                "CORP",
+                true,
+                true,
+                true
+            ),
+            Some(CredentialSource::Prompt)
+        );
+    }
+
+    #[test]
+    fn credential_source_from_form_inline_ssh_never_carries_a_domain() {
+        // Domain is RDP-only, per the P9.6 non-goals -- `is_rdp: false` drops
+        // even a non-empty typed domain.
+        let source = credential_source_from_form(1, None, "bob", "CORP", false, true, false);
+        assert_eq!(
+            source,
+            Some(CredentialSource::Inline {
+                username: "bob".to_owned(),
+                domain: None,
+                has_secret: true,
+            })
+        );
+    }
+
+    #[test]
+    fn credential_source_from_form_inline_rdp_keeps_a_trimmed_non_empty_domain() {
+        let source = credential_source_from_form(1, None, "bob", "  CORP  ", true, false, false);
+        assert_eq!(
+            source,
+            Some(CredentialSource::Inline {
+                username: "bob".to_owned(),
+                domain: Some("CORP".to_owned()),
+                has_secret: false,
+            })
+        );
+    }
+
+    #[test]
+    fn credential_source_from_form_inline_has_secret_survives_a_blank_password_when_one_was_already_stored()
+     {
+        // Leaving the password field blank on an edit must NOT read back as
+        // "no secret" when one is already in the keychain (item d's sibling
+        // concern: don't silently drop a stored secret on an untouched save).
+        let source = credential_source_from_form(1, None, "bob", "", false, false, true);
+        assert_eq!(
+            source,
+            Some(CredentialSource::Inline {
+                username: "bob".to_owned(),
+                domain: None,
+                has_secret: true,
+            })
+        );
+    }
+
+    #[test]
+    fn credential_source_from_form_inline_no_secret_when_never_typed_or_stored() {
+        let source = credential_source_from_form(1, None, "bob", "", false, false, false);
+        assert_eq!(
+            source,
+            Some(CredentialSource::Inline {
+                username: "bob".to_owned(),
+                domain: None,
+                has_secret: false,
+            })
+        );
     }
 }

@@ -597,8 +597,16 @@ fn dialog_field_names(dialog: &str) -> &'static [&'static str] {
             "auth_method",
             "selected_cred_idx",
             "effective_cred_name",
+            "effective_cred_username",
             "effective_inherited",
             "selected_group_idx",
+            // P9.6-A Phase C: the mode selector + its non-secret Inline flag.
+            // `inline_password` is deliberately excluded here (secret-bearing
+            // -- see the module doc), same as `quick_connect`'s
+            // `secret`/`passphrase`; still reachable one at a time via an
+            // explicit `dialog_field` call (see `profile_field_get`/`_set`).
+            "cred_mode",
+            "inline_has_secret",
         ],
         "group_editor" => &[
             "id",
@@ -686,8 +694,12 @@ fn profile_field_get(f: &ConnProfile, field: &str) -> Result<Value, String> {
         "auth_method" => Value::from(f.auth_method),
         "selected_cred_idx" => Value::from(f.selected_cred_idx),
         "effective_cred_name" => Value::from(f.effective_cred_name.as_str()),
+        "effective_cred_username" => Value::from(f.effective_cred_username.as_str()),
         "effective_inherited" => Value::from(f.effective_inherited),
         "selected_group_idx" => Value::from(f.selected_group_idx),
+        "cred_mode" => Value::from(f.cred_mode),
+        "inline_has_secret" => Value::from(f.inline_has_secret),
+        "inline_password" => Value::from(f.inline_password.as_str()),
         other => return Err(format!("profile_editor: unknown field {other}")),
     })
 }
@@ -710,8 +722,12 @@ fn profile_field_set(f: &mut ConnProfile, field: &str, value: &Value) -> Result<
         "auth_method" => f.auth_method = need_i32(value)?,
         "selected_cred_idx" => f.selected_cred_idx = need_i32(value)?,
         "effective_cred_name" => f.effective_cred_name = need_str(value)?,
+        "effective_cred_username" => f.effective_cred_username = need_str(value)?,
         "effective_inherited" => f.effective_inherited = need_bool(value)?,
         "selected_group_idx" => f.selected_group_idx = need_i32(value)?,
+        "cred_mode" => f.cred_mode = need_i32(value)?,
+        "inline_has_secret" => f.inline_has_secret = need_bool(value)?,
+        "inline_password" => f.inline_password = need_str(value)?,
         other => return Err(format!("profile_editor: unknown field {other}")),
     }
     Ok(())
@@ -1344,6 +1360,51 @@ mod tests {
         assert!(!dialog_field_names("cred_editor").contains(&"secret"));
         assert!(!dialog_field_names("cred_editor").contains(&"passphrase"));
         assert!(!dialog_field_names("kbd_interactive").contains(&"prompts"));
+        // P9.6-A Phase C: the Inline mode's transient password field.
+        assert!(!dialog_field_names("profile_editor").contains(&"inline_password"));
+    }
+
+    #[test]
+    fn profile_editor_field_names_include_cred_mode_selector_fields() {
+        // P9.6-A Phase C: the non-secret mode-selector fields ARE bulk-dumpable
+        // (mirrors `effective_cred_name`/`effective_inherited` above them).
+        let names = dialog_field_names("profile_editor");
+        assert!(names.contains(&"cred_mode"));
+        assert!(names.contains(&"inline_has_secret"));
+        assert!(names.contains(&"effective_cred_username"));
+    }
+
+    #[test]
+    fn profile_field_get_set_round_trip_cred_mode_selector_fields() {
+        // Non-secret fields: readable via the bulk-safe path.
+        let mut f = sample_profile();
+        profile_field_set(&mut f, "cred_mode", &serde_json::json!(1)).unwrap();
+        assert_eq!(
+            profile_field_get(&f, "cred_mode").unwrap(),
+            serde_json::json!(1)
+        );
+        profile_field_set(&mut f, "inline_has_secret", &serde_json::json!(true)).unwrap();
+        assert_eq!(
+            profile_field_get(&f, "inline_has_secret").unwrap(),
+            serde_json::json!(true)
+        );
+        profile_field_set(
+            &mut f,
+            "effective_cred_username",
+            &serde_json::json!("alice"),
+        )
+        .unwrap();
+        assert_eq!(
+            profile_field_get(&f, "effective_cred_username").unwrap(),
+            serde_json::json!("alice")
+        );
+        // The secret-bearing field is still reachable one at a time (just not
+        // bulk-dumped -- see `dialog_field_names_excludes_secret_bearing_fields`).
+        profile_field_set(&mut f, "inline_password", &serde_json::json!("hunter2")).unwrap();
+        assert_eq!(
+            profile_field_get(&f, "inline_password").unwrap(),
+            serde_json::json!("hunter2")
+        );
     }
 
     #[test]
@@ -1366,10 +1427,14 @@ mod tests {
             auth_method: 1,
             selected_cred_idx: 0,
             effective_cred_name: "".into(),
+            effective_cred_username: "".into(),
             effective_inherited: false,
             selected_group_idx: 0,
             rdp_domain: "".into(),
             rdp_resolution: "".into(),
+            cred_mode: 0,
+            inline_password: "".into(),
+            inline_has_secret: false,
         }
     }
 

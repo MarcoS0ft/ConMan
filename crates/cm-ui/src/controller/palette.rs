@@ -207,10 +207,14 @@ pub(super) fn dispatch_palette_action(
                 auth_method: 1,
                 selected_cred_idx: cred_idx,
                 effective_cred_name: SharedString::from(""),
+                effective_cred_username: SharedString::from(""),
                 effective_inherited: false,
                 selected_group_idx,
                 rdp_domain: SharedString::from(""),
                 rdp_resolution: SharedString::from(tree_ctl::default_rdp_resolution().as_str()),
+                cred_mode: 0,
+                inline_password: SharedString::from(""),
+                inline_has_secret: false,
             };
             ui.set_profile_form(form);
             ui.set_profile_editor_open(true);
@@ -233,10 +237,14 @@ pub(super) fn dispatch_palette_action(
                 auth_method: 1,
                 selected_cred_idx: cred_idx,
                 effective_cred_name: SharedString::from(""),
+                effective_cred_username: SharedString::from(""),
                 effective_inherited: false,
                 selected_group_idx,
                 rdp_domain: SharedString::from(""),
                 rdp_resolution: SharedString::from(tree_ctl::default_rdp_resolution().as_str()),
+                cred_mode: 0,
+                inline_password: SharedString::from(""),
+                inline_has_secret: false,
             };
             ui.set_profile_form(form);
             ui.set_profile_editor_open(true);

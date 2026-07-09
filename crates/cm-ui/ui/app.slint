@@ -84,6 +84,11 @@ export struct CredRow {
     expanded: bool,
     selected: bool,
     depth: int,
+    // P9.5 #6: "" (folder rows, or a credential used by no connection) hides
+    // the badge; otherwise a ready-made label ("Used by 1 connection" / "Used
+    // by N connections") -- precomputed in Rust (keys_ctl::refresh_cred_model)
+    // rather than formatted in .slint, matching `kind`'s existing pattern.
+    used-by-label: string,
 }
 
 // ── TerminalSurface (verbatim from P2.4; background tokenised) ─────────────
@@ -737,6 +742,29 @@ component CredTreeRow inherits Rectangle {
                     padding-left: 5px; padding-right: 5px;
                     Text {
                         text: data.kind;
+                        color: Theme.color-text-secondary;
+                        font-size: Theme.font-xxs;
+                        font-family: Theme.font-family-mono;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // P9.5 #6: "used by N connections" indicator -- mirrors the `kind`
+        // tag immediately above; hidden (empty label) for folders and for a
+        // credential nothing currently references directly.
+        if !data.is-folder && data.used-by-label != "" : VerticalLayout {
+            alignment: center;
+            Rectangle {
+                height: Theme.tag-height;
+                border-radius: Theme.radius-xs;
+                background: Theme.color-hover;
+                HorizontalLayout {
+                    padding-left: 5px; padding-right: 5px;
+                    Text {
+                        text: data.used-by-label;
                         color: Theme.color-text-secondary;
                         font-size: Theme.font-xxs;
                         font-family: Theme.font-family-mono;
