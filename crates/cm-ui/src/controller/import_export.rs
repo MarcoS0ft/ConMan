@@ -20,6 +20,11 @@
 //! byte-for-byte as before this task — see [`ImportOutcome`] for the shared
 //! result shape (adds a warning count alongside the pre-existing stats /
 //! skipped-secrets pair).
+//!
+//! **P9.3 (import-dispatch handoff):** `.csv` (ConMan's own CSV interchange
+//! format) joins `.rjson` on the same `cm_storage::import` foreign-format
+//! route -- mirrors that wiring exactly, just another extension in the
+//! match.
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -102,8 +107,9 @@ pub(super) struct ImportOutcome {
 
 /// Import `path` into `repo`, dispatching by extension:
 ///
-/// - `.rjson` (RoyalTS, P9.2) routes through `cm_storage::import`'s
-///   foreign-format framework (parses to an `ExportEnvelope`, then the same
+/// - `.rjson` (RoyalTS, P9.2) and `.csv` (ConMan's own CSV interchange
+///   format, P9.3) route through `cm_storage::import`'s foreign-format
+///   framework (parses to an `ExportEnvelope`, then the same
 ///   `cm_storage::import()` seam as the native path).
 /// - anything else falls through to the native `.json` envelope path
 ///   (additive; see `cm_storage::json_io`'s module docs for full semantics
@@ -120,12 +126,13 @@ pub(super) fn import_from_path(
     repo: &dyn ConnectionRepository,
     secrets: &dyn CredentialStore,
 ) -> Result<ImportOutcome, String> {
-    let is_royalts = path
+    let ext = path
         .extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("rjson"));
+        .unwrap_or_default()
+        .to_ascii_lowercase();
 
-    if is_royalts {
+    if matches!(ext.as_str(), "rjson" | "csv") {
         let outcome = cm_storage::import::import_from_path(path, repo, Some(secrets))
             .map_err(|e| format!("import failed: {e}"))?;
         let skipped_secrets = outcome
@@ -240,7 +247,9 @@ pub(super) fn import_via_dialog(
         // P9.2: RoyalTS plaintext export format, routed through
         // `cm_storage::import::royalts` in `import_from_path` above.
         .add_filter("RoyalTS", &["rjson"])
-        .add_filter("All supported", &["json", "rjson"])
+        // P9.3: ConMan's own CSV interchange format.
+        .add_filter("CSV", &["csv"])
+        .add_filter("All supported", &["json", "rjson", "csv"])
         .pick_file()
     else {
         return; // user cancelled
@@ -423,6 +432,34 @@ mod tests {
 
         let msg = summary_message(&outcome);
         assert!(msg.contains("1 warning(s)"));
+    }
+
+    /// P9.3: `.csv` (ConMan's own CSV interchange format) dispatch — mirrors
+    /// the `.rjson` test above exactly, just the next extension in the same
+    /// match. 7 data rows in the shared fixture, 1 (`no-host-ssh`, blank
+    /// host) skipped with a counted warning.
+    #[test]
+    fn import_from_path_dispatches_csv_extension_to_the_csv_importer() {
+        let fixture_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../cm-storage/tests/fixtures/csv_sample.csv"
+        );
+        let repo = SqliteRepository::open_in_memory().expect("open db");
+        let mock_store = MockStore::default();
+
+        let outcome = import_from_path(fixture_path.as_ref(), &repo, &mock_store)
+            .expect("csv import should succeed");
+
+        assert_eq!(outcome.stats.connections_imported, 6);
+        assert_eq!(outcome.warnings, 1);
+        assert!(outcome.stats.secrets_imported >= 3, "{:?}", outcome.stats);
+
+        let conns = repo.list_connections().expect("list connections");
+        assert!(conns.iter().any(|c| c.name == "web-01-ssh"));
+        assert!(
+            !conns.iter().any(|c| c.name == "no-host-ssh"),
+            "the blank-host row must be skipped, not imported"
+        );
     }
 
     /// Builds an [`ImportExportHandles`] over an in-memory repo/mock keychain
