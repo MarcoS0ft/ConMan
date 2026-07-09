@@ -1157,6 +1157,13 @@ pub(super) fn reattach_session(
             broadcast_target: BroadcastTarget::default(),
             broadcast_saved_groups: Vec::new(),
             search: super::search::SearchState::default(),
+            // P9.5 #3: reattach has no live "connecting" moment of its own
+            // (a detached session is only ever Connected/Disconnected, never
+            // Connecting -- see `disposition`), so `kind` never actually
+            // renders; `identity` mirrors what's pushed to
+            // `set_session_identity` just below.
+            identity: label.clone(),
+            kind: String::new(),
         });
         st.active = st.tabs.len() - 1;
         let active = st.active;
@@ -1299,6 +1306,8 @@ mod tests {
             broadcast_target: BroadcastTarget::default(),
             broadcast_saved_groups: Vec::new(),
             search: super::search::SearchState::default(),
+            identity: String::new(),
+            kind: String::new(),
         };
         (tab, sinks)
     }

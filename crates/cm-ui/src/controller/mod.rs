@@ -214,6 +214,24 @@ struct Tab {
     /// P6.7: whole-buffer search overlay state, targeting this tab's primary
     /// pane (`session`) — see `search.rs`'s module doc for the scoping note.
     search: search::SearchState,
+    /// P9.5 #3: this tab's own `"user@host:port"` identity (or a local
+    /// shell's title, e.g. `"shell 3"`), cached at connect/reconnect time.
+    /// `AppWindow::session-identity` is a single shared property (feeds
+    /// `ConnectingOverlay`/`ErrorOverlay`/the status bar for whichever tab is
+    /// active) that used to be set ONLY when a tab connects/reconnects, never
+    /// refreshed on a plain tab switch -- so switching to a tab that was
+    /// merely `Connecting`/`Failed` (not just-connected) kept showing
+    /// whichever OTHER tab's identity had most recently been set, bleeding
+    /// that tab's content into the one just switched to. `select_tab` now
+    /// re-pushes this cached value on every switch. Empty for a tab that has
+    /// never connected/been named (never shown, since `overlay_connecting`/
+    /// `overlay_error` gate whether it's rendered at all).
+    identity: String,
+    /// P9.5 #3: this tab's protocol label ("SSH"/"RDP"), cached alongside
+    /// `identity` for the same reason -- feeds `ConnectingOverlay`'s `kind`
+    /// text. Empty for local-shell tabs (which never show it: `kind == ""`
+    /// falls back to "the connection" with no protocol name).
+    kind: String,
 }
 
 struct State {

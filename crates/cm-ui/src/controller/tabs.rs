@@ -105,6 +105,11 @@ pub(super) struct PushTabArgs {
     pub(super) origin_connection_id: Option<i32>,
     /// See `Tab::is_empty` (P6.14 gap 3). `false` for every real connect path.
     pub(super) is_empty: bool,
+    /// See `Tab::identity` (P9.5 #3). Whatever the caller is about to (or
+    /// just did) pass to `ui.set_session_identity`.
+    pub(super) identity: String,
+    /// See `Tab::kind` (P9.5 #3). `"SSH"`/`"RDP"`, or empty for local shells.
+    pub(super) kind: String,
 }
 
 pub(super) fn push_tab(
@@ -122,6 +127,8 @@ pub(super) fn push_tab(
         initial_status,
         origin_connection_id,
         is_empty,
+        identity,
+        kind,
     } = args;
     let mut st = state.borrow_mut();
     let scale = st.scale;
@@ -163,6 +170,8 @@ pub(super) fn push_tab(
         broadcast_target: panes::BroadcastTarget::default(),
         broadcast_saved_groups: Vec::new(),
         search: super::search::SearchState::default(),
+        identity,
+        kind,
     });
     st.active = st.tabs.len() - 1;
     let active = st.active;
@@ -275,6 +284,8 @@ fn spawn_local_tab(
             initial_status: "connected",
             origin_connection_id: None,
             is_empty,
+            identity: identity.clone(),
+            kind: String::new(),
         },
     );
     ui.set_session_identity(SharedString::from(identity));
@@ -303,6 +314,16 @@ pub(super) fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
     let status = st.tabs[idx].session.status();
     let tab = &st.tabs[idx];
     overlays::update_overlays_from_status(ui, tab, &status);
+    // P9.5 #3: re-push THIS tab's own cached identity/kind (Tab::identity /
+    // Tab::kind) -- these two are the only overlay-relevant properties
+    // `update_overlays_from_status` doesn't already refresh from live status
+    // (it derives `overlay_connecting`/`overlay_error`/`error_reason`/
+    // `error_detail` fresh every call), so without this a switch to a tab
+    // that's also Connecting/Failed kept showing whichever OTHER tab last
+    // called `set_session_identity`/`set_connecting_kind` -- the tab-content
+    // bleed the user reported.
+    ui.set_session_identity(SharedString::from(tab.identity.as_str()));
+    ui.set_connecting_kind(SharedString::from(tab.kind.as_str()));
     sessions::render_active(&mut st, ui);
     drop(st);
     panes::refresh_broadcast_label(state, ui);

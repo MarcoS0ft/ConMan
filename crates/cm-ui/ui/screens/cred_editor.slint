@@ -34,7 +34,12 @@ export struct CredFormData {
 }
 
 // ── CredEditor ─────────────────────────────────────────────────────────────
-export component CredEditor {
+// Opaque card: mirrors ProfileEditor / GroupEditor / QuickConnectForm (P9.5
+// #4 -- the SAME "no opaque card" bleed-through defect P7.2 fixed for
+// ProfileEditor and P7.6 fixed for GroupEditor, but this dialog was missed)
+// -- a solid `color-overlay` panel with a border/radius so nothing behind
+// the Modal scrim bleeds through, in both themes.
+export component CredEditor inherits Rectangle {
     in-out property <CredFormData> form;
     // Flat folder name list for the folder combo box.
     // Index 0 is "Root (no folder)"; subsequent entries are folder paths.
@@ -45,6 +50,16 @@ export component CredEditor {
     // P8.1: no dialog role in Slint 1.17 — groupbox + "<Title> dialog".
     accessible-role: groupbox;
     accessible-label: (root.form.id == 0 ? "New credential" : "Edit credential") + " dialog";
+
+    width: 520px;
+    background: Theme.color-overlay;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.color-stroke;
+
+    // Absorb clicks so the Modal scrim behind doesn't dismiss on inner clicks
+    // (mirrors ProfileEditor / GroupEditor / QuickConnectForm).
+    TouchArea {}
 
     VerticalLayout {
         padding: Theme.space-6;

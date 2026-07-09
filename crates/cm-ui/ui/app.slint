@@ -636,11 +636,27 @@ component CredTreeRow inherits Rectangle {
     accessible-item-selected: data.selected;
     accessible-action-default => { if (data.is-folder) { root.toggled(); } else { root.activated(); } }
 
+    // P9.5 #1 (closing the identical latent bug flagged in the connection
+    // tree's own fix): same reasoning as `ConnectionRow::action-hover` in
+    // this file -- `touch` and the action-icon strip are overlapping
+    // siblings, so gating the strip's existence on `touch.has-hover` alone
+    // is unstable (Slint hands the pointer to whichever button is topmost,
+    // synthesizing an Exit for `touch` that destroys the `if`-gated strip
+    // out from under the pointer). ORing in each button's own latched hover
+    // (via `IconButton::hover-changed`, see `move-up-hover` etc. on
+    // ConnectionRow for the full mechanism/why) keeps the combined signal
+    // stable across that boundary.
+    property <bool> new-cred-hover: false;
+    property <bool> edit-cred-hover: false;
+    property <bool> delete-cred-hover: false;
+    property <bool> action-hover: touch.has-hover
+        || root.new-cred-hover || root.edit-cred-hover || root.delete-cred-hover;
+
     height: Theme.tree-row-height;
     border-radius: Theme.radius-sm;
     background: data.selected ? Theme.color-accent-subtle
               : root.highlighted ? Theme.color-accent-subtle.with-alpha(0.5)
-              : touch.has-hover ? Theme.color-hover : transparent;
+              : root.action-hover ? Theme.color-hover : transparent;
 
     touch := TouchArea {
         clicked => {
@@ -731,7 +747,9 @@ component CredTreeRow inherits Rectangle {
             }
         }
 
-        if touch.has-hover : HorizontalLayout {
+        // Gated on `root.action-hover`, not bare `touch.has-hover` -- see the
+        // property's doc comment above (P9.5 #1).
+        if root.action-hover : HorizontalLayout {
             spacing: Theme.gap-hairline;
             alignment: center;
             if data.is-folder : new-cred-btn := IconButton {
@@ -739,12 +757,14 @@ component CredTreeRow inherits Rectangle {
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 tooltip: "New credential";
                 clicked => { root.new-sub(); }
+                hover-changed(h) => { root.new-cred-hover = h; }
             }
             if !data.is-folder : edit-cred-btn := IconButton {
                 glyph: "\u{F03EB}";
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
                 tooltip: "Edit";
                 clicked => { root.activated(); }
+                hover-changed(h) => { root.edit-cred-hover = h; }
             }
             delete-cred-btn := IconButton {
                 glyph: "\u{EA81}";
@@ -752,6 +772,7 @@ component CredTreeRow inherits Rectangle {
                 glyph-color: Theme.color-error;
                 tooltip: "Delete";
                 clicked => { root.delete-clicked(); }
+                hover-changed(h) => { root.delete-cred-hover = h; }
             }
         }
     }

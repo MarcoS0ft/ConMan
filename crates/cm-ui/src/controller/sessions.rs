@@ -1951,6 +1951,8 @@ fn push_auth_failed_tab(
             initial_status: "error",
             origin_connection_id,
             is_empty: false,
+            identity: identity.clone(),
+            kind: String::new(),
         },
     );
     ui.set_session_identity(SharedString::from(identity));
@@ -2025,6 +2027,8 @@ pub(super) fn open_ssh_tab(
                     initial_status: "connecting",
                     origin_connection_id,
                     is_empty: false,
+                    identity: identity.clone(),
+                    kind: "SSH".to_owned(),
                 },
             );
             ui.set_session_identity(SharedString::from(identity));
@@ -2148,6 +2152,8 @@ pub(super) fn open_rdp_tab(
             initial_status: "connecting",
             origin_connection_id,
             is_empty: false,
+            identity: identity.clone(),
+            kind: "RDP".to_owned(),
         },
     );
     ui.set_session_identity(SharedString::from(identity));
@@ -2198,6 +2204,11 @@ pub(super) fn reconnect_rdp_tab(
                     tab.connect_info = Some(ConnectInfo::Rdp(ci));
                     tab.last_frame = None;
                     tab.rdp_clipboard = rdp_clipboard;
+                    // P9.5 #3: keep the cached identity/kind (select_tab
+                    // re-pushes these on every switch) in step with a
+                    // reconnect, same as the fresh-connect path.
+                    tab.identity = identity.clone();
+                    tab.kind = "RDP".to_owned();
                 }
             }
             if let Some(mut item) = tab_model.row_data(tab_idx) {
@@ -2247,6 +2258,10 @@ pub(super) fn reconnect_ssh_tab(
                     tab.session = new_session;
                     tab.connect_info = Some(ConnectInfo::Ssh(ci));
                     tab.last = None;
+                    // P9.5 #3: see the RDP counterpart's identical comment
+                    // (reconnect_rdp_tab, above).
+                    tab.identity = identity.clone();
+                    tab.kind = "SSH".to_owned();
                 }
             }
             if let Some(mut item) = tab_model.row_data(tab_idx) {
