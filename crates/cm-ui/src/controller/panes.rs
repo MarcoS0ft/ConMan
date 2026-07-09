@@ -33,6 +33,7 @@ pub(super) fn wire_panes(ctx: &Ctx) {
     wire_split_pane_v(ctx);
     wire_close_pane(ctx);
     wire_detach_session(ctx);
+    wire_pane_disconnect(ctx);
     wire_pane_focused(ctx);
     wire_pane_resized(ctx);
     wire_broadcast_target(ctx);
@@ -447,15 +448,28 @@ fn wire_split_pane_v(ctx: &Ctx) {
     });
 }
 
+/// The active tab's currently-focused pane id -- every "close/detach
+/// whatever I'm looking at" caller of the now-generalized [`do_close_pane`]
+/// (the keyboard shortcuts here, the command palette, `wire_key_input`'s own
+/// shortcut handling in `sessions.rs`) passes this explicitly, preserving
+/// their exact prior behavior.
+pub(super) fn focused_pane_id(state: &Rc<RefCell<State>>) -> Option<usize> {
+    let st = state.borrow();
+    let active = st.active;
+    st.tabs.get(active).map(|t| t.pane_group.focused())
+}
+
 fn wire_close_pane(ctx: &Ctx) {
     ctx.ui.on_close_pane({
         let state = ctx.state.clone();
         let tab_model = ctx.tab_model.clone();
         let weak = ctx.ui.as_weak();
         move || {
-            if let Some(ui) = weak.upgrade() {
-                do_close_pane(&state, &tab_model, &ui, false);
-            }
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(pane_id) = focused_pane_id(&state) else {
+                return;
+            };
+            do_close_pane(&state, &tab_model, &ui, pane_id, false);
         }
     });
 }
@@ -466,9 +480,29 @@ fn wire_detach_session(ctx: &Ctx) {
         let tab_model = ctx.tab_model.clone();
         let weak = ctx.ui.as_weak();
         move || {
-            if let Some(ui) = weak.upgrade() {
-                do_close_pane(&state, &tab_model, &ui, true);
-            }
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(pane_id) = focused_pane_id(&state) else {
+                return;
+            };
+            do_close_pane(&state, &tab_model, &ui, pane_id, true);
+        }
+    });
+}
+
+/// P9.10 #2: per-pane disconnect inside a split -- the corner affordance on
+/// each `PaneSlot` (or a future context menu) targets a SPECIFIC pane id,
+/// never "whichever pane is focused" (unlike the two callbacks above).
+/// Always a plain disconnect (`detach: false`), matching the "close ==
+/// disconnect == collapse split" naming this whole P9.10 lane's other items
+/// use for a session teardown that isn't kept running in the background.
+fn wire_pane_disconnect(ctx: &Ctx) {
+    ctx.ui.on_pane_disconnect({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let weak = ctx.ui.as_weak();
+        move |pane_id| {
+            let Some(ui) = weak.upgrade() else { return };
+            do_close_pane(&state, &tab_model, &ui, pane_id as usize, false);
         }
     });
 }
@@ -1034,15 +1068,27 @@ fn promote_extra_to_primary(tab: &mut Tab, ep_idx: usize) {
     std::mem::swap(&mut tab.rdp_h, &mut ep.rdp_h);
 }
 
-/// Close the focused pane in the active tab (P6.11: any pane, including the
-/// primary — see [`promote_extra_to_primary`]).
+/// Close a specific pane (by id) in the active tab (P6.11: any pane,
+/// including the primary — see [`promote_extra_to_primary`]).
 ///
 /// If `detach` is `true`, the closed pane's session is moved to the detached
 /// list (kept running).  If `false`, the session is shut down immediately.
+///
+/// P9.10 #2: generalized from "always the focused pane" to an explicit
+/// `pane_id` -- a per-pane disconnect affordance (or a future context menu)
+/// can target ANY pane, not necessarily the one the user happens to be
+/// typing into. Retargets `PaneGroup`'s own focus to `pane_id` first (its
+/// only removal primitive is `close_focused()` — see `cm_session::pane`),
+/// then everything below is the original, unchanged "close the focused
+/// pane" logic. The two pre-existing keyboard-shortcut callers
+/// (`wire_close_pane`/`wire_detach_session`) now pass the CURRENTLY-focused
+/// id explicitly, which is a no-op retarget and preserves their exact prior
+/// behavior.
 pub(super) fn do_close_pane(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,
     ui: &AppWindow,
+    pane_id: usize,
     detach: bool,
 ) {
     let (closed_session, closed_label, new_layout, new_focused, tab_label) = {
@@ -1054,6 +1100,7 @@ pub(super) fn do_close_pane(
         if tab.pane_group.count() <= 1 {
             return; // nothing to close (caller should use close_tab instead)
         }
+        tab.pane_group.set_focused(pane_id);
         let focused_id = tab.pane_group.focused();
         let label = tab_model
             .row_data(active)
@@ -1220,6 +1267,14 @@ pub(super) fn reattach_session(
             id: 0,
             status: SharedString::from(initial_status),
             pane_count: 1,
+            // A reattached detached session is always a real connection --
+            // never the Home tab.
+            is_home: false,
+            // P9.10 #1: `origin_connection_id` is always `None` for a
+            // reattached tab (see the comment just above, in the `Tab {
+            // ... }` construction) -- can only "duplicate" as a new local
+            // shell, and only if this reattached session actually was one.
+            can_duplicate: !is_remote,
         });
         ui.set_active_tab(active as i32);
         ui.set_pane_layout(0);

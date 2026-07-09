@@ -27,15 +27,20 @@
 
 mod support;
 
-use i_slint_backend_testing::ElementHandle;
+use std::sync::{Arc, Mutex};
 
-use support::{find_by_id, harness, nth_by_id};
+use cm_core::SessionStatus;
+use i_slint_backend_testing::ElementHandle;
+use slint::Model;
+
+use support::{find_by_id, harness, nth_by_id, pump_ticks};
 
 #[test]
 fn connections_tree_suite() {
     i_slint_backend_testing::init_integration_test_with_mock_time();
 
     select_does_not_launch_but_activate_does();
+    tree_row_status_dot_tracks_its_connection_s_live_tab();
 }
 
 fn tab_count(ui: &cm_ui::AppWindow) -> usize {
@@ -100,5 +105,72 @@ fn select_does_not_launch_but_activate_does() {
         tab_count(&h.ui),
         tabs_before + 1,
         "row-activated (double click / Enter) must open a new tab (P9.5 #2)"
+    );
+}
+
+/// P9.10 #4: the connection tree's `StatusDot` used to be hardcoded
+/// "disconnected" at construction and never touched again -- this proves the
+/// live-status overlay (`tree_ctl::overlay_live_status`, triggered off the
+/// tab's own status-transition detection in `tick_tab`) actually reaches the
+/// row, across a real connecting -> connected -> disconnected lifecycle
+/// driven through the exact tree-launch path (`row-activated`) a real
+/// double-click/Enter goes through.
+///
+/// Known, documented, accepted gap (not a bug): the row only picks up a
+/// tab's status once that tab's status actually CHANGES at least once after
+/// being pushed -- `tick_tab`'s refresh hook rides the existing "did this
+/// tab's own status change" detection rather than an unconditional every-
+/// tick walk of the whole tree, so the dot briefly lags the FIRST connecting
+/// phase right after launch (a cosmetically minor, well-bounded trade-off,
+/// not the "inert forever" bug the user reported). This test starts its
+/// assertions from the FIRST transition onward, where the dot is always
+/// accurate.
+fn tree_row_status_dot_tracks_its_connection_s_live_tab() {
+    let (h, repo, provider) = harness();
+
+    h.ui.invoke_new_connection(0);
+    {
+        let mut form = h.ui.get_profile_form();
+        form.name = "Live Dot Target".into();
+        form.host = "mock-live-dot-host".into();
+        form.auth_method = 2; // Agent -- no stored credential needed to resolve.
+        h.ui.set_profile_form(form);
+    }
+    find_by_id(&h.ui, "ProfileEditor::profile-save-btn").invoke_accessible_default_action();
+    let saved = repo.list_connections().expect("list_connections");
+    assert_eq!(saved.len(), 1, "seed: exactly one connection persisted");
+
+    let cell = Arc::new(Mutex::new(SessionStatus::Connecting));
+    provider.script_next_remote(cell.clone());
+    h.ui.invoke_row_activated(0);
+    pump_ticks(1);
+
+    // First transition: Connecting -> Connected.
+    *cell.lock().expect("cell poisoned") = SessionStatus::Connected;
+    pump_ticks(1);
+    assert_eq!(
+        h.ui
+            .get_connections()
+            .row_data(0)
+            .expect("tree row")
+            .status
+            .as_str(),
+        "connected",
+        "the tree row must reflect its connection's now-Connected tab"
+    );
+
+    // Second transition: Connected -> Disconnected -- the dot must revert,
+    // not get stuck showing a stale "connected".
+    *cell.lock().expect("cell poisoned") = SessionStatus::Disconnected;
+    pump_ticks(1);
+    assert_eq!(
+        h.ui
+            .get_connections()
+            .row_data(0)
+            .expect("tree row")
+            .status
+            .as_str(),
+        "disconnected",
+        "the tree row must revert once its tab disconnects, not stay stuck showing connected"
     );
 }

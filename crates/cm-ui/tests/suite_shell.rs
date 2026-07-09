@@ -10,9 +10,16 @@
 
 mod support;
 
-use i_slint_backend_testing::ElementHandle;
+use std::sync::{Arc, Mutex};
 
-use support::{find_by_id, find_descendant_by_label, find_singleton, harness, nth_by_id};
+use cm_core::SessionStatus;
+use i_slint_backend_testing::ElementHandle;
+use slint::Model;
+
+use support::{
+    find_by_id, find_descendant_by_label, find_singleton, harness, harness_with, nth_by_id,
+    pump_ticks,
+};
 
 #[test]
 fn shell_suite() {
@@ -23,6 +30,9 @@ fn shell_suite() {
     sidebar_collapse_toggles();
     status_pill_tracks_session_status();
     first_tab_inset_and_divider_present();
+    home_tab_is_flagged_is_home_and_a_new_local_tab_is_not();
+    tab_duplicate_is_available_for_a_saved_connection_but_not_for_quick_connect();
+    tab_disconnect_keeps_the_tab_open_and_tab_reconnect_dials_again();
 }
 
 fn tab_count(ui: &cm_ui::AppWindow) -> usize {
@@ -185,4 +195,178 @@ fn first_tab_inset_and_divider_present() {
         first_tab_x_collapsed > activity_bar_right,
         "first tab must still start after the activity bar with the sidebar collapsed"
     );
+}
+
+// ── P9.10: tab context menu / Home pill (element-reachable pieces) ─────────
+//
+// The right-click menu itself (opening it, the real gesture) is out of this
+// harness's reach the same way Bug A's hover-icon click was -- Slint's
+// `ContextMenuArea`/`Menu`/`MenuItem` aren't queryable `ElementHandle`s the
+// way an ordinary `Rectangle`/`TouchArea` is (no existing suite anywhere
+// touches one). What IS reachable and is exactly what needs proving: the
+// `TabItem` fields the menu's `if` guards key off (`is-home`/`can-duplicate`)
+// compute correctly, and each new callback (`tab-reconnect`/`tab-disconnect`/
+// `tab-duplicate`, whatever real UI element ends up invoking them) does the
+// right thing -- driven directly via their auto-generated `invoke_*` methods,
+// the same "drive the semantic action directly" pattern this whole suite
+// file already uses for the palette/quick-connect.
+
+/// Mirrors `suite_overlays.rs`'s identical helper (kept local here rather
+/// than shared -- each P8.2 suite binary is its own process/compilation
+/// unit, some duplication across them is the accepted cost, see this file's
+/// module doc and `support`'s).
+fn connect_ssh_via_quick_connect(
+    h: &cm_ui::TestHarness,
+    provider: &Arc<support::MockSessionProvider>,
+    host: &str,
+) -> Arc<Mutex<SessionStatus>> {
+    let cell = Arc::new(Mutex::new(SessionStatus::Connecting));
+    provider.script_next_remote(cell.clone());
+
+    h.ui.invoke_quick_connect();
+    h.ui.set_qc_kind(0); // SSH
+    h.ui.set_qc_host(host.into());
+    h.ui.set_qc_username("ops".into());
+    h.ui.set_qc_auth_method(1); // Password
+    h.ui.set_qc_secret("mock-password".into());
+    find_by_id(&h.ui, "QuickConnectForm::qc-connect-btn").invoke_accessible_default_action();
+
+    cell
+}
+
+/// The Home/Launchpad-fronted tab (`harness_with(false)`, mirrors
+/// `suite_launchpad.rs`'s own way of reaching it) must be flagged
+/// `is-home: true` -- and only it; a plain new local-shell tab opened
+/// alongside it must NOT be.
+fn home_tab_is_flagged_is_home_and_a_new_local_tab_is_not() {
+    let (h, _repo, _provider) = harness_with(false);
+    assert_eq!(tab_count(&h.ui), 1, "seed: the empty/Home tab only");
+    assert!(
+        h.ui.get_tabs().row_data(0).expect("home tab row").is_home,
+        "the Launchpad-fronted Home tab must be flagged is-home"
+    );
+
+    find_by_id(&h.ui, "AppWindow::new-tab-btn").invoke_accessible_default_action();
+    assert_eq!(tab_count(&h.ui), 2);
+    assert!(
+        !h.ui.get_tabs().row_data(1).expect("new tab row").is_home,
+        "a plain new local-shell tab must NOT be flagged is-home"
+    );
+}
+
+/// `TabItem::can_duplicate` (the "Duplicate" menu item's `if` guard) must be
+/// true for a tree-launched saved connection (has an `origin_connection_id`
+/// to relaunch), true for a plain local shell (duplicate = a new shell, no
+/// origin needed), and false for a quick-connect-originated remote tab (no
+/// stored settings to safely relaunch -- the spec's explicit "omit the item
+/// rather than launch nothing" rule).
+fn tab_duplicate_is_available_for_a_saved_connection_but_not_for_quick_connect() {
+    let (h, repo, provider) = harness();
+
+    // Local shell (harness()'s own seed tab) -- no origin, not remote.
+    assert!(
+        h.ui.get_tabs().row_data(0).expect("seed tab row").can_duplicate,
+        "a plain local shell must be duplicable (relaunch = a new shell)"
+    );
+
+    // A tree-launched saved SSH connection -- has an origin_connection_id.
+    h.ui.invoke_new_connection(0);
+    {
+        let mut form = h.ui.get_profile_form();
+        form.name = "Dup Target".into();
+        form.host = "mock-dup-host".into();
+        form.auth_method = 2; // Agent -- no stored credential needed to resolve.
+        h.ui.set_profile_form(form);
+    }
+    find_by_id(&h.ui, "ProfileEditor::profile-save-btn").invoke_accessible_default_action();
+    let saved = repo.list_connections().expect("list_connections");
+    let row_idx = saved
+        .iter()
+        .position(|c| c.name == "Dup Target")
+        .expect("connection was saved");
+    h.ui.invoke_row_activated(row_idx as i32);
+    pump_ticks(1);
+    let saved_tab_idx = tab_count(&h.ui) - 1;
+    assert!(
+        h.ui
+            .get_tabs()
+            .row_data(saved_tab_idx)
+            .expect("saved-connection tab row")
+            .can_duplicate,
+        "a tree-launched saved connection must be duplicable (has an origin_connection_id)"
+    );
+
+    // Quick-connect -- no origin_connection_id, and it IS remote.
+    let _cell = connect_ssh_via_quick_connect(&h, &provider, "mock-qc-host");
+    let qc_tab_idx = tab_count(&h.ui) - 1;
+    assert!(
+        !h.ui
+            .get_tabs()
+            .row_data(qc_tab_idx)
+            .expect("quick-connect tab row")
+            .can_duplicate,
+        "a quick-connect-originated remote tab must NOT be duplicable -- no stored \
+         settings to safely relaunch"
+    );
+}
+
+/// "Disconnect" tears the session down but keeps the tab open in the same
+/// Failed/error-overlay state a spontaneous disconnect already leaves a tab
+/// in -- then "Reconnect" from that same tab dials the provider again.
+/// Drives both new callbacks directly via their `invoke_*` methods (the real
+/// gesture, opening the context menu and clicking an item, is .99-verify
+/// territory -- see this section's header comment).
+fn tab_disconnect_keeps_the_tab_open_and_tab_reconnect_dials_again() {
+    let (h, _repo, provider) = harness();
+    let _cell = connect_ssh_via_quick_connect(&h, &provider, "mock-host");
+    let idx = h.ui.get_active_tab();
+    assert_eq!(
+        provider.ssh_connect_count(),
+        1,
+        "seed: the quick-connect dialed the provider exactly once"
+    );
+    let tabs_before = tab_count(&h.ui);
+
+    h.ui.invoke_tab_disconnect(idx);
+    pump_ticks(1);
+
+    assert_eq!(
+        tab_count(&h.ui),
+        tabs_before,
+        "Disconnect must keep the tab open, not close it"
+    );
+    assert!(
+        h.ui.get_overlay_error(),
+        "Disconnect must drop the tab into the error/reconnect-available overlay"
+    );
+    assert!(
+        h.ui.get_error_reason().contains("Disconnected"),
+        "the overlay must surface the disconnect's own reason, got {:?}",
+        h.ui.get_error_reason()
+    );
+    assert_eq!(
+        h.ui
+            .get_tabs()
+            .row_data(idx as usize)
+            .expect("tab row")
+            .status
+            .as_str(),
+        "error",
+        "the tab strip's own status dot must reflect the disconnect"
+    );
+
+    h.ui.invoke_tab_reconnect(idx);
+    pump_ticks(1);
+
+    assert_eq!(
+        provider.ssh_connect_count(),
+        2,
+        "Reconnect (from the same tab Disconnect left in place) must dial the \
+         provider again"
+    );
+    assert!(
+        h.ui.get_overlay_connecting(),
+        "Reconnect must show the connecting overlay again"
+    );
+    assert!(!h.ui.get_overlay_error(), "the error overlay must clear");
 }

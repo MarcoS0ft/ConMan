@@ -18,6 +18,9 @@ pub(super) fn wire_tabs(ctx: &Ctx) {
     wire_new_tab(ctx);
     wire_select_tab(ctx);
     wire_close_tab(ctx);
+    wire_tab_reconnect(ctx);
+    wire_tab_disconnect(ctx);
+    wire_tab_duplicate(ctx);
     wire_surface_resized(ctx);
 }
 
@@ -54,6 +57,121 @@ fn wire_close_tab(ctx: &Ctx) {
         move |idx| {
             if let Some(ui) = weak.upgrade() {
                 close_tab(&state, &tab_model, &ui, idx as usize);
+            }
+        }
+    });
+}
+
+/// P9.10 #1: the tab context menu's "Reconnect" -- `sessions::reconnect_tab`
+/// does the real work (shared with the ErrorOverlay's own Reconnect button),
+/// but it writes AppWindow-level properties that are shared by whichever
+/// tab is ACTIVE, not per-tab (see `reconnect_tab`'s own doc comment). Bring
+/// the right-clicked tab into view first -- mirrors how choosing "Connect"
+/// on a tree row already opens+focuses a new tab rather than acting
+/// off-screen -- so those properties land on the tab the user actually
+/// asked to reconnect.
+fn wire_tab_reconnect(ctx: &Ctx) {
+    ctx.ui.on_tab_reconnect({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let weak = ctx.ui.as_weak();
+        let hk_pending = ctx.hk_pending.clone();
+        let cert_pending = ctx.cert_pending.clone();
+        let secrets = ctx.secrets.clone();
+        move |idx| {
+            let Some(ui) = weak.upgrade() else { return };
+            let idx = idx as usize;
+            if idx >= state.borrow().tabs.len() {
+                return;
+            }
+            select_tab(&state, &ui, idx as i32);
+            sessions::reconnect_tab(
+                &state,
+                &tab_model,
+                &ui,
+                &weak,
+                &hk_pending,
+                &cert_pending,
+                &secrets,
+                idx,
+            );
+        }
+    });
+}
+
+/// P9.10 #1: the tab context menu's "Disconnect" -- same active-tab-first
+/// reasoning as [`wire_tab_reconnect`] (`sessions::disconnect_tab` writes
+/// the same kind of AppWindow-shared overlay properties via
+/// `fail_reconnect_in_place`).
+fn wire_tab_disconnect(ctx: &Ctx) {
+    ctx.ui.on_tab_disconnect({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let weak = ctx.ui.as_weak();
+        move |idx| {
+            let Some(ui) = weak.upgrade() else { return };
+            let idx = idx as usize;
+            if idx >= state.borrow().tabs.len() {
+                return;
+            }
+            select_tab(&state, &ui, idx as i32);
+            sessions::disconnect_tab(&state, &tab_model, &ui, idx);
+        }
+    });
+}
+
+/// P9.10 #1: the tab context menu's "Duplicate" -- reuses
+/// `sessions::launch_saved_connection` (the exact same stored-credential
+/// connect path a tree-row double-click/Enter/context-menu Connect already
+/// goes through) for a tab whose `origin_connection_id` is known, or
+/// `open_local_tab` for a plain local shell with none. The UI already omits
+/// this menu item when neither applies (`TabItem::can_duplicate`); the
+/// `None` arm below is defense in depth, not the primary guard.
+fn wire_tab_duplicate(ctx: &Ctx) {
+    ctx.ui.on_tab_duplicate({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let weak = ctx.ui.as_weak();
+        let hk_pending = ctx.hk_pending.clone();
+        let cert_pending = ctx.cert_pending.clone();
+        let secrets = ctx.secrets.clone();
+        move |idx| {
+            let Some(ui) = weak.upgrade() else { return };
+            let idx = idx as usize;
+            let target = {
+                let st = state.borrow();
+                st.tabs
+                    .get(idx)
+                    .map(|t| (t.origin_connection_id, t.is_remote))
+            };
+            let Some((origin_connection_id, is_remote)) = target else {
+                return;
+            };
+            match origin_connection_id {
+                Some(conn_id) => {
+                    let conn = {
+                        let st = state.borrow();
+                        st.conn_tree
+                            .connections()
+                            .iter()
+                            .find(|c| c.id.get() as i32 == conn_id)
+                            .cloned()
+                    };
+                    if let Some(conn) = conn {
+                        sessions::launch_saved_connection(
+                            &state,
+                            &tab_model,
+                            &ui,
+                            &weak,
+                            &hk_pending,
+                            &cert_pending,
+                            &secrets,
+                            &conn,
+                        );
+                    }
+                }
+                None if !is_remote => open_local_tab(&state, &tab_model, &ui),
+                None => {}
             }
         }
     });
@@ -183,6 +301,11 @@ pub(super) fn push_tab(
         id: num as i32,
         status: SharedString::from(initial_status),
         pane_count: 1,
+        // P9.10 #3: mirrors this exact tab's own `is_empty` -- the Home tab
+        // (and only the Home tab) is pushed with `is_empty: true`.
+        is_home: is_empty,
+        // P9.10 #1: see `TabItem::can_duplicate`'s doc comment.
+        can_duplicate: origin_connection_id.is_some() || !is_remote,
     });
     ui.set_active_tab(active as i32);
     ui.set_session_status(SharedString::from(initial_status));

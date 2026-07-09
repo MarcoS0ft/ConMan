@@ -21,7 +21,7 @@ use slint::{ComponentHandle, Image, Model, SharedString, Timer, TimerMode, VecMo
 
 use crate::input;
 use crate::keys::KeysPanel;
-use crate::{AppWindow, KbdPromptRow, TabItem, ToastEntry};
+use crate::{AppWindow, ConnRow, KbdPromptRow, TabItem, ToastEntry};
 
 use super::*;
 
@@ -130,12 +130,16 @@ fn wire_key_input(ctx: &Ctx) {
                     }
                     // Ctrl+Shift+W → close focused pane (detach = false → shutdown).
                     (0, "w" | "W") => {
-                        panes::do_close_pane(&state, &tab_model_kb, &ui, false);
+                        if let Some(pane_id) = panes::focused_pane_id(&state) {
+                            panes::do_close_pane(&state, &tab_model_kb, &ui, pane_id, false);
+                        }
                         return;
                     }
                     // Ctrl+Shift+D → detach session (keep session alive).
                     (0, "d" | "D") => {
-                        panes::do_close_pane(&state, &tab_model_kb, &ui, true);
+                        if let Some(pane_id) = panes::focused_pane_id(&state) {
+                            panes::do_close_pane(&state, &tab_model_kb, &ui, pane_id, true);
+                        }
                         return;
                     }
                     // Ctrl+Shift+C → copy the focused pane's selection (P6.5).
@@ -1443,88 +1447,145 @@ fn wire_reconnect(ctx: &Ctx) {
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let active_idx = state.borrow().active;
-            // P6.4/P6.12: `Credential`-sourced auth is re-resolved fresh here
-            // (never cached as plaintext in `Tab` state) — `Direct`
-            // (quick-connect) just clones the typed input as before. SSH and
-            // RDP each carry their own settings/auth types, so the two kinds
-            // build a `ReconnectPlan` variant rather than sharing one tuple
-            // shape.
-            let plan = {
-                let st = state.borrow();
-                st.tabs
-                    .get(active_idx)
-                    .and_then(|t| t.connect_info.as_ref())
-                    .map(|ci| match ci {
-                        ConnectInfo::Ssh(ssh_ci) => {
-                            let (settings, provenance, auth_result) = resolve_ssh_reconnect(
-                                ssh_ci,
-                                st.conn_tree.connections(),
-                                st.conn_tree.groups(),
-                                secrets.as_ref(),
-                                st.keys_panel.credentials(),
-                            );
-                            ReconnectPlan::Ssh(settings, provenance, auth_result)
-                        }
-                        ConnectInfo::Rdp(rdp_ci) => {
-                            let (provenance, auth_result) = resolve_rdp_reconnect(
-                                rdp_ci,
-                                st.conn_tree.connections(),
-                                st.conn_tree.groups(),
-                                secrets.as_ref(),
-                                st.keys_panel.credentials(),
-                            );
-                            ReconnectPlan::Rdp(rdp_ci.settings.clone(), provenance, auth_result)
-                        }
-                    })
-            };
-            let Some(plan) = plan else { return };
-            // Either way the old session is done — shut it down before
-            // deciding whether a fresh connect attempt or the auth-error
-            // overlay follows.
-            {
-                let st = state.borrow();
-                if let Some(tab) = st.tabs.get(active_idx) {
-                    tab.session.shutdown();
-                }
-            }
-            match plan {
-                ReconnectPlan::Ssh(settings, provenance, auth_result) => match auth_result {
-                    Ok(auth) => {
-                        let auto_accept = util::ssh_auto_accept_keys();
-                        let verifier = Arc::new(UiHostKeyVerifier {
-                            weak_ui: weak.clone(),
-                            pending: hk_pending.clone(),
-                            auto_accept,
-                        });
-                        reconnect_ssh_tab(
-                            &state, &tab_model, &ui, active_idx, settings, auth, provenance,
-                            verifier,
-                        );
-                    }
-                    Err(e) => {
-                        fail_reconnect_in_place(&state, &tab_model, &ui, active_idx, e.to_string());
-                    }
-                },
-                ReconnectPlan::Rdp(settings, provenance, auth_result) => match auth_result {
-                    Ok(auth) => {
-                        let auto_accept = util::rdp_auto_accept_certs();
-                        let verifier = Arc::new(UiCertVerifier {
-                            weak_ui: weak.clone(),
-                            pending: cert_pending.clone(),
-                            auto_accept,
-                        });
-                        reconnect_rdp_tab(
-                            &state, &tab_model, &ui, active_idx, settings, auth, provenance,
-                            verifier,
-                        );
-                    }
-                    Err(e) => {
-                        fail_reconnect_in_place(&state, &tab_model, &ui, active_idx, e.to_string());
-                    }
-                },
-            }
+            reconnect_tab(
+                &state,
+                &tab_model,
+                &ui,
+                &weak,
+                &hk_pending,
+                &cert_pending,
+                &secrets,
+                active_idx,
+            );
         }
     });
+}
+
+/// The ErrorOverlay's "Reconnect" button (above) and the tab context menu's
+/// "Reconnect" item (P9.10 #1, `controller::tabs::wire_tab_reconnect`) share
+/// this exact logic -- the only difference is which `tab_idx` they target
+/// (always `active` for the overlay button; whichever tab was right-clicked
+/// for the menu item). **Callers that might target a non-active tab must
+/// bring it into view first** (`tabs::select_tab`) before calling this --
+/// every downstream function here (`reconnect_ssh_tab`/`reconnect_rdp_tab`/
+/// `fail_reconnect_in_place`) writes AppWindow-level properties shared by
+/// whichever tab is active (the exact single-shared-property shape Bug B's
+/// stale-frame fix was about), so calling this for a tab that ISN'T active
+/// would paint its reconnect over whatever tab the user is actually looking
+/// at.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reconnect_tab(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    weak: &slint::Weak<AppWindow>,
+    hk_pending: &HkQueue,
+    cert_pending: &Arc<Mutex<Option<Sender<CertDecision>>>>,
+    secrets: &Arc<dyn cm_core::CredentialStore>,
+    tab_idx: usize,
+) {
+    // P6.4/P6.12: `Credential`-sourced auth is re-resolved fresh here
+    // (never cached as plaintext in `Tab` state) — `Direct`
+    // (quick-connect) just clones the typed input as before. SSH and
+    // RDP each carry their own settings/auth types, so the two kinds
+    // build a `ReconnectPlan` variant rather than sharing one tuple
+    // shape.
+    let plan = {
+        let st = state.borrow();
+        st.tabs
+            .get(tab_idx)
+            .and_then(|t| t.connect_info.as_ref())
+            .map(|ci| match ci {
+                ConnectInfo::Ssh(ssh_ci) => {
+                    let (settings, provenance, auth_result) = resolve_ssh_reconnect(
+                        ssh_ci,
+                        st.conn_tree.connections(),
+                        st.conn_tree.groups(),
+                        secrets.as_ref(),
+                        st.keys_panel.credentials(),
+                    );
+                    ReconnectPlan::Ssh(settings, provenance, auth_result)
+                }
+                ConnectInfo::Rdp(rdp_ci) => {
+                    let (provenance, auth_result) = resolve_rdp_reconnect(
+                        rdp_ci,
+                        st.conn_tree.connections(),
+                        st.conn_tree.groups(),
+                        secrets.as_ref(),
+                        st.keys_panel.credentials(),
+                    );
+                    ReconnectPlan::Rdp(rdp_ci.settings.clone(), provenance, auth_result)
+                }
+            })
+    };
+    let Some(plan) = plan else { return };
+    // Either way the old session is done — shut it down before
+    // deciding whether a fresh connect attempt or the auth-error
+    // overlay follows.
+    {
+        let st = state.borrow();
+        if let Some(tab) = st.tabs.get(tab_idx) {
+            tab.session.shutdown();
+        }
+    }
+    match plan {
+        ReconnectPlan::Ssh(settings, provenance, auth_result) => match auth_result {
+            Ok(auth) => {
+                let auto_accept = util::ssh_auto_accept_keys();
+                let verifier = Arc::new(UiHostKeyVerifier {
+                    weak_ui: weak.clone(),
+                    pending: hk_pending.clone(),
+                    auto_accept,
+                });
+                reconnect_ssh_tab(state, tab_model, ui, tab_idx, settings, auth, provenance, verifier);
+            }
+            Err(e) => {
+                fail_reconnect_in_place(state, tab_model, ui, tab_idx, e.to_string());
+            }
+        },
+        ReconnectPlan::Rdp(settings, provenance, auth_result) => match auth_result {
+            Ok(auth) => {
+                let auto_accept = util::rdp_auto_accept_certs();
+                let verifier = Arc::new(UiCertVerifier {
+                    weak_ui: weak.clone(),
+                    pending: cert_pending.clone(),
+                    auto_accept,
+                });
+                reconnect_rdp_tab(state, tab_model, ui, tab_idx, settings, auth, provenance, verifier);
+            }
+            Err(e) => {
+                fail_reconnect_in_place(state, tab_model, ui, tab_idx, e.to_string());
+            }
+        },
+    }
+}
+
+/// P9.10 #1: the tab context menu's "Disconnect" -- tears the session(s)
+/// down but keeps the tab open, dropping it into the same Failed/
+/// error-overlay state a spontaneous disconnect or a failed reconnect
+/// already leaves a tab in (`fail_reconnect_in_place`), so "Reconnect" works
+/// from the very same tab afterward. Shuts down every pane's session
+/// (primary + any split extra panes) -- this is a whole-TAB disconnect;
+/// disconnecting a single pane within a split is Item 2's own, separate
+/// affordance. Caller must bring `tab_idx` into view first, same reasoning
+/// as [`reconnect_tab`].
+pub(super) fn disconnect_tab(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    tab_idx: usize,
+) {
+    {
+        let st = state.borrow();
+        let Some(tab) = st.tabs.get(tab_idx) else {
+            return;
+        };
+        tab.session.shutdown();
+        for ep in &tab.extra_panes {
+            ep.session.shutdown();
+        }
+    }
+    fail_reconnect_in_place(state, tab_model, ui, tab_idx, "Disconnected".to_string());
 }
 
 pub(super) struct UiHostKeyVerifier {
@@ -2544,7 +2605,7 @@ pub(super) fn reconnect_ssh_tab(
 ///
 /// Extracted from [`tick`]'s per-tab loop body (P6.1 function-size budget) --
 /// pure code move, identical logic, same field-by-field mutation of `st`. The
-/// 8-parameter signature mirrors `tick`'s own (state access + the 3 model/ui
+/// 9-parameter signature mirrors `tick`'s own (state access + the model/ui
 /// handles it forwards); bundling them would be a needless intermediate type
 /// for a single private call site.
 #[allow(clippy::too_many_arguments)]
@@ -2553,6 +2614,7 @@ fn tick_tab(
     i: usize,
     active: usize,
     target: Option<(u32, u32)>,
+    conn_model: &Rc<VecModel<ConnRow>>,
     tab_model: &Rc<VecModel<TabItem>>,
     toast_model: &Rc<VecModel<ToastEntry>>,
     toast_next_id: &Rc<RefCell<i32>>,
@@ -2757,6 +2819,17 @@ fn tick_tab(
         }
         item.status = SharedString::from(dot);
         tab_model.set_row_data(i, item);
+
+        // P9.10 #4: refresh the connection tree's live-status overlay right
+        // where a tab's own status transition is ALREADY detected (this
+        // `if`'s whole condition), rather than adding a new unconditional
+        // per-tick poll -- a tab with no `origin_connection_id` (a local
+        // shell, or a quick-connect with nothing stored to point back to)
+        // has no tree row to update, so skip the (otherwise harmless but
+        // pointless) whole-tree walk for those.
+        if st.tabs[i].origin_connection_id.is_some() {
+            tree_ctl::refresh_conn_model(st, conn_model);
+        }
     }
 
     if i == active {
@@ -2769,6 +2842,7 @@ fn tick_tab(
 pub(super) fn tick(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,
+    conn_model: &Rc<VecModel<ConnRow>>,
     toast_model: &Rc<VecModel<ToastEntry>>,
     toast_next_id: &Rc<RefCell<i32>>,
     ui: &AppWindow,
@@ -2819,6 +2893,7 @@ pub(super) fn tick(
             i,
             active,
             target,
+            conn_model,
             tab_model,
             toast_model,
             toast_next_id,
@@ -2983,12 +3058,20 @@ pub(super) fn wire_tick(ctx: &Ctx) -> Timer {
     let redraw = Timer::default();
     let state = ctx.state.clone();
     let tab_model = ctx.tab_model.clone();
+    let conn_model = ctx.conn_model.clone();
     let toast_model = ctx.toast_model.clone();
     let toast_next_id = ctx.toast_next_id.clone();
     let weak = ctx.ui.as_weak();
     redraw.start(TimerMode::Repeated, REDRAW_INTERVAL, move || {
         if let Some(ui) = weak.upgrade() {
-            tick(&state, &tab_model, &toast_model, &toast_next_id, &ui);
+            tick(
+                &state,
+                &tab_model,
+                &conn_model,
+                &toast_model,
+                &toast_next_id,
+                &ui,
+            );
         }
     });
     redraw

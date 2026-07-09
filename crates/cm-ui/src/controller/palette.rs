@@ -273,8 +273,16 @@ pub(super) fn dispatch_palette_action(
         // ── PANES ─────────────────────────────────────────────────────────────
         "Split horizontal" => panes::do_split(state, tab_model, ui, PaneLayout::HSplit),
         "Split vertical" => panes::do_split(state, tab_model, ui, PaneLayout::VSplit),
-        "Close pane" => panes::do_close_pane(state, tab_model, ui, false),
-        "Detach session" => panes::do_close_pane(state, tab_model, ui, true),
+        "Close pane" => {
+            if let Some(pane_id) = panes::focused_pane_id(state) {
+                panes::do_close_pane(state, tab_model, ui, pane_id, false);
+            }
+        }
+        "Detach session" => {
+            if let Some(pane_id) = panes::focused_pane_id(state) {
+                panes::do_close_pane(state, tab_model, ui, pane_id, true);
+            }
+        }
         "Toggle broadcast" => ui.set_broadcast_active(!ui.get_broadcast_active()),
         "Broadcast target\u{2026}" => ui.invoke_open_broadcast_target(),
         // ── TABS (dynamic) ────────────────────────────────────────────────────
