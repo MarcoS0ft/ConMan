@@ -143,6 +143,18 @@ impl CredentialRef {
     pub fn account(&self) -> &str {
         &self.account
     }
+
+    /// The purpose suffix parsed out of the account string
+    /// (`"cred:<id>:<purpose>"` / `"conn:<id>:<purpose>"`) — the one piece of
+    /// a `CredentialRef` that's safe and useful to log (P9.8 §3: never log
+    /// the full [`Self::account`], which encodes id material, but the
+    /// purpose component alone is fine — it's one of
+    /// [`CredentialPurpose::as_str`]'s three fixed strings). `None` if the
+    /// account string doesn't match the expected shape (defensive; every
+    /// `CredentialRef` this crate constructs does).
+    pub fn purpose_str(&self) -> Option<&str> {
+        self.account.rsplit(':').next()
+    }
 }
 
 // ---------------------------------------------------------------------------
