@@ -589,6 +589,12 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
 /// # Errors
 /// Returns a [`slint::PlatformError`] if the window/backend cannot be created.
 pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
+    // P9.8 A6: this crate's own share of "how long did startup take" --
+    // main.rs already logs A1 (process start) before calling here; this
+    // Instant doesn't reach back into that (no shared clock needed), it just
+    // times this function's own work (assemble + wiring) through to handing
+    // control to the event loop.
+    let t0 = std::time::Instant::now();
     // Taken before `assemble` consumes the rest of `config` -- only the
     // single-instance listener below needs it, and `assemble` (shared with
     // the test seam, which never has one) has no use for this field.
@@ -644,6 +650,11 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         });
     }
 
+    // P9.8 A6.
+    tracing::info!(
+        elapsed_ms = t0.elapsed().as_millis(),
+        "startup complete, entering event loop"
+    );
     ctx.ui.run()
 }
 
