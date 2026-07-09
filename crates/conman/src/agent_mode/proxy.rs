@@ -36,6 +36,27 @@
 //! what this does" is deny, not "assume it's harmless" or "assume it's the
 //! most permissive scope."
 //!
+//! ## Gate invariants enforced independently of the upstream server
+//! Added after Fable's adversarial review, which could not smuggle an
+//! out-of-scope call through but flagged that two of the proxy's invariants
+//! were only airtight because they *delegated* to the vendored Slint
+//! server's own strictness (rejecting batch JSON-RPC arrays, 404-ing any
+//! path other than `/mcp`/`/`) rather than enforcing it independently — a
+//! future Slint version that loosened either could silently turn a
+//! passthrough into a bypass. [`process`] now re-checks both itself, before
+//! ever dialing the internal server:
+//! - **Batch rejection**: a top-level JSON array is always denied here
+//!   (mirroring the vendored server's own `-32600` "Batch requests are not
+//!   supported"), regardless of what it contains or whether the internal
+//!   server would also reject it.
+//! - **Endpoint-path enforcement**: a `tools/call`/`tools/list`-shaped
+//!   JSON-RPC body is only ever forwarded when the request path is `/mcp`
+//!   or `/` — the same two paths the vendored server itself recognizes.
+//!   Reaching either method on any *other* path is denied at the proxy,
+//!   never forwarded, so a hypothetical future server version that accepted
+//!   MCP calls on a different path could not bypass scope enforcement
+//!   simply by not living at `/mcp`.
+//!
 //! ## Deliberate simplifications (v1, loopback-only, dev-facing)
 //! - No request pipelining support: each accepted client connection is read
 //!   one full request at a time, replied to, then the next is read — the
@@ -155,15 +176,19 @@ pub(crate) fn decide_tool_call(tool_name: &str, granted: &ScopeSet) -> Decision 
     }
 }
 
-fn json_rpc_scope_error(id: &Value, tool_name: &str, scope: &str) -> Value {
+/// Builds a JSON-RPC 2.0 error response — used for every proxy-level denial
+/// (scope, batch, wrong-path), so a client sees the same shape regardless of
+/// which invariant it tripped.
+fn json_rpc_error(id: &Value, code: i32, message: String) -> Value {
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": id,
-        "error": {
-            "code": -32001,
-            "message": format!("scope not granted: '{tool_name}' requires '{scope}'"),
-        }
+        "error": { "code": code, "message": message }
     })
+}
+
+fn json_rpc_error_body(id: &Value, code: i32, message: String) -> Vec<u8> {
+    serde_json::to_vec(&json_rpc_error(id, code, message)).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -446,37 +471,79 @@ fn forward_and_filter_tools_list(
 
 /// Inspects one already-parsed request and decides what to send back: gate
 /// `tools/call`, filter `tools/list`, forward everything else untouched.
+///
+/// Two invariants below (batch rejection, endpoint-path enforcement) are
+/// deliberately re-checked **here**, independent of whatever the internal
+/// Slint server itself does with the same input — see the module doc's
+/// "Gate invariants enforced independently of the upstream server" section.
+/// This is belt-and-suspenders, added after Fable's adversarial review: the
+/// gate must stay airtight even if a future Slint version loosened its own
+/// path matching or re-added batch support.
 fn process(
     req: &ParsedRequest,
     internal_port: u16,
     scopes: &Arc<RwLock<ScopeSet>>,
 ) -> (u16, String, Vec<u8>) {
-    let is_mcp_endpoint = req.path == "/mcp" || req.path == "/";
     if req.method.eq_ignore_ascii_case("POST")
-        && is_mcp_endpoint
         && let Ok(body_str) = std::str::from_utf8(&req.body)
         && let Ok(rpc) = serde_json::from_str::<Value>(body_str)
     {
+        // A batch (top-level JSON array) is never forwarded, full stop —
+        // whatever it contains, don't rely on the internal server to be the
+        // one that rejects it.
+        if rpc.is_array() {
+            let body = json_rpc_error_body(
+                &Value::Null,
+                -32600,
+                "Batch requests are not supported".to_string(),
+            );
+            return (200, "application/json".to_string(), body);
+        }
+
         let method = rpc.get("method").and_then(|v| v.as_str()).unwrap_or("");
-        let granted = scopes
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if method == "tools/call" {
-            let tool_name = rpc
-                .pointer("/params/name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if let Decision::Deny { scope } = decide_tool_call(tool_name, &granted) {
-                let id = rpc.get("id").cloned().unwrap_or(Value::Null);
-                let err = json_rpc_scope_error(&id, tool_name, scope);
-                let body = serde_json::to_vec(&err).unwrap_or_default();
-                return (200, "application/json".to_string(), body);
+        let is_tool_request = method == "tools/call" || method == "tools/list";
+        let is_mcp_endpoint = req.path == "/mcp" || req.path == "/";
+
+        // A tools/call or tools/list arriving on any path other than the
+        // known MCP endpoint is denied here, not forwarded — don't rely on
+        // the internal server continuing to 404 every other path.
+        if is_tool_request && !is_mcp_endpoint {
+            let id = rpc.get("id").cloned().unwrap_or(Value::Null);
+            let body = json_rpc_error_body(
+                &id,
+                -32002,
+                format!(
+                    "tool requests are only accepted at the MCP endpoint ('/mcp' or '/'), not '{}'",
+                    req.path
+                ),
+            );
+            return (200, "application/json".to_string(), body);
+        }
+
+        if is_mcp_endpoint {
+            let granted = scopes
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if method == "tools/call" {
+                let tool_name = rpc
+                    .pointer("/params/name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if let Decision::Deny { scope } = decide_tool_call(tool_name, &granted) {
+                    let id = rpc.get("id").cloned().unwrap_or(Value::Null);
+                    let body = json_rpc_error_body(
+                        &id,
+                        -32001,
+                        format!("scope not granted: '{tool_name}' requires '{scope}'"),
+                    );
+                    return (200, "application/json".to_string(), body);
+                }
+                // In scope: fall through to the plain forward below.
+            } else if method == "tools/list" {
+                let granted_copy = *granted;
+                drop(granted); // release the read lock before the blocking forward call
+                return forward_and_filter_tools_list(req, internal_port, &granted_copy);
             }
-            // In scope: fall through to the plain forward below.
-        } else if method == "tools/list" {
-            let granted_copy = *granted;
-            drop(granted); // release the read lock before the blocking forward call
-            return forward_and_filter_tools_list(req, internal_port, &granted_copy);
         }
     }
     forward_verbatim(req, internal_port)
@@ -750,6 +817,87 @@ mod tests {
                 .unwrap()
                 .contains("requires 'write'")
         );
+    }
+
+    /// Returns a port with nothing listening on it (bound then immediately
+    /// dropped) — reused by the two hardening tests below to prove,
+    /// structurally, that the proxy denies before ever dialing the internal
+    /// server (mirrors `tools_call_out_of_scope_is_rejected_without_forwarding`'s
+    /// trick).
+    fn unused_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr")
+            .port()
+    }
+
+    #[test]
+    fn batch_json_rpc_array_is_rejected_without_forwarding() {
+        // A top-level array is a batch request -- the proxy must deny it
+        // itself (Fable hardening note), not rely on the internal server's
+        // own "-32600 Batch requests are not supported". Every scope
+        // granted, to prove this isn't a scope-related denial.
+        let everything = Arc::new(RwLock::new(scopes(true, true, true)));
+        let req = parsed_request(
+            "POST",
+            "/mcp",
+            br#"[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"click_element","arguments":{}}}]"#,
+        );
+        let (status, content_type, body) = process(&req, unused_port(), &everything);
+        assert_eq!(status, 200, "a JSON-RPC-level error is still HTTP 200");
+        assert_eq!(content_type, "application/json");
+        let parsed: Value = serde_json::from_slice(&body).expect("valid JSON-RPC error body");
+        assert_eq!(parsed["id"], Value::Null);
+        assert_eq!(parsed["error"]["code"], -32600);
+        assert!(
+            parsed["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Batch requests are not supported")
+        );
+    }
+
+    #[test]
+    fn tool_call_on_a_non_mcp_path_is_rejected_without_forwarding() {
+        // A tools/call-shaped body arriving on a path other than /mcp or /
+        // must be denied at the proxy itself (Fable hardening note) rather
+        // than forwarded on the assumption the internal server will 404 it.
+        // Every scope granted, to prove this isn't a scope-related denial.
+        let everything = Arc::new(RwLock::new(scopes(true, true, true)));
+        let req = parsed_request(
+            "POST",
+            "/not-mcp",
+            br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"click_element","arguments":{}}}"#,
+        );
+        let (status, content_type, body) = process(&req, unused_port(), &everything);
+        assert_eq!(status, 200, "a JSON-RPC-level error is still HTTP 200");
+        assert_eq!(content_type, "application/json");
+        let parsed: Value = serde_json::from_slice(&body).expect("valid JSON-RPC error body");
+        assert_eq!(parsed["id"], 7);
+        assert_eq!(parsed["error"]["code"], -32002);
+        assert!(
+            parsed["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("only accepted at the MCP endpoint")
+        );
+    }
+
+    #[test]
+    fn tools_list_on_a_non_mcp_path_is_rejected_without_forwarding() {
+        // Same as above but for tools/list, which the tools/list-filter
+        // path doesn't otherwise exercise off the standard endpoint.
+        let everything = Arc::new(RwLock::new(scopes(true, true, true)));
+        let req = parsed_request(
+            "POST",
+            "/other",
+            br#"{"jsonrpc":"2.0","id":8,"method":"tools/list"}"#,
+        );
+        let (status, _content_type, body) = process(&req, unused_port(), &everything);
+        assert_eq!(status, 200);
+        let parsed: Value = serde_json::from_slice(&body).expect("valid JSON-RPC error body");
+        assert_eq!(parsed["error"]["code"], -32002);
     }
 
     #[test]
