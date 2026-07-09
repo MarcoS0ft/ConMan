@@ -48,21 +48,29 @@
 //!   (no auth concept in [`LocalSettings`]).
 //! - **Credential handling:** if `cred_name` is set, **dedupe** — one
 //!   [`Credential`] per unique `cred_name`, referenced by every row sharing
-//!   it. Two passes over the parsed rows ([`collect_credentials`] then
-//!   [`walk_rows`]) mirror [`super::royalts`]'s dedupe-by-construction
-//!   architecture: the *first* row (by file order) carrying both a given
-//!   `cred_name` **and** actual secret material registers the credential;
-//!   earlier/later rows that only reference the name by find it already
-//!   there. A `cred_name` mentioned but never backed by secret material on
-//!   any row simply resolves to no credential (never a hard error — the
-//!   connection still imports, just without one). Without `cred_name`, each
-//!   row gets its own private credential (only created when the row itself
-//!   carries secret material).
-//! - `username`/`domain` land on the **connection's** settings (consistent
-//!   with the current model — the P9.6 `CredentialSource` model change lands
-//!   separately and this stays compatible); the credential created for a
-//!   `cred_name`/per-row secret also carries `username` so it's still
-//!   authoritative post-assignment (mirrors [`super::royalts::register_credential`]).
+//!   it, as a [`CredentialSource::Object`]. Two passes over the parsed rows
+//!   ([`collect_credentials`] then [`walk_rows`]) mirror [`super::royalts`]'s
+//!   dedupe-by-construction architecture: the *first* row (by file order)
+//!   carrying both a given `cred_name` **and** actual secret material
+//!   registers the credential; earlier/later rows that only reference the
+//!   name by find it already there. A `cred_name` mentioned but never backed
+//!   by secret material on any row simply resolves to no credential (never a
+//!   hard error — the connection still imports, just without one).
+//!
+//!   Without `cred_name`, a row's own secret material (P9.6 decision 5)
+//!   becomes: **`CredentialSource::Inline`** when the row is password-auth
+//!   (genuinely per-row, unshared — the whole point of Inline), carrying
+//!   `username`/`domain` on the source itself and the secret as a
+//!   connection-scoped [`crate::json_io::ExportedConnectionSecret`]; or
+//!   **still `CredentialSource::Object`** when the row is key-auth — Inline
+//!   is password-only (no key-material field), so an SSH key must stay a
+//!   `Credential{SshKey}` + `ExportedSecret(ssh-key)` regardless of sharing.
+//! - `username`/`domain` land on the **connection's** settings (unchanged);
+//!   an `Object` credential (shared `cred_name` or a per-row key) also
+//!   carries `username` so it's still authoritative post-assignment (mirrors
+//!   [`super::royalts::register_credential`]); an `Inline` source carries its
+//!   own `username`/`domain` copy instead (see
+//!   [`cm_core::resolve_connection_auth`]).
 
 use std::collections::HashMap;
 
@@ -72,7 +80,9 @@ use cm_core::{
     LocalSettings, RdpSettings, SshAuthMethod, SshSettings,
 };
 
-use crate::json_io::{self, ExportEnvelope, ExportedSecret, ImportExportError};
+use crate::json_io::{
+    self, ExportEnvelope, ExportedConnectionSecret, ExportedSecret, ImportExportError,
+};
 
 use super::ImportWarning;
 
@@ -148,7 +158,7 @@ pub fn parse(contents: &str) -> Result<(ExportEnvelope, Vec<ImportWarning>), Imp
         groups: ctx.groups,
         connections: ctx.connections,
         credential_secrets: ctx.credential_secrets,
-        connection_secrets: Vec::new(),
+        connection_secrets: ctx.connection_secrets,
         settings: Vec::new(),
     };
 
@@ -165,6 +175,10 @@ struct ParseCtx {
     credentials: Vec<Credential>,
     credential_secrets: Vec<ExportedSecret>,
     connections: Vec<Connection>,
+    /// P9.6 decision 5: a no-`cred_name`, password-auth row's secret lands
+    /// here (Inline, connection-scoped) instead of in `credential_secrets` —
+    /// see [`resolve_row_credential`].
+    connection_secrets: Vec<ExportedConnectionSecret>,
     warnings: Vec<ImportWarning>,
     /// Full `group_path` string (e.g. `"Prod/Web"`) → the synthetic
     /// [`GroupId`] minted for it — this map *is* the path-dedupe.
@@ -370,10 +384,25 @@ fn ensure_group_path(ctx: &mut ParseCtx, path: &str) -> Option<GroupId> {
     parent
 }
 
-/// Resolves the [`CredentialId`] (if any) a row's connection should carry:
-/// the shared `cred_name` credential (pass 1), or a fresh per-row credential
-/// built from this row's own secret material, or `None`. `local` rows never
-/// get a credential — [`LocalSettings`] has no auth concept.
+/// What a row's own credential resolution produced: an already-registered
+/// (shared or per-row) credential **object**, or — P9.6 decision 5 — a
+/// genuinely per-row password whose plaintext is pushed as an Inline
+/// connection-secret once the connection's synthetic id is known (mirrors
+/// `mremoteng.rs`'s `push_connection`).
+enum RowCredential {
+    Object(CredentialId),
+    InlinePassword(String),
+}
+
+/// Resolves what (if any) credential a row's connection should carry: the
+/// shared `cred_name` credential (pass 1) is always [`RowCredential::Object`];
+/// without `cred_name`, the row's own secret material decides — a key-bearing
+/// row still becomes a fresh `Object` (Inline is password-only, so a
+/// `Credential{SshKey}` is the only place a key can live), a password-only
+/// row becomes [`RowCredential::InlinePassword`] (genuinely per-row, unshared
+/// — no dedupe concept applies). `None` when the row has no secret material
+/// at all. `local` rows never get a credential — [`LocalSettings`] has no
+/// auth concept.
 #[allow(clippy::too_many_arguments)]
 fn resolve_row_credential(
     ctx: &mut ParseCtx,
@@ -385,15 +414,28 @@ fn resolve_row_credential(
     ssh_passphrase: Option<&str>,
     cred_name: Option<&str>,
     conn_name: &str,
-) -> Option<CredentialId> {
+) -> Option<RowCredential> {
     if kind == ConnectionKind::LocalTerminal {
         return None;
     }
     if let Some(name) = cred_name {
-        return ctx.cred_name_to_id.get(name).copied();
+        return ctx
+            .cred_name_to_id
+            .get(name)
+            .copied()
+            .map(RowCredential::Object);
     }
     let (cred_kind, secrets) =
         secret_material_for_row(auth_method, password, ssh_key, ssh_passphrase)?;
+
+    if cred_kind == CredentialKind::Password {
+        let (_, pw) = secrets
+            .into_iter()
+            .next()
+            .expect("secret_material_for_row's password branch always yields exactly one entry");
+        return Some(RowCredential::InlinePassword(pw));
+    }
+
     let cred_id = ctx.fresh_cred_id();
     ctx.credentials.push(Credential {
         id: cred_id,
@@ -403,7 +445,7 @@ fn resolve_row_credential(
         username: username.map(str::to_string),
     });
     push_secrets(ctx, cred_id, secrets);
-    Some(cred_id)
+    Some(RowCredential::Object(cred_id))
 }
 
 /// Maps the `auth_method` column to [`SshAuthMethod`]; unrecognized values
@@ -480,10 +522,7 @@ fn process_row(row_num: u64, rec: &::csv::StringRecord, idx: &HeaderIndex, ctx: 
     let ssh_passphrase = field(idx, rec, "ssh_passphrase");
     let cred_name = field(idx, rec, "cred_name");
 
-    // CSV only ever produces a credential OBJECT (per-row or cred_name-deduped)
-    // — never Inline/Prompt (P9.6-A's Inline/Prompt mapping for importers is a
-    // documented follow-on, not built here; see the P9.6-A report).
-    let credential = resolve_row_credential(
+    let credential_resolution = resolve_row_credential(
         ctx,
         kind,
         &auth_method_str,
@@ -493,8 +532,20 @@ fn process_row(row_num: u64, rec: &::csv::StringRecord, idx: &HeaderIndex, ctx: 
         ssh_passphrase.as_deref(),
         cred_name.as_deref(),
         &name,
-    )
-    .map(CredentialSource::Object);
+    );
+    // P9.6 decision 5: a shared cred_name / key-bearing row stays an Object
+    // reference; a genuinely per-row password (no cred_name) becomes Inline,
+    // carrying username/domain on the source itself (authoritative, per
+    // `resolve_connection_auth`'s Inline arm).
+    let credential = match &credential_resolution {
+        Some(RowCredential::Object(id)) => Some(CredentialSource::Object(*id)),
+        Some(RowCredential::InlinePassword(_)) => Some(CredentialSource::Inline {
+            username: username.clone().unwrap_or_default(),
+            domain: domain.clone(),
+            has_secret: true,
+        }),
+        None => None,
+    };
 
     let settings = match kind {
         ConnectionKind::Ssh => ConnectionSettings::Ssh(SshSettings {
@@ -539,7 +590,19 @@ fn process_row(row_num: u64, rec: &::csv::StringRecord, idx: &HeaderIndex, ctx: 
         0,
         0,
     ) {
-        Ok(conn) => ctx.connections.push(conn),
+        Ok(conn) => {
+            // The Inline secret is only pushed once the connection actually
+            // validates — a rejected connection carries no keychain entry to
+            // orphan.
+            if let Some(RowCredential::InlinePassword(secret)) = credential_resolution {
+                ctx.connection_secrets.push(ExportedConnectionSecret {
+                    connection_id: conn_id,
+                    purpose: CredentialPurpose::Password.as_str().to_string(),
+                    secret_hex: json_io::to_hex(secret.as_bytes()),
+                });
+            }
+            ctx.connections.push(conn);
+        }
         Err(e) => {
             tracing::warn!(
                 row = row_num,
@@ -621,6 +684,40 @@ mod tests {
             local.credential_source, None,
             "local rows never get a credential"
         );
+    }
+
+    /// P9.6 decision 5: `web-01-ssh` has no `cred_name` and password auth —
+    /// the genuinely-per-row, unshared case that must become
+    /// `CredentialSource::Inline` (not a synthesized `Credential` object).
+    #[test]
+    fn no_cred_name_password_row_becomes_an_inline_credential_and_connection_secret() {
+        let (envelope, _warnings) = parse(FIXTURE).expect("fixture should parse");
+        let ssh = envelope
+            .connections
+            .iter()
+            .find(|c| c.name == "web-01-ssh")
+            .expect("ssh connection present");
+        match &ssh.credential_source {
+            Some(CredentialSource::Inline {
+                username,
+                has_secret,
+                ..
+            }) => {
+                assert_eq!(username, "deploy");
+                assert!(*has_secret);
+            }
+            other => panic!("expected an Inline credential source, got {other:?}"),
+        }
+        let secret = envelope
+            .connection_secrets
+            .iter()
+            .find(|s| s.connection_id == ssh.id && s.purpose == "password")
+            .expect("password connection-secret present");
+        let decoded = (0..secret.secret_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&secret.secret_hex[i..i + 2], 16).unwrap())
+            .collect::<Vec<u8>>();
+        assert_eq!(decoded, b"dummy-pw-1");
     }
 
     #[test]

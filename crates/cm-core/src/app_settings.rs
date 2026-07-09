@@ -81,6 +81,26 @@ pub const KEY_SESSION_TABS: &str = "ui.session_tabs";
 /// referenced from `cm-storage`'s export-envelope exclusion list (P7.1 cont.:
 /// a cached `accelerated` must never cross machines, see that list's docs).
 pub const KEY_RENDERER_BACKEND: &str = "render.backend";
+/// Master enable/disable for the agent-mode automation interface (P8.6).
+/// "1"/"0"; absent means disabled (off by default — the product's decided
+/// consent model). Read at startup by `conman`'s scope-enforcement proxy
+/// (P8.6-A) and by `cm-ui`'s Settings surface + execute-scope launch-gate
+/// (P8.6-B).
+///
+/// `pub` (not `pub(crate)`) — see [`KEY_FIRST_RUN_SEEDED`]'s note; also
+/// referenced from `cm-storage`'s export-envelope exclusion list: this is
+/// per-machine security posture, not connection data, and must never travel
+/// on export/import (a DB copied to another machine must not silently arrive
+/// with automation already enabled there).
+pub const KEY_AUTOMATION_ENABLED: &str = "automation.enabled";
+/// Which automation scopes are granted (P8.6) — a stable CSV of zero or more
+/// of `"read"`, `"write"`, `"execute"` (e.g. `"read,write"`); absent/empty
+/// means none granted. See [`ScopeSet::parse`]/[`ScopeSet::format`] for the
+/// wire format.
+///
+/// `pub` (not `pub(crate)`) — same export-exclusion reasoning as
+/// [`KEY_AUTOMATION_ENABLED`].
+pub const KEY_AUTOMATION_SCOPES: &str = "automation.scopes";
 
 // ---------------------------------------------------------------------------
 // AppSettings — the loaded settings snapshot
@@ -166,6 +186,82 @@ pub enum SessionTabEntry {
 pub struct SessionTabSnapshot {
     pub tabs: Vec<SessionTabEntry>,
     pub active: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Automation scopes (P8.6)
+// ---------------------------------------------------------------------------
+
+/// Which agent-mode automation scopes the user has granted. The three scopes
+/// are independently grantable and cumulative *in risk* (read < write <
+/// execute) per the product's decided consent model — not a strict
+/// hierarchy: `execute` without `write` is a valid (if unusual) grant, and
+/// this type does not enforce any ordering between the fields.
+///
+/// - `read` — observe only (element tree, screenshots, etc.); gated by
+///   `conman`'s proxy (P8.6-A).
+/// - `write` — mutate saved data / UI state; gated by the same proxy.
+/// - `execute` — launch/open sessions with stored credentials. **Not gated by
+///   the proxy** — "execute" is not a distinct MCP tool, it rides the write
+///   tools targeting launch UI, so a tool-name-based proxy cannot separate it
+///   from `write`. Enforced instead at `cm-ui`'s session-launch actions
+///   (P8.6-B). See `docs/devel/tasks/P8.6-impl.md`'s "Critical architectural
+///   finding".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScopeSet {
+    pub read: bool,
+    pub write: bool,
+    pub execute: bool,
+}
+
+impl ScopeSet {
+    /// Parses the stable CSV wire format (e.g. `"read,write"`), matching
+    /// [`Self::format`]'s output. Case-insensitive; blank/whitespace-only
+    /// segments and an empty string are ignored (-> no scopes granted).
+    /// Unrecognized tokens are silently ignored — defensive against
+    /// hand-edited or stale DB content (CONVENTIONS §2), never a parse
+    /// error.
+    pub fn parse(csv: &str) -> Self {
+        let mut scopes = Self::default();
+        for token in csv.split(',') {
+            match token.trim().to_ascii_lowercase().as_str() {
+                "read" => scopes.read = true,
+                "write" => scopes.write = true,
+                "execute" => scopes.execute = true,
+                _ => {} // unknown/blank token — ignored, not an error
+            }
+        }
+        scopes
+    }
+
+    /// Formats back to the stable CSV wire format: only the granted scopes,
+    /// always in `read,write,execute` order (so the stored string is stable
+    /// regardless of grant order) — an empty [`ScopeSet`] formats to `""`.
+    pub fn format(&self) -> String {
+        let mut parts = Vec::with_capacity(3);
+        if self.read {
+            parts.push("read");
+        }
+        if self.write {
+            parts.push("write");
+        }
+        if self.execute {
+            parts.push("execute");
+        }
+        parts.join(",")
+    }
+}
+
+/// Runtime state of the agent-mode automation interface (P8.6): whether it's
+/// enabled at all, and which [`ScopeSet`] is granted. `enabled: false` is the
+/// default (off by default, per the product's decided consent model) —
+/// distinct from whether the `agent-mode`/`automation` Cargo feature was
+/// compiled in at all (that's a build-time gate; this is the runtime one
+/// read from settings).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AutomationSettings {
+    pub enabled: bool,
+    pub scopes: ScopeSet,
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +423,28 @@ impl<'a> SettingsService<'a> {
     /// Persist renderer backend ("software" | "accelerated" | "auto").
     pub fn save_renderer_backend(&self, v: &str) -> Result<(), RepositoryError> {
         self.repo.set_setting(KEY_RENDERER_BACKEND, v)
+    }
+
+    /// Load the agent-mode automation interface's runtime state (P8.6):
+    /// whether it's enabled and which scopes are granted. Absent/unparseable
+    /// state collapses to [`AutomationSettings::default`] (disabled, no
+    /// scopes) — never a hard error on stale/malformed DB content.
+    pub fn load_automation(&self) -> Result<AutomationSettings, RepositoryError> {
+        let enabled = self.read_bool(KEY_AUTOMATION_ENABLED, false)?;
+        let scopes = ScopeSet::parse(&self.read_string(KEY_AUTOMATION_SCOPES, "")?);
+        Ok(AutomationSettings { enabled, scopes })
+    }
+
+    /// Persist the automation master enable/disable.
+    pub fn save_automation_enabled(&self, v: bool) -> Result<(), RepositoryError> {
+        self.repo
+            .set_setting(KEY_AUTOMATION_ENABLED, if v { "1" } else { "0" })
+    }
+
+    /// Persist the granted [`ScopeSet`].
+    pub fn save_automation_scopes(&self, scopes: ScopeSet) -> Result<(), RepositoryError> {
+        self.repo
+            .set_setting(KEY_AUTOMATION_SCOPES, &scopes.format())
     }
 
     // ── private helpers ────────────────────────────────────────────────────
@@ -659,5 +777,97 @@ mod tests {
         );
         svc.save_renderer_backend("").unwrap();
         assert_eq!(svc.load_renderer_backend().unwrap(), None, "empty is None");
+    }
+
+    // ── P8.6: automation scopes ──────────────────────────────────────────
+
+    #[test]
+    fn scope_set_parses_the_csv_wire_format() {
+        assert_eq!(
+            ScopeSet::parse("read,write"),
+            ScopeSet {
+                read: true,
+                write: true,
+                execute: false
+            }
+        );
+        assert_eq!(
+            ScopeSet::parse("execute"),
+            ScopeSet {
+                read: false,
+                write: false,
+                execute: true
+            }
+        );
+        assert_eq!(ScopeSet::parse(""), ScopeSet::default());
+    }
+
+    #[test]
+    fn scope_set_parse_is_case_insensitive_and_tolerates_whitespace_and_junk() {
+        assert_eq!(
+            ScopeSet::parse(" Read , WRITE ,bogus, "),
+            ScopeSet {
+                read: true,
+                write: true,
+                execute: false
+            }
+        );
+    }
+
+    #[test]
+    fn scope_set_format_round_trips_and_is_order_stable() {
+        let scopes = ScopeSet {
+            read: true,
+            write: false,
+            execute: true,
+        };
+        let csv = scopes.format();
+        assert_eq!(csv, "read,execute");
+        assert_eq!(ScopeSet::parse(&csv), scopes);
+
+        assert_eq!(ScopeSet::default().format(), "");
+    }
+
+    #[test]
+    fn automation_absent_is_disabled_with_no_scopes() {
+        let repo = fresh();
+        let svc = SettingsService::new(&repo);
+        assert_eq!(
+            svc.load_automation().unwrap(),
+            AutomationSettings::default()
+        );
+    }
+
+    #[test]
+    fn automation_round_trips() {
+        let repo = fresh();
+        let svc = SettingsService::new(&repo);
+        svc.save_automation_enabled(true).unwrap();
+        svc.save_automation_scopes(ScopeSet {
+            read: true,
+            write: true,
+            execute: false,
+        })
+        .unwrap();
+
+        let loaded = svc.load_automation().unwrap();
+        assert!(loaded.enabled);
+        assert_eq!(
+            loaded.scopes,
+            ScopeSet {
+                read: true,
+                write: true,
+                execute: false
+            }
+        );
+    }
+
+    #[test]
+    fn automation_disabled_after_being_enabled_round_trips_back_to_false() {
+        let repo = fresh();
+        let svc = SettingsService::new(&repo);
+        svc.save_automation_enabled(true).unwrap();
+        svc.save_automation_enabled(false).unwrap();
+        assert!(!svc.load_automation().unwrap().enabled);
     }
 }

@@ -35,6 +35,8 @@
 //! This must run **before** `logging::init()` (see `render_backend`'s module
 //! docs) — the decision is logged afterward, once a subscriber exists.
 
+#[cfg(feature = "agent-mode")]
+mod agent_mode;
 mod logging;
 mod render_backend;
 
@@ -94,6 +96,18 @@ fn main() -> ExitCode {
     // comment for the full invariant. Precedence: explicit `SLINT_BACKEND` env
     // > persisted cache > probe (P7.1 cont.).
     let renderer_decision = render_backend::resolve(cached.as_deref());
+
+    // P8.6-A: same single-threaded window as the renderer decision above —
+    // if agent-mode is enabled, this sets `SLINT_MCP_PORT` via `unsafe
+    // std::env::set_var` before the Slint backend (which reads it) ever
+    // initializes. See `agent_mode::prepare`'s doc comment.
+    #[cfg(feature = "agent-mode")]
+    let agent_mode_prepared = agent_mode::prepare(
+        repo_result
+            .as_ref()
+            .ok()
+            .map(|r| r as &dyn cm_core::ConnectionRepository),
+    );
 
     // Install the tracing subscriber — everything below may log.
     let _logging_guard = logging::init();
@@ -160,6 +174,15 @@ fn main() -> ExitCode {
     // backend is unavailable (headless CI, missing daemon, etc.) so startup
     // never fails due to keychain issues.
     init_keyring();
+
+    // P8.6-A: start the scope-enforcement proxy's accept-loop thread now
+    // that a subscriber exists and thread-spawning is unrestricted — the
+    // env-var-setting half already ran above, before `logging::init()`. A
+    // `None` here (agent-mode disabled, or the feature isn't compiled in)
+    // means no listener at all. `_agent_mode_handle` isn't consumed yet —
+    // see `agent_mode`'s module doc for the P8.6-B seam this is left for.
+    #[cfg(feature = "agent-mode")]
+    let _agent_mode_handle = agent_mode_prepared.map(agent_mode::spawn);
 
     let config = match build_config(repo, activation_rx) {
         Ok(c) => c,

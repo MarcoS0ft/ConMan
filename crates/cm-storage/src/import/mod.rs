@@ -144,7 +144,14 @@ pub fn import_from_path_with_password(
         }
     };
 
-    let secrets_attempted = envelope.credential_secrets.len();
+    // P9.6 decision 5: `connection_secrets` (Inline per-connection secrets)
+    // must count toward "attempted" alongside `credential_secrets` (Object
+    // secrets) — before this lane every foreign importer hard-coded
+    // `connection_secrets: Vec::new()`, so omitting it here happened to be
+    // harmless; now that mRemoteNG/CSV populate it, omitting it would
+    // undercount and make `cm_ui`'s "N secret(s) skipped" toast lie by
+    // silently hiding real Inline-secret failures behind `saturating_sub`.
+    let secrets_attempted = envelope.credential_secrets.len() + envelope.connection_secrets.len();
     let stats = json_io::import(&envelope, repo, store)?;
     tracing::info!(
         groups = stats.groups_imported,
