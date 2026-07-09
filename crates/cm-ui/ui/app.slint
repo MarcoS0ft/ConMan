@@ -251,7 +251,13 @@ component RdpSurface inherits Rectangle {
             source: frame;
             width: 100%;
             height: 100%;
-            image-fit: fill;
+            // P9.5 #10: `contain` (not `fill`) -- the controller now
+            // negotiates the RDP desktop at the pane's live pixel size (see
+            // `sessions::apply_pane_resolution`), so this is a 1:1 no-op in
+            // the common case; `contain` only matters (no distortion,
+            // letterboxed instead) for the brief window before a resize
+            // settles, or if a server clamps the requested resolution.
+            image-fit: contain;
             image-rendering: pixelated;
         }
 

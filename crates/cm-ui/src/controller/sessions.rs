@@ -2051,17 +2051,52 @@ pub(super) fn open_ssh_tab(
     }
 }
 
+/// Pure decision behind [`apply_pane_resolution`]: the pane's live pixel
+/// size (`target_px`, when known) wins over whatever `(width, height)` the
+/// caller already had -- persisted profile, quick-connect typed value, or
+/// the `RdpSettings::default()` autoinit uses -- which is the "resize to
+/// window" behavior P9.5 #10 asks for. Clamped to a sane desktop-size range
+/// so a transient 0/huge readout can never produce a degenerate resolution.
+/// Falls back to `current` unchanged when no pane has ever reported its
+/// size yet (the very first tab at startup, before any `surface-resized`
+/// event).
+fn pane_resolution_override(target_px: Option<(u32, u32)>, current: (u16, u16)) -> (u16, u16) {
+    match target_px {
+        Some((pw, ph)) => (pw.clamp(200, 8192) as u16, ph.clamp(200, 8192) as u16),
+        None => current,
+    }
+}
+
+/// P9.5 #10: overwrite `settings.width`/`settings.height` with the active
+/// pane's live pixel size via [`pane_resolution_override`] (`State::target_px`
+/// is the same HiDPI-corrected value `apply_settled_resize` feeds to
+/// `Session::resize_px` after connect) -- negotiating the desktop at the
+/// pane's actual size is what lets `RdpSurface`'s `Image` display 1:1
+/// instead of bitmap-scaling.
+fn apply_pane_resolution(state: &Rc<RefCell<State>>, settings: &mut RdpSettings) {
+    let target = state.borrow().target_px();
+    let (width, height) = pane_resolution_override(target, (settings.width, settings.height));
+    settings.width = width;
+    settings.height = height;
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn open_rdp_tab(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,
     ui: &AppWindow,
-    settings: RdpSettings,
+    mut settings: RdpSettings,
     auth: RdpAuthInput,
     provenance: AuthProvenance,
     verifier: Arc<dyn CertVerifier>,
     origin_connection_id: Option<i32>,
 ) {
+    // P9.5 #10: the pane's live pixel size (when known) wins over whatever
+    // resolution the settings carried in (persisted profile / quick-connect
+    // typed value / autoinit default) -- negotiating the desktop at the
+    // pane's actual size is what lets `RdpSurface`'s `Image` display 1:1
+    // instead of bitmap-scaling. See `apply_pane_resolution`.
+    apply_pane_resolution(state, &mut settings);
     let title = format!("RDP {}", settings.host);
     let identity = format!("{}@{}:{}", auth.username, settings.host, settings.port);
     // Only `Direct` (quick-connect / debug autoinit) clones the auth for
@@ -2130,11 +2165,16 @@ pub(super) fn reconnect_rdp_tab(
     tab_model: &Rc<VecModel<TabItem>>,
     ui: &AppWindow,
     tab_idx: usize,
-    settings: RdpSettings,
+    mut settings: RdpSettings,
     auth: RdpAuthInput,
     provenance: AuthProvenance,
     verifier: Arc<dyn CertVerifier>,
 ) {
+    // P9.5 #10: re-apply the pane's current pixel size on every reconnect
+    // too, so a reconnect after the user has resized the window picks up
+    // the new size rather than replaying whatever resolution the original
+    // connect stored in `RdpConnectInfo`.
+    apply_pane_resolution(state, &mut settings);
     let identity = format!("{}@{}:{}", auth.username, settings.host, settings.port);
     let auth_source = match provenance {
         AuthProvenance::Direct => RdpAuthSource::Direct(auth.clone()),
@@ -2700,6 +2740,41 @@ mod tests {
         let buf = img.to_rgba8().expect("from_rgba8 image round-trips");
         let bytes = buf.as_bytes();
         assert_eq!(bytes, &[10, 20, 30, 0xff, 40, 50, 60, 0xff]);
+    }
+
+    // ── P9.5 item 10: connect-time resolution follows the pane, not the
+    // persisted/typed value (the bitmap-scaling bug) ────────────────────
+
+    #[test]
+    fn pane_resolution_override_prefers_the_live_pane_size() {
+        // The pane is known to be 1024x768 -- that wins over whatever the
+        // saved profile/quick-connect form had (a stand-in for the stored
+        // 1280x720 default).
+        assert_eq!(
+            pane_resolution_override(Some((1024, 768)), (1280, 720)),
+            (1024, 768)
+        );
+    }
+
+    #[test]
+    fn pane_resolution_override_falls_back_when_pane_size_unknown() {
+        // No pane has reported its size yet (e.g. the very first tab at
+        // startup) -- keep whatever the caller already had.
+        assert_eq!(pane_resolution_override(None, (1280, 720)), (1280, 720));
+    }
+
+    #[test]
+    fn pane_resolution_override_clamps_degenerate_readouts() {
+        // A transient 0 (not yet laid out) or an absurdly large readout
+        // must never reach RdpSettings verbatim.
+        assert_eq!(
+            pane_resolution_override(Some((0, 0)), (1280, 720)),
+            (200, 200)
+        );
+        assert_eq!(
+            pane_resolution_override(Some((50_000, 50_000)), (1280, 720)),
+            (8192, 8192)
+        );
     }
 
     // ── gap 17: Ctrl+Shift direct-shortcut classifier ───────────────────
