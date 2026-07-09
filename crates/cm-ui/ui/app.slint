@@ -18,7 +18,7 @@ import {
     PrimaryButton, SecondaryButton, EmptyState, Toast
 } from "components.slint";
 import { ListView, Palette, LineEdit } from "std-widgets.slint";
-import { Modal, QuickConnectForm, HostKeyDialog, CertDialog, KbdInteractiveDialog, KbdPromptRow } from "screens/dialogs.slint";
+import { Modal, QuickConnectForm, HostKeyDialog, CertDialog, KbdInteractiveDialog, KbdPromptRow, ImportPasswordDialog } from "screens/dialogs.slint";
 import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
 import { SettingsPanel } from "screens/settings_panel.slint";
 import { ConnectingOverlay, ErrorOverlay, SearchOverlay } from "screens/session_overlays.slint";
@@ -1032,6 +1032,13 @@ export component AppWindow inherits Window {
     callback kbd-answer-edited(int, string);
     callback kbd-submit();
     callback kbd-cancel();
+
+    // ── mRemoteNG import password prompt (P9.4) ───────────────────────
+    in-out property <bool>   import-password-open: false;
+    in property <string>     import-password-file-name: "";
+    callback import-password-edited(string);
+    callback import-password-submit();
+    callback import-password-cancel();
 
     // ── Appearance (P5.2: full settings exposed here) ────────────────
     in-out property <int>   theme-mode: 2;
@@ -2097,6 +2104,18 @@ export component AppWindow inherits Window {
             answer-edited(idx, t) => { root.kbd-answer-edited(idx, t); }
             submit => { root.kbd-submit(); }
             cancel => { root.kbd-cancel(); }
+        }
+    }
+
+    // ── mRemoteNG import password prompt (P9.4) ───────────────────────────
+    Modal {
+        open: root.import-password-open;
+        dismissed => { root.import-password-cancel(); }
+        import-password-dialog := ImportPasswordDialog {
+            file-name: root.import-password-file-name;
+            password-edited(t) => { root.import-password-edited(t); }
+            submit => { root.import-password-submit(); }
+            cancel => { root.import-password-cancel(); }
         }
     }
 
