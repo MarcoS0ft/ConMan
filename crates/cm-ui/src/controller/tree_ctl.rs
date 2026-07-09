@@ -889,14 +889,81 @@ fn wire_reorder_group_row(ctx: &Ctx) {
     });
 }
 
+/// .99 GPU verify (real double-click investigation): this used to
+/// unconditionally `remove(0)` every existing row then `push` every row of
+/// `flat` fresh, on EVERY call -- including the plain, non-structural
+/// `row-selected` refresh a single click triggers (`wire_select_conn_row`,
+/// above) to update the `selected` highlight. A `VecModel::remove`/`push`
+/// pair is a STRUCTURAL model mutation Slint's `for conn[idx] in
+/// connections: ConnectionRow {...}` repeater reacts to by destroying and
+/// recreating the row's component instance (including its `touch`
+/// TouchArea) -- so a plain single click on a row destroyed and rebuilt
+/// that exact row's own `touch` out from under the pointer as a SIDE EFFECT
+/// of merely selecting it. Slint's double-click detection tracks
+/// `click_count` by comparing the CURRENT click's hit item to the item the
+/// PREVIOUS click landed on (`i-slint-core`'s `send_mouse_event_to_item`);
+/// since the row's `touch` was a brand-new instance by the time the second
+/// click of a double-click landed, that comparison always failed, resetting
+/// `click_count` to 0 -- so `double-clicked` (P9.5 #2's launch gesture)
+/// could never fire on a real pointer, even though headless element tests
+/// (which invoke `row-activated`/`row-selected` directly, bypassing Slint's
+/// click-count machinery entirely) never exercised this at all.
+///
+/// Fixed by diffing instead of blindly rebuilding: `set_row_data` at a
+/// stable index is a data-only update Slint's repeater applies to the
+/// EXISTING component instance in place (no destroy/recreate), which keeps
+/// `touch`'s identity stable across a plain selection change -- restoring
+/// real-pointer double-click detection. Rows are only actually added/
+/// removed (a genuine structural change: connect/delete/duplicate/reorder/
+/// expand-collapse) at the tail, past whichever prefix already matches.
+/// The actual decision is [`diff_conn_rows`], a pure function kept separate
+/// so the "a plain selection-only change produces zero Push/RemoveLast ops"
+/// claim above is directly unit-testable without a `VecModel`/`AppWindow`.
 pub(super) fn refresh_conn_model(state: &State, conn_model: &Rc<VecModel<ConnRow>>) {
     let flat = state.conn_tree.flat_filtered(&state.conn_filter);
-    while conn_model.row_count() > 0 {
-        conn_model.remove(0);
+    let old: Vec<ConnRow> = (0..conn_model.row_count())
+        .filter_map(|i| conn_model.row_data(i))
+        .collect();
+    for op in diff_conn_rows(&old, flat) {
+        match op {
+            RowOp::SetRowData(i, row) => conn_model.set_row_data(i, row),
+            RowOp::Push(row) => conn_model.push(row),
+            RowOp::RemoveLast => {
+                conn_model.remove(conn_model.row_count() - 1);
+            }
+        }
     }
-    for row in flat {
-        conn_model.push(row);
+}
+
+/// The minimal sequence of `VecModel` operations to turn `old` into `new`.
+/// `SetRowData` (index unchanged, data updated in place -- Slint's repeater
+/// reuses the existing component instance) is always preferred over
+/// `Push`/`RemoveLast` (structural -- destroys/recreates it) for any index
+/// present in both; only a genuine length change adds/removes at the tail.
+#[derive(Debug, PartialEq)]
+enum RowOp {
+    SetRowData(usize, ConnRow),
+    Push(ConnRow),
+    RemoveLast,
+}
+
+fn diff_conn_rows(old: &[ConnRow], new: Vec<ConnRow>) -> Vec<RowOp> {
+    let old_len = old.len();
+    let new_len = new.len();
+    let mut ops = Vec::new();
+    for (i, row) in new.into_iter().enumerate() {
+        if i < old_len {
+            if old[i] != row {
+                ops.push(RowOp::SetRowData(i, row));
+            }
+        } else {
+            ops.push(RowOp::Push(row));
+        }
     }
+    for _ in new_len..old_len {
+        ops.push(RowOp::RemoveLast);
+    }
+    ops
 }
 
 pub(super) fn build_group_name_list(groups: &[Group]) -> Vec<SharedString> {
@@ -1080,6 +1147,73 @@ mod tests {
     use cm_core::{CredentialStore, Secret};
 
     use super::*;
+
+    // ── .99 GPU verify: refresh_conn_model's diff (double-click fix) ──────
+
+    fn conn_row(id: i32, label: &str, selected: bool) -> ConnRow {
+        ConnRow {
+            id,
+            label: SharedString::from(label),
+            host: SharedString::from("host"),
+            kind: SharedString::from("SSH"),
+            status: SharedString::from("disconnected"),
+            is_group: false,
+            expanded: false,
+            selected,
+            depth: 0,
+        }
+    }
+
+    #[test]
+    fn diff_conn_rows_is_a_no_op_when_nothing_changed() {
+        let rows = vec![conn_row(1, "a", false), conn_row(2, "b", true)];
+        assert_eq!(diff_conn_rows(&rows, rows.clone()), Vec::<RowOp>::new());
+    }
+
+    #[test]
+    fn diff_conn_rows_produces_only_set_row_data_when_only_selection_changes() {
+        // The double-click regression's whole fix: a plain row-selected
+        // refresh (nothing added/removed/reordered, just two rows' `selected`
+        // flags flipping) must produce ONLY SetRowData ops -- never a
+        // Push/RemoveLast, which would destroy and recreate the row's
+        // `touch` TouchArea and break Slint's real-pointer double-click
+        // detection (see `refresh_conn_model`'s doc comment for the full
+        // mechanism this proves).
+        let old = vec![
+            conn_row(1, "a", false),
+            conn_row(2, "b", true),
+            conn_row(3, "c", false),
+        ];
+        let new = vec![
+            conn_row(1, "a", true),
+            conn_row(2, "b", false),
+            conn_row(3, "c", false),
+        ];
+        assert_eq!(
+            diff_conn_rows(&old, new.clone()),
+            vec![
+                RowOp::SetRowData(0, new[0].clone()),
+                RowOp::SetRowData(1, new[1].clone()),
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_conn_rows_appends_new_rows_at_the_tail_when_the_list_grows() {
+        let old = vec![conn_row(1, "a", false)];
+        let new = vec![conn_row(1, "a", false), conn_row(2, "b", false)];
+        assert_eq!(
+            diff_conn_rows(&old, new.clone()),
+            vec![RowOp::Push(new[1].clone())]
+        );
+    }
+
+    #[test]
+    fn diff_conn_rows_removes_from_the_tail_when_the_list_shrinks() {
+        let old = vec![conn_row(1, "a", false), conn_row(2, "b", false)];
+        let new = vec![conn_row(1, "a", false)];
+        assert_eq!(diff_conn_rows(&old, new), vec![RowOp::RemoveLast]);
+    }
 
     #[test]
     fn form_to_ssh_auth_password() {
