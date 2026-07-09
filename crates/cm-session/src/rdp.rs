@@ -1766,20 +1766,35 @@ where
             return Ok(ReactivationOutcome::Continue);
         }
 
-        if std::time::Instant::now() > deadline {
-            // §3 degradation contract: never wedge -- fail the session with
-            // a clear status instead of hanging.
-            tracing::warn!("rdp: reactivation timed out, failing session");
-            set_status(
-                status,
-                SessionStatus::Failed("RDP reactivation (resize) timed out".to_owned()),
-            );
-            return Ok(ReactivationOutcome::Terminated);
-        }
-
-        single_sequence_step(framed, &mut cas, &mut buf)
+        // Fable review fix: the deadline must bound the *step itself*, not
+        // just the gap between iterations. `single_sequence_step` reads via
+        // `read_by_hint` with no timeout of its own -- a server that sends
+        // `DemandActive` (taking us into this loop) and then goes silent
+        // mid-finalization would otherwise block here forever. Because this
+        // whole function runs inline inside `active_loop`'s
+        // `tokio::select!` arm, an unbounded block here freezes the ENTIRE
+        // session (no input, no frames, `RdpCmd::Shutdown` not polled)
+        // until the OS TCP stack notices -- exactly the wedge the §3
+        // degradation contract forbids. Wrapping the step in
+        // `tokio::time::timeout` bounds it directly; a zero/negative
+        // `remaining` (deadline already passed) times out immediately,
+        // subsuming the old between-iterations check.
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, single_sequence_step(framed, &mut cas, &mut buf))
             .await
-            .map_err(|e| e.to_string())?;
+        {
+            Ok(step_result) => step_result.map_err(|e| e.to_string())?,
+            Err(_elapsed) => {
+                // §3 degradation contract: never wedge -- fail the session
+                // with a clear status instead of hanging.
+                tracing::warn!("rdp: reactivation timed out, failing session");
+                set_status(
+                    status,
+                    SessionStatus::Failed("RDP reactivation (resize) timed out".to_owned()),
+                );
+                return Ok(ReactivationOutcome::Terminated);
+            }
+        }
     }
 }
 
