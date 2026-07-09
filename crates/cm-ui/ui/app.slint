@@ -2156,7 +2156,15 @@ export component AppWindow inherits Window {
             cred-name-list: root.cred-name-list;
             group-name-list: root.group-name-list;
             save   => { root.profile-save(); }
-            cancel => { root.profile-editor-open = false; }
+            // Fable non-blocking note (P9.6-A Phase C): a typed-then-cancelled
+            // Inline password otherwise lingers in `profile-form` until the
+            // next editor-open (save/open already clear it -- see
+            // tree_ctl::wire_profile_save / wire_edit_conn) -- close the gap
+            // on cancel too.
+            cancel => {
+                root.profile-form.inline-password = "";
+                root.profile-editor-open = false;
+            }
         }
     }
 
