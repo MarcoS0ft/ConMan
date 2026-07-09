@@ -2199,7 +2199,13 @@ export component AppWindow inherits Window {
     // ── P1.4: Profile editor modal ────────────────────────────────────────
     Modal {
         open: root.profile-editor-open;
-        dismissed => { root.profile-editor-open = false; }
+        // Fable follow-up (P8.6-B): Esc/scrim-click must clear the transient
+        // Inline password too, not just the explicit Cancel button below --
+        // mirrors ProfileEditor's own `cancel` body exactly.
+        dismissed => {
+            root.profile-form.inline-password = "";
+            root.profile-editor-open = false;
+        }
         profile-editor-dialog := ProfileEditor {
             form <=> root.profile-form;
             cred-name-list: root.cred-name-list;
