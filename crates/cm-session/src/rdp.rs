@@ -2277,6 +2277,17 @@ mod tests {
     ///   - `/etc/xrdp/xrdp.ini` on the server must have `security_layer=negotiate`
     ///     (or `tls`); the default `security_layer=rdp` uses STANDARD_RDP_SECURITY
     ///     which IronRDP does not support.
+    ///
+    /// **P9.7 Slice 1** (wire-level visual QA, since every other runner is
+    /// headless/software and structurally blind to GPU-compositing bugs):
+    /// beyond "connects and gets one frame", this asserts (1) the confirmed
+    /// desktop size matches the *requested* `RdpSettings` (proves resolution
+    /// negotiation, not post-hoc scaling -- #10 at the wire level), (2) the
+    /// framebuffer has real RGB variety, not just a non-zero byte (catches a
+    /// uniform solid-color decode failure the old check missed), and (3) the
+    /// #9/#11 black-screen root cause (alpha = wire-padding 0x00 while RGB is
+    /// valid) as a documented invariant, so a future alpha "cleanup" can't
+    /// silently reintroduce it. See the assertions' own comments below.
     #[tokio::test]
     #[ignore = "opt-in: set CONMAN_LIVE_RDP_HOST/_USER/_PASSWORD to run against a real host"]
     async fn rdp_connect_live_host() {
@@ -2341,15 +2352,109 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(15))
             .expect("must receive a frame within 15 s");
 
-        // Verify non-blank framebuffer: at least one pixel must be non-zero.
-        assert!(
-            frame.rgba.iter().any(|&b| b != 0),
-            "framebuffer is all-zero (blank)"
-        );
         assert_eq!(
             frame.rgba.len(),
             usize::from(frame.width) * usize::from(frame.height) * 4
         );
+
+        // P9.7 Slice 1, item 1: requested-size validation (#10 at the wire
+        // level). `frame.width`/`frame.height` are not an echo of `cfg` --
+        // they come from `DecodedImage::new(.., desktop_size.width,
+        // desktop_size.height)` in `drive_inner`, where `desktop_size` is
+        // `connection_result.desktop_size`, IronRDP's server-CONFIRMED
+        // active size from `connect_finalize`. Asserting it equals the
+        // requested size proves the resolution was actually negotiated
+        // end-to-end (not bitmap-scaled after the fact -- the #10 bug).
+        // Logged unconditionally so a clamp is visible in the test output
+        // even if this assertion is later relaxed for a target host that
+        // genuinely can't honor arbitrary resolutions.
+        eprintln!(
+            "rdp_connect_live_host: requested {}x{}, server-confirmed {}x{}",
+            cfg.width, cfg.height, frame.width, frame.height
+        );
+        assert_eq!(
+            (frame.width, frame.height),
+            (cfg.width, cfg.height),
+            "server did not honor the requested desktop resolution \
+             (requested {}x{}, server confirmed {}x{}) -- if this specific \
+             xrdp target genuinely cannot support the requested size, this \
+             is a legitimate clamp, not a #10 regression; verify against \
+             the target's real capabilities before assuming a regression",
+            cfg.width,
+            cfg.height,
+            frame.width,
+            frame.height
+        );
+
+        // P9.7 Slice 1, items 2 + 3: content variety, and the alpha=0/
+        // RGB-valid invariant behind the #9/#11 black-screen root cause.
+        //
+        // `PixelFormat::RgbA32`'s byte order is [R, G, B, A] per pixel
+        // (ironrdp_graphics::image_processing::PixelFormat::channel_order),
+        // matching `frame.rgba`'s layout (row-major, width*height*4 bytes).
+        let pixels: Vec<(u8, u8, u8, u8)> = frame
+            .rgba
+            .chunks_exact(4)
+            .map(|p| (p[0], p[1], p[2], p[3]))
+            .collect();
+        assert!(!pixels.is_empty(), "frame has no pixels");
+
+        // Item 2: a uniform solid-color fill (a plausible decode failure
+        // distinct from all-zero) passed the old "any non-zero byte" check
+        // -- it must not pass here. 8 distinct RGB values is a conservative
+        // floor (a real xrdp desktop -- wallpaper, taskbar, anti-aliased
+        // text -- has hundreds to thousands), chosen to avoid flaking
+        // against an unknown target's visual complexity while still
+        // catching a truly uniform fill (which has exactly 1).
+        let distinct_rgb: std::collections::HashSet<(u8, u8, u8)> =
+            pixels.iter().map(|&(r, g, b, _)| (r, g, b)).collect();
+        assert!(
+            distinct_rgb.len() > 8,
+            "framebuffer has only {} distinct RGB value(s) -- expected real \
+             desktop content (anti-aliased text/window chrome/wallpaper), \
+             not a uniform solid-color fill",
+            distinct_rgb.len()
+        );
+
+        // Item 3 (the highest-value part): pin the #9/#11 black-screen root
+        // cause as a test-documented invariant. That black screen was NOT a
+        // wire bug -- IronRDP's fast-path/tile decoders leave the alpha
+        // channel at the wire-padding value 0x00 while the RGB channels are
+        // fully valid. Slint's software backend ignores alpha (so it
+        // rendered fine); femtovg alpha-blends alpha=0x00 to fully
+        // transparent, which composites as black. cm-ui's fix
+        // (`frame_to_image`) forces alpha=0xff before handing the buffer to
+        // Slint's `Image`. This assertion documents the exact contract that
+        // fix depends on: the RGB data is real and varied EVEN WHERE alpha
+        // is 0 -- so a downstream renderer MUST treat alpha=0 pixels as
+        // opaque, never as "no content" / blank. Do NOT change decode/alpha
+        // behavior here -- this only asserts + documents the invariant; the
+        // fix itself lives in cm-ui.
+        let alpha_zero_rgb: std::collections::HashSet<(u8, u8, u8)> = pixels
+            .iter()
+            .filter(|&&(_, _, _, a)| a == 0)
+            .map(|&(r, g, b, _)| (r, g, b))
+            .collect();
+        if alpha_zero_rgb.is_empty() {
+            // Server/decoder-dependent: this particular capture happened to
+            // carry real alpha throughout. The general RGB-variety
+            // assertion above still holds regardless.
+            eprintln!(
+                "rdp_connect_live_host: no alpha=0 pixels in this frame -- \
+                 the wire-padding invariant this test documents didn't \
+                 trigger for this capture"
+            );
+        } else {
+            assert!(
+                alpha_zero_rgb.len() > 1,
+                "all {} alpha=0 pixel(s) share a single RGB value -- if \
+                 alpha=0 now correlates with genuinely blank/unset pixels \
+                 (rather than wire padding on otherwise-valid content), the \
+                 #9/#11 black-screen root-cause analysis needs \
+                 re-checking before touching cm-ui's forced-opaque fix",
+                alpha_zero_rgb.len()
+            );
+        }
 
         session.shutdown();
     }
