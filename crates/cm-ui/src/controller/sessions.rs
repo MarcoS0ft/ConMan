@@ -2060,7 +2060,10 @@ pub(super) fn open_ssh_tab(
 /// Falls back to `current` unchanged when no pane has ever reported its
 /// size yet (the very first tab at startup, before any `surface-resized`
 /// event).
-fn pane_resolution_override(target_px: Option<(u32, u32)>, current: (u16, u16)) -> (u16, u16) {
+pub(super) fn pane_resolution_override(
+    target_px: Option<(u32, u32)>,
+    current: (u16, u16),
+) -> (u16, u16) {
     match target_px {
         Some((pw, ph)) => (pw.clamp(200, 8192) as u16, ph.clamp(200, 8192) as u16),
         None => current,

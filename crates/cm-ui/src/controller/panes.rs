@@ -887,6 +887,26 @@ pub(super) fn connect_in_split(
             );
             let (pane_w, pane_h) = split_pane_dims(layout, slot.surface_w, slot.surface_h);
 
+            // P9.5 #10 (Fable review fixup): connect-into-a-split-pane
+            // bypassed `open_rdp_tab`/`apply_pane_resolution` entirely, so it
+            // still negotiated whatever resolution the saved profile
+            // carried -- stretched to fill under the old `image-fit: fill`,
+            // but *letterboxed at the wrong resolution* now that RdpSurface
+            // uses `contain`. Apply the same pane-size-wins override here,
+            // using the split slot's own pixel size (mirrors the
+            // `(w * scale).round().max(1.0)` formula `apply_settled_resize`
+            // already uses at tabs.rs for the primary-pane/resize path).
+            let mut s = s.clone();
+            let (width, height) = sessions::pane_resolution_override(
+                Some((
+                    (pane_w * slot.scale).round().max(1.0) as u32,
+                    (pane_h * slot.scale).round().max(1.0) as u32,
+                )),
+                (s.width, s.height),
+            );
+            s.width = width;
+            s.height = height;
+
             let auto_accept = util::rdp_auto_accept_certs();
             let verifier = Arc::new(sessions::UiCertVerifier {
                 weak_ui: weak.clone(),
@@ -895,7 +915,7 @@ pub(super) fn connect_in_split(
             });
 
             let provider = state.borrow().session_provider.clone();
-            let session = match provider.connect_rdp(s, auth, verifier) {
+            let session = match provider.connect_rdp(&s, auth, verifier) {
                 Ok(sess) => sess,
                 Err(e) => {
                     tracing::warn!("connect-in-split RDP connect failed: {e}");
@@ -1374,5 +1394,43 @@ mod tests {
             tab.broadcast_target.label(tab.pane_group.count()),
             "group: prod"
         );
+    }
+
+    // ── P9.5 #10 (Fable review fixup): connect-in-split RDP resolution ──
+    // `connect_in_split`'s Rdp arm bypasses `open_rdp_tab`, so it has to
+    // apply `sessions::pane_resolution_override` itself using the split
+    // slot's own `(pane_w, pane_h, scale)` -- this proves the exact
+    // `(logical * scale).round().max(1.0)` conversion used there produces
+    // the same physical-pixel override as the primary-pane path
+    // (`apply_settled_resize`, tabs.rs) would for the same inputs.
+    #[test]
+    fn connect_in_split_pane_size_to_px_matches_primary_pane_formula() {
+        // A split slot's fractional logical size at a HiDPI 1.5x scale.
+        let (pane_w, pane_h, scale): (f32, f32, f32) = (639.5, 359.7, 1.5);
+        let (width, height) = sessions::pane_resolution_override(
+            Some((
+                (pane_w * scale).round().max(1.0) as u32,
+                (pane_h * scale).round().max(1.0) as u32,
+            )),
+            (1280, 720), // stand-in for the saved profile's stored resolution
+        );
+        // 639.5 * 1.5 = 959.25 -> rounds to 959; 359.7 * 1.5 = 539.55 -> 540.
+        assert_eq!((width, height), (959, 540));
+    }
+
+    #[test]
+    fn connect_in_split_pane_size_wins_over_a_tiny_slot_via_the_clamp() {
+        // A degenerate (not-yet-laid-out) split slot must still clamp to
+        // the same [200, 8192] floor `pane_resolution_override` enforces
+        // for the primary-pane path -- never a literally-zero desktop.
+        let (pane_w, pane_h, scale): (f32, f32, f32) = (0.0, 0.0, 1.0);
+        let (width, height) = sessions::pane_resolution_override(
+            Some((
+                (pane_w * scale).round().max(1.0) as u32,
+                (pane_h * scale).round().max(1.0) as u32,
+            )),
+            (1280, 720),
+        );
+        assert_eq!((width, height), (200, 200));
     }
 }
