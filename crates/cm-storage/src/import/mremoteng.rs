@@ -65,23 +65,25 @@
 //! effective `Hostname` also skips the connection (counted), mirroring CSV's
 //! missing-host handling. `Port` blank/unparsable → the kind's default.
 //! mRemoteNG has **no separate credential objects** (creds are inline per
-//! node) — like CSV without `cred_name`, a per-connection [`Credential`] is
-//! created only when a password actually decrypts; `username`/`domain` land
-//! on the connection's settings; SSH `auth_method` is
+//! node, never shared) — a decrypted password becomes a
+//! [`CredentialSource::Inline`] (P9.6 decision 5) carrying `username`/`domain`
+//! on the source itself, with the plaintext pushed as an
+//! [`crate::json_io::ExportedConnectionSecret`] once the connection's
+//! synthetic id is known; `username`/`domain` also still land on the
+//! connection's settings as before. SSH `auth_method` is
 //! [`SshAuthMethod::Password`] when a password resolved, else
 //! [`SshAuthMethod::Agent`] (mirrors `royalts.rs`'s `build_ssh_connection`).
 
 use std::collections::HashMap;
 
 use cm_core::{
-    Connection, ConnectionId, ConnectionKind, ConnectionSettings, Credential, CredentialId,
-    CredentialKind, CredentialPurpose, CredentialSource, Group, GroupId, RdpSettings,
-    SshAuthMethod, SshSettings,
+    Connection, ConnectionId, ConnectionKind, ConnectionSettings, CredentialPurpose,
+    CredentialSource, Group, GroupId, RdpSettings, SshAuthMethod, SshSettings,
 };
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use crate::json_io::{self, ExportEnvelope, ExportedSecret, ImportExportError};
+use crate::json_io::{self, ExportEnvelope, ExportedConnectionSecret, ImportExportError};
 
 use super::ImportWarning;
 use super::mremoteng_crypto;
@@ -151,11 +153,14 @@ pub fn parse(
         conman_export_version: json_io::MIN_SUPPORTED_VERSION,
         exported_at: 0, // foreign import: no meaningful export timestamp
         credential_folders: Vec::new(),
-        credentials: ctx.credentials,
+        // mRemoteNG never produces a shared credential object (P9.6 decision
+        // 5 — every per-node password is Inline, never Object); these two
+        // stay permanently empty.
+        credentials: Vec::new(),
         groups: ctx.groups,
         connections: ctx.connections,
-        credential_secrets: ctx.credential_secrets,
-        connection_secrets: Vec::new(),
+        credential_secrets: Vec::new(),
+        connection_secrets: ctx.connection_secrets,
         settings: Vec::new(),
     };
 
@@ -169,9 +174,11 @@ pub fn parse(
 #[derive(Default)]
 struct ParseCtx {
     groups: Vec<Group>,
-    credentials: Vec<Credential>,
-    credential_secrets: Vec<ExportedSecret>,
     connections: Vec<Connection>,
+    /// P9.6 decision 5: every decrypted per-node password becomes an
+    /// Inline connection-secret (never a shared credential object) — see
+    /// [`push_connection`].
+    connection_secrets: Vec<ExportedConnectionSecret>,
     warnings: Vec<ImportWarning>,
     password: String,
     kdf_iterations: u32,
@@ -179,7 +186,6 @@ struct ParseCtx {
     /// [`ParseCtx::decrypt`].
     password_confirmed: bool,
     next_group_id: i64,
-    next_cred_id: i64,
     next_conn_id: i64,
 }
 
@@ -187,11 +193,6 @@ impl ParseCtx {
     fn fresh_group_id(&mut self) -> GroupId {
         self.next_group_id += 1;
         GroupId::new(self.next_group_id)
-    }
-
-    fn fresh_cred_id(&mut self) -> CredentialId {
-        self.next_cred_id += 1;
-        CredentialId::new(self.next_cred_id)
     }
 
     fn fresh_conn_id(&mut self) -> ConnectionId {
@@ -520,22 +521,19 @@ fn build_connection(
         )));
     }
 
-    let credential = decrypted_password.as_ref().map(|pw_bytes| {
-        let cred_id = ctx.fresh_cred_id();
-        ctx.credentials.push(Credential {
-            id: cred_id,
-            name: format!("{name} credential"),
-            kind: CredentialKind::Password,
-            folder_id: None,
-            username: username.clone(),
+    // P9.6 decision 5: a decrypted password becomes an Inline source —
+    // mRemoteNG's per-node password is never shared, so there's no dedupe
+    // concept the way RoyalTS's CredentialID has. `username`/`domain` are
+    // carried on the source itself (authoritative, per
+    // `resolve_connection_auth`'s Inline arm) in addition to still landing on
+    // the connection's settings below.
+    let credential_source = decrypted_password
+        .is_some()
+        .then(|| CredentialSource::Inline {
+            username: username.clone().unwrap_or_default(),
+            domain: domain.clone(),
+            has_secret: true,
         });
-        ctx.credential_secrets.push(ExportedSecret {
-            credential_id: cred_id,
-            purpose: CredentialPurpose::Password.as_str().to_string(),
-            secret_hex: json_io::to_hex(pw_bytes),
-        });
-        cred_id
-    });
 
     let port_raw = effective.port;
     let settings = match kind {
@@ -556,7 +554,7 @@ fn build_connection(
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(SshSettings::DEFAULT_PORT),
             username: username.unwrap_or_default(),
-            auth_method: if credential.is_some() {
+            auth_method: if decrypted_password.is_some() {
                 SshAuthMethod::Password
             } else {
                 SshAuthMethod::Agent
@@ -567,24 +565,29 @@ fn build_connection(
         }
     };
 
-    push_connection(name, group, kind, settings, credential, ctx);
+    push_connection(
+        name,
+        group,
+        kind,
+        settings,
+        credential_source,
+        decrypted_password,
+        ctx,
+    );
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_connection(
     name: String,
     group: Option<GroupId>,
     kind: ConnectionKind,
     settings: ConnectionSettings,
-    credential: Option<CredentialId>,
+    credential_source: Option<CredentialSource>,
+    decrypted_password: Option<Vec<u8>>,
     ctx: &mut ParseCtx,
 ) {
     let conn_id = ctx.fresh_conn_id();
-    // mRemoteNG's inline-per-node password always becomes a credential
-    // OBJECT here (never Inline/Prompt) — P9.6-A's Inline mapping for
-    // importers is a documented follow-on, not built here; see the P9.6-A
-    // report.
-    let credential_source = credential.map(CredentialSource::Object);
     match Connection::new(
         conn_id,
         group,
@@ -596,7 +599,19 @@ fn push_connection(
         0,
         0,
     ) {
-        Ok(conn) => ctx.connections.push(conn),
+        Ok(conn) => {
+            // The Inline secret is only pushed once the connection actually
+            // validates — a rejected connection carries no keychain entry to
+            // orphan.
+            if let Some(pw_bytes) = decrypted_password {
+                ctx.connection_secrets.push(ExportedConnectionSecret {
+                    connection_id: conn_id,
+                    purpose: CredentialPurpose::Password.as_str().to_string(),
+                    secret_hex: json_io::to_hex(&pw_bytes),
+                });
+            }
+            ctx.connections.push(conn);
+        }
         Err(e) => {
             tracing::warn!(connection = %name, error = %e, "mremoteng: connection skipped (validation)");
             ctx.warnings.push(ImportWarning::new(format!(
@@ -662,27 +677,38 @@ mod tests {
     }
 
     #[test]
-    fn decrypted_password_becomes_a_per_connection_credential_and_secret() {
+    fn decrypted_password_becomes_an_inline_credential_and_connection_secret() {
         let (envelope, _warnings) = parse(FIXTURE, "mR3m").expect("fixture should parse");
         let rdp = envelope
             .connections
             .iter()
             .find(|c| c.name == "app01-rdp")
             .expect("rdp connection present");
-        let cred_id = match &rdp.credential_source {
-            Some(CredentialSource::Object(id)) => *id,
-            other => panic!("expected an Object credential source, got {other:?}"),
-        };
+        match &rdp.credential_source {
+            Some(CredentialSource::Inline {
+                username,
+                has_secret,
+                ..
+            }) => {
+                assert_eq!(username, "admin");
+                assert!(*has_secret);
+            }
+            other => panic!("expected an Inline credential source, got {other:?}"),
+        }
         let secret = envelope
-            .credential_secrets
+            .connection_secrets
             .iter()
-            .find(|s| s.credential_id == cred_id && s.purpose == "password")
-            .expect("password secret present");
+            .find(|s| s.connection_id == rdp.id && s.purpose == "password")
+            .expect("password connection-secret present");
         let decoded = (0..secret.secret_hex.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&secret.secret_hex[i..i + 2], 16).unwrap())
             .collect::<Vec<u8>>();
         assert_eq!(decoded, b"dummy-pw-1");
+        assert!(
+            envelope.credentials.is_empty(),
+            "mRemoteNG never produces a shared credential object — only Inline sources"
+        );
     }
 
     /// The fixture's "Shared" container carries its own encrypted `Password`
@@ -701,15 +727,22 @@ mod tests {
             .iter()
             .find(|c| c.name == "inherited-conn")
             .expect("inherited-conn present");
-        let cred_id = match &inherited.credential_source {
-            Some(CredentialSource::Object(id)) => *id,
-            other => panic!("expected an Object credential source, got {other:?}"),
-        };
+        assert!(
+            matches!(
+                &inherited.credential_source,
+                Some(CredentialSource::Inline {
+                    has_secret: true,
+                    ..
+                })
+            ),
+            "expected an Inline credential source with a secret, got {:?}",
+            inherited.credential_source
+        );
         let secret = envelope
-            .credential_secrets
+            .connection_secrets
             .iter()
-            .find(|s| s.credential_id == cred_id && s.purpose == "password")
-            .expect("password secret present");
+            .find(|s| s.connection_id == inherited.id && s.purpose == "password")
+            .expect("password connection-secret present");
         let decoded = (0..secret.secret_hex.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&secret.secret_hex[i..i + 2], 16).unwrap())

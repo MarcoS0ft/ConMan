@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use cm_core::{
-    ConnectionKind, ConnectionRepository, ConnectionSettings, CredentialError, CredentialRef,
-    CredentialSource, CredentialStore, Secret,
+    ConnectionKind, ConnectionRepository, ConnectionSettings, CredentialError, CredentialPurpose,
+    CredentialRef, CredentialSource, CredentialStore, Secret, resolve_connection_auth,
 };
 use cm_storage::SqliteRepository;
 use cm_storage::import::import_from_path;
@@ -95,37 +95,69 @@ fn mremoteng_fixture_round_trips_into_a_real_repo_and_keychain() {
         .expect("ssh connection persisted");
     assert_eq!(ssh.kind, ConnectionKind::Ssh);
 
-    // ---- Decrypted password resolves from the keychain ---------------------
-    let rdp_cred_id = match &rdp.credential_source {
-        Some(CredentialSource::Object(id)) => *id,
-        other => panic!("expected an Object credential source, got {other:?}"),
-    };
-    let secret = store
-        .get(&CredentialRef::new(
-            rdp_cred_id,
-            cm_core::CredentialPurpose::Password,
-        ))
-        .expect("keychain lookup")
-        .expect("password secret should be present");
-    assert_eq!(secret.expose(), b"dummy-pw-1");
+    // ---- P9.6 decision 5: mRemoteNG's per-node password imports as Inline,
+    // never a synthesized credential object, and resolves end-to-end through
+    // `resolve_connection_auth` (username + secret) exactly like an Object
+    // credential would. --------------------------------------------------
+    assert!(
+        repo.list_credentials()
+            .expect("list credentials")
+            .is_empty(),
+        "mRemoteNG must never synthesize a shared credential object"
+    );
+    let group_list = repo.list_groups().expect("list groups");
+    let cred_list = repo.list_credentials().expect("list credentials");
+    assert!(matches!(
+        &rdp.credential_source,
+        Some(CredentialSource::Inline {
+            has_secret: true,
+            ..
+        })
+    ));
+    let rdp_auth = resolve_connection_auth(
+        rdp,
+        &group_list,
+        &cred_list,
+        &store,
+        CredentialPurpose::Password,
+    )
+    .expect("resolve rdp auth");
+    assert_eq!(rdp_auth.username, "admin");
+    assert_eq!(
+        rdp_auth
+            .secret
+            .expect("rdp inline secret resolved")
+            .expose(),
+        b"dummy-pw-1"
+    );
 
-    // ---- Inherited password also resolves -----------------------------------
+    // ---- Inherited password also resolves via the same Inline path ---------
     let inherited = connections
         .iter()
         .find(|c| c.name == "inherited-conn")
         .expect("inherited-conn persisted");
-    let inherited_cred_id = match &inherited.credential_source {
-        Some(CredentialSource::Object(id)) => *id,
-        other => panic!("expected an Object credential source, got {other:?}"),
-    };
-    let inherited_secret = store
-        .get(&CredentialRef::new(
-            inherited_cred_id,
-            cm_core::CredentialPurpose::Password,
-        ))
-        .expect("keychain lookup")
-        .expect("inherited password secret should be present");
-    assert_eq!(inherited_secret.expose(), b"dummy-shared-pw");
+    assert!(matches!(
+        &inherited.credential_source,
+        Some(CredentialSource::Inline {
+            has_secret: true,
+            ..
+        })
+    ));
+    let inherited_auth = resolve_connection_auth(
+        inherited,
+        &group_list,
+        &cred_list,
+        &store,
+        CredentialPurpose::Password,
+    )
+    .expect("resolve inherited auth");
+    assert_eq!(
+        inherited_auth
+            .secret
+            .expect("inherited inline secret resolved")
+            .expose(),
+        b"dummy-shared-pw"
+    );
 
     // ---- Unsupported protocol + blank-host: skipped, counted warnings ------
     assert!(!connections.iter().any(|c| c.name == "legacy-vnc"));
@@ -188,18 +220,27 @@ fn custom_password_file_requires_password_then_succeeds_with_it() {
         .iter()
         .find(|c| c.name == "custom-pw-conn")
         .expect("custom-pw-conn persisted");
-    let cred_id = match &conn.credential_source {
-        Some(CredentialSource::Object(id)) => *id,
-        other => panic!("expected an Object credential source, got {other:?}"),
-    };
-    let secret = store
-        .get(&CredentialRef::new(
-            cred_id,
-            cm_core::CredentialPurpose::Password,
-        ))
-        .expect("keychain lookup")
-        .expect("password secret should be present");
-    assert_eq!(secret.expose(), b"custom-secret");
+    assert!(matches!(
+        &conn.credential_source,
+        Some(CredentialSource::Inline {
+            has_secret: true,
+            ..
+        })
+    ));
+    let auth = resolve_connection_auth(
+        conn,
+        &repo.list_groups().expect("list groups"),
+        &repo.list_credentials().expect("list credentials"),
+        &store,
+        CredentialPurpose::Password,
+    )
+    .expect("resolve auth");
+    assert_eq!(
+        auth.secret
+            .expect("custom-password inline secret resolved")
+            .expose(),
+        b"custom-secret"
+    );
     assert_eq!(outcome.stats.secrets_imported, 1);
 }
 
