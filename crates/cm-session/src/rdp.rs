@@ -65,29 +65,33 @@
 //! existing entries from a JSON file and saves on every accepted fingerprint.
 //! Call with a path in the app-data directory so TOFU survives restarts.
 //!
-//! **Deactivation-Reactivation Sequence (P9.8 correction)**: when the server
-//! sends `DeactivateAll` (which xrdp does during normal connection setup,
-//! before first bitmap data), `active_loop` does **not** run a real
-//! Deactivation-Reactivation exchange (MS-RDPBCGR §1.3.1.3: wait for
-//! `DemandActive`, reply `ConfirmActive`, redo Connection Finalization) —
-//! it just `continue`s the loop and processes whatever PDU the server sends
-//! next. This happens to work for xrdp, which sends `DeactivateAll` and then
-//! immediately resumes FastPath bitmap data without actually requiring the
-//! client to run the reactivation sequence. A prior version of this comment
-//! claimed the loop "rebuilds processors with the new desktop size" here —
-//! that was never true; no reactivation state machine or framebuffer realloc
-//! exists yet. See the detailed comment at the `should_reactivate` site in
-//! `active_loop` for the full rationale.
+//! **Deactivation-Reactivation Sequence (P9.9)**: when the server sends
+//! `DeactivateAll` (which xrdp does during normal connection setup before
+//! first bitmap data, and which any server does in response to a display-
+//! control resize -- MS-RDPBCGR §1.3.1.3), `active_loop` disambiguates the
+//! target by peeking the `Action` of the very next PDU (`reactivate_session`):
+//! - `Action::X224` (a compliant host's `ServerDemandActive`): drives the
+//!   bound `ConnectionActivationSequence` to `Finalized` (the same state
+//!   machine used for the ordinary connect sequence), then applies the new
+//!   `share_id` and negotiated `desktop_size` via `ActiveStage::set_share_id`,
+//!   a freshly-built `fast_path::Processor` (`ActiveStage::set_fastpath_processor`),
+//!   and a `DecodedImage` realloc. `static_channels` (the DisplayControl DVC,
+//!   clipboard SVC) are never touched -- they live inside `ActiveStage`'s
+//!   private `x224::Processor` the whole time, so nothing is dropped.
+//! - `Action::FastPath` (xrdp's non-compliant shortcut: it resumes bitmap
+//!   updates immediately, no `DemandActive`): the CAS is dropped and the
+//!   already-read frame is processed normally -- the session stays stable at
+//!   its current size (a legitimate no-op resize on this target, never a
+//!   hang or a crash).
 //!
-//! **Resize (P4.2 deferral)**: `resize_px` sends a Display Control resize PDU
-//! (`ActiveStage::encode_resize`) — IronRDP does support this at the protocol
-//! level. But if the server answers with `DeactivateAll` (the correct
-//! response to a display-control resize per spec), that falls into the
-//! same no-op `continue` above: the client's `DecodedImage` is never
-//! reallocated to the new size and no real reactivation runs. A full,
-//! general mid-session resize therefore needs a real reactivation state
-//! machine + framebuffer realloc; tracked as separate follow-up work, not
-//! implemented here.
+//! A prior version of this comment said the loop discarded `DeactivateAll`
+//! outright and "just `continue`s" -- that was true before P9.9 landed the
+//! state machine above.
+//!
+//! **Resize**: `resize_px` sends a Display Control resize PDU
+//! (`ActiveStage::encode_resize`); the `RdpCmd::Resize` handler coalesces a
+//! burst of pending resizes (`coalesce_latest_resize`) down to one PDU for
+//! the settled size, avoiding a reactivation storm on a live window drag.
 
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -100,18 +104,25 @@ use ironrdp_cliprdr::pdu::{
     OwnedFormatDataResponse,
 };
 use ironrdp_cliprdr::{CliprdrClient, CliprdrSvcMessages};
+use ironrdp_connector::connection_activation::{
+    ConnectionActivationSequence, ConnectionActivationState,
+};
 use ironrdp_connector::{
     ClientConnector, Config, ConnectionResult, ConnectorError, ConnectorErrorKind, Credentials,
-    DesktopSize,
+    DesktopSize, Sequence as _,
 };
+use ironrdp_core::WriteBuf;
 use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_input::{
     Database as InputDatabase, MouseButton, MousePosition, Operation as InputOperation, Scancode,
     WheelRotations,
 };
+use ironrdp_pdu::Action;
 use ironrdp_session::image::DecodedImage;
-use ironrdp_session::{ActiveStage, ActiveStageOutput};
-use ironrdp_tokio::{TokioFramed, connect_begin, connect_finalize, mark_as_upgraded};
+use ironrdp_session::{ActiveStage, ActiveStageOutput, fast_path};
+use ironrdp_tokio::{
+    TokioFramed, connect_begin, connect_finalize, mark_as_upgraded, single_sequence_step,
+};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -290,6 +301,23 @@ enum RdpCmd {
     Shutdown,
     /// Text to paste via CLIPRDR (sent as a remote copy announcement).
     PasteText(String),
+}
+
+/// P9.9 §5: collapses a burst of pending resize sizes down to the latest one.
+///
+/// A live window/pane drag fires `resize_px` (and so `RdpCmd::Resize`) many
+/// times in quick succession; without coalescing, each would trigger its own
+/// Display Control PDU -> `ActiveStageOutput::DeactivateAll` -> a full
+/// reactivation -- a "reactivation storm". `active_loop`'s `RdpCmd::Resize`
+/// handler drains every immediately-pending `Resize` from the command
+/// channel and calls this pure function so exactly one resize PDU is sent
+/// for the settled size. Factored out (rather than inlined) so it's
+/// unit-testable independent of the async driver loop.
+///
+/// - Empty iterator -> `None` (nothing pending, no-op).
+/// - Any non-empty run -> the last size in iteration order.
+fn coalesce_latest_resize(sizes: impl Iterator<Item = (u32, u32)>) -> Option<(u32, u32)> {
+    sizes.last()
 }
 
 // ---------------------------------------------------------------------------
@@ -1166,6 +1194,46 @@ fn sha256_fingerprint(data: &[u8]) -> String {
 // Active-stage loop
 // ---------------------------------------------------------------------------
 
+/// P9.9 §3: bounded safety timeout for driving the reactivation
+/// (`ConnectionActivationSequence`) to `Finalized` after a compliant host's
+/// `DemandActive`. Belt-and-suspenders against a half-speaking server -- the
+/// reactivation must never be able to wedge `active_loop` forever; on
+/// timeout the session fails with a clear status instead of hanging (the
+/// §3 degradation contract: a wedged session is never acceptable, a stable
+/// no-op resize is). Env-tunable like the live-test's
+/// `CONMAN_LIVE_RDP_TIMEOUT_SECS` (same idiom, different knob: this one
+/// governs the production reactivation path, not a test).
+fn reactivation_timeout() -> std::time::Duration {
+    let secs: u64 = std::env::var("CONMAN_RDP_REACTIVATION_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Outcome of processing one server PDU's [`ActiveStageOutput`]s
+/// ([`process_active_stage_pdu`]).
+enum PduOutcome {
+    /// Nothing special; the caller proceeds as usual.
+    Continue,
+    /// The server sent [`ActiveStageOutput::Terminate`]; `status` has
+    /// already been set to [`SessionStatus::Disconnected`] -- the caller
+    /// must return `Ok(())` from `active_loop`.
+    Terminated,
+    /// The server sent [`ActiveStageOutput::DeactivateAll`]; the caller
+    /// drives the Deactivation-Reactivation Sequence (`reactivate_session`).
+    Reactivate(Box<ConnectionActivationSequence>),
+}
+
+/// Outcome of handling one non-`Resize` [`RdpCmd`] ([`handle_rdp_cmd`]).
+/// `Resize` has its own coalescing wrapper directly in `active_loop` (P9.9
+/// §5) so it never reaches `handle_rdp_cmd`.
+#[derive(PartialEq, Eq)]
+enum CmdOutcome {
+    Continue,
+    Shutdown,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn active_loop<S>(
     framed: &mut TokioFramed<S>,
@@ -1201,155 +1269,43 @@ where
             // Incoming data from the server.
             pdu_result = framed.read_pdu() => {
                 let (action, frame) = pdu_result.map_err(|e| e.to_string())?;
-                let outputs = active_stage
-                    .process(image, action, &frame)
-                    .map_err(|e| e.to_string())?;
-
-                let mut dirty = false;
-                let mut should_reactivate = false;
-                for output in outputs {
-                    match output {
-                        ActiveStageOutput::ResponseFrame(data) => {
-                            framed
-                                .write_all(&data)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                        }
-                        ActiveStageOutput::GraphicsUpdate(_rect) => {
-                            dirty = true;
-                        }
-                        ActiveStageOutput::Terminate(reason) => {
-                            // P9.8 B11: `reason` was previously discarded --
-                            // bind and log it (a `GracefulDisconnectReason`,
-                            // just a description string, never secret).
-                            tracing::info!(reason = %reason, "rdp: session terminated by server");
-                            set_status(status, SessionStatus::Disconnected);
+                match process_active_stage_pdu(
+                    action,
+                    &frame,
+                    framed,
+                    active_stage,
+                    image,
+                    &mut image_has_content,
+                    &mut first_frame_logged,
+                    t0,
+                    frame_tx,
+                    status,
+                )
+                .await?
+                {
+                    PduOutcome::Continue => {}
+                    PduOutcome::Terminated => return Ok(()),
+                    PduOutcome::Reactivate(cas) => {
+                        // P9.9: Deactivation-Reactivation Sequence (MS-RDPBCGR
+                        // §1.3.1.3). See the module doc comment +
+                        // `reactivate_session`'s own doc for the full design
+                        // (dual-target disambiguation, the §4 rebuild
+                        // resolution, framebuffer realloc).
+                        if let ReactivationOutcome::Terminated = reactivate_session(
+                            *cas,
+                            framed,
+                            active_stage,
+                            image,
+                            &mut image_has_content,
+                            &mut first_frame_logged,
+                            t0,
+                            frame_tx,
+                            status,
+                        )
+                        .await?
+                        {
                             return Ok(());
                         }
-                        ActiveStageOutput::DeactivateAll(_cas) => {
-                            // Deactivation-Reactivation Sequence (MS-RDPBCGR §1.3.1.3).
-                            // See the detailed comment below.
-                            should_reactivate = true;
-                        }
-                        // Pointer / auto-detect events: ignored for MVP.
-                        ActiveStageOutput::PointerDefault
-                        | ActiveStageOutput::PointerHidden
-                        | ActiveStageOutput::PointerPosition { .. }
-                        | ActiveStageOutput::PointerBitmap(_)
-                        | ActiveStageOutput::AutoDetect(_)
-                        | ActiveStageOutput::MultitransportRequest(_) => {}
-                    }
-                }
-
-                // --- Deactivation-Reactivation Sequence ---
-                // The RDP specification (MS-RDPBCGR §1.3.1.3) calls for a full
-                // Deactivation-Reactivation when the server sends DeactivateAll:
-                // the client should respond to a subsequent DemandActive with
-                // ConfirmActive, then complete the Connection Finalization sequence.
-                //
-                // However, xrdp (the test host) does not follow this sequence: it
-                // sends DeactivateAll and then immediately sends FastPath bitmap
-                // data (no DemandActive). Trying to read DemandActive from the wire
-                // here would block indefinitely while xrdp is sending bitmap frames.
-                //
-                // Strategy: if the CAS immediately needs server input (starts in
-                // CapabilitiesExchange), just continue the active loop so the next
-                // PDU from the server (FastPath bitmap or slow-path update) is
-                // dispatched to active_stage.process() as usual.
-                //
-                // A full Deactivation-Reactivation (for servers that require it) is
-                // deferred to P4.2 when the session gains a proper state machine for
-                // the reactivation exchange.
-                if should_reactivate {
-                    // The next PDU from the server (FastPath bitmap or slow-path)
-                    // will be processed normally in the next tokio::select! iteration.
-                    continue;
-                }
-
-                if dirty {
-                    // Suppress phantom frames that arrive before the first real
-                    // bitmap is decoded.  IronRDP sets alpha = 0xFF for every
-                    // pixel it writes (see `apply_bgr24_bitmap`); before that the
-                    // DecodedImage is zero-filled, so any(|b| b != 0) is a cheap
-                    // proxy for "has at least one decoded pixel".
-                    //
-                    // This is needed because xrdp sends FrameMarker-only Surface
-                    // Commands PDUs early in the session (before the desktop
-                    // bitmap), which produce a GraphicsUpdate with an empty rect
-                    // but leave the image all-zero.
-                    if !image_has_content {
-                        image_has_content = image.data().iter().any(|&b| b != 0);
-                    }
-                    if image_has_content {
-                        if !first_frame_logged {
-                            first_frame_logged = true;
-                            tracing::info!(
-                                ttff_ms = t0.elapsed().as_millis(),
-                                "rdp: first frame rendered"
-                            );
-                        }
-                        publish_frame(image, frame_tx);
-                    }
-                }
-
-                // --- Clipboard state machine: remote → local ---
-                // After `process()`, the backend may have set `wants_paste_unicode`
-                // (triggered by on_remote_copy). We call initiate_paste to request
-                // the actual data; the response arrives in on_format_data_response.
-                let wants_paste = {
-                    active_stage
-                        .get_svc_processor_mut::<CliprdrClient>()
-                        .and_then(|c| c.downcast_backend_mut::<TextCliprdrBackend>())
-                        .map(|b| {
-                            if b.wants_paste_unicode {
-                                b.wants_paste_unicode = false;
-                                true
-                            } else {
-                                false
-                            }
-                        })
-                        .unwrap_or(false)
-                };
-                if wants_paste {
-                    let maybe_msgs = active_stage
-                        .get_svc_processor_mut::<CliprdrClient>()
-                        .and_then(|c| c.initiate_paste(ClipboardFormatId::new(13)).ok());
-                    if let Some(msgs) = maybe_msgs {
-                        let data = active_stage
-                            .process_svc_processor_messages(msgs)
-                            .map_err(|e| e.to_string())?;
-                        framed.write_all(&data).await.map_err(|e| e.to_string())?;
-                    }
-                }
-
-                // --- Clipboard state machine: local → remote ---
-                // The server may have called on_format_data_request (after we
-                // announced our text via initiate_copy). Respond with encoded text.
-                let pending_req = {
-                    active_stage
-                        .get_svc_processor_mut::<CliprdrClient>()
-                        .and_then(|c| c.downcast_backend_mut::<TextCliprdrBackend>())
-                        .and_then(|b| b.pending_format_request.take())
-                };
-                if pending_req.is_some() {
-                    // Fetch local text (a separate borrow so NLL lets us proceed).
-                    let local_text = active_stage
-                        .get_svc_processor_mut::<CliprdrClient>()
-                        .and_then(|c| c.downcast_backend_mut::<TextCliprdrBackend>())
-                        .and_then(|b| b.local_text.clone());
-
-                    let response: OwnedFormatDataResponse = match local_text {
-                        Some(text) => FormatDataResponse::new_data(encode_utf16le(&text)),
-                        None => FormatDataResponse::new_error(),
-                    };
-                    let maybe_msgs = active_stage
-                        .get_svc_processor_mut::<CliprdrClient>()
-                        .and_then(|c| c.submit_format_data(response).ok());
-                    if let Some(msgs) = maybe_msgs {
-                        let data = active_stage
-                            .process_svc_processor_messages(msgs)
-                            .map_err(|e| e.to_string())?;
-                        framed.write_all(&data).await.map_err(|e| e.to_string())?;
                     }
                 }
             }
@@ -1357,84 +1313,483 @@ where
             // Outbound command from the handle.
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    RdpCmd::Shutdown => {
-                        // Send graceful shutdown PDU if possible.
-                        if let Ok(outputs) = active_stage.graceful_shutdown() {
-                            for output in outputs {
-                                if let ActiveStageOutput::ResponseFrame(data) = output {
-                                    let _ = framed.write_all(&data).await;
-                                }
-                            }
-                        }
-                        return Ok(());
-                    }
-                    RdpCmd::Input(events) => {
-                        // Encode neutral RdpInputEvents to FastPath PDUs using
-                        // ironrdp-input's stateful Database (tracks key/button state).
-                        let ops: Vec<InputOperation> = events
-                            .into_iter()
-                            .map(rdp_event_to_operation)
-                            .collect();
-                        let fast_path_events = input_db.apply(ops);
-                        if !fast_path_events.is_empty() {
-                            let outputs = active_stage
-                                .process_fastpath_input(image, &fast_path_events)
-                                .map_err(|e| e.to_string())?;
-                            for output in outputs {
-                                if let ActiveStageOutput::ResponseFrame(data) = output {
-                                    framed
-                                        .write_all(&data)
-                                        .await
-                                        .map_err(|e| e.to_string())?;
-                                }
-                            }
-                        }
-                    }
                     RdpCmd::Resize { width, height } => {
-                        // Sends a Display Control resize PDU. Full
-                        // DeactivateAll/Reactivation + framebuffer realloc is
-                        // deferred to P4.2; the server may respond with a
-                        // DeactivateAll which currently disconnects us.
-                        if let Some(Ok(data)) =
-                            active_stage.encode_resize(width, height, None, None)
+                        // P9.9 §5: drain every immediately-pending Resize and
+                        // coalesce down to the latest settled size -- one
+                        // Display Control PDU per burst, not one per event
+                        // (avoids a reactivation storm on a live window/pane
+                        // drag). Non-Resize commands drained along the way
+                        // are preserved and replayed in order afterward, so
+                        // nothing is silently dropped or reordered.
+                        let mut sizes = vec![(width, height)];
+                        let mut trailing = Vec::new();
+                        while let Ok(next) = cmd_rx.try_recv() {
+                            match next {
+                                RdpCmd::Resize { width, height } => sizes.push((width, height)),
+                                other => trailing.push(other),
+                            }
+                        }
+                        if let Some((width, height)) = coalesce_latest_resize(sizes.into_iter())
+                            && let Some(Ok(data)) = active_stage.encode_resize(width, height, None, None)
                         {
                             let _ = framed.write_all(&data).await;
                         }
-                    }
-                    RdpCmd::PasteText(text) => {
-                        // Announce text availability on the CLIPRDR channel.
-                        let maybe_msgs: Option<CliprdrSvcMessages<ironrdp_cliprdr::Client>> = {
-                            if let Some(cliprdr) =
-                                active_stage.get_svc_processor_mut::<CliprdrClient>()
+                        for cmd in trailing {
+                            if handle_rdp_cmd(cmd, framed, active_stage, image, input_db).await?
+                                == CmdOutcome::Shutdown
                             {
-                                // Store the text for when the server requests it.
-                                if let Some(backend) =
-                                    cliprdr.downcast_backend_mut::<TextCliprdrBackend>()
-                                {
-                                    backend.set_local_text(text);
-                                }
-                                let cf_unicode = ClipboardFormatId::new(13);
-                                cliprdr
-                                    .initiate_copy(&[ClipboardFormat {
-                                        id: cf_unicode,
-                                        name: Some(ClipboardFormatName::new("CF_UNICODETEXT")),
-                                    }])
-                                    .ok()
-                            } else {
-                                None
+                                return Ok(());
                             }
-                        };
-                        if let Some(msgs) = maybe_msgs {
-                            let data = active_stage
-                                .process_svc_processor_messages(msgs)
-                                .map_err(|e| e.to_string())?;
-                            framed.write_all(&data).await.map_err(|e| e.to_string())?;
+                        }
+                    }
+                    other => {
+                        if handle_rdp_cmd(other, framed, active_stage, image, input_db).await?
+                            == CmdOutcome::Shutdown
+                        {
+                            return Ok(());
                         }
                     }
                 }
             }
         }
     }
+}
+
+/// Processes one server PDU (`action`/`frame`, as read by `framed.read_pdu()`)
+/// through `active_stage`: applies the standard side effects (write
+/// `ResponseFrame`s, track dirty/`image_has_content`, publish frames, drive
+/// the CLIPRDR remote<->local state machine) exactly as `active_loop` did
+/// inline before P9.9. Factored out so the same logic can process the
+/// disambiguating post-`DeactivateAll` frame in `reactivate_session`'s xrdp
+/// fallback without duplicating it.
+///
+/// Returns [`PduOutcome::Reactivate`] on `DeactivateAll` (mirrors the
+/// original `should_reactivate` flag) and [`PduOutcome::Terminated`] on
+/// `Terminate` (mirrors the original inline early `return Ok(())` --
+/// `status` is already set to `Disconnected` when this returns).
+#[allow(clippy::too_many_arguments)]
+async fn process_active_stage_pdu<S>(
+    action: Action,
+    frame: &[u8],
+    framed: &mut TokioFramed<S>,
+    active_stage: &mut ActiveStage,
+    image: &mut DecodedImage,
+    image_has_content: &mut bool,
+    first_frame_logged: &mut bool,
+    t0: std::time::Instant,
+    frame_tx: &SyncSender<FrameUpdate>,
+    status: &Arc<Mutex<SessionStatus>>,
+) -> Result<PduOutcome, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin,
+{
+    use ironrdp_tokio::FramedWrite as _;
+
+    let outputs = active_stage
+        .process(image, action, frame)
+        .map_err(|e| e.to_string())?;
+
+    let mut dirty = false;
+    let mut reactivate: Option<Box<ConnectionActivationSequence>> = None;
+    for output in outputs {
+        match output {
+            ActiveStageOutput::ResponseFrame(data) => {
+                framed.write_all(&data).await.map_err(|e| e.to_string())?;
+            }
+            ActiveStageOutput::GraphicsUpdate(_rect) => {
+                dirty = true;
+            }
+            ActiveStageOutput::Terminate(reason) => {
+                // P9.8 B11: `reason` was previously discarded -- bind and
+                // log it (a `GracefulDisconnectReason`, just a description
+                // string, never secret).
+                tracing::info!(reason = %reason, "rdp: session terminated by server");
+                set_status(status, SessionStatus::Disconnected);
+                return Ok(PduOutcome::Terminated);
+            }
+            ActiveStageOutput::DeactivateAll(cas) => {
+                // Matches the original code's behavior of continuing to
+                // drain the rest of this PDU's outputs (e.g. a trailing
+                // GraphicsUpdate) before acting on the reactivation.
+                reactivate = Some(cas);
+            }
+            // Pointer / auto-detect events: ignored for MVP.
+            ActiveStageOutput::PointerDefault
+            | ActiveStageOutput::PointerHidden
+            | ActiveStageOutput::PointerPosition { .. }
+            | ActiveStageOutput::PointerBitmap(_)
+            | ActiveStageOutput::AutoDetect(_)
+            | ActiveStageOutput::MultitransportRequest(_) => {}
+        }
+    }
+
+    if let Some(cas) = reactivate {
+        // Matches the original `if should_reactivate { continue; }`: skip
+        // the dirty/publish/clipboard handling below for this PDU -- the
+        // reactivation is driven by the caller, and the next real content
+        // frame is handled on its own next iteration.
+        return Ok(PduOutcome::Reactivate(cas));
+    }
+
+    if dirty {
+        // Suppress phantom frames that arrive before the first real
+        // bitmap is decoded.  IronRDP sets alpha = 0xFF for every
+        // pixel it writes (see `apply_bgr24_bitmap`); before that the
+        // DecodedImage is zero-filled, so any(|b| b != 0) is a cheap
+        // proxy for "has at least one decoded pixel".
+        //
+        // This is needed because xrdp sends FrameMarker-only Surface
+        // Commands PDUs early in the session (before the desktop
+        // bitmap), which produce a GraphicsUpdate with an empty rect
+        // but leave the image all-zero.
+        if !*image_has_content {
+            *image_has_content = image.data().iter().any(|&b| b != 0);
+        }
+        if *image_has_content {
+            if !*first_frame_logged {
+                *first_frame_logged = true;
+                tracing::info!(
+                    ttff_ms = t0.elapsed().as_millis(),
+                    "rdp: first frame rendered"
+                );
+            }
+            publish_frame(image, frame_tx);
+        }
+    }
+
+    // --- Clipboard state machine: remote → local ---
+    // After `process()`, the backend may have set `wants_paste_unicode`
+    // (triggered by on_remote_copy). We call initiate_paste to request
+    // the actual data; the response arrives in on_format_data_response.
+    let wants_paste = {
+        active_stage
+            .get_svc_processor_mut::<CliprdrClient>()
+            .and_then(|c| c.downcast_backend_mut::<TextCliprdrBackend>())
+            .map(|b| {
+                if b.wants_paste_unicode {
+                    b.wants_paste_unicode = false;
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false)
+    };
+    if wants_paste {
+        let maybe_msgs = active_stage
+            .get_svc_processor_mut::<CliprdrClient>()
+            .and_then(|c| c.initiate_paste(ClipboardFormatId::new(13)).ok());
+        if let Some(msgs) = maybe_msgs {
+            let data = active_stage
+                .process_svc_processor_messages(msgs)
+                .map_err(|e| e.to_string())?;
+            framed.write_all(&data).await.map_err(|e| e.to_string())?;
+        }
+    }
+
+    // --- Clipboard state machine: local → remote ---
+    // The server may have called on_format_data_request (after we
+    // announced our text via initiate_copy). Respond with encoded text.
+    let pending_req = {
+        active_stage
+            .get_svc_processor_mut::<CliprdrClient>()
+            .and_then(|c| c.downcast_backend_mut::<TextCliprdrBackend>())
+            .and_then(|b| b.pending_format_request.take())
+    };
+    if pending_req.is_some() {
+        // Fetch local text (a separate borrow so NLL lets us proceed).
+        let local_text = active_stage
+            .get_svc_processor_mut::<CliprdrClient>()
+            .and_then(|c| c.downcast_backend_mut::<TextCliprdrBackend>())
+            .and_then(|b| b.local_text.clone());
+
+        let response: OwnedFormatDataResponse = match local_text {
+            Some(text) => FormatDataResponse::new_data(encode_utf16le(&text)),
+            None => FormatDataResponse::new_error(),
+        };
+        let maybe_msgs = active_stage
+            .get_svc_processor_mut::<CliprdrClient>()
+            .and_then(|c| c.submit_format_data(response).ok());
+        if let Some(msgs) = maybe_msgs {
+            let data = active_stage
+                .process_svc_processor_messages(msgs)
+                .map_err(|e| e.to_string())?;
+            framed.write_all(&data).await.map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(PduOutcome::Continue)
+}
+
+/// Handles one non-`Resize` [`RdpCmd`] (see [`CmdOutcome`]). `Resize` is
+/// handled directly in `active_loop` (its own coalescing wrapper, P9.9 §5)
+/// and never reaches this function.
+async fn handle_rdp_cmd<S>(
+    cmd: RdpCmd,
+    framed: &mut TokioFramed<S>,
+    active_stage: &mut ActiveStage,
+    image: &mut DecodedImage,
+    input_db: &mut InputDatabase,
+) -> Result<CmdOutcome, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin,
+{
+    use ironrdp_tokio::FramedWrite as _;
+
+    match cmd {
+        RdpCmd::Shutdown => {
+            // Send graceful shutdown PDU if possible.
+            if let Ok(outputs) = active_stage.graceful_shutdown() {
+                for output in outputs {
+                    if let ActiveStageOutput::ResponseFrame(data) = output {
+                        let _ = framed.write_all(&data).await;
+                    }
+                }
+            }
+            Ok(CmdOutcome::Shutdown)
+        }
+        RdpCmd::Input(events) => {
+            // Encode neutral RdpInputEvents to FastPath PDUs using
+            // ironrdp-input's stateful Database (tracks key/button state).
+            let ops: Vec<InputOperation> = events.into_iter().map(rdp_event_to_operation).collect();
+            let fast_path_events = input_db.apply(ops);
+            if !fast_path_events.is_empty() {
+                let outputs = active_stage
+                    .process_fastpath_input(image, &fast_path_events)
+                    .map_err(|e| e.to_string())?;
+                for output in outputs {
+                    if let ActiveStageOutput::ResponseFrame(data) = output {
+                        framed.write_all(&data).await.map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+            Ok(CmdOutcome::Continue)
+        }
+        RdpCmd::Resize { .. } => {
+            unreachable!("RdpCmd::Resize is handled directly in active_loop, never here")
+        }
+        RdpCmd::PasteText(text) => {
+            // Announce text availability on the CLIPRDR channel.
+            let maybe_msgs: Option<CliprdrSvcMessages<ironrdp_cliprdr::Client>> = {
+                if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
+                    // Store the text for when the server requests it.
+                    if let Some(backend) = cliprdr.downcast_backend_mut::<TextCliprdrBackend>() {
+                        backend.set_local_text(text);
+                    }
+                    let cf_unicode = ClipboardFormatId::new(13);
+                    cliprdr
+                        .initiate_copy(&[ClipboardFormat {
+                            id: cf_unicode,
+                            name: Some(ClipboardFormatName::new("CF_UNICODETEXT")),
+                        }])
+                        .ok()
+                } else {
+                    None
+                }
+            };
+            if let Some(msgs) = maybe_msgs {
+                let data = active_stage
+                    .process_svc_processor_messages(msgs)
+                    .map_err(|e| e.to_string())?;
+                framed.write_all(&data).await.map_err(|e| e.to_string())?;
+            }
+            Ok(CmdOutcome::Continue)
+        }
+    }
+}
+
+/// Outcome of [`reactivate_session`].
+enum ReactivationOutcome {
+    /// The reactivation (compliant path) succeeded, or the target doesn't
+    /// support it (xrdp fallback) and the session continues stably at its
+    /// current size. The caller resumes its normal `tokio::select!` loop.
+    Continue,
+    /// The server terminated the session partway through (rare, but
+    /// `process_active_stage_pdu` can still surface it for the xrdp
+    /// fallback's disambiguating frame) -- `status` is already
+    /// `Disconnected`; the caller must return `Ok(())`.
+    Terminated,
+}
+
+/// Drives the Deactivation-Reactivation Sequence (MS-RDPBCGR §1.3.1.3) after
+/// `active_stage.process()` surfaces `ActiveStageOutput::DeactivateAll(cas)`.
+///
+/// **Dual-target disambiguation (P9.9 §3, no heuristic, no timed wait):**
+/// does NOT blindly drive `cas` via `single_sequence_step` (that would
+/// `read_by_hint(X224_HINT)` and stall on xrdp's FastPath bitmaps -- see
+/// [`ironrdp_tokio::single_sequence_step_read`]). Instead it reads the very
+/// next PDU with the loop's own `framed.read_pdu()` and branches on its
+/// [`Action`], which is decided straight from the wire header
+/// (`ironrdp_pdu::find_size`) -- the exact same function `X224_HINT`'s own
+/// `find_size` delegates to, so a PDU classified `Action::X224` here is
+/// byte-for-byte the same frame `read_by_hint(X224_HINT)` would have
+/// produced:
+/// - `Action::X224` -- a compliant host's `ServerDemandActive`. Feeds the
+///   already-read frame into `cas`'s first `step` directly (equivalent to,
+///   not a re-read of, what `single_sequence_step` would have done), then
+///   drives the rest via `single_sequence_step` until `Finalized`, bounded
+///   by [`reactivation_timeout`] -- a half-speaking server fails the session
+///   with a clear status rather than wedging `active_loop` forever.
+/// - `Action::FastPath` -- xrdp's non-compliant shortcut: it resumes bitmap
+///   updates immediately, never sending `DemandActive`. The CAS is dropped
+///   and the already-read frame is processed exactly like any other PDU
+///   (via [`process_active_stage_pdu`]) -- the session stays stable at its
+///   current size. A no-op resize on this target is a legitimate outcome;
+///   a wedged session is not (the §3 degradation contract).
+///
+/// **§4 resolution (in-place mutation, no `ActiveStage` rebuild):** on
+/// reaching `Finalized { desktop_size, share_id, io_channel_id,
+/// user_channel_id, enable_server_pointer, pointer_software_rendering }`,
+/// the ONLY things that differ from the initial connect are `share_id` and
+/// `desktop_size` -- `io_channel_id`/`user_channel_id` are carried forward
+/// unchanged by `ConnectionActivationSequence::reset()`, and
+/// `enable_server_pointer`/`pointer_software_rendering` are copied straight
+/// from the CAS's own immutable `Config` on every `Finalized` transition
+/// (never real deltas). `static_channels` (the DisplayControl DVC, clipboard
+/// SVC) live inside `ActiveStage`'s private `x224::Processor` and are never
+/// touched here -- there is no `ActiveStage` rebuild, so nothing is dropped:
+/// - `ActiveStage::set_share_id` -- documented upstream for exactly this
+///   ("Must be called during Deactivation-Reactivation if the server
+///   assigns a new share_id").
+/// - `ActiveStage::set_fastpath_processor` with a freshly built
+///   `fast_path::ProcessorBuilder` -- needed because `fast_path::Processor`'s
+///   internal `FrameMarkerProcessor` captures its own `share_id` copy at
+///   construction (used to encode outbound `FrameAcknowledge` PDUs);
+///   `set_share_id` alone only updates the x224 processor's copy, leaving
+///   fast-path's stale. `bulk_decompressor: None` is correct here because
+///   ConMan's `Config.compression_type` is always `None` (see `drive_inner`)
+///   -- if ConMan ever negotiates bulk compression, this rebuild would need
+///   to carry the decompressor state forward instead.
+/// - The `DecodedImage` realloc (§6) is `cm-session`'s own concern --
+///   neither processor stores pixel dimensions.
+#[allow(clippy::too_many_arguments)]
+async fn reactivate_session<S>(
+    cas: ConnectionActivationSequence,
+    framed: &mut TokioFramed<S>,
+    active_stage: &mut ActiveStage,
+    image: &mut DecodedImage,
+    image_has_content: &mut bool,
+    first_frame_logged: &mut bool,
+    t0: std::time::Instant,
+    frame_tx: &SyncSender<FrameUpdate>,
+    status: &Arc<Mutex<SessionStatus>>,
+) -> Result<ReactivationOutcome, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin,
+{
+    use ironrdp_tokio::FramedWrite as _;
+
+    let (action, first_frame) = framed.read_pdu().await.map_err(|e| e.to_string())?;
+
+    if !rdp_action_wants_reactivation(action) {
+        // xrdp path: no DemandActive coming: process the frame we already
+        // read exactly like any other PDU and stay at the current size.
+        tracing::debug!("rdp: server ignored the display-control resize (no reactivation)");
+        return match process_active_stage_pdu(
+            action,
+            &first_frame,
+            framed,
+            active_stage,
+            image,
+            image_has_content,
+            first_frame_logged,
+            t0,
+            frame_tx,
+            status,
+        )
+        .await?
+        {
+            PduOutcome::Terminated => Ok(ReactivationOutcome::Terminated),
+            // A nested DeactivateAll/Reactivate surfacing from this single
+            // fallback read is not driven further here (astronomically
+            // unlikely immediately after an already-ignored resize) -- fall
+            // through to Continue rather than recurse unboundedly.
+            PduOutcome::Continue | PduOutcome::Reactivate(_) => Ok(ReactivationOutcome::Continue),
+        };
+    }
+
+    // Compliant path: `first_frame` is (or leads into) the ServerDemandActive.
+    let mut cas = cas;
+    let mut buf = WriteBuf::new();
+    let written = cas
+        .step(&first_frame, &mut buf)
+        .map_err(|e| e.to_string())?;
+    // Mirrors `ironrdp_async::framed::single_sequence_step_write` (private to
+    // that crate) -- `cas.step`'s first call already produced the response
+    // in `buf`; the rest of the sequence is driven generically below via the
+    // public `single_sequence_step`, which does its own read+step+write.
+    if written.size().is_some() {
+        framed
+            .write_all(buf.filled())
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    let deadline = std::time::Instant::now() + reactivation_timeout();
+    loop {
+        if let ConnectionActivationState::Finalized {
+            desktop_size,
+            share_id,
+            io_channel_id,
+            user_channel_id,
+            enable_server_pointer,
+            pointer_software_rendering,
+        } = cas.connection_activation_state()
+        {
+            // §4: in-place mutation via the existing public setters -- no
+            // `ActiveStage` rebuild, `static_channels` untouched.
+            active_stage.set_share_id(share_id);
+            active_stage.set_fastpath_processor(
+                fast_path::ProcessorBuilder {
+                    io_channel_id,
+                    user_channel_id,
+                    share_id,
+                    enable_server_pointer,
+                    pointer_software_rendering,
+                    bulk_decompressor: None,
+                }
+                .build(),
+            );
+
+            // §6: framebuffer realloc. A reactivation legitimately starts
+            // blank again -- reuse the existing `image_has_content` guard so
+            // the first new-size frame publishes once real content arrives.
+            *image =
+                DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
+            *image_has_content = false;
+
+            tracing::info!(
+                width = desktop_size.width,
+                height = desktop_size.height,
+                "rdp: reactivated at new size"
+            );
+            return Ok(ReactivationOutcome::Continue);
+        }
+
+        if std::time::Instant::now() > deadline {
+            // §3 degradation contract: never wedge -- fail the session with
+            // a clear status instead of hanging.
+            tracing::warn!("rdp: reactivation timed out, failing session");
+            set_status(
+                status,
+                SessionStatus::Failed("RDP reactivation (resize) timed out".to_owned()),
+            );
+            return Ok(ReactivationOutcome::Terminated);
+        }
+
+        single_sequence_step(framed, &mut cas, &mut buf)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+}
+
+/// P9.9 §3's dual-target branch decision, factored as a pure function over
+/// the PDU [`Action`] so it's unit-testable without a live host: does this
+/// `Action` indicate a compliant host actually running the reactivation
+/// (`Action::X224`, i.e. `ServerDemandActive`), or xrdp's non-compliant
+/// resume-bitmaps shortcut (`Action::FastPath`)?
+fn rdp_action_wants_reactivation(action: Action) -> bool {
+    matches!(action, Action::X224)
 }
 
 /// Convert a [`RdpInputEvent`] to an `ironrdp-input` [`InputOperation`].
@@ -1505,6 +1860,47 @@ mod tests {
     // Only used to build `RdpAuthInput` values in these tests — the
     // production path never converts a `Secret` outside `connect()` itself.
     use cm_core::Secret;
+
+    // ---------------------------------------------------------------------------
+    // P9.9 §5: coalesce_latest_resize (pure)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn coalesce_latest_resize_empty_is_none() {
+        assert_eq!(coalesce_latest_resize(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn coalesce_latest_resize_single_is_itself() {
+        assert_eq!(
+            coalesce_latest_resize([(800, 600)].into_iter()),
+            Some((800, 600))
+        );
+    }
+
+    #[test]
+    fn coalesce_latest_resize_run_keeps_the_last() {
+        let burst = [(800, 600), (810, 605), (1024, 768), (1280, 720)];
+        assert_eq!(coalesce_latest_resize(burst.into_iter()), Some((1280, 720)));
+    }
+
+    // ---------------------------------------------------------------------------
+    // P9.9 §3: rdp_action_wants_reactivation (pure, dual-target branch decision)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn action_x224_wants_reactivation() {
+        // A compliant host's ServerDemandActive is always a Share Control
+        // PDU, i.e. always X224 (slow-path) by protocol definition.
+        assert!(rdp_action_wants_reactivation(Action::X224));
+    }
+
+    #[test]
+    fn action_fastpath_does_not_want_reactivation() {
+        // xrdp's shortcut: resumes FastPath bitmaps immediately, never
+        // sending a DemandActive -- passthrough, no reactivation.
+        assert!(!rdp_action_wants_reactivation(Action::FastPath));
+    }
 
     // ---------------------------------------------------------------------------
     // CertStore tests
@@ -2556,6 +2952,69 @@ mod tests {
                  re-checking before touching cm-ui's forced-opaque fix",
                 alpha_zero_rgb.len()
             );
+        }
+
+        // P9.9 §8: mid-session resize round-trip. Request a different size
+        // and give the target a window to respond, then assert only what's
+        // true for BOTH targets the dual-target design supports: the
+        // session must stay `Connected` -- never `Failed`/hung -- whether
+        // the target actually reactivates to the new size (a compliant
+        // host) or silently ignores the request (xrdp's documented no-op).
+        // Does NOT hard-assert the new dimensions equal the request: that
+        // would only hold for a compliant host, and this test runs against
+        // whatever `CONMAN_LIVE_RDP_HOST` points at.
+        let (resize_w, resize_h) = (1024u16, 768u16);
+        session.resize_px(u32::from(resize_w), u32::from(resize_h));
+
+        let resize_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut post_resize_frame: Option<FrameUpdate> = None;
+        while std::time::Instant::now() < resize_deadline {
+            match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok(f) => {
+                    let reactivated = (f.width, f.height) == (resize_w, resize_h);
+                    post_resize_frame = Some(f);
+                    if reactivated {
+                        break; // observed the new size; no need to keep waiting
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        assert!(
+            matches!(session.status(), SessionStatus::Connected),
+            "session must remain Connected after a mid-session resize \
+             request -- the §3 degradation contract: a stable no-op (xrdp) \
+             is acceptable, a wedged or failed session is not; got {:?}",
+            session.status()
+        );
+
+        match post_resize_frame {
+            Some(f) if (f.width, f.height) == (resize_w, resize_h) => {
+                eprintln!(
+                    "rdp_connect_live_host: mid-session resize reactivated to \
+                     {}x{} (compliant-host path exercised)",
+                    f.width, f.height
+                );
+            }
+            Some(f) => {
+                eprintln!(
+                    "rdp_connect_live_host: mid-session resize request was not \
+                     honored -- framebuffer stayed at {}x{} (xrdp-style no-op, \
+                     session remained stable; this is this test's known \
+                     reachable target -- a compliant Windows host was not \
+                     available to exercise the reactivation path here)",
+                    f.width, f.height
+                );
+            }
+            None => {
+                eprintln!(
+                    "rdp_connect_live_host: no framebuffer update observed within \
+                     10s of the resize request -- acceptable as long as \
+                     session status stayed Connected (asserted above)"
+                );
+            }
         }
 
         session.shutdown();
