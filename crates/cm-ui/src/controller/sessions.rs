@@ -130,12 +130,16 @@ fn wire_key_input(ctx: &Ctx) {
                     }
                     // Ctrl+Shift+W → close focused pane (detach = false → shutdown).
                     (0, "w" | "W") => {
-                        panes::do_close_pane(&state, &tab_model_kb, &ui, false);
+                        if let Some(pane_id) = panes::focused_pane_id(&state) {
+                            panes::do_close_pane(&state, &tab_model_kb, &ui, pane_id, false);
+                        }
                         return;
                     }
                     // Ctrl+Shift+D → detach session (keep session alive).
                     (0, "d" | "D") => {
-                        panes::do_close_pane(&state, &tab_model_kb, &ui, true);
+                        if let Some(pane_id) = panes::focused_pane_id(&state) {
+                            panes::do_close_pane(&state, &tab_model_kb, &ui, pane_id, true);
+                        }
                         return;
                     }
                     // Ctrl+Shift+C → copy the focused pane's selection (P6.5).

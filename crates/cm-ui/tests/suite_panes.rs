@@ -30,6 +30,7 @@ fn panes_suite() {
     focus_move_updates_active_pane();
     broadcast_toggle_and_target_menu();
     connect_in_split_is_refused_when_agent_mode_lacks_execute_scope();
+    pane_disconnect_closes_the_targeted_pane_and_collapses_the_split();
 }
 
 fn active_tab_pane_count(h: &cm_ui::TestHarness) -> i32 {
@@ -54,6 +55,34 @@ fn split_h_then_v_grows_pane_count() {
     h.ui.invoke_split_pane_v();
     pump_ticks(1);
     assert_eq!(active_tab_pane_count(&h), 3, "V-split must grow to 3 panes");
+}
+
+/// P9.10 #2: the per-pane disconnect affordance's real callback
+/// (`ui.invoke_pane_disconnect(pane_id)` -- the exact `on_pane_disconnect`
+/// `PaneSlot`'s corner icon button fires, see `panes::wire_pane_disconnect`)
+/// closes exactly the targeted pane, not necessarily the FOCUSED one, and
+/// collapses a 2-pane split back to a single surface. The real-pointer
+/// gesture (hovering/clicking the corner icon on real hardware) is .99-verify
+/// territory like Bug A; this proves the callback's own effect, the same
+/// "drive the semantic action directly" pattern every other scenario in this
+/// suite already uses.
+fn pane_disconnect_closes_the_targeted_pane_and_collapses_the_split() {
+    let (h, _repo, _provider) = harness();
+    h.ui.invoke_split_pane_h();
+    pump_ticks(1);
+    assert_eq!(active_tab_pane_count(&h), 2, "seed: a 2-pane split");
+    // `do_split` focuses the NEW pane (id 1) -- disconnect pane 0 instead,
+    // proving this targets an explicit id, not just "whatever is focused".
+    assert_eq!(h.ui.get_active_pane(), 1, "seed: pane 1 is focused, not 0");
+
+    h.ui.invoke_pane_disconnect(0);
+    pump_ticks(1);
+
+    assert_eq!(
+        active_tab_pane_count(&h),
+        1,
+        "disconnecting one pane of a 2-pane split must collapse it back to a single surface"
+    );
 }
 
 /// J6: `Ctrl+Shift+Left/Right` moves focus between panes -- driven here via
