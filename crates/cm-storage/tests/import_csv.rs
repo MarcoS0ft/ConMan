@@ -10,8 +10,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use cm_core::{
-    ConnectionKind, ConnectionRepository, ConnectionSettings, CredentialError, CredentialRef,
-    CredentialSource, CredentialStore, Secret, SshAuthMethod,
+    ConnectionKind, ConnectionRepository, ConnectionSettings, CredentialError, CredentialPurpose,
+    CredentialRef, CredentialSource, CredentialStore, Secret, SshAuthMethod,
+    resolve_connection_auth,
 };
 use cm_storage::SqliteRepository;
 use cm_storage::import::import_from_path;
@@ -164,19 +165,32 @@ fn csv_fixture_round_trips_into_a_real_repo_and_keychain() {
         "the imported key material should round-trip byte-for-byte"
     );
 
-    // ---- Password secret also resolves (per-row credential, no cred_name) -
-    let web_conn_cred_id = match &ssh.credential_source {
-        Some(CredentialSource::Object(id)) => *id,
-        other => panic!("expected an Object credential source, got {other:?}"),
-    };
-    let password_secret = store
-        .get(&CredentialRef::new(
-            web_conn_cred_id,
-            cm_core::CredentialPurpose::Password,
-        ))
-        .expect("keychain lookup")
-        .expect("password secret should be present");
-    assert_eq!(password_secret.expose(), b"dummy-pw-1");
+    // ---- P9.6 decision 5: a no-cred_name password row (web-01-ssh) imports
+    // as Inline, never a synthesized credential object, and resolves
+    // end-to-end via `resolve_connection_auth` exactly like an Object
+    // credential would. --------------------------------------------------
+    assert!(matches!(
+        &ssh.credential_source,
+        Some(CredentialSource::Inline {
+            has_secret: true,
+            ..
+        })
+    ));
+    let auth = resolve_connection_auth(
+        ssh,
+        &repo.list_groups().expect("list groups"),
+        &credentials,
+        &store,
+        CredentialPurpose::Password,
+    )
+    .expect("resolve ssh auth");
+    assert_eq!(auth.username, "deploy");
+    assert_eq!(
+        auth.secret
+            .expect("inline password secret resolved")
+            .expose(),
+        b"dummy-pw-1"
+    );
 
     assert!(outcome.stats.secrets_imported >= 3, "{:?}", outcome.stats);
 }
