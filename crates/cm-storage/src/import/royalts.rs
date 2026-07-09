@@ -375,9 +375,11 @@ fn push_connection(
 ) {
     let _ = node; // reserved: node kept for future field mapping/diagnostics.
     let conn_id = ctx.fresh_conn_id();
-    // RoyalTS always dedupes to a shared credential OBJECT (never Inline/
-    // Prompt) — P9.6-A's Inline/Prompt mapping for importers is a documented
-    // follow-on, not built here; see the P9.6-A report.
+    // RoyalTS always dedupes to a shared credential OBJECT, never Inline —
+    // P9.6 decision 5's Inline mapping only applies to a genuinely per-row/
+    // per-node *unshared* password (mRemoteNG, CSV without cred_name);
+    // RoyalTS's CredentialID is shared-by-reference by construction (see the
+    // module doc's "Credential dedupe" section), so it stays Object here.
     let credential_source = credential.map(CredentialSource::Object);
     match Connection::new(
         conn_id,
