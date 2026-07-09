@@ -788,7 +788,6 @@ pub(super) fn connect_in_split(
                     st.keys_panel.credentials(),
                 )
             };
-            #[cfg(debug_assertions)]
             {
                 let st = state.borrow();
                 sessions::log_ssh_launch_auth(
@@ -867,7 +866,6 @@ pub(super) fn connect_in_split(
                     return;
                 }
             };
-            #[cfg(debug_assertions)]
             {
                 let st = state.borrow();
                 sessions::log_rdp_launch_auth(
