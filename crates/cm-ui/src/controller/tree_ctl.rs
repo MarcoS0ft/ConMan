@@ -20,6 +20,7 @@ use super::*;
 pub(super) fn wire_tree_ctl(ctx: &Ctx) {
     wire_conn_filter_changed(ctx);
     wire_toggle_conn_row(ctx);
+    wire_select_conn_row(ctx);
     wire_new_connection(ctx);
     wire_new_group(ctx);
     wire_edit_conn(ctx);
@@ -56,6 +57,30 @@ fn wire_toggle_conn_row(ctx: &Ctx) {
                 && row.is_group
             {
                 st.conn_tree.toggle_expand(row.id as i64);
+                refresh_conn_model(&st, &conn_model);
+            }
+        }
+    });
+}
+
+/// P9.5 #2: a single click on a leaf connection row selects/highlights it
+/// (`ConnRow.selected`) rather than launching -- launching now needs a
+/// double click (`wire_row_activated`, sessions.rs) or keyboard Enter
+/// (wired directly to `row-activated` at the AppWindow level, unchanged).
+/// Mirrors [`wire_toggle_conn_row`]'s idx -> flat-row -> mutate-tree ->
+/// refresh-model shape; groups are ignored here (their single click still
+/// toggles expand/collapse via `wire_toggle_conn_row`, unaffected).
+fn wire_select_conn_row(ctx: &Ctx) {
+    ctx.ui.on_row_selected({
+        let state = ctx.state.clone();
+        let conn_model = ctx.conn_model.clone();
+        move |idx| {
+            let mut st = state.borrow_mut();
+            let flat = st.conn_tree.flat();
+            if let Some(row) = flat.get(idx as usize)
+                && !row.is_group
+            {
+                st.conn_tree.select_conn(row.id as i64);
                 refresh_conn_model(&st, &conn_model);
             }
         }

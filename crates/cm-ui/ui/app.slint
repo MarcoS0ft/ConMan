@@ -368,7 +368,14 @@ component ConnectionRow inherits Rectangle {
     // P8.1: position within the flattened tree, supplied by the `for` loop.
     in property <int> row-index: 0;
     in property <int> row-count: 0;
-    callback activated();       // open session tab (leaf)
+    // P9.5 #2: single click on a leaf row selects/highlights (`selected`);
+    // double click launches (`activated`). Groups aren't affected -- a
+    // single click still expands/collapses (`toggled`), which was never the
+    // "launches accidentally" complaint. Keyboard Enter and the context
+    // menu's "Connect" still call `activated()` directly (see `touch`
+    // below) -- only the plain mouse click path changes.
+    callback activated();       // open session tab (leaf) -- double-click
+    callback selected();        // select/highlight (leaf) -- single-click
     callback toggled();         // expand / collapse group
     callback edit-clicked();    // open profile / group editor
     callback new-sub();         // new child item under this group
@@ -438,10 +445,19 @@ component ConnectionRow inherits Rectangle {
     }
 
     // Base touch — FIRST interactive child; content layer on top captures first.
+    // P9.5 #2: single click selects a leaf row; double click launches it
+    // (`clicked` fires on every physical click, `double-clicked` fires
+    // additionally on the 2nd/4th/... click of a rapid sequence -- Slint's
+    // own click-count tracking, no hand-rolled timer needed). Groups keep
+    // single-click-to-toggle, unaffected -- that was never the "launches
+    // accidentally" complaint.
     touch := TouchArea {
         clicked => {
             if (data.is-group) { root.toggled(); }
-            else { root.activated(); }
+            else { root.selected(); }
+        }
+        double-clicked => {
+            if (!data.is-group) { root.activated(); }
         }
     }
 
@@ -1048,6 +1064,9 @@ export component AppWindow inherits Window {
     callback open-palette();
     callback quick-connect();
     callback row-activated(int);
+    // P9.5 #2: fired on a single click on a leaf connection row (select,
+    // as opposed to `row-activated`'s double-click launch).
+    callback row-selected(int);
     callback toggle-broadcast();
     callback palette-edited(string);
     callback palette-activated(int);
@@ -1311,6 +1330,7 @@ export component AppWindow inherits Window {
                                     row-count: connections.length;
                                     highlighted: idx == conn-tree-focus.kb-idx;
                                     activated     => { root.row-activated(idx); }
+                                    selected      => { root.row-selected(idx); }
                                     toggled       => { root.toggle-conn-row(idx); }
                                     edit-clicked  => {
                                         if (conn.is-group) { root.edit-group(conn.id); }
