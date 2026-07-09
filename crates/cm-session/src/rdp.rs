@@ -775,7 +775,14 @@ async fn drive(cfg: RdpSettings, auth: RdpAuthInput, ctx: DriveCtx) {
     let status = ctx.status.clone();
     match drive_inner(&cfg, auth, ctx).await {
         Ok(()) => {}
-        Err(e) => set_status(&status, SessionStatus::Failed(e.to_string())),
+        Err(e) => {
+            // P9.8 B12: catch-all so no `RdpError` variant is ever silent --
+            // every failure that reaches here (Connect/Tls/Protocol/Session/
+            // CertRejected/etc.) gets one WARN line before the status flips
+            // to Failed, even though the ErrorOverlay also shows `e`.
+            tracing::warn!(host = %cfg.host, error = %e, "rdp: session loop error");
+            set_status(&status, SessionStatus::Failed(e.to_string()));
+        }
     }
 }
 
@@ -789,10 +796,25 @@ async fn drive_inner(
     //    tokio-rustls; without an explicit `install_default()`, rustls panics.
     install_ring_provider();
 
+    // P9.8 §5.1: connect-start Instant, used for `connect_ms` (B8) and
+    // `ttff_ms` (B9). Threaded into `active_loop` for the latter.
+    let t0 = std::time::Instant::now();
+
+    tracing::info!(
+        host = %cfg.host,
+        port = cfg.port,
+        width = cfg.width,
+        height = cfg.height,
+        "rdp: connecting"
+    );
+
     // 1. TCP connect.
     let tcp = TcpStream::connect((cfg.host.as_str(), cfg.port))
         .await
-        .map_err(|e| RdpError::Connect(e.to_string()))?;
+        .map_err(|e| {
+            tracing::warn!(host = %cfg.host, port = cfg.port, error = %e, "rdp: TCP connect failed");
+            RdpError::Connect(e.to_string())
+        })?;
 
     // 2. Build connector config (TLS security, CredSSP/NLA enabled — P9.1).
     //    Password exposed only here, at the IronRDP boundary, then moved.
@@ -855,14 +877,31 @@ async fn drive_inner(
     let mut framed: TokioFramed<TcpStream> = TokioFramed::new(tcp);
     let should_upgrade = connect_begin(&mut framed, &mut connector)
         .await
-        .map_err(map_negotiation_error)?;
+        .map_err(|e| {
+            // P9.8 B4: `map_negotiation_error` stays a pure, unit-testable
+            // function (no host/port); log the actionable case here at the
+            // IO boundary where those fields are in scope.
+            let mapped = map_negotiation_error(e);
+            if matches!(mapped, RdpError::LegacySecurityOnly) {
+                tracing::warn!(
+                    host = %cfg.host,
+                    port = cfg.port,
+                    "rdp: server offers only legacy Standard RDP Security"
+                );
+            }
+            mapped
+        })?;
 
     // 5. TLS upgrade — ironrdp-tls performs the handshake; CA validation and
     //    TOFU follow in verify_cert.
     let (tcp, leftover) = framed.into_inner();
-    let (tls_stream, tls_cert) = ironrdp_tls::upgrade(tcp, cfg.host.as_str())
-        .await
-        .map_err(|e| RdpError::Tls(e.to_string()))?;
+    let (tls_stream, tls_cert) =
+        ironrdp_tls::upgrade(tcp, cfg.host.as_str())
+            .await
+            .map_err(|e| {
+                tracing::warn!(host = %cfg.host, error = %e, "rdp: TLS upgrade failed");
+                RdpError::Tls(e.to_string())
+            })?;
 
     // 6. Certificate verification: CA store first, then TOFU.
     let server_public_key = verify_cert(
@@ -895,7 +934,18 @@ async fn drive_inner(
     //     check avoids. For a TLS-only server, the state here is
     //     `BasicSettingsExchange...`, so `should_perform_credssp()` is false
     //     and this check is a no-op — the plain-TLS path is unaffected.
-    if credssp_requires_credentials(connector.should_perform_credssp(), auth.password.expose()) {
+    let should_perform_credssp = connector.should_perform_credssp();
+    tracing::info!(
+        host = %cfg.host,
+        credssp = should_perform_credssp,
+        "rdp: security protocol negotiated"
+    );
+    if credssp_requires_credentials(should_perform_credssp, auth.password.expose()) {
+        tracing::warn!(
+            host = %cfg.host,
+            username = %auth.username,
+            "rdp: NLA required but no password supplied"
+        );
         return Err(RdpError::CredentialsRequired);
     }
 
@@ -932,12 +982,33 @@ async fn drive_inner(
         None,
     )
     .await
-    .map_err(map_finalize_error)?;
+    .map_err(|e| {
+        // P9.8 B7: `map_finalize_error` stays pure/testable (no host/username
+        // in scope); log the actionable, operator-facing event here where
+        // they're available. `map_finalize_error` still separately logs the
+        // raw ironrdp error at `debug` for deep diagnosis (P9.5 item 5) --
+        // this ERROR line is the "what happened, to whom" summary.
+        if matches!(e.kind(), ConnectorErrorKind::Credssp(_)) {
+            tracing::error!(
+                host = %cfg.host,
+                username = %auth.username,
+                "rdp: CredSSP/NTLM auth rejected"
+            );
+        }
+        map_finalize_error(e)
+    })?;
 
     let desktop_size = connection_result.desktop_size;
 
     // 8. Enter active stage (connected).
     set_status(&ctx.status, SessionStatus::Connected);
+    tracing::info!(
+        host = %cfg.host,
+        width = desktop_size.width,
+        height = desktop_size.height,
+        connect_ms = t0.elapsed().as_millis(),
+        "rdp: connected (active stage)"
+    );
 
     let mut active_stage = ActiveStage::new(connection_result);
     let mut image = DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
@@ -951,6 +1022,7 @@ async fn drive_inner(
         &mut ctx.cmd_rx,
         &ctx.frame_tx,
         &ctx.status,
+        t0,
     )
     .await
     .map_err(|e| RdpError::Session(e.to_string()))
@@ -1011,18 +1083,31 @@ fn verify_cert(
         host: host.to_owned(),
         port,
         fingerprint: fingerprint.clone(),
-        subject,
-        situation,
+        subject: subject.clone(),
+        situation: situation.clone(),
     };
+
+    tracing::warn!(
+        host,
+        port,
+        situation = ?situation,
+        fingerprint = %fingerprint,
+        subject = %subject,
+        "rdp: certificate not CA-trusted, prompting"
+    );
 
     match verifier.decide(&info) {
         CertDecision::AcceptAndRemember => {
             store.store(host, port, &fingerprint);
+            tracing::info!(host, port, fingerprint = %fingerprint, "rdp: certificate accepted and pinned");
             Ok(public_key)
         }
-        CertDecision::Reject => Err(RdpError::CertRejected(format!(
-            "{host}:{port} cert fingerprint {fingerprint} rejected by verifier"
-        ))),
+        CertDecision::Reject => {
+            tracing::warn!(host, port, fingerprint = %fingerprint, "rdp: certificate rejected by user");
+            Err(RdpError::CertRejected(format!(
+                "{host}:{port} cert fingerprint {fingerprint} rejected by verifier"
+            )))
+        }
     }
 }
 
@@ -1090,6 +1175,9 @@ async fn active_loop<S>(
     cmd_rx: &mut UnboundedReceiver<RdpCmd>,
     frame_tx: &SyncSender<FrameUpdate>,
     status: &Arc<Mutex<SessionStatus>>,
+    // P9.8 §5.1 B9: connect-start Instant (from `drive_inner`), used to log
+    // `ttff_ms` (time-to-first-frame) exactly once below.
+    t0: std::time::Instant,
 ) -> Result<(), String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin,
@@ -1105,6 +1193,8 @@ where
     // FrameMarker-only PDUs (which produce a GraphicsUpdate with an empty
     // rectangle but do not update image pixels).
     let mut image_has_content = false;
+    // P9.8 B9: fire-once guard so `ttff_ms` is logged exactly once.
+    let mut first_frame_logged = false;
 
     loop {
         tokio::select! {
@@ -1128,7 +1218,11 @@ where
                         ActiveStageOutput::GraphicsUpdate(_rect) => {
                             dirty = true;
                         }
-                        ActiveStageOutput::Terminate(_reason) => {
+                        ActiveStageOutput::Terminate(reason) => {
+                            // P9.8 B11: `reason` was previously discarded --
+                            // bind and log it (a `GracefulDisconnectReason`,
+                            // just a description string, never secret).
+                            tracing::info!(reason = %reason, "rdp: session terminated by server");
                             set_status(status, SessionStatus::Disconnected);
                             return Ok(());
                         }
@@ -1187,6 +1281,13 @@ where
                         image_has_content = image.data().iter().any(|&b| b != 0);
                     }
                     if image_has_content {
+                        if !first_frame_logged {
+                            first_frame_logged = true;
+                            tracing::info!(
+                                ttff_ms = t0.elapsed().as_millis(),
+                                "rdp: first frame rendered"
+                            );
+                        }
                         publish_frame(image, frame_tx);
                     }
                 }
