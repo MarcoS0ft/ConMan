@@ -24,7 +24,8 @@ mod support;
 use i_slint_backend_testing::{ElementHandle, ElementRoot};
 
 use support::{
-    find_by_id, find_by_id_opt, find_descendant_by_label, find_singleton, harness, pump_ticks,
+    find_by_id, find_by_id_opt, find_descendant_by_label, find_descendant_by_label_opt,
+    find_singleton, harness, pump_ticks,
 };
 
 #[test]
@@ -36,6 +37,10 @@ fn dialogs_suite() {
     quick_connect_local_manifest();
     profile_editor_new_ssh_default_manifest();
     profile_editor_kind_switch_updates_port_and_manifest();
+    profile_editor_new_connection_username_is_editable_with_no_credential();
+    profile_editor_inline_mode_shows_password_hides_credential_picker();
+    profile_editor_credential_mode_selector_has_no_prompt_option();
+    profile_editor_reference_mode_with_named_credential_is_read_only();
     profile_editor_save_persists_and_cancel_discards();
     dialog_and_button_bounds();
 }
@@ -206,6 +211,132 @@ fn profile_editor_kind_switch_updates_port_and_manifest() {
     find_by_id(&h.ui, "ProfileEditor::profile-rdp-resolution-field");
     find_by_id(&h.ui, "ProfileEditor::profile-host-field");
     find_by_id(&h.ui, "ProfileEditor::profile-username-field");
+}
+
+/// P9.6-A Phase C (P9.5 #7): a brand-new connection has no credential
+/// assigned at all (`cred-mode` defaults to Reference/index-0-"Inherit",
+/// `effective-cred-username` empty) -- the ordinary EDITABLE username field
+/// must be present (it's the actual fallback that gets used), and the
+/// read-only variant must not exist at all yet (behind a real `if`, not just
+/// hidden).
+fn profile_editor_new_connection_username_is_editable_with_no_credential() {
+    let (h, _repo, _provider) = harness();
+    h.ui.invoke_new_connection(0);
+    pump_ticks(1);
+
+    let form = h.ui.get_profile_form();
+    assert_eq!(form.cred_mode, 0, "new connection defaults to Reference");
+    assert_eq!(
+        form.effective_cred_username.as_str(),
+        "",
+        "no credential assigned yet"
+    );
+    find_by_id(&h.ui, "ProfileEditor::profile-username-field");
+    assert!(find_by_id_opt(&h.ui, "ProfileEditor::profile-username-readonly-field").is_none());
+}
+
+/// Switching the mode selector to Inline swaps the credential picker for the
+/// Inline password field; the ordinary editable username field stays (Inline
+/// mode's own typed username is what's actually used).
+fn profile_editor_inline_mode_shows_password_hides_credential_picker() {
+    let (h, _repo, _provider) = harness();
+    h.ui.invoke_new_connection(0);
+    pump_ticks(1);
+
+    let editor = find_singleton(&h.ui, "ProfileEditor");
+    find_descendant_by_label(&editor, "Inline").invoke_accessible_default_action();
+    pump_ticks(1);
+
+    let form = h.ui.get_profile_form();
+    assert_eq!(form.cred_mode, 1, "mode switch to Inline did not take");
+    find_by_id(&h.ui, "ProfileEditor::profile-username-field");
+    find_by_id(&h.ui, "ProfileEditor::profile-inline-password-field");
+    assert!(
+        find_by_id_opt(&h.ui, "ProfileEditor::profile-cred-combo").is_none(),
+        "Inline mode must hide the Reference-mode credential picker"
+    );
+}
+
+/// Per Fable's guidance: "Prompt" must NOT be a selectable mode yet -- there
+/// is no connect-time password-prompt UX to route into, so a Prompt
+/// connection would surface a confusing "no credential assigned" error.
+/// `CredentialSource::Prompt` stays in the model (harmless, unreachable);
+/// this asserts the mode selector itself only ever offers Reference/Inline,
+/// guarding against it being accidentally re-exposed.
+fn profile_editor_credential_mode_selector_has_no_prompt_option() {
+    let (h, _repo, _provider) = harness();
+    h.ui.invoke_new_connection(0);
+    pump_ticks(1);
+
+    let editor = find_singleton(&h.ui, "ProfileEditor");
+    // Reference/Inline still exist and are switchable (exercised end to end
+    // by the other mode-selector tests above); here just confirm Prompt
+    // specifically does NOT exist in the tree at all -- not merely hidden.
+    find_descendant_by_label(&editor, "Reference");
+    find_descendant_by_label(&editor, "Inline");
+    assert!(
+        find_descendant_by_label_opt(&editor, "Prompt").is_none(),
+        "Prompt must not be a selectable mode yet (no connect-time prompt UX exists)"
+    );
+}
+
+/// P9.5 #6/#7: a connection whose Reference credential HAS its own username
+/// shows that username read-only (greyed) instead of the ordinary editable
+/// field -- the credential's username is what's actually used
+/// (`resolve_connection_auth`'s precedence), so editing the connection's own
+/// field here would be misleading.
+fn profile_editor_reference_mode_with_named_credential_is_read_only() {
+    let (h, repo, _provider) = harness();
+
+    // Create a credential with its own username via the real Keys-panel save
+    // path (mirrors how a user would actually do this).
+    h.ui.invoke_new_cred(0);
+    pump_ticks(1);
+    {
+        let mut cred_form = h.ui.get_cred_form();
+        cred_form.name = "Ops Admin".into();
+        cred_form.username = "opsadmin".into();
+        h.ui.set_cred_form(cred_form);
+    }
+    h.ui.invoke_cred_save();
+    pump_ticks(1);
+
+    // New connection, assign that credential (index 1 -- the only one, index
+    // 0 is "Inherit"), save it.
+    h.ui.invoke_new_connection(0);
+    pump_ticks(1);
+    {
+        let mut form = h.ui.get_profile_form();
+        form.name = "Ops Box".into();
+        form.host = "10.0.0.9".into();
+        form.selected_cred_idx = 1;
+        h.ui.set_profile_form(form);
+    }
+    find_by_id(&h.ui, "ProfileEditor::profile-save-btn").invoke_accessible_default_action();
+    pump_ticks(1);
+
+    // Re-open it for edit: `wire_edit_conn` computes `effective-cred-username`
+    // fresh from the reloaded connection (it isn't recomputed reactively as
+    // the dropdown itself changes -- pre-existing behavior, unrelated to this
+    // phase).
+    let saved = repo.list_connections().expect("list_connections");
+    let conn_id = saved
+        .iter()
+        .find(|c| c.name == "Ops Box")
+        .expect("connection was saved")
+        .id
+        .get();
+    h.ui.invoke_edit_conn(conn_id as i32);
+    pump_ticks(1);
+
+    let form = h.ui.get_profile_form();
+    assert_eq!(form.cred_mode, 0, "Reference mode (Object credential)");
+    assert_eq!(form.effective_cred_username.as_str(), "opsadmin");
+    find_by_id(&h.ui, "ProfileEditor::profile-username-readonly-field");
+    assert!(
+        find_by_id_opt(&h.ui, "ProfileEditor::profile-username-field").is_none(),
+        "the editable username field must not exist while the read-only one does"
+    );
 }
 
 /// Save persists the typed fields to the repo and closes the dialog; a

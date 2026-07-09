@@ -277,8 +277,42 @@ fn wire_cred_save(ctx: &Ctx) {
     });
 }
 
+/// P9.5 #6: how many connections directly reference credential `cred_id` as
+/// their `CredentialSource::Object` -- NOT counting connections that only
+/// reach it by inheriting a group's `default_credential` (that's the
+/// "Inheriting:" concept the profile editor already shows separately).
+/// Pure/testable; `refresh_cred_model` is the only caller.
+pub(super) fn credential_usage_counts(
+    connections: &[cm_core::Connection],
+) -> std::collections::HashMap<i64, usize> {
+    let mut counts = std::collections::HashMap::new();
+    for conn in connections {
+        if let Some(id) = super::tree_ctl::object_credential_id(&conn.credential_source) {
+            *counts.entry(id.get()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// The Keys-panel row badge text for a usage count -- `""` hides the badge
+/// entirely (see `CredRow::used-by-label`'s doc comment, app.slint).
+pub(super) fn used_by_label(count: usize) -> String {
+    match count {
+        0 => String::new(),
+        1 => "Used by 1 connection".to_owned(),
+        n => format!("Used by {n} connections"),
+    }
+}
+
 pub(super) fn refresh_cred_model(state: &State, cred_model: &Rc<VecModel<CredRow>>) {
-    let flat = state.keys_panel.flat_filtered(&state.cred_filter);
+    let mut flat = state.keys_panel.flat_filtered(&state.cred_filter);
+    let usage = credential_usage_counts(state.conn_tree.connections());
+    for row in flat.iter_mut() {
+        if !row.is_folder {
+            let count = usage.get(&(row.id as i64)).copied().unwrap_or(0);
+            row.used_by_label = SharedString::from(used_by_label(count).as_str());
+        }
+    }
     while cred_model.row_count() > 0 {
         cred_model.remove(0);
     }
@@ -483,5 +517,66 @@ mod tests {
     fn folder_name_idx_none_returns_zero() {
         let folders = vec![make_folder_sorted(1, 0, "F")];
         assert_eq!(folder_name_idx(None, &folders), 0);
+    }
+
+    // -- credential_usage_counts / used_by_label (P9.5 #6) --------------------
+
+    fn make_conn_with_source(
+        id: i64,
+        source: Option<cm_core::CredentialSource>,
+    ) -> cm_core::Connection {
+        use cm_core::{
+            ConnectionId, ConnectionKind, ConnectionSettings, SshAuthMethod, SshSettings,
+        };
+        cm_core::Connection::new(
+            ConnectionId::new(id),
+            None,
+            "c".to_owned(),
+            ConnectionKind::Ssh,
+            ConnectionSettings::Ssh(SshSettings {
+                host: "h".to_owned(),
+                port: 22,
+                username: String::new(),
+                auth_method: SshAuthMethod::Agent,
+            }),
+            source,
+            0,
+            0,
+            0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn credential_usage_counts_counts_only_direct_object_references() {
+        use cm_core::{CredentialId, CredentialSource};
+        let conns = vec![
+            make_conn_with_source(1, Some(CredentialSource::Object(CredentialId::new(9)))),
+            make_conn_with_source(2, Some(CredentialSource::Object(CredentialId::new(9)))),
+            make_conn_with_source(3, Some(CredentialSource::Object(CredentialId::new(4)))),
+            // Inherited (None) and Inline/Prompt never count toward an
+            // OBJECT's direct usage, however they resolve.
+            make_conn_with_source(5, None),
+            make_conn_with_source(
+                6,
+                Some(CredentialSource::Inline {
+                    username: "u".to_owned(),
+                    domain: None,
+                    has_secret: false,
+                }),
+            ),
+            make_conn_with_source(7, Some(CredentialSource::Prompt)),
+        ];
+        let counts = credential_usage_counts(&conns);
+        assert_eq!(counts.get(&9), Some(&2));
+        assert_eq!(counts.get(&4), Some(&1));
+        assert_eq!(counts.get(&99), None);
+    }
+
+    #[test]
+    fn used_by_label_pluralizes_and_hides_zero() {
+        assert_eq!(used_by_label(0), "");
+        assert_eq!(used_by_label(1), "Used by 1 connection");
+        assert_eq!(used_by_label(3), "Used by 3 connections");
     }
 }

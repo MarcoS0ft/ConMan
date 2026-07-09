@@ -381,6 +381,12 @@ export component FormField {
   in property <string> label;
   in property <string> placeholder;
   in property <bool>   password: false;
+  // P9.6-A Phase C (P9.5 #7): greys out and disables the field -- used by the
+  // connection editor's Username field in Reference/Object mode, where the
+  // username actually used comes from the bound credential, not this
+  // connection. Only wired for the non-password (`LineEdit`) variant; no
+  // caller currently needs a read-only *password* field.
+  in property <bool>   read-only: false;
   in-out property <string> text;
   callback accepted(string);
   callback edited(string);
@@ -426,6 +432,7 @@ export component FormField {
       input-type: InputType.text;
       font-size: Theme.font-base;
       accessible-label: root.label;
+      enabled: !root.read-only;
       accepted(t) => { root.accepted(t); }
       edited(t) => { root.edited(t); }
     }

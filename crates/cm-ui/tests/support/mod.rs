@@ -155,6 +155,20 @@ pub(crate) fn find_descendant_by_label(scope: &ElementHandle, label: &str) -> El
         })
 }
 
+/// Like [`find_descendant_by_label`], but returns `None` rather than
+/// panicking when there is no match -- for asserting a labeled descendant's
+/// *absence* (e.g. "no selectable mode named X exists in this scope").
+pub(crate) fn find_descendant_by_label_opt(
+    scope: &ElementHandle,
+    label: &str,
+) -> Option<ElementHandle> {
+    let label_owned = label.to_string();
+    scope
+        .query_descendants()
+        .match_predicate(move |e| e.accessible_label().as_deref() == Some(label_owned.as_str()))
+        .find_first()
+}
+
 /// The single instance of a component type in the whole window. Panics if
 /// there are zero or more than one -- every dialog root / top-level
 /// singleton this harness looks up (`QuickConnectForm`, `ProfileEditor`,

@@ -22,10 +22,20 @@ import { ComboBox, ScrollView } from "std-widgets.slint";
 // `auth-method`  0 = Public key · 1 = Password · 2 = Agent  (SSH only)
 // `selected-cred-idx`  index into AppWindow.cred-name-list; 0 = "Inherit"
 // `effective-cred-name`  resolved credential name (may come from a group)
+// `effective-cred-username`  that credential's own username, "" if it has none
+//   (P9.5 #6/#7) -- Reference mode only; "" for Inline/Prompt.
 // `effective-inherited`  true when the effective cred comes from a group
 // `selected-group-idx`  index into AppWindow.group-name-list; 0 = "Root (no group)"
 // `rdp-domain` / `rdp-resolution`  RDP-only (kind == 1); mirror QuickConnectForm's
 // fields (screens/dialogs.slint) so a profile-saved RDP connection can set them too.
+// `cred-mode`  0 = Reference (credential object/inherit, today's behavior) ·
+//   1 = Inline (username/password +domain-for-RDP typed on this connection) ·
+//   2 = Prompt (no stored secret -- prompted at connect time)
+// `inline-password`  TRANSIENT -- Rust clears it immediately after profile-save
+//   reads it (secrets hygiene, CONVENTIONS §3); Inline's username/domain reuse
+//   the ordinary `username`/`rdp-domain` fields above instead of separate ones.
+// `inline-has-secret`  whether a keychain entry already exists for this
+//   connection's Inline password (drives the placeholder hint only).
 export struct ConnProfile {
     id: int,
     name: string,
@@ -37,10 +47,14 @@ export struct ConnProfile {
     auth-method: int,
     selected-cred-idx: int,
     effective-cred-name: string,
+    effective-cred-username: string,
     effective-inherited: bool,
     selected-group-idx: int,
     rdp-domain: string,
     rdp-resolution: string,
+    cred-mode: int,
+    inline-password: string,
+    inline-has-secret: bool,
 }
 
 // ── GroupForm ──────────────────────────────────────────────────────────────
@@ -192,10 +206,31 @@ export component ProfileEditor inherits Rectangle {
                 }
 
                 // ── Username (SSH + RDP) ──────────────────────────────
-                if root.form.kind != 2 : profile-username-field := FormField {
-                    label: "Username";
-                    placeholder: "login username";
-                    text <=> root.form.username;
+                // P9.5 #7: read-only/greyed ONLY when Reference mode
+                // resolves to a credential that actually HAS its own
+                // username -- matching `resolve_connection_auth`'s
+                // precedence, that username is what's actually used, so
+                // editing this field would be misleading. Reference-with-no-
+                // username-bearing-credential (the common "just type a
+                // username, no credential object at all" case) and every
+                // Inline/Prompt connection still need the ordinary editable
+                // field: it IS the fallback that gets used. Two separate
+                // `if`-gated instances (not one field with a conditional
+                // `text:`) so each gets a fresh two-way `<=>` alias -- no
+                // stale-binding risk across mode switches.
+                if root.form.kind != 2 : VerticalLayout {
+                    if root.form.cred-mode == 0 && root.form.effective-cred-username != ""
+                    : profile-username-readonly-field := FormField {
+                        label: "Username";
+                        read-only: true;
+                        text: root.form.effective-cred-username;
+                    }
+                    if !(root.form.cred-mode == 0 && root.form.effective-cred-username != "")
+                    : profile-username-field := FormField {
+                        label: "Username";
+                        placeholder: "login username";
+                        text <=> root.form.username;
+                    }
                 }
 
                 // ── Auth method (SSH only) ────────────────────────────
@@ -215,6 +250,12 @@ export component ProfileEditor inherits Rectangle {
                 }
 
                 // ── RDP-only fields (mirror QuickConnectForm) ─────────
+                // Domain has no read-only concern: unlike username, a
+                // credential OBJECT has no domain field at all (Reference
+                // mode always just uses this one), and Inline mode reuses
+                // this SAME field as its own domain (see
+                // `credential_source_from_form`, controller/tree_ctl.rs) --
+                // always editable, in every mode.
                 if root.form.kind == 1 : profile-rdp-domain-field := FormField {
                     label: "Domain";
                     placeholder: "(optional, e.g. CORP)";
@@ -227,6 +268,21 @@ export component ProfileEditor inherits Rectangle {
                 }
 
                 // ── Credential ─────────────────────────────────────────
+                // P9.6-A Phase C: the mode selector -- "Reference" (today's
+                // credential-object picker, unchanged, incl. "Inherit from
+                // group"), "Inline" (username/password +domain-for-RDP typed
+                // directly on this connection, stored in the OS keychain
+                // keyed to the CONNECTION -- never in the DB). Per Fable: NOT
+                // exposing "Prompt" here yet -- there is no connect-time
+                // password-prompt UX to route into (SSH-agent returns early,
+                // kbd-interactive is server-driven, RDP always required a
+                // password), so a selectable Prompt mode would surface a
+                // confusing "no credential assigned" error at connect time.
+                // `CredentialSource::Prompt` stays in the model and
+                // `cred_mode_fields`/`credential_source_from_form` (cm-ui,
+                // controller/tree_ctl.rs) still handle it correctly -- it's
+                // just unreachable from this selector until the connect-time
+                // prompt UX lands as its own P9.6 follow-up.
                 VerticalLayout {
                     spacing: Theme.space-2;
                     Text {
@@ -236,39 +292,76 @@ export component ProfileEditor inherits Rectangle {
                         font-family: Theme.font-family;
                         font-weight: 600;
                     }
-                    profile-cred-combo := ComboBox {
-                        model: root.cred-name-list;
-                        current-index <=> root.form.selected-cred-idx;
-                        accessible-label: "Credential";
+                    SegmentedControl {
+                        options: ["Reference", "Inline"];
+                        selected <=> root.form.cred-mode;
                     }
-                    // Show the effective (possibly inherited) credential.
-                    if root.form.effective-cred-name != "" : HorizontalLayout {
+
+                    if root.form.cred-mode == 0 : VerticalLayout {
                         spacing: Theme.space-2;
-                        padding-top: Theme.space-1;
-                        Text {
-                            text: root.form.effective-inherited ? "Inheriting:" : "Using:";
-                            color: Theme.color-text-disabled;
-                            font-size: Theme.font-sm;
-                            font-family: Theme.font-family;
-                            vertical-alignment: center;
+                        profile-cred-combo := ComboBox {
+                            model: root.cred-name-list;
+                            current-index <=> root.form.selected-cred-idx;
+                            accessible-label: "Credential";
                         }
-                        Text {
-                            text: root.form.effective-cred-name;
-                            color: root.form.effective-inherited
-                                ? Theme.color-accent : Theme.color-text;
-                            font-size: Theme.font-sm;
-                            font-family: Theme.font-family;
-                            font-weight: 500;
-                            vertical-alignment: center;
-                        }
-                        if root.form.effective-inherited : Text {
-                            text: "(from group)";
-                            color: Theme.color-text-disabled;
-                            font-size: Theme.font-sm;
-                            font-family: Theme.font-family;
-                            vertical-alignment: center;
+                        // Show the effective (possibly inherited) credential
+                        // (P9.5 #6: name here; its username is the read-only
+                        // Username field above, when it has one).
+                        if root.form.effective-cred-name != "" : HorizontalLayout {
+                            spacing: Theme.space-2;
+                            padding-top: Theme.space-1;
+                            Text {
+                                text: root.form.effective-inherited ? "Inheriting:" : "Using:";
+                                color: Theme.color-text-disabled;
+                                font-size: Theme.font-sm;
+                                font-family: Theme.font-family;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.form.effective-cred-name;
+                                color: root.form.effective-inherited
+                                    ? Theme.color-accent : Theme.color-text;
+                                font-size: Theme.font-sm;
+                                font-family: Theme.font-family;
+                                font-weight: 500;
+                                vertical-alignment: center;
+                            }
+                            if root.form.effective-inherited : Text {
+                                text: "(from group)";
+                                color: Theme.color-text-disabled;
+                                font-size: Theme.font-sm;
+                                font-family: Theme.font-family;
+                                vertical-alignment: center;
+                            }
                         }
                     }
+
+                    if root.form.cred-mode == 1 : VerticalLayout {
+                        spacing: Theme.space-2;
+                        Text {
+                            text: "Stored on this connection only -- not shared with other connections.";
+                            color: Theme.color-text-disabled;
+                            font-size: Theme.font-xs;
+                            font-family: Theme.font-family;
+                            wrap: word-wrap;
+                        }
+                        // P8.1b no-leak pattern (password: true -- raw
+                        // TextInput internally, see components.slint). TRANSIENT
+                        // -- Rust clears this immediately after profile-save
+                        // reads it (secrets hygiene, CONVENTIONS §3).
+                        profile-inline-password-field := FormField {
+                            label: "Password";
+                            placeholder: root.form.inline-has-secret
+                                ? "•••••••• (unchanged -- leave blank to keep)"
+                                : "••••••••";
+                            password: true;
+                            text <=> root.form.inline-password;
+                        }
+                    }
+
+                    // No cred-mode == 2 (Prompt) branch here -- see the
+                    // section doc comment above; the mode isn't selectable
+                    // from this control yet.
                 }
             }
         }
