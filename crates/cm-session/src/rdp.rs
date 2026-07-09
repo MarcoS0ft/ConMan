@@ -2139,35 +2139,59 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Integration test (real host, gated)
+    // Integration test (real host, gated) -- P9.5 item 8: env-gated, no
+    // hardcoded lab host/credential in tracked source.
     // ---------------------------------------------------------------------------
 
-    /// Real-host integration test: connect to xrdp at 192.0.2.10 (lab-user/dummy-password),
-    /// accept self-signed cert via FixedCertVerifier, assert non-blank framebuffer.
+    /// Opt-in live proof driven entirely by env vars, so no lab-specific
+    /// host/user/password is ever hardcoded in tracked source (this repo
+    /// keeps infra/host details out of tracked files -- P9.5 item 8; mirrors
+    /// the `ssh_publickey_rsa_live_host_requiring_sha2` live test in
+    /// `cm-session/tests/ssh_loopback.rs`). No-ops (does not fail) when the
+    /// env vars are unset, so `cargo test --ignored` elsewhere never fails on
+    /// missing lab access; only meaningful when explicitly pointed at a host:
     ///
-    /// Prerequisites:
-    ///   - Network access to 192.0.2.10:3389.
+    /// ```text
+    /// CONMAN_LIVE_RDP_HOST=<ip-or-hostname> CONMAN_LIVE_RDP_USER=<user> \
+    ///   CONMAN_LIVE_RDP_PASSWORD=<password> \
+    ///   cargo test -p cm-session -- --ignored rdp_connect_live_host --nocapture
+    /// ```
+    ///
+    /// Prerequisites (xrdp target):
+    ///   - Network access to the target host on port 3389.
     ///   - `/etc/xrdp/xrdp.ini` on the server must have `security_layer=negotiate`
     ///     (or `tls`); the default `security_layer=rdp` uses STANDARD_RDP_SECURITY
     ///     which IronRDP does not support.
-    ///
-    /// Run with:
-    ///   cargo test -p cm-session -- --ignored test_rdp_connect_real_host
     #[tokio::test]
-    #[ignore]
-    async fn test_rdp_connect_real_host() {
+    #[ignore = "opt-in: set CONMAN_LIVE_RDP_HOST/_USER/_PASSWORD to run against a real host"]
+    async fn rdp_connect_live_host() {
+        let (host, user, password) = match (
+            std::env::var("CONMAN_LIVE_RDP_HOST"),
+            std::env::var("CONMAN_LIVE_RDP_USER"),
+            std::env::var("CONMAN_LIVE_RDP_PASSWORD"),
+        ) {
+            (Ok(h), Ok(u), Ok(p)) => (h, u, p),
+            _ => {
+                eprintln!(
+                    "rdp_connect_live_host: skipping -- set \
+                     CONMAN_LIVE_RDP_HOST/_USER/_PASSWORD to exercise a live host"
+                );
+                return;
+            }
+        };
+
         let cfg = cm_core::RdpSettings {
-            host: "192.0.2.10".into(),
+            host,
             port: 3389,
             domain: None,
-            username: Some("lab-user".into()),
+            username: Some(user.clone()),
             width: 1280,
             height: 720,
             color_depth: 32,
         };
         let auth = RdpAuthInput {
-            username: "lab-user".into(),
-            password: Secret::from_string("dummy-password".to_owned()),
+            username: user,
+            password: Secret::from_string(password),
             domain: None,
         };
         let verifier = FixedCertVerifier::new(CertDecision::AcceptAndRemember);
