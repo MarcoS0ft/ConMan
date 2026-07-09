@@ -7,6 +7,11 @@ publish.workspace = true
 
 [dependencies]
 cm-core = { path = "../cm-core" }
+# CSV reader for the P9.3 `.csv` importer (memos/P9.3-csv-dep.md) — RFC 4180
+# quoting/escaping (needed for the multi-line PEM in `ssh_private_key_pem`)
+# plus free line-number tracking for accurate "row N" warnings. MIT OR
+# Unlicense.
+csv = "1"
 # rusqlite with bundled SQLite — approved dep (P1.1 spec).
 # "bundled" links the SQLite amalgamation; no system SQLite dependency.
 rusqlite = { version = "0.32", features = ["bundled"] }
