@@ -769,13 +769,26 @@ pub(super) fn connect_in_split(
                     return;
                 }
             };
+            // BUG-cred-username-auth: the settings actually used to
+            // connect/log carry the *effective* username (credential's own
+            // username wins over the inline field when a credential is
+            // assigned) -- see `sessions::effective_ssh_settings`.
+            let effective_settings = {
+                let st = state.borrow();
+                sessions::effective_ssh_settings(
+                    &conn,
+                    st.conn_tree.groups(),
+                    s,
+                    st.keys_panel.credentials(),
+                )
+            };
             #[cfg(debug_assertions)]
             {
                 let st = state.borrow();
                 sessions::log_ssh_launch_auth(
                     &conn,
                     st.conn_tree.groups(),
-                    s,
+                    &effective_settings,
                     st.keys_panel.credentials(),
                 );
             }
@@ -806,7 +819,7 @@ pub(super) fn connect_in_split(
             });
 
             let provider = state.borrow().session_provider.clone();
-            let session = match provider.connect_ssh(s, auth, verifier, size) {
+            let session = match provider.connect_ssh(&effective_settings, auth, verifier, size) {
                 Ok(sess) => sess,
                 Err(e) => {
                     tracing::warn!("connect-in-split SSH connect failed: {e}");
@@ -833,7 +846,13 @@ pub(super) fn connect_in_split(
         cm_core::ConnectionSettings::Rdp(s) => {
             let resolved = {
                 let st = state.borrow();
-                sessions::resolve_rdp_auth(&conn, st.conn_tree.groups(), s, secrets.as_ref())
+                sessions::resolve_rdp_auth(
+                    &conn,
+                    st.conn_tree.groups(),
+                    s,
+                    secrets.as_ref(),
+                    st.keys_panel.credentials(),
+                )
             };
             let auth = match resolved {
                 Ok(a) => a,

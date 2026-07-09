@@ -1208,13 +1208,27 @@ pub(super) fn launch_saved_connection(
             };
             match resolved {
                 Ok(auth) => {
+                    // BUG-cred-username-auth: the settings actually used to
+                    // connect/log/identify carry the *effective* username
+                    // (credential's own username wins over the inline field
+                    // when a credential is assigned) -- see
+                    // `effective_ssh_settings`.
+                    let effective_settings = {
+                        let st = state.borrow();
+                        effective_ssh_settings(
+                            conn,
+                            st.conn_tree.groups(),
+                            s,
+                            st.keys_panel.credentials(),
+                        )
+                    };
                     #[cfg(debug_assertions)]
                     {
                         let st = state.borrow();
                         log_ssh_launch_auth(
                             conn,
                             st.conn_tree.groups(),
-                            s,
+                            &effective_settings,
                             st.keys_panel.credentials(),
                         );
                     }
@@ -1228,7 +1242,7 @@ pub(super) fn launch_saved_connection(
                         state,
                         tab_model,
                         ui,
-                        s.clone(),
+                        effective_settings,
                         auth,
                         AuthProvenance::Credential(conn_id),
                         verifier,
@@ -1249,7 +1263,13 @@ pub(super) fn launch_saved_connection(
         ConnectionSettings::Rdp(s) => {
             let resolved = {
                 let st = state.borrow();
-                resolve_rdp_auth(conn, st.conn_tree.groups(), s, secrets.as_ref())
+                resolve_rdp_auth(
+                    conn,
+                    st.conn_tree.groups(),
+                    s,
+                    secrets.as_ref(),
+                    st.keys_panel.credentials(),
+                )
             };
             match resolved {
                 Ok(auth) => {
@@ -1323,33 +1343,52 @@ enum ReconnectPlan {
 /// secret never lingers in `Tab` state longer than one connect attempt.
 /// Pure and mock-testable (no live `AppWindow`/session needed) -- extracted
 /// from [`wire_reconnect`]'s inline match (P6.12 prep, no behavior change).
+///
+/// BUG-cred-username-auth: also returns the [`SshSettings`] actually used to
+/// reconnect, with `username` re-derived via [`effective_ssh_settings`] --
+/// without this, a reconnect would keep whatever username the tab's cached
+/// `SshConnectInfo` happened to carry rather than re-applying the
+/// credential-wins precedence, and a credentialed reconnect could regress to
+/// an empty/stale username.
 fn resolve_ssh_reconnect(
     ci: &SshConnectInfo,
     connections: &[Connection],
     groups: &[Group],
     secrets: &dyn cm_core::CredentialStore,
-) -> (AuthProvenance, Result<SshAuthInput, AuthResolveError>) {
+    credentials: &[cm_core::Credential],
+) -> (
+    SshSettings,
+    AuthProvenance,
+    Result<SshAuthInput, AuthResolveError>,
+) {
     match &ci.auth_source {
-        SshAuthSource::Direct(a) => (AuthProvenance::Direct, Ok(a.clone())),
+        SshAuthSource::Direct(a) => (ci.settings.clone(), AuthProvenance::Direct, Ok(a.clone())),
         SshAuthSource::Credential(conn_id) => {
-            let result = connections
-                .iter()
-                .find(|c| c.id == *conn_id)
+            let conn = connections.iter().find(|c| c.id == *conn_id);
+            let result = conn
                 .ok_or(AuthResolveError::NoCredentialAssigned)
                 .and_then(|c| resolve_ssh_auth(c, groups, &ci.settings, secrets));
-            (AuthProvenance::Credential(*conn_id), result)
+            let settings = match conn {
+                Some(c) => effective_ssh_settings(c, groups, &ci.settings, credentials),
+                None => ci.settings.clone(),
+            };
+            (settings, AuthProvenance::Credential(*conn_id), result)
         }
     }
 }
 
 /// RDP counterpart to [`resolve_ssh_reconnect`] (P6.12, gap 19) -- same
 /// `Direct`-clones / `Credential`-re-resolves-fresh rule, via
-/// [`resolve_rdp_auth`].
+/// [`resolve_rdp_auth`]. No settings re-derivation needed here (unlike SSH):
+/// [`RdpAuthInput::username`] already carries the effective username, and
+/// [`resolve_rdp_auth`] re-applies [`effective_auth_username`] fresh on every
+/// call since `credentials` is now threaded through.
 fn resolve_rdp_reconnect(
     ci: &RdpConnectInfo,
     connections: &[Connection],
     groups: &[Group],
     secrets: &dyn cm_core::CredentialStore,
+    credentials: &[cm_core::Credential],
 ) -> (AuthProvenance, Result<RdpAuthInput, AuthResolveError>) {
     match &ci.auth_source {
         RdpAuthSource::Direct(a) => (AuthProvenance::Direct, Ok(a.clone())),
@@ -1358,7 +1397,7 @@ fn resolve_rdp_reconnect(
                 .iter()
                 .find(|c| c.id == *conn_id)
                 .ok_or(AuthResolveError::NoCredentialAssigned)
-                .and_then(|c| resolve_rdp_auth(c, groups, &ci.settings, secrets));
+                .and_then(|c| resolve_rdp_auth(c, groups, &ci.settings, secrets, credentials));
             (AuthProvenance::Credential(*conn_id), result)
         }
     }
@@ -1388,13 +1427,14 @@ fn wire_reconnect(ctx: &Ctx) {
                     .and_then(|t| t.connect_info.as_ref())
                     .map(|ci| match ci {
                         ConnectInfo::Ssh(ssh_ci) => {
-                            let (provenance, auth_result) = resolve_ssh_reconnect(
+                            let (settings, provenance, auth_result) = resolve_ssh_reconnect(
                                 ssh_ci,
                                 st.conn_tree.connections(),
                                 st.conn_tree.groups(),
                                 secrets.as_ref(),
+                                st.keys_panel.credentials(),
                             );
-                            ReconnectPlan::Ssh(ssh_ci.settings.clone(), provenance, auth_result)
+                            ReconnectPlan::Ssh(settings, provenance, auth_result)
                         }
                         ConnectInfo::Rdp(rdp_ci) => {
                             let (provenance, auth_result) = resolve_rdp_reconnect(
@@ -1402,6 +1442,7 @@ fn wire_reconnect(ctx: &Ctx) {
                                 st.conn_tree.connections(),
                                 st.conn_tree.groups(),
                                 secrets.as_ref(),
+                                st.keys_panel.credentials(),
                             );
                             ReconnectPlan::Rdp(rdp_ci.settings.clone(), provenance, auth_result)
                         }
@@ -1656,6 +1697,59 @@ fn require_secret(
     fetch_secret(secrets, id, purpose)?.ok_or(AuthResolveError::NotFoundInKeychain)
 }
 
+/// BUG-cred-username-auth: the effective username actually sent to
+/// authenticate a connection. Precedence (see `cm_core::Credential::username`
+/// doc comment):
+///
+/// 1. the resolved credential's own `username` -- when [`resolve_effective_credential`]
+///    (own credential, or inherited from the nearest ancestor group's
+///    default) finds one, AND its `username` is non-empty. The credential
+///    object is the source of truth once assigned: this is what makes a
+///    credentialed RoyalTS-imported connection (which carries no inline
+///    username at all) authenticate with the right user instead of an empty
+///    one.
+/// 2. else `inline_username` -- the connection's own typed username (Quick
+///    Connect with inline creds, an explicit override, or any connection
+///    with no credential assigned).
+/// 3. else empty -- unchanged behavior for callers that require a non-empty
+///    username (surfaces as the existing auth error).
+///
+/// [`resolve_effective_credential`]: cm_core::resolve_effective_credential
+pub(super) fn effective_auth_username(
+    conn: &Connection,
+    groups: &[Group],
+    inline_username: &str,
+    credentials: &[cm_core::Credential],
+) -> String {
+    let cred_username = cm_core::resolve_effective_credential(conn, groups).and_then(|id| {
+        credentials
+            .iter()
+            .find(|c| c.id == id)
+            .and_then(|c| c.username.clone())
+            .filter(|u| !u.is_empty())
+    });
+    cred_username.unwrap_or_else(|| inline_username.to_owned())
+}
+
+/// SSH counterpart-helper: [`SshAuthInput`] carries no username field (unlike
+/// [`RdpAuthInput`]) -- the username actually used to connect lives entirely
+/// on [`SshSettings::username`], which is what [`cm_session`]'s SSH backend
+/// reads directly. This builds the [`SshSettings`] actually used to connect:
+/// identical to `settings` except `username`, which follows
+/// [`effective_auth_username`]'s precedence. Centralizing the override here
+/// means every SSH launch/reconnect path (initial launch, connect-in-split,
+/// reconnect) applies it identically.
+pub(super) fn effective_ssh_settings(
+    conn: &Connection,
+    groups: &[Group],
+    settings: &SshSettings,
+    credentials: &[cm_core::Credential],
+) -> SshSettings {
+    let mut settings = settings.clone();
+    settings.username = effective_auth_username(conn, groups, &settings.username, credentials);
+    settings
+}
+
 /// Resolves the real [`SshAuthInput`] for a tree-launched SSH connection:
 /// [`cm_core::resolve_effective_credential`] (own credential → nearest
 /// ancestor group default), then a keychain fetch keyed by credential id +
@@ -1695,19 +1789,30 @@ pub(super) fn resolve_ssh_auth(
 
 /// Resolves the real [`RdpAuthInput`] for a tree-launched RDP connection:
 /// same credential-resolution chain as [`resolve_ssh_auth`], password-only
-/// (ConMan has no RDP key-based auth). `username`/`domain` come from the
-/// connection's own settings -- the credential holds only the password secret.
+/// (ConMan has no RDP key-based auth). `domain` always comes from the
+/// connection's own settings -- credentials have no domain field
+/// (BUG-cred-username-auth: `username` now follows
+/// [`effective_auth_username`]'s precedence -- the assigned credential's own
+/// username wins over `settings.username` when non-empty, since a
+/// RoyalTS-imported connection carries no inline username at all).
 pub(super) fn resolve_rdp_auth(
     conn: &Connection,
     groups: &[Group],
     settings: &RdpSettings,
     secrets: &dyn cm_core::CredentialStore,
+    credentials: &[cm_core::Credential],
 ) -> Result<RdpAuthInput, AuthResolveError> {
     let cred_id = cm_core::resolve_effective_credential(conn, groups)
         .ok_or(AuthResolveError::NoCredentialAssigned)?;
     let password = require_secret(secrets, cred_id, CredentialPurpose::Password)?;
+    let username = effective_auth_username(
+        conn,
+        groups,
+        settings.username.as_deref().unwrap_or(""),
+        credentials,
+    );
     Ok(RdpAuthInput {
-        username: settings.username.clone().unwrap_or_default(),
+        username,
         password,
         domain: settings.domain.clone(),
     })
@@ -1721,6 +1826,13 @@ pub(super) fn resolve_rdp_auth(
 /// that goes through [`resolve_ssh_auth`]: `launch_saved_connection` (tree
 /// click / `CONMAN_TREE_AUTOLAUNCH` / Launchpad) and `connect_in_split`
 /// (`controller/panes.rs`).
+///
+/// BUG-cred-username-auth: `username` is computed via
+/// [`effective_auth_username`] -- the *effective* username actually sent
+/// (credential's own username when one is assigned and non-empty, else
+/// `settings.username`) -- not `settings.username` directly, so the log is
+/// truthful regardless of whether the caller already applied the same
+/// precedence to the `settings` it passes in.
 ///
 /// ABSOLUTE RULE: never log the password/secret/passphrase/key material --
 /// only the credential's name/id, the resolved username, and connection
@@ -1748,21 +1860,23 @@ pub(super) fn log_ssh_launch_auth(
             None => "none".to_owned(),
         }
     };
+    let username = effective_auth_username(conn, groups, &settings.username, credentials);
     tracing::info!(
         conn = %conn.name,
         kind = "ssh",
         host = %settings.host,
         port = settings.port,
         cred_source = %cred_source,
-        username = %settings.username,
+        username = %username,
         "launching connection"
     );
 }
 
 /// RDP counterpart to [`log_ssh_launch_auth`] -- same rule, plus `domain`
-/// (RDP-specific auth context). `username`/`domain` come from the
-/// connection's own settings, never the credential (see [`resolve_rdp_auth`]
-/// -- the credential holds only the password secret).
+/// (RDP-specific auth context, always from `settings` -- credentials have no
+/// domain field). BUG-cred-username-auth: `username` is likewise the
+/// *effective* username via [`effective_auth_username`], not
+/// `settings.username` directly (see [`resolve_rdp_auth`]).
 #[cfg(debug_assertions)]
 pub(super) fn log_rdp_launch_auth(
     conn: &Connection,
@@ -1780,13 +1894,19 @@ pub(super) fn log_rdp_launch_auth(
         // NoCredentialAssigned before returning Ok(auth) here.
         None => "none".to_owned(),
     };
+    let username = effective_auth_username(
+        conn,
+        groups,
+        settings.username.as_deref().unwrap_or(""),
+        credentials,
+    );
     tracing::info!(
         conn = %conn.name,
         kind = "rdp",
         host = %settings.host,
         port = settings.port,
         cred_source = %cred_source,
-        username = %settings.username.clone().unwrap_or_default(),
+        username = %username,
         domain = %settings.domain.clone().unwrap_or_default(),
         "launching connection"
     );
@@ -2523,7 +2643,10 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::mpsc;
 
-    use cm_core::{ConnectionId, ConnectionKind, CredentialError, CredentialId, GroupId};
+    use cm_core::{
+        ConnectionId, ConnectionKind, Credential, CredentialError, CredentialId, CredentialKind,
+        GroupId,
+    };
 
     #[test]
     fn drain_latest_keeps_only_the_last() {
@@ -2708,6 +2831,44 @@ mod tests {
         .unwrap()
     }
 
+    /// BUG-cred-username-auth test helper: an RDP connection with NO inline
+    /// username -- the shape a RoyalTS import produces, where the username
+    /// lives only on the assigned credential.
+    fn make_rdp_conn_no_inline_username(
+        group_id: Option<i64>,
+        credential: Option<i64>,
+    ) -> Connection {
+        Connection::new(
+            ConnectionId::new(3),
+            group_id.map(GroupId::new),
+            "rdp-conn-imported".to_owned(),
+            ConnectionKind::Rdp,
+            ConnectionSettings::Rdp(RdpSettings {
+                host: "srv-win01".to_owned(),
+                username: None,
+                domain: None,
+                ..RdpSettings::default()
+            }),
+            credential.map(CredentialId::new),
+            0,
+            0,
+            0,
+        )
+        .unwrap()
+    }
+
+    /// BUG-cred-username-auth test helper: a minimal [`Credential`] carrying
+    /// only the fields the username-precedence logic reads.
+    fn make_credential(id: i64, username: Option<&str>) -> Credential {
+        Credential {
+            id: CredentialId::new(id),
+            name: "cred".to_owned(),
+            kind: CredentialKind::Password,
+            folder_id: None,
+            username: username.map(str::to_owned),
+        }
+    }
+
     #[test]
     fn resolve_ssh_auth_password_own_credential() {
         let conn = make_ssh_conn(None, Some(1), SshAuthMethod::Password);
@@ -2872,7 +3033,11 @@ mod tests {
             domain: Some("CORP".to_owned()),
             ..RdpSettings::default()
         };
-        let auth = resolve_rdp_auth(&conn, &[], &settings, &store).expect("should resolve");
+        // Credential #6 isn't in the credentials list here (empty slice) --
+        // exercises the "credential id resolves but the object itself isn't
+        // found" fallback-to-inline path, same as `<deleted>` display
+        // elsewhere.
+        let auth = resolve_rdp_auth(&conn, &[], &settings, &store, &[]).expect("should resolve");
         assert_eq!(auth.username, "admin");
         assert_eq!(auth.domain.as_deref(), Some("CORP"));
         assert_eq!(auth.password.expose(), b"rdppw");
@@ -2892,7 +3057,7 @@ mod tests {
             username: Some("admin".to_owned()),
             ..RdpSettings::default()
         };
-        let auth = resolve_rdp_auth(&conn, &[group], &settings, &store)
+        let auth = resolve_rdp_auth(&conn, &[group], &settings, &store, &[])
             .expect("should resolve via inherited group default");
         assert_eq!(auth.password.expose(), b"grouprdp");
     }
@@ -2902,7 +3067,7 @@ mod tests {
         let conn = make_rdp_conn(None, None);
         let store = MockCredentialStore::new();
         let settings = RdpSettings::default();
-        let err = resolve_rdp_auth(&conn, &[], &settings, &store)
+        let err = resolve_rdp_auth(&conn, &[], &settings, &store, &[])
             .expect_err("should fail: no credential assigned anywhere");
         assert_eq!(err, AuthResolveError::NoCredentialAssigned);
     }
@@ -2912,9 +3077,192 @@ mod tests {
         let conn = make_rdp_conn(None, Some(9));
         let store = MockCredentialStore::new(); // nothing stored for id 9
         let settings = RdpSettings::default();
-        let err = resolve_rdp_auth(&conn, &[], &settings, &store)
+        let err = resolve_rdp_auth(&conn, &[], &settings, &store, &[])
             .expect_err("should fail: keychain has no entry");
         assert_eq!(err, AuthResolveError::NotFoundInKeychain);
+    }
+
+    // -- BUG-cred-username-auth: effective_auth_username / effective_ssh_settings
+    // / resolve_rdp_auth username precedence ---------------------------------
+
+    #[test]
+    fn effective_auth_username_credential_wins_when_assigned_and_non_empty() {
+        let conn = make_rdp_conn(None, Some(6));
+        let creds = vec![make_credential(6, Some("admin-from-cred"))];
+        assert_eq!(
+            effective_auth_username(&conn, &[], "", &creds),
+            "admin-from-cred"
+        );
+    }
+
+    #[test]
+    fn effective_auth_username_falls_back_to_inline_when_credential_username_empty() {
+        let conn = make_rdp_conn(None, Some(6));
+        let creds = vec![make_credential(6, Some(""))];
+        assert_eq!(
+            effective_auth_username(&conn, &[], "inline-user", &creds),
+            "inline-user"
+        );
+    }
+
+    #[test]
+    fn effective_auth_username_falls_back_to_inline_when_credential_username_none() {
+        let conn = make_rdp_conn(None, Some(6));
+        let creds = vec![make_credential(6, None)];
+        assert_eq!(
+            effective_auth_username(&conn, &[], "inline-user", &creds),
+            "inline-user"
+        );
+    }
+
+    #[test]
+    fn effective_auth_username_falls_back_to_inline_when_no_credential_assigned() {
+        let conn = make_rdp_conn(None, None);
+        assert_eq!(
+            effective_auth_username(&conn, &[], "inline-user", &[]),
+            "inline-user"
+        );
+    }
+
+    #[test]
+    fn effective_auth_username_inherits_group_default_credential_username() {
+        let group = make_group(20, None, Some(8));
+        let conn = make_rdp_conn(Some(20), None);
+        let creds = vec![make_credential(8, Some("group-admin"))];
+        assert_eq!(
+            effective_auth_username(&conn, &[group], "inline", &creds),
+            "group-admin"
+        );
+    }
+
+    /// THE regression test for BUG-cred-username-auth (RDP half): a
+    /// credentialed RDP connection with an EMPTY inline `settings.username`
+    /// (exactly the RoyalTS-imported shape -- the username lives on the
+    /// credential object, not inline) plus a credential whose `username` is
+    /// "admin" must resolve `RdpAuthInput.username == "admin"`, not empty.
+    /// **Must FAIL on master**: pre-fix, `resolve_rdp_auth` used
+    /// `settings.username.clone().unwrap_or_default()` verbatim and never
+    /// looked at the credential's `username` at all -- the live bug
+    /// (`username=` blank in the auth log).
+    #[test]
+    fn resolve_rdp_auth_credential_username_wins_over_empty_inline_username() {
+        let conn = make_rdp_conn_no_inline_username(None, Some(6));
+        let store = MockCredentialStore::new().with(
+            CredentialId::new(6),
+            CredentialPurpose::Password,
+            "rdppw",
+        );
+        let credentials = vec![make_credential(6, Some("admin"))];
+        let settings = RdpSettings {
+            host: "10.0.0.2".to_owned(),
+            username: None, // no inline username -- RoyalTS-imported style
+            domain: Some("CORP".to_owned()),
+            ..RdpSettings::default()
+        };
+        let auth =
+            resolve_rdp_auth(&conn, &[], &settings, &store, &credentials).expect("should resolve");
+        assert_eq!(
+            auth.username, "admin",
+            "the assigned credential's username must be used when the inline \
+             username is empty (BUG-cred-username-auth)"
+        );
+        assert_eq!(auth.domain.as_deref(), Some("CORP"), "domain stays inline");
+    }
+
+    /// Non-regression (item c): a connection with an inline username and NO
+    /// credential assigned still uses the inline username unchanged.
+    #[test]
+    fn resolve_rdp_auth_uses_inline_username_when_no_credential_username() {
+        let conn = make_rdp_conn(None, Some(6));
+        let store = MockCredentialStore::new().with(
+            CredentialId::new(6),
+            CredentialPurpose::Password,
+            "rdppw",
+        );
+        // Credential #6 exists but has no username of its own.
+        let credentials = vec![make_credential(6, None)];
+        let settings = RdpSettings {
+            host: "10.0.0.2".to_owned(),
+            username: Some("typed-user".to_owned()),
+            domain: Some("CORP".to_owned()),
+            ..RdpSettings::default()
+        };
+        let auth =
+            resolve_rdp_auth(&conn, &[], &settings, &store, &credentials).expect("should resolve");
+        assert_eq!(auth.username, "typed-user");
+    }
+
+    /// SSH counterpart of [`resolve_ssh_auth`]'s SSH equivalent
+    /// (BUG-cred-username-auth). [`SshAuthInput`] carries no username field
+    /// -- the effective username is applied to [`SshSettings`] via
+    /// [`effective_ssh_settings`], which every SSH launch/reconnect path uses
+    /// before connecting. **Must FAIL on master**: `effective_ssh_settings`
+    /// doesn't exist there and every call site used the connection's inline
+    /// (empty) `settings.username` verbatim.
+    #[test]
+    fn effective_ssh_settings_credential_username_wins_over_empty_inline_username() {
+        let conn = make_ssh_conn(None, Some(1), SshAuthMethod::Password);
+        let credentials = vec![make_credential(1, Some("opsuser"))];
+        let settings = SshSettings {
+            host: "10.0.0.1".to_owned(),
+            port: 22,
+            username: String::new(), // no inline username
+            auth_method: SshAuthMethod::Password,
+        };
+        let effective = effective_ssh_settings(&conn, &[], &settings, &credentials);
+        assert_eq!(
+            effective.username, "opsuser",
+            "the assigned credential's username must be used when the inline \
+             username is empty (BUG-cred-username-auth)"
+        );
+    }
+
+    #[test]
+    fn effective_ssh_settings_uses_inline_username_when_no_credential_assigned() {
+        let conn = make_ssh_conn(None, None, SshAuthMethod::Agent);
+        let settings = ssh_settings(SshAuthMethod::Agent); // inline username "ops"
+        let effective = effective_ssh_settings(&conn, &[], &settings, &[]);
+        assert_eq!(effective.username, "ops");
+    }
+
+    #[test]
+    fn effective_ssh_settings_uses_inline_username_when_credential_username_empty() {
+        let conn = make_ssh_conn(None, Some(1), SshAuthMethod::Password);
+        let credentials = vec![make_credential(1, Some(""))];
+        let settings = ssh_settings(SshAuthMethod::Password); // inline username "ops"
+        let effective = effective_ssh_settings(&conn, &[], &settings, &credentials);
+        assert_eq!(effective.username, "ops");
+    }
+
+    /// Non-regression (item d): key-material auth resolution itself is
+    /// untouched by the username fix -- `resolve_ssh_auth` never looked at
+    /// username before and still doesn't; `effective_ssh_settings` only
+    /// changes the login name that goes alongside whatever auth material was
+    /// resolved (agent, password, or key).
+    #[test]
+    fn resolve_ssh_auth_key_material_unaffected_by_username_fix() {
+        let auth_method = SshAuthMethod::PublicKey {
+            key_ref: CredentialRef::new(CredentialId::new(4), CredentialPurpose::SshKey),
+        };
+        let conn = make_ssh_conn(None, Some(4), auth_method.clone());
+        let store = MockCredentialStore::new().with(
+            CredentialId::new(4),
+            CredentialPurpose::SshKey,
+            "PEM-TEXT",
+        );
+        let settings = ssh_settings(auth_method);
+        let auth =
+            resolve_ssh_auth(&conn, &[], &settings, &store).expect("should resolve key material");
+        match auth {
+            SshAuthInput::KeyMaterial { key_pem, .. } => assert_eq!(key_pem.expose(), b"PEM-TEXT"),
+            other => panic!("expected KeyMaterial, got {other:?}"),
+        }
+        // The login name for a key-auth connection still follows the same
+        // credential-wins precedence -- the credential's username applies to
+        // *which account* the key logs into, independent of the key material.
+        let credentials = vec![make_credential(4, Some("keyuser"))];
+        let effective = effective_ssh_settings(&conn, &[], &settings, &credentials);
+        assert_eq!(effective.username, "keyuser");
     }
 
     // ── P6.12 gap 20: quick-connect kind selector → settings mapping ────────
@@ -3032,8 +3380,12 @@ mod tests {
             ))),
         };
         let store = MockCredentialStore::new();
-        let (provenance, auth) = resolve_ssh_reconnect(&ci, &[], &[], &store);
+        let (settings, provenance, auth) = resolve_ssh_reconnect(&ci, &[], &[], &store, &[]);
         assert!(matches!(provenance, AuthProvenance::Direct));
+        assert_eq!(
+            settings.username, "ops",
+            "Direct settings pass through unchanged"
+        );
         match auth.expect("direct auth always resolves") {
             SshAuthInput::Password(s) => assert_eq!(s.expose(), b"typed-pw"),
             other => panic!("expected Password, got {other:?}"),
@@ -3052,12 +3404,39 @@ mod tests {
             CredentialPurpose::Password,
             "fresh-pw",
         );
-        let (provenance, auth) = resolve_ssh_reconnect(&ci, &[conn], &[], &store);
+        let (_, provenance, auth) = resolve_ssh_reconnect(&ci, &[conn], &[], &store, &[]);
         assert!(matches!(provenance, AuthProvenance::Credential(_)));
         match auth.expect("credential resolves from the mock store") {
             SshAuthInput::Password(s) => assert_eq!(s.expose(), b"fresh-pw"),
             other => panic!("expected Password, got {other:?}"),
         }
+    }
+
+    /// BUG-cred-username-auth: a reconnect must not regress to an empty
+    /// username -- the returned settings re-derive the effective username
+    /// from the *live* connection + credentials list, not whatever the
+    /// tab's stale cached `SshConnectInfo.settings.username` happened to be.
+    #[test]
+    fn resolve_ssh_reconnect_credential_username_wins_over_empty_inline_username() {
+        let conn = make_ssh_conn(None, Some(1), SshAuthMethod::Password);
+        let ci = SshConnectInfo {
+            settings: SshSettings {
+                host: "10.0.0.1".to_owned(),
+                port: 22,
+                username: String::new(), // no inline username
+                auth_method: SshAuthMethod::Password,
+            },
+            auth_source: SshAuthSource::Credential(conn.id),
+        };
+        let store = MockCredentialStore::new().with(
+            CredentialId::new(1),
+            CredentialPurpose::Password,
+            "fresh-pw",
+        );
+        let credentials = vec![make_credential(1, Some("opsuser"))];
+        let (settings, _, auth) = resolve_ssh_reconnect(&ci, &[conn], &[], &store, &credentials);
+        assert_eq!(settings.username, "opsuser");
+        auth.expect("credential resolves from the mock store");
     }
 
     #[test]
@@ -3067,7 +3446,7 @@ mod tests {
             auth_source: SshAuthSource::Credential(ConnectionId::new(404)),
         };
         let store = MockCredentialStore::new();
-        let (_, auth) = resolve_ssh_reconnect(&ci, &[], &[], &store);
+        let (_, _, auth) = resolve_ssh_reconnect(&ci, &[], &[], &store, &[]);
         assert_eq!(
             auth.expect_err("connection no longer exists"),
             AuthResolveError::NoCredentialAssigned
@@ -3085,7 +3464,7 @@ mod tests {
             }),
         };
         let store = MockCredentialStore::new();
-        let (provenance, auth) = resolve_rdp_reconnect(&ci, &[], &[], &store);
+        let (provenance, auth) = resolve_rdp_reconnect(&ci, &[], &[], &store, &[]);
         assert!(matches!(provenance, AuthProvenance::Direct));
         let auth = auth.expect("direct auth always resolves");
         assert_eq!(auth.username, "admin");
@@ -3108,10 +3487,36 @@ mod tests {
             CredentialPurpose::Password,
             "fresh-rdp-pw",
         );
-        let (provenance, auth) = resolve_rdp_reconnect(&ci, &[conn], &[], &store);
+        let (provenance, auth) = resolve_rdp_reconnect(&ci, &[conn], &[], &store, &[]);
         assert!(matches!(provenance, AuthProvenance::Credential(_)));
         let auth = auth.expect("credential resolves from the mock store");
         assert_eq!(auth.password.expose(), b"fresh-rdp-pw");
+    }
+
+    /// BUG-cred-username-auth: RDP reconnect must not regress to an empty
+    /// username either -- `resolve_rdp_auth` re-applies the credential-wins
+    /// precedence fresh on every reconnect since `credentials` is threaded
+    /// all the way through.
+    #[test]
+    fn resolve_rdp_reconnect_credential_username_wins_over_empty_inline_username() {
+        let conn = make_rdp_conn_no_inline_username(None, Some(6));
+        let ci = RdpConnectInfo {
+            settings: RdpSettings {
+                host: "srv-win01".to_owned(),
+                username: None, // no inline username -- RoyalTS-imported style
+                ..RdpSettings::default()
+            },
+            auth_source: RdpAuthSource::Credential(conn.id),
+        };
+        let store = MockCredentialStore::new().with(
+            CredentialId::new(6),
+            CredentialPurpose::Password,
+            "fresh-rdp-pw",
+        );
+        let credentials = vec![make_credential(6, Some("admin"))];
+        let (_, auth) = resolve_rdp_reconnect(&ci, &[conn], &[], &store, &credentials);
+        let auth = auth.expect("credential resolves from the mock store");
+        assert_eq!(auth.username, "admin");
     }
 
     #[test]
@@ -3121,7 +3526,7 @@ mod tests {
             auth_source: RdpAuthSource::Credential(ConnectionId::new(404)),
         };
         let store = MockCredentialStore::new();
-        let (_, auth) = resolve_rdp_reconnect(&ci, &[], &[], &store);
+        let (_, auth) = resolve_rdp_reconnect(&ci, &[], &[], &store, &[]);
         assert_eq!(
             auth.expect_err("connection no longer exists"),
             AuthResolveError::NoCredentialAssigned
