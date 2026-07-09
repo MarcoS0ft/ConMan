@@ -65,15 +65,29 @@
 //! existing entries from a JSON file and saves on every accepted fingerprint.
 //! Call with a path in the app-data directory so TOFU survives restarts.
 //!
-//! **Deactivation-Reactivation Sequence**: when the server sends `DeactivateAll`
-//! (which xrdp does during normal connection setup before first bitmap data),
-//! `active_loop` re-runs the `ConnectionActivationSequence` to completion,
-//! then updates the `ActiveStage` processors. This is required for xrdp to
-//! deliver the first bitmap frame.
+//! **Deactivation-Reactivation Sequence (P9.8 correction)**: when the server
+//! sends `DeactivateAll` (which xrdp does during normal connection setup,
+//! before first bitmap data), `active_loop` does **not** run a real
+//! Deactivation-Reactivation exchange (MS-RDPBCGR §1.3.1.3: wait for
+//! `DemandActive`, reply `ConfirmActive`, redo Connection Finalization) —
+//! it just `continue`s the loop and processes whatever PDU the server sends
+//! next. This happens to work for xrdp, which sends `DeactivateAll` and then
+//! immediately resumes FastPath bitmap data without actually requiring the
+//! client to run the reactivation sequence. A prior version of this comment
+//! claimed the loop "rebuilds processors with the new desktop size" here —
+//! that was never true; no reactivation state machine or framebuffer realloc
+//! exists yet. See the detailed comment at the `should_reactivate` site in
+//! `active_loop` for the full rationale.
 //!
-//! **Resize (P4.2 deferral)**: `resize_px` sends a Display Control resize PDU.
-//! The server may respond with a `DeactivateAll`; the loop handles it correctly
-//! by rebuilding processors with the new desktop size.
+//! **Resize (P4.2 deferral)**: `resize_px` sends a Display Control resize PDU
+//! (`ActiveStage::encode_resize`) — IronRDP does support this at the protocol
+//! level. But if the server answers with `DeactivateAll` (the correct
+//! response to a display-control resize per spec), that falls into the
+//! same no-op `continue` above: the client's `DecodedImage` is never
+//! reallocated to the new size and no real reactivation runs. A full,
+//! general mid-session resize therefore needs a real reactivation state
+//! machine + framebuffer realloc; tracked as separate follow-up work, not
+//! implemented here.
 
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
