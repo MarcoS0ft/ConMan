@@ -165,6 +165,20 @@ pub(crate) fn run_engine_owner<T: Transport>(
                 let snap = engine.snapshot(offset);
                 if !logged_nonempty && snap.cells.iter().any(|c| !c.grapheme.is_empty()) {
                     timing(start, "owner: first NON-EMPTY snapshot");
+                    // P9.8 D4/§5.3: parallel `debug!` (the existing `timing()`
+                    // trace line above is untouched -- this promotes the same
+                    // event to a level an operator can see without full trace
+                    // spam). This loop is shared by local PTY *and* SSH
+                    // sessions (both call `run_engine_owner`), so the message
+                    // says "terminal", not "local" -- ttfr_ms (time to first
+                    // rendered content) is exactly as meaningful for an SSH
+                    // shell as a local one, and this is distinct from the
+                    // SSH driver's own "ssh: shell ready" connect_ms (channel
+                    // opened, before any output has necessarily arrived).
+                    tracing::debug!(
+                        ttfr_ms = start.elapsed().as_secs_f64() * 1000.0,
+                        "terminal: shell ready"
+                    );
                     logged_nonempty = true;
                 }
                 if snapshot_tx.send(snap).is_err() {

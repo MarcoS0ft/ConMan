@@ -82,6 +82,10 @@ pub struct LocalTerminalSession {
     owner_handle: Mutex<Option<JoinHandle<()>>>,
     reader_handle: Mutex<Option<JoinHandle<()>>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
+    /// P9.8 D5 fire-once guard: `status()` is polled repeatedly (every UI
+    /// tick) once the shell exits, but the "shell exited" line must log
+    /// exactly once, not on every poll.
+    exit_logged: std::sync::atomic::AtomicBool,
 }
 
 impl LocalTerminalSession {
@@ -92,27 +96,38 @@ impl LocalTerminalSession {
     /// Returns a [`SessionError`] if the PTY cannot be opened, the shell cannot
     /// be spawned, a thread cannot start, or the engine fails to initialize.
     pub fn spawn(cfg: &LocalSettings, size: TerminalSize) -> Result<Self, SessionError> {
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(to_pty_size(size))
-            .map_err(|e| SessionError::OpenPty(e.to_string()))?;
+        // P9.8 D1: shell path/argv0 only -- never cfg.env (may carry secrets
+        // via an inherited/overridden variable) or cfg.args (may carry a
+        // password on the command line for some tools).
+        tracing::info!(
+            program = cfg.program.as_deref().unwrap_or("<default shell>"),
+            cols = size.cols,
+            rows = size.rows,
+            "local: spawning shell"
+        );
 
-        let mut child = pair
-            .slave
-            .spawn_command(build_command(cfg))
-            .map_err(|e| SessionError::Spawn(e.to_string()))?;
+        let pty_system = native_pty_system();
+        let pair = pty_system.openpty(to_pty_size(size)).map_err(|e| {
+            tracing::warn!(error = %e, "local: pty open failed");
+            SessionError::OpenPty(e.to_string())
+        })?;
+
+        let mut child = pair.slave.spawn_command(build_command(cfg)).map_err(|e| {
+            tracing::warn!(error = %e, "local: shell spawn failed");
+            SessionError::Spawn(e.to_string())
+        })?;
         // Drop our slave handle so the child is the sole slave owner; the master
         // then sees EOF when the child exits.
         drop(pair.slave);
 
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| SessionError::OpenPty(e.to_string()))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| SessionError::OpenPty(e.to_string()))?;
+        let reader = pair.master.try_clone_reader().map_err(|e| {
+            tracing::warn!(error = %e, "local: pty open failed");
+            SessionError::OpenPty(e.to_string())
+        })?;
+        let writer = pair.master.take_writer().map_err(|e| {
+            tracing::warn!(error = %e, "local: pty open failed");
+            SessionError::OpenPty(e.to_string())
+        })?;
         let transport = PtyTransport {
             writer,
             master: pair.master,
@@ -146,6 +161,7 @@ impl LocalTerminalSession {
                 owner_handle: Mutex::new(Some(owner_handle)),
                 reader_handle: Mutex::new(Some(reader_handle)),
                 child: Mutex::new(child),
+                exit_logged: std::sync::atomic::AtomicBool::new(false),
             }),
             Ok(Err(engine_err)) => {
                 let _ = child.kill();
@@ -208,7 +224,21 @@ impl TerminalSession for LocalTerminalSession {
 
     fn status(&self) -> SessionStatus {
         match self.exit_status() {
-            Some(status) => SessionStatus::Exited(status),
+            Some(status) => {
+                // P9.8 D5: log exactly once (status() is polled every UI
+                // tick while the exited tab stays open).
+                if !self
+                    .exit_logged
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    tracing::info!(
+                        code = status.code,
+                        success = status.success,
+                        "local: shell exited"
+                    );
+                }
+                SessionStatus::Exited(status)
+            }
             None => SessionStatus::Connected,
         }
     }

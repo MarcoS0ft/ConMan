@@ -178,17 +178,30 @@ impl KnownHosts {
         verifier: &dyn HostKeyVerifier,
         situation: HostKeySituation,
     ) -> bool {
+        let algorithm = key.algorithm().as_str().to_owned();
+        let fp = fingerprint(key);
         let info = HostKeyInfo {
             host: host.to_owned(),
             port,
-            algorithm: key.algorithm().as_str().to_owned(),
-            fingerprint: fingerprint(key),
-            situation,
+            algorithm: algorithm.clone(),
+            fingerprint: fp.clone(),
+            situation: situation.clone(),
         };
+
+        tracing::warn!(
+            host,
+            port,
+            algorithm = %algorithm,
+            fingerprint = %fp,
+            situation = ?situation,
+            "ssh: host key unknown/mismatch, prompting"
+        );
+
         match verifier.decide(&info) {
             HostKeyDecision::Accept => {
                 // Store/replace in ConMan's store only — never the user file.
                 let _ = learn_known_hosts_path(host, port, key, &self.conman_path);
+                tracing::info!(host, port, algorithm = %algorithm, fingerprint = %fp, "ssh: host key accepted and stored");
                 true
             }
             HostKeyDecision::Reject => false,
@@ -373,6 +386,7 @@ impl SshTerminalSession {
                     &driver_control,
                     out_rx,
                     &driver_status,
+                    start,
                 ));
             })
             .map_err(SshError::Thread)?;
@@ -523,6 +537,7 @@ async fn drive(
     control_tx: &Sender<Msg>,
     mut out_rx: UnboundedReceiver<Outbound>,
     status: &Arc<Mutex<SessionStatus>>,
+    start: Instant,
 ) {
     match drive_inner(
         &cfg,
@@ -533,11 +548,18 @@ async fn drive(
         control_tx,
         &mut out_rx,
         status,
+        start,
     )
     .await
     {
         Ok(()) => {}
-        Err(e) => set_status(status, SessionStatus::Failed(e.to_string())),
+        Err(e) => {
+            // P9.8 C16: catch-all so no SshError variant is ever silent --
+            // every failure that reaches here gets one WARN line before the
+            // status flips to Failed.
+            tracing::warn!(host = %cfg.host, error = %e, "ssh: session failed");
+            set_status(status, SessionStatus::Failed(e.to_string()));
+        }
     }
 }
 
@@ -551,7 +573,15 @@ async fn drive_inner(
     control_tx: &Sender<Msg>,
     out_rx: &mut UnboundedReceiver<Outbound>,
     status: &Arc<Mutex<SessionStatus>>,
+    start: Instant,
 ) -> Result<(), SshError> {
+    tracing::info!(
+        host = %cfg.host,
+        port = cfg.port,
+        username = %cfg.username,
+        "ssh: connecting"
+    );
+
     let config = Arc::new(russh::client::Config::default());
     let rejected = Arc::new(Mutex::new(None::<String>));
     let handler = ClientHandler {
@@ -562,20 +592,23 @@ async fn drive_inner(
         rejected: Arc::clone(&rejected),
     };
 
-    let mut handle =
-        match russh::client::connect(config, (cfg.host.as_str(), cfg.port), handler).await {
-            Ok(h) => h,
-            Err(e) => {
-                let reason = rejected
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take();
-                if let Some(reason) = reason {
-                    return Err(SshError::HostKey(reason));
-                }
-                return Err(SshError::Connect(e.to_string()));
+    let mut handle = match russh::client::connect(config, (cfg.host.as_str(), cfg.port), handler)
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            let reason = rejected
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(reason) = reason {
+                tracing::warn!(host = %cfg.host, port = cfg.port, reason = %reason, "ssh: host key rejected");
+                return Err(SshError::HostKey(reason));
             }
-        };
+            tracing::warn!(host = %cfg.host, port = cfg.port, error = %e, "ssh: TCP/handshake connect failed");
+            return Err(SshError::Connect(e.to_string()));
+        }
+    };
 
     // fix-connect-credential-logging: debug-build-only diagnostic for the
     // effective username actually handed to SSH auth. NEVER the
@@ -589,13 +622,14 @@ async fn drive_inner(
     );
 
     if !authenticate(&mut handle, &cfg.username, auth).await? {
+        tracing::warn!(username = %cfg.username, host = %cfg.host, "ssh: all auth methods rejected");
         return Err(SshError::Auth("all methods rejected".to_owned()));
     }
 
-    let channel = handle
-        .channel_open_session()
-        .await
-        .map_err(|e| SshError::Channel(e.to_string()))?;
+    let channel = handle.channel_open_session().await.map_err(|e| {
+        tracing::warn!(host = %cfg.host, error = %e, "ssh: channel/PTY/shell request failed");
+        SshError::Channel(e.to_string())
+    })?;
     channel
         .request_pty(
             false,
@@ -607,15 +641,24 @@ async fn drive_inner(
             &[],
         )
         .await
-        .map_err(|e| SshError::Channel(e.to_string()))?;
-    channel
-        .request_shell(false)
-        .await
-        .map_err(|e| SshError::Channel(e.to_string()))?;
+        .map_err(|e| {
+            tracing::warn!(host = %cfg.host, error = %e, "ssh: channel/PTY/shell request failed");
+            SshError::Channel(e.to_string())
+        })?;
+    channel.request_shell(false).await.map_err(|e| {
+        tracing::warn!(host = %cfg.host, error = %e, "ssh: channel/PTY/shell request failed");
+        SshError::Channel(e.to_string())
+    })?;
 
     set_status(status, SessionStatus::Connected);
+    tracing::info!(
+        host = %cfg.host,
+        username = %cfg.username,
+        connect_ms = start.elapsed().as_millis(),
+        "ssh: shell ready"
+    );
 
-    pump(channel, control_tx, out_rx, status).await;
+    pump(channel, control_tx, out_rx, status, &cfg.host).await;
     Ok(())
 }
 
@@ -679,6 +722,19 @@ async fn authenticate(
     user: &str,
     auth: SshAuthInput,
 ) -> Result<bool, SshError> {
+    // P9.8 C6: which method is attempted, not any secret material.
+    #[cfg(debug_assertions)]
+    {
+        let method = match &auth {
+            SshAuthInput::Password(_) => "password",
+            SshAuthInput::Key { .. } => "key",
+            SshAuthInput::KeyMaterial { .. } => "key-material",
+            SshAuthInput::Agent => "agent",
+            SshAuthInput::KeyboardInteractive { .. } => "kbd-interactive",
+        };
+        tracing::debug!(username = %user, method, "ssh: auth method attempt");
+    }
+
     match auth {
         SshAuthInput::Password(secret) => {
             let password = String::from_utf8_lossy(secret.expose()).into_owned();
@@ -692,8 +748,12 @@ async fn authenticate(
             let pass = passphrase
                 .as_ref()
                 .map(|s| String::from_utf8_lossy(s.expose()).into_owned());
-            let key = load_secret_key(&path, pass.as_deref())
-                .map_err(|e| SshError::Key(e.to_string()))?;
+            let key = load_secret_key(&path, pass.as_deref()).map_err(|e| {
+                // P9.8 C9: path is a filesystem location, not secret material
+                // -- fine to log. The key bytes/passphrase never are.
+                tracing::warn!(path = %path.display(), error = %e, "ssh: key load failed");
+                SshError::Key(e.to_string())
+            })?;
             authenticate_publickey_negotiated(handle, user, Arc::new(key)).await
         }
         // P6.4: a stored credential's key material, fetched from the keychain
@@ -706,8 +766,11 @@ async fn authenticate(
             let pass = passphrase
                 .as_ref()
                 .map(|s| String::from_utf8_lossy(s.expose()).into_owned());
-            let key = decode_secret_key(&pem, pass.as_deref())
-                .map_err(|e| SshError::Key(e.to_string()))?;
+            let key = decode_secret_key(&pem, pass.as_deref()).map_err(|e| {
+                // P9.8 C9: no path (there is none) and NEVER the PEM text.
+                tracing::warn!(error = %e, "ssh: key load failed");
+                SshError::Key(e.to_string())
+            })?;
             authenticate_publickey_negotiated(handle, user, Arc::new(key)).await
         }
         // ssh-agent: Unix reaches it via the domain socket in `SSH_AUTH_SOCK`;
@@ -718,7 +781,10 @@ async fn authenticate(
         SshAuthInput::Agent => {
             let mut agent = russh::keys::agent::client::AgentClient::connect_env()
                 .await
-                .map_err(|e| SshError::Auth(format!("agent: {e}")))?;
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "ssh: agent unavailable");
+                    SshError::Auth(format!("agent: {e}"))
+                })?;
             try_agent_identities(handle, user, &mut agent).await
         }
         #[cfg(windows)]
@@ -727,7 +793,10 @@ async fn authenticate(
                 WINDOWS_OPENSSH_AGENT_PIPE,
             )
             .await
-            .map_err(|e| SshError::Auth(format!("agent: {e}")))?;
+            .map_err(|e| {
+                tracing::warn!(error = %e, "ssh: agent unavailable");
+                SshError::Auth(format!("agent: {e}"))
+            })?;
             try_agent_identities(handle, user, &mut agent).await
         }
         #[cfg(not(any(unix, windows)))]
@@ -807,7 +876,7 @@ async fn keyboard_interactive_auth(
         .await
         .map_err(|e| SshError::Auth(format!("keyboard-interactive: {e}")))?;
 
-    for _ in 0..MAX_KBD_INTERACTIVE_ROUNDS {
+    for round in 0..MAX_KBD_INTERACTIVE_ROUNDS {
         match response {
             Resp::Success => return Ok(true),
             Resp::Failure { .. } => return Ok(false),
@@ -827,6 +896,14 @@ async fn keyboard_interactive_auth(
                         })
                         .collect(),
                 };
+                // P9.8 C10: round/prompt-count/name only -- NEVER the prompt
+                // text or the user's answers.
+                tracing::debug!(
+                    round,
+                    prompt_count = challenge.prompts.len(),
+                    name = %challenge.name,
+                    "ssh: kbd-interactive round"
+                );
                 let Some(answers) = handler.respond(&challenge) else {
                     // The user aborted the prompt: fail this auth method
                     // cleanly rather than sending a bogus response.
@@ -843,6 +920,10 @@ async fn keyboard_interactive_auth(
             }
         }
     }
+    tracing::warn!(
+        max = MAX_KBD_INTERACTIVE_ROUNDS,
+        "ssh: kbd-interactive exceeded max rounds"
+    );
     Err(SshError::Auth(
         "keyboard-interactive: too many challenge rounds".to_owned(),
     ))
@@ -854,6 +935,7 @@ async fn pump(
     control_tx: &Sender<Msg>,
     out_rx: &mut UnboundedReceiver<Outbound>,
     status: &Arc<Mutex<SessionStatus>>,
+    host: &str,
 ) {
     let mut exit_code: Option<u32> = None;
     loop {
@@ -886,6 +968,12 @@ async fn pump(
             },
         }
     }
+
+    // P9.8 C15: a clean session end (server sent ExitStatus, or the channel
+    // just closed) previously logged nothing at all -- only C16's catch-all
+    // covers failures. `exit_code` is `?`-debug-formatted since it's an
+    // `Option<u32>`, not secret.
+    tracing::info!(host, exit_code = ?exit_code, "ssh: session ended");
 
     let final_status = match exit_code {
         Some(code) => SessionStatus::Exited(ExitStatus {

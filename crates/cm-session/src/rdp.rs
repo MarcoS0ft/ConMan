@@ -65,15 +65,29 @@
 //! existing entries from a JSON file and saves on every accepted fingerprint.
 //! Call with a path in the app-data directory so TOFU survives restarts.
 //!
-//! **Deactivation-Reactivation Sequence**: when the server sends `DeactivateAll`
-//! (which xrdp does during normal connection setup before first bitmap data),
-//! `active_loop` re-runs the `ConnectionActivationSequence` to completion,
-//! then updates the `ActiveStage` processors. This is required for xrdp to
-//! deliver the first bitmap frame.
+//! **Deactivation-Reactivation Sequence (P9.8 correction)**: when the server
+//! sends `DeactivateAll` (which xrdp does during normal connection setup,
+//! before first bitmap data), `active_loop` does **not** run a real
+//! Deactivation-Reactivation exchange (MS-RDPBCGR §1.3.1.3: wait for
+//! `DemandActive`, reply `ConfirmActive`, redo Connection Finalization) —
+//! it just `continue`s the loop and processes whatever PDU the server sends
+//! next. This happens to work for xrdp, which sends `DeactivateAll` and then
+//! immediately resumes FastPath bitmap data without actually requiring the
+//! client to run the reactivation sequence. A prior version of this comment
+//! claimed the loop "rebuilds processors with the new desktop size" here —
+//! that was never true; no reactivation state machine or framebuffer realloc
+//! exists yet. See the detailed comment at the `should_reactivate` site in
+//! `active_loop` for the full rationale.
 //!
-//! **Resize (P4.2 deferral)**: `resize_px` sends a Display Control resize PDU.
-//! The server may respond with a `DeactivateAll`; the loop handles it correctly
-//! by rebuilding processors with the new desktop size.
+//! **Resize (P4.2 deferral)**: `resize_px` sends a Display Control resize PDU
+//! (`ActiveStage::encode_resize`) — IronRDP does support this at the protocol
+//! level. But if the server answers with `DeactivateAll` (the correct
+//! response to a display-control resize per spec), that falls into the
+//! same no-op `continue` above: the client's `DecodedImage` is never
+//! reallocated to the new size and no real reactivation runs. A full,
+//! general mid-session resize therefore needs a real reactivation state
+//! machine + framebuffer realloc; tracked as separate follow-up work, not
+//! implemented here.
 
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -466,7 +480,14 @@ pub enum RdpError {
     CredentialsRequired,
     #[error("Certificate rejected: {0}")]
     CertRejected(String),
-    #[error("Authentication failed: {0}")]
+    /// A `connect_finalize` (CredSSP/NLA) authentication failure — bad
+    /// username/password/domain, or an unsupported Kerberos/KDC round-trip.
+    /// The string is a clean, user-facing message; the raw ironrdp error
+    /// (which embeds an internal `[CredSSP @ <file>:<line>]` protocol/source
+    /// trace — see `ironrdp_error::Error`'s `Display` impl) is logged via
+    /// `tracing` at the [`map_finalize_error`] call site instead, never
+    /// surfaced here (P9.5 item 5).
+    #[error("{0}")]
     Auth(String),
     #[error("Session error: {0}")]
     Session(String),
@@ -531,9 +552,21 @@ fn credssp_requires_credentials(should_perform_credssp: bool, password: &[u8]) -
 /// `RdpError::Auth`. All other `connect_finalize` failures pass through
 /// unchanged as `RdpError::Protocol`, matching [`map_negotiation_error`]'s
 /// fallback behavior.
+///
+/// **P9.5 item 5:** `e.to_string()` for a `Credssp` failure renders as
+/// `[CredSSP @ <vendored-source-file>:<line>] <sspi message>` (the
+/// `ironrdp_error::Error<Kind>` `Display` impl always prefixes the error's
+/// context + call-site source location). That internal plumbing is
+/// meaningless to a user and was leaking straight into the `ErrorOverlay`
+/// (`Authentication failed [ CredSSP @ … ]`). The raw detail is still useful
+/// for debugging, so it's logged here via `tracing` and *not* placed in the
+/// `RdpError` reason string — the user only ever sees the clean message.
 fn map_finalize_error(e: ConnectorError) -> RdpError {
     if matches!(e.kind(), ConnectorErrorKind::Credssp(_)) {
-        return RdpError::Auth(e.to_string());
+        tracing::debug!(error = %e, "rdp: CredSSP/NLA authentication failed (connect_finalize)");
+        return RdpError::Auth(
+            "Authentication failed — check the username, password, and domain.".to_owned(),
+        );
     }
     RdpError::Protocol(e.to_string())
 }
@@ -742,7 +775,14 @@ async fn drive(cfg: RdpSettings, auth: RdpAuthInput, ctx: DriveCtx) {
     let status = ctx.status.clone();
     match drive_inner(&cfg, auth, ctx).await {
         Ok(()) => {}
-        Err(e) => set_status(&status, SessionStatus::Failed(e.to_string())),
+        Err(e) => {
+            // P9.8 B12: catch-all so no `RdpError` variant is ever silent --
+            // every failure that reaches here (Connect/Tls/Protocol/Session/
+            // CertRejected/etc.) gets one WARN line before the status flips
+            // to Failed, even though the ErrorOverlay also shows `e`.
+            tracing::warn!(host = %cfg.host, error = %e, "rdp: session loop error");
+            set_status(&status, SessionStatus::Failed(e.to_string()));
+        }
     }
 }
 
@@ -756,10 +796,25 @@ async fn drive_inner(
     //    tokio-rustls; without an explicit `install_default()`, rustls panics.
     install_ring_provider();
 
+    // P9.8 §5.1: connect-start Instant, used for `connect_ms` (B8) and
+    // `ttff_ms` (B9). Threaded into `active_loop` for the latter.
+    let t0 = std::time::Instant::now();
+
+    tracing::info!(
+        host = %cfg.host,
+        port = cfg.port,
+        width = cfg.width,
+        height = cfg.height,
+        "rdp: connecting"
+    );
+
     // 1. TCP connect.
     let tcp = TcpStream::connect((cfg.host.as_str(), cfg.port))
         .await
-        .map_err(|e| RdpError::Connect(e.to_string()))?;
+        .map_err(|e| {
+            tracing::warn!(host = %cfg.host, port = cfg.port, error = %e, "rdp: TCP connect failed");
+            RdpError::Connect(e.to_string())
+        })?;
 
     // 2. Build connector config (TLS security, CredSSP/NLA enabled — P9.1).
     //    Password exposed only here, at the IronRDP boundary, then moved.
@@ -822,14 +877,31 @@ async fn drive_inner(
     let mut framed: TokioFramed<TcpStream> = TokioFramed::new(tcp);
     let should_upgrade = connect_begin(&mut framed, &mut connector)
         .await
-        .map_err(map_negotiation_error)?;
+        .map_err(|e| {
+            // P9.8 B4: `map_negotiation_error` stays a pure, unit-testable
+            // function (no host/port); log the actionable case here at the
+            // IO boundary where those fields are in scope.
+            let mapped = map_negotiation_error(e);
+            if matches!(mapped, RdpError::LegacySecurityOnly) {
+                tracing::warn!(
+                    host = %cfg.host,
+                    port = cfg.port,
+                    "rdp: server offers only legacy Standard RDP Security"
+                );
+            }
+            mapped
+        })?;
 
     // 5. TLS upgrade — ironrdp-tls performs the handshake; CA validation and
     //    TOFU follow in verify_cert.
     let (tcp, leftover) = framed.into_inner();
-    let (tls_stream, tls_cert) = ironrdp_tls::upgrade(tcp, cfg.host.as_str())
-        .await
-        .map_err(|e| RdpError::Tls(e.to_string()))?;
+    let (tls_stream, tls_cert) =
+        ironrdp_tls::upgrade(tcp, cfg.host.as_str())
+            .await
+            .map_err(|e| {
+                tracing::warn!(host = %cfg.host, error = %e, "rdp: TLS upgrade failed");
+                RdpError::Tls(e.to_string())
+            })?;
 
     // 6. Certificate verification: CA store first, then TOFU.
     let server_public_key = verify_cert(
@@ -862,7 +934,18 @@ async fn drive_inner(
     //     check avoids. For a TLS-only server, the state here is
     //     `BasicSettingsExchange...`, so `should_perform_credssp()` is false
     //     and this check is a no-op — the plain-TLS path is unaffected.
-    if credssp_requires_credentials(connector.should_perform_credssp(), auth.password.expose()) {
+    let should_perform_credssp = connector.should_perform_credssp();
+    tracing::info!(
+        host = %cfg.host,
+        credssp = should_perform_credssp,
+        "rdp: security protocol negotiated"
+    );
+    if credssp_requires_credentials(should_perform_credssp, auth.password.expose()) {
+        tracing::warn!(
+            host = %cfg.host,
+            username = %auth.username,
+            "rdp: NLA required but no password supplied"
+        );
         return Err(RdpError::CredentialsRequired);
     }
 
@@ -899,12 +982,33 @@ async fn drive_inner(
         None,
     )
     .await
-    .map_err(map_finalize_error)?;
+    .map_err(|e| {
+        // P9.8 B7: `map_finalize_error` stays pure/testable (no host/username
+        // in scope); log the actionable, operator-facing event here where
+        // they're available. `map_finalize_error` still separately logs the
+        // raw ironrdp error at `debug` for deep diagnosis (P9.5 item 5) --
+        // this ERROR line is the "what happened, to whom" summary.
+        if matches!(e.kind(), ConnectorErrorKind::Credssp(_)) {
+            tracing::error!(
+                host = %cfg.host,
+                username = %auth.username,
+                "rdp: CredSSP/NTLM auth rejected"
+            );
+        }
+        map_finalize_error(e)
+    })?;
 
     let desktop_size = connection_result.desktop_size;
 
     // 8. Enter active stage (connected).
     set_status(&ctx.status, SessionStatus::Connected);
+    tracing::info!(
+        host = %cfg.host,
+        width = desktop_size.width,
+        height = desktop_size.height,
+        connect_ms = t0.elapsed().as_millis(),
+        "rdp: connected (active stage)"
+    );
 
     let mut active_stage = ActiveStage::new(connection_result);
     let mut image = DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
@@ -918,6 +1022,7 @@ async fn drive_inner(
         &mut ctx.cmd_rx,
         &ctx.frame_tx,
         &ctx.status,
+        t0,
     )
     .await
     .map_err(|e| RdpError::Session(e.to_string()))
@@ -978,18 +1083,31 @@ fn verify_cert(
         host: host.to_owned(),
         port,
         fingerprint: fingerprint.clone(),
-        subject,
-        situation,
+        subject: subject.clone(),
+        situation: situation.clone(),
     };
+
+    tracing::warn!(
+        host,
+        port,
+        situation = ?situation,
+        fingerprint = %fingerprint,
+        subject = %subject,
+        "rdp: certificate not CA-trusted, prompting"
+    );
 
     match verifier.decide(&info) {
         CertDecision::AcceptAndRemember => {
             store.store(host, port, &fingerprint);
+            tracing::info!(host, port, fingerprint = %fingerprint, "rdp: certificate accepted and pinned");
             Ok(public_key)
         }
-        CertDecision::Reject => Err(RdpError::CertRejected(format!(
-            "{host}:{port} cert fingerprint {fingerprint} rejected by verifier"
-        ))),
+        CertDecision::Reject => {
+            tracing::warn!(host, port, fingerprint = %fingerprint, "rdp: certificate rejected by user");
+            Err(RdpError::CertRejected(format!(
+                "{host}:{port} cert fingerprint {fingerprint} rejected by verifier"
+            )))
+        }
     }
 }
 
@@ -1057,6 +1175,9 @@ async fn active_loop<S>(
     cmd_rx: &mut UnboundedReceiver<RdpCmd>,
     frame_tx: &SyncSender<FrameUpdate>,
     status: &Arc<Mutex<SessionStatus>>,
+    // P9.8 §5.1 B9: connect-start Instant (from `drive_inner`), used to log
+    // `ttff_ms` (time-to-first-frame) exactly once below.
+    t0: std::time::Instant,
 ) -> Result<(), String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin,
@@ -1072,6 +1193,8 @@ where
     // FrameMarker-only PDUs (which produce a GraphicsUpdate with an empty
     // rectangle but do not update image pixels).
     let mut image_has_content = false;
+    // P9.8 B9: fire-once guard so `ttff_ms` is logged exactly once.
+    let mut first_frame_logged = false;
 
     loop {
         tokio::select! {
@@ -1095,7 +1218,11 @@ where
                         ActiveStageOutput::GraphicsUpdate(_rect) => {
                             dirty = true;
                         }
-                        ActiveStageOutput::Terminate(_reason) => {
+                        ActiveStageOutput::Terminate(reason) => {
+                            // P9.8 B11: `reason` was previously discarded --
+                            // bind and log it (a `GracefulDisconnectReason`,
+                            // just a description string, never secret).
+                            tracing::info!(reason = %reason, "rdp: session terminated by server");
                             set_status(status, SessionStatus::Disconnected);
                             return Ok(());
                         }
@@ -1154,6 +1281,13 @@ where
                         image_has_content = image.data().iter().any(|&b| b != 0);
                     }
                     if image_has_content {
+                        if !first_frame_logged {
+                            first_frame_logged = true;
+                            tracing::info!(
+                                ttff_ms = t0.elapsed().as_millis(),
+                                "rdp: first frame rendered"
+                            );
+                        }
                         publish_frame(image, frame_tx);
                     }
                 }
@@ -1935,6 +2069,34 @@ mod tests {
         assert!(matches!(mapped, RdpError::Auth(_)), "got: {mapped:?}");
     }
 
+    /// P9.5 item 5: the mapped `RdpError::Auth` message is clean and
+    /// user-facing — no `[CredSSP @ …]` internal protocol/source-location
+    /// trace (which `e.to_string()` on the raw `ConnectorError` embeds, per
+    /// `ironrdp_error::Error<Kind>`'s `Display` impl). The raw detail must
+    /// only reach the `tracing` log, never the reason string the
+    /// `ErrorOverlay` renders.
+    #[test]
+    fn map_finalize_error_credssp_kind_message_is_clean() {
+        let sspi_err = ironrdp_connector::sspi::Error::new(
+            ironrdp_connector::sspi::ErrorKind::LogonDenied,
+            "the referenced account is currently locked out",
+        );
+        let err = ConnectorError::new(
+            "CredSSP",
+            ironrdp_connector::ConnectorErrorKind::Credssp(sspi_err),
+        );
+
+        let mapped = map_finalize_error(err);
+        let msg = mapped.to_string();
+
+        assert_eq!(
+            msg, "Authentication failed — check the username, password, and domain.",
+            "got: {msg:?}"
+        );
+        assert!(!msg.contains("CredSSP @"), "leaked internal trace: {msg:?}");
+        assert!(!msg.contains(".rs:"), "leaked source location: {msg:?}");
+    }
+
     /// A non-CredSSP `connect_finalize` failure (e.g. a plain TLS-only-path
     /// finalize error) passes through unchanged as `RdpError::Protocol`,
     /// exactly like the pre-P9.1 behavior — the plain-TLS regression guard
@@ -2092,35 +2254,70 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Integration test (real host, gated)
+    // Integration test (real host, gated) -- P9.5 item 8: env-gated, no
+    // hardcoded lab host/credential in tracked source.
     // ---------------------------------------------------------------------------
 
-    /// Real-host integration test: connect to xrdp at 192.0.2.10 (lab-user/dummy-password),
-    /// accept self-signed cert via FixedCertVerifier, assert non-blank framebuffer.
+    /// Opt-in live proof driven entirely by env vars, so no lab-specific
+    /// host/user/password is ever hardcoded in tracked source (this repo
+    /// keeps infra/host details out of tracked files -- P9.5 item 8; mirrors
+    /// the `ssh_publickey_rsa_live_host_requiring_sha2` live test in
+    /// `cm-session/tests/ssh_loopback.rs`). No-ops (does not fail) when the
+    /// env vars are unset, so `cargo test --ignored` elsewhere never fails on
+    /// missing lab access; only meaningful when explicitly pointed at a host:
     ///
-    /// Prerequisites:
-    ///   - Network access to 192.0.2.10:3389.
+    /// ```text
+    /// CONMAN_LIVE_RDP_HOST=<ip-or-hostname> CONMAN_LIVE_RDP_USER=<user> \
+    ///   CONMAN_LIVE_RDP_PASSWORD=<password> \
+    ///   cargo test -p cm-session -- --ignored rdp_connect_live_host --nocapture
+    /// ```
+    ///
+    /// Prerequisites (xrdp target):
+    ///   - Network access to the target host on port 3389.
     ///   - `/etc/xrdp/xrdp.ini` on the server must have `security_layer=negotiate`
     ///     (or `tls`); the default `security_layer=rdp` uses STANDARD_RDP_SECURITY
     ///     which IronRDP does not support.
     ///
-    /// Run with:
-    ///   cargo test -p cm-session -- --ignored test_rdp_connect_real_host
+    /// **P9.7 Slice 1** (wire-level visual QA, since every other runner is
+    /// headless/software and structurally blind to GPU-compositing bugs):
+    /// beyond "connects and gets one frame", this asserts (1) the confirmed
+    /// desktop size matches the *requested* `RdpSettings` (proves resolution
+    /// negotiation, not post-hoc scaling -- #10 at the wire level), (2) the
+    /// framebuffer has real RGB variety, not just a non-zero byte (catches a
+    /// uniform solid-color decode failure the old check missed), and (3) the
+    /// #9/#11 black-screen root cause (alpha = wire-padding 0x00 while RGB is
+    /// valid) as a documented invariant, so a future alpha "cleanup" can't
+    /// silently reintroduce it. See the assertions' own comments below.
     #[tokio::test]
-    #[ignore]
-    async fn test_rdp_connect_real_host() {
+    #[ignore = "opt-in: set CONMAN_LIVE_RDP_HOST/_USER/_PASSWORD to run against a real host"]
+    async fn rdp_connect_live_host() {
+        let (host, user, password) = match (
+            std::env::var("CONMAN_LIVE_RDP_HOST"),
+            std::env::var("CONMAN_LIVE_RDP_USER"),
+            std::env::var("CONMAN_LIVE_RDP_PASSWORD"),
+        ) {
+            (Ok(h), Ok(u), Ok(p)) => (h, u, p),
+            _ => {
+                eprintln!(
+                    "rdp_connect_live_host: skipping -- set \
+                     CONMAN_LIVE_RDP_HOST/_USER/_PASSWORD to exercise a live host"
+                );
+                return;
+            }
+        };
+
         let cfg = cm_core::RdpSettings {
-            host: "192.0.2.10".into(),
+            host,
             port: 3389,
             domain: None,
-            username: Some("lab-user".into()),
+            username: Some(user.clone()),
             width: 1280,
             height: 720,
             color_depth: 32,
         };
         let auth = RdpAuthInput {
-            username: "lab-user".into(),
-            password: Secret::from_string("dummy-password".to_owned()),
+            username: user,
+            password: Secret::from_string(password),
             domain: None,
         };
         let verifier = FixedCertVerifier::new(CertDecision::AcceptAndRemember);
@@ -2155,15 +2352,109 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(15))
             .expect("must receive a frame within 15 s");
 
-        // Verify non-blank framebuffer: at least one pixel must be non-zero.
-        assert!(
-            frame.rgba.iter().any(|&b| b != 0),
-            "framebuffer is all-zero (blank)"
-        );
         assert_eq!(
             frame.rgba.len(),
             usize::from(frame.width) * usize::from(frame.height) * 4
         );
+
+        // P9.7 Slice 1, item 1: requested-size validation (#10 at the wire
+        // level). `frame.width`/`frame.height` are not an echo of `cfg` --
+        // they come from `DecodedImage::new(.., desktop_size.width,
+        // desktop_size.height)` in `drive_inner`, where `desktop_size` is
+        // `connection_result.desktop_size`, IronRDP's server-CONFIRMED
+        // active size from `connect_finalize`. Asserting it equals the
+        // requested size proves the resolution was actually negotiated
+        // end-to-end (not bitmap-scaled after the fact -- the #10 bug).
+        // Logged unconditionally so a clamp is visible in the test output
+        // even if this assertion is later relaxed for a target host that
+        // genuinely can't honor arbitrary resolutions.
+        eprintln!(
+            "rdp_connect_live_host: requested {}x{}, server-confirmed {}x{}",
+            cfg.width, cfg.height, frame.width, frame.height
+        );
+        assert_eq!(
+            (frame.width, frame.height),
+            (cfg.width, cfg.height),
+            "server did not honor the requested desktop resolution \
+             (requested {}x{}, server confirmed {}x{}) -- if this specific \
+             xrdp target genuinely cannot support the requested size, this \
+             is a legitimate clamp, not a #10 regression; verify against \
+             the target's real capabilities before assuming a regression",
+            cfg.width,
+            cfg.height,
+            frame.width,
+            frame.height
+        );
+
+        // P9.7 Slice 1, items 2 + 3: content variety, and the alpha=0/
+        // RGB-valid invariant behind the #9/#11 black-screen root cause.
+        //
+        // `PixelFormat::RgbA32`'s byte order is [R, G, B, A] per pixel
+        // (ironrdp_graphics::image_processing::PixelFormat::channel_order),
+        // matching `frame.rgba`'s layout (row-major, width*height*4 bytes).
+        let pixels: Vec<(u8, u8, u8, u8)> = frame
+            .rgba
+            .chunks_exact(4)
+            .map(|p| (p[0], p[1], p[2], p[3]))
+            .collect();
+        assert!(!pixels.is_empty(), "frame has no pixels");
+
+        // Item 2: a uniform solid-color fill (a plausible decode failure
+        // distinct from all-zero) passed the old "any non-zero byte" check
+        // -- it must not pass here. 8 distinct RGB values is a conservative
+        // floor (a real xrdp desktop -- wallpaper, taskbar, anti-aliased
+        // text -- has hundreds to thousands), chosen to avoid flaking
+        // against an unknown target's visual complexity while still
+        // catching a truly uniform fill (which has exactly 1).
+        let distinct_rgb: std::collections::HashSet<(u8, u8, u8)> =
+            pixels.iter().map(|&(r, g, b, _)| (r, g, b)).collect();
+        assert!(
+            distinct_rgb.len() > 8,
+            "framebuffer has only {} distinct RGB value(s) -- expected real \
+             desktop content (anti-aliased text/window chrome/wallpaper), \
+             not a uniform solid-color fill",
+            distinct_rgb.len()
+        );
+
+        // Item 3 (the highest-value part): pin the #9/#11 black-screen root
+        // cause as a test-documented invariant. That black screen was NOT a
+        // wire bug -- IronRDP's fast-path/tile decoders leave the alpha
+        // channel at the wire-padding value 0x00 while the RGB channels are
+        // fully valid. Slint's software backend ignores alpha (so it
+        // rendered fine); femtovg alpha-blends alpha=0x00 to fully
+        // transparent, which composites as black. cm-ui's fix
+        // (`frame_to_image`) forces alpha=0xff before handing the buffer to
+        // Slint's `Image`. This assertion documents the exact contract that
+        // fix depends on: the RGB data is real and varied EVEN WHERE alpha
+        // is 0 -- so a downstream renderer MUST treat alpha=0 pixels as
+        // opaque, never as "no content" / blank. Do NOT change decode/alpha
+        // behavior here -- this only asserts + documents the invariant; the
+        // fix itself lives in cm-ui.
+        let alpha_zero_rgb: std::collections::HashSet<(u8, u8, u8)> = pixels
+            .iter()
+            .filter(|&&(_, _, _, a)| a == 0)
+            .map(|&(r, g, b, _)| (r, g, b))
+            .collect();
+        if alpha_zero_rgb.is_empty() {
+            // Server/decoder-dependent: this particular capture happened to
+            // carry real alpha throughout. The general RGB-variety
+            // assertion above still holds regardless.
+            eprintln!(
+                "rdp_connect_live_host: no alpha=0 pixels in this frame -- \
+                 the wire-padding invariant this test documents didn't \
+                 trigger for this capture"
+            );
+        } else {
+            assert!(
+                alpha_zero_rgb.len() > 1,
+                "all {} alpha=0 pixel(s) share a single RGB value -- if \
+                 alpha=0 now correlates with genuinely blank/unset pixels \
+                 (rather than wire padding on otherwise-valid content), the \
+                 #9/#11 black-screen root-cause analysis needs \
+                 re-checking before touching cm-ui's forced-opaque fix",
+                alpha_zero_rgb.len()
+            );
+        }
 
         session.shutdown();
     }

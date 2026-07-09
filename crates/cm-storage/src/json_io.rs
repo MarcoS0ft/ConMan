@@ -169,6 +169,13 @@ pub enum ImportExportError {
     /// A keychain operation failed during a secrets-inclusive export.
     #[error("keychain error during export: {0}")]
     SecretStore(String),
+    /// P9.4: the attempted password did not decrypt an mRemoteNG file's
+    /// encrypted fields (wrong password, or a custom one was never
+    /// supplied). The caller should prompt for the correct password and
+    /// retry via `import::import_from_path_with_password`. Never raised for
+    /// any other import format.
+    #[error("a password is required to decrypt this file's secrets")]
+    PasswordRequired,
 }
 
 /// Statistics returned by a successful [`import`] / [`import_from_json`] call.
@@ -219,6 +226,15 @@ pub fn export(
         .filter(|(k, _)| !EXPORT_EXCLUDED_SETTING_KEYS.contains(&k.as_str()))
         .collect();
 
+    tracing::info!(
+        credentials = credentials.len(),
+        groups = groups.len(),
+        connections = connections.len(),
+        secrets = credential_secrets.len(),
+        include_secrets = options.include_secrets,
+        "exporting envelope"
+    );
+
     Ok(ExportEnvelope {
         conman_export_version: ENVELOPE_VERSION,
         exported_at: current_epoch_secs(),
@@ -263,6 +279,11 @@ pub fn import(
 ) -> Result<ImportStats, ImportExportError> {
     let found = envelope.conman_export_version;
     if !(MIN_SUPPORTED_VERSION..=ENVELOPE_VERSION).contains(&found) {
+        tracing::warn!(
+            found,
+            supported = ENVELOPE_VERSION,
+            "rejecting import: unsupported envelope version"
+        );
         return Err(ImportExportError::UnsupportedVersion {
             found,
             supported: ENVELOPE_VERSION,
@@ -310,6 +331,16 @@ pub fn import(
         repo.set_setting(key, value)?;
         stats.settings_imported += 1;
     }
+
+    tracing::info!(
+        folders = stats.credential_folders_imported,
+        credentials = stats.credentials_imported,
+        groups = stats.groups_imported,
+        connections = stats.connections_imported,
+        secrets = stats.secrets_imported,
+        settings = stats.settings_imported,
+        "import complete"
+    );
 
     Ok(stats)
 }
@@ -476,8 +507,14 @@ fn import_secrets(
 
         let key = CredentialRef::new(new_cred_id, purpose);
         let secret = Secret::new(raw);
-        if store.store(&key, &secret).is_ok() {
-            stats.secrets_imported += 1;
+        match store.store(&key, &secret) {
+            Ok(()) => stats.secrets_imported += 1,
+            Err(e) => tracing::warn!(
+                credential_id = new_cred_id.get(),
+                purpose = purpose.as_str(),
+                error = %e,
+                "keychain store failed for imported secret"
+            ),
         }
     }
 }
@@ -498,13 +535,24 @@ fn collect_secrets(credentials: &[Credential], store: &dyn CredentialStore) -> V
         };
         for &purpose in purposes {
             let key = CredentialRef::new(cred.id, purpose);
-            // Absent or error → silently skip; export continues.
-            if let Ok(Some(secret)) = store.get(&key) {
-                out.push(ExportedSecret {
+            // Absent or error → skip; export continues (never fatal).
+            match store.get(&key) {
+                Ok(Some(secret)) => out.push(ExportedSecret {
                     credential_id: cred.id,
                     purpose: purpose.as_str().to_string(),
                     secret_hex: to_hex(secret.expose()),
-                });
+                }),
+                Ok(None) => tracing::debug!(
+                    credential_id = cred.id.get(),
+                    purpose = purpose.as_str(),
+                    "secret absent during export"
+                ),
+                Err(e) => tracing::debug!(
+                    credential_id = cred.id.get(),
+                    purpose = purpose.as_str(),
+                    error = %e,
+                    "secret unreadable during export"
+                ),
             }
         }
     }

@@ -216,6 +216,7 @@ fn collect_credentials(nodes: &[Value], ctx: &mut ParseCtx) {
 
 fn register_credential(node: &Value, ctx: &mut ParseCtx) {
     let Some(guid) = get_str(node, &["ID", "Id"]) else {
+        tracing::warn!("royalts: node skipped, missing ID");
         ctx.warnings
             .push(ImportWarning::new("credential node missing 'ID' — skipped"));
         return;
@@ -255,6 +256,7 @@ fn register_credential(node: &Value, ctx: &mut ParseCtx) {
 fn walk_nodes(nodes: &[Value], parent_group: Option<GroupId>, ctx: &mut ParseCtx) {
     for node in nodes {
         let Some(type_str) = node.get("Type").and_then(Value::as_str) else {
+            tracing::warn!(name = ?get_str(node, &["Name"]), "royalts: node skipped, missing Type");
             ctx.warnings
                 .push(ImportWarning::new("node missing 'Type' field — skipped"));
             continue;
@@ -278,6 +280,7 @@ fn walk_nodes(nodes: &[Value], parent_group: Option<GroupId>, ctx: &mut ParseCtx
             NodeKind::Rdp => build_rdp_connection(node, parent_group, ctx),
             NodeKind::Ssh => build_ssh_connection(node, parent_group, ctx),
             NodeKind::Unsupported => {
+                tracing::warn!(node_type = %type_str, "royalts: unsupported node kind skipped");
                 ctx.warnings.push(ImportWarning::new(format!(
                     "skipped unsupported node kind '{type_str}' (Web/VNC/other unmapped RoyalTS type)"
                 )));
@@ -373,9 +376,16 @@ fn push_connection(
         0,
     ) {
         Ok(conn) => ctx.connections.push(conn),
-        Err(e) => ctx.warnings.push(ImportWarning::new(format!(
-            "connection '{name}' skipped: {e}"
-        ))),
+        Err(e) => {
+            tracing::warn!(
+                connection = %name,
+                error = %e,
+                "royalts: connection skipped (validation)"
+            );
+            ctx.warnings.push(ImportWarning::new(format!(
+                "connection '{name}' skipped: {e}"
+            )));
+        }
     }
 }
 

@@ -21,7 +21,18 @@ const MIGRATIONS: &[(u32, &str)] = &[
 pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), StorageError> {
     ensure_version_table(conn)?;
     let current = read_version(conn)?;
-    apply_from(conn, current)
+    tracing::info!(
+        from_version = current,
+        target_version = CURRENT_VERSION,
+        "running DB migrations"
+    );
+    let applied = apply_from(conn, current)?;
+    tracing::info!(
+        target_version = CURRENT_VERSION,
+        applied,
+        "migrations complete"
+    );
+    Ok(())
 }
 
 /// **Test helper only** — set up a database at the requested `version` without
@@ -60,17 +71,43 @@ fn read_version(conn: &rusqlite::Connection) -> Result<u32, StorageError> {
     Ok(v.unwrap_or(0))
 }
 
-fn apply_from(conn: &mut rusqlite::Connection, from: u32) -> Result<(), StorageError> {
+/// Applies every pending migration, returning the count applied (for the
+/// "migrations complete" summary log).
+fn apply_from(conn: &mut rusqlite::Connection, from: u32) -> Result<usize, StorageError> {
+    let mut applied = 0usize;
     for &(target, sql) in MIGRATIONS {
         if target <= from {
             continue;
         }
         run_one_migration(conn, target, sql)?;
+        applied += 1;
     }
-    Ok(())
+    Ok(applied)
 }
 
 fn run_one_migration(
+    conn: &mut rusqlite::Connection,
+    target_version: u32,
+    sql: &str,
+) -> Result<(), StorageError> {
+    let start = std::time::Instant::now();
+    tracing::info!(version = target_version, "applying migration");
+    let result = apply_migration_tx(conn, target_version, sql);
+    match &result {
+        Ok(()) => tracing::debug!(
+            version = target_version,
+            elapsed_ms = start.elapsed().as_millis(),
+            "migration applied"
+        ),
+        Err(e) => tracing::error!(version = target_version, error = %e, "migration failed"),
+    }
+    result
+}
+
+/// The actual transactional work for one migration — split out of
+/// `run_one_migration` so every failure path (transaction start, batch apply,
+/// version-row update, commit) funnels through one `Result` for the log above.
+fn apply_migration_tx(
     conn: &mut rusqlite::Connection,
     target_version: u32,
     sql: &str,

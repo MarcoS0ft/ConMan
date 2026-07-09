@@ -22,9 +22,10 @@
 //! blocking startup.
 //!
 //! P6.3: installs the `tracing` subscriber before anything else runs (see
-//! `logging.rs`) — console layer in debug, rotating file layer under
-//! `cm_platform::app_log_dir()` in release (`windows_subsystem = "windows"`
-//! swallows stderr there).
+//! `logging.rs`) — a rotating file layer under `cm_platform::app_log_dir()` in
+//! both builds (P9.8 §2a: debug used to be stderr-only, losing repros), plus a
+//! console layer in debug (`windows_subsystem = "windows"` swallows stderr in
+//! release, so the console layer is debug-only).
 //!
 //! P7.1: before any of the above, decides the Slint renderer
 //! (`render_backend::resolve`) — honors an explicit user `SLINT_BACKEND`,
@@ -167,18 +168,32 @@ fn main() -> ExitCode {
 /// display in headless CI, or a missing/broken daemon) we fall back to the
 /// in-memory mock backend so the application still starts and credentials are
 /// kept for the session duration.
+///
+/// P9.8 H1/A3: logs once, at startup, which backend is active — the highest-
+/// value line in the logging audit, since a misbuilt binary silently storing
+/// secrets in the in-memory mock would otherwise leave no runtime evidence.
 fn init_keyring() {
     #[cfg(target_os = "linux")]
     {
         keyring::set_default_credential_builder(keyring::keyutils::default_credential_builder());
+        tracing::info!(backend = "keyutils", "keychain backend initialized");
     }
     #[cfg(target_os = "macos")]
     {
         keyring::set_default_credential_builder(keyring::macos::default_credential_builder());
+        tracing::info!(backend = "macos", "keychain backend initialized");
     }
     #[cfg(target_os = "windows")]
     {
         keyring::set_default_credential_builder(keyring::windows::default_credential_builder());
+        tracing::info!(backend = "windows", "keychain backend initialized");
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        tracing::warn!(
+            backend = "mock",
+            "keychain backend initialized; secrets are NOT persisted (in-memory mock)"
+        );
     }
 }
 
