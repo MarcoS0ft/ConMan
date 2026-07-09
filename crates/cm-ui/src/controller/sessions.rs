@@ -2310,6 +2310,11 @@ pub(super) fn reconnect_rdp_tab(
                     // reconnect, same as the fresh-connect path.
                     tab.identity = identity.clone();
                     tab.kind = "RDP".to_owned();
+                    // P9.8 I2: this reconnect's own connecting -> connected
+                    // transition needs its own start time, not the tab's
+                    // original one (that would report a stale, way-too-long
+                    // "perceived_ms" spanning the whole prior session).
+                    tab.connect_started = std::time::Instant::now();
                 }
             }
             if let Some(mut item) = tab_model.row_data(tab_idx) {
@@ -2363,6 +2368,9 @@ pub(super) fn reconnect_ssh_tab(
                     // (reconnect_rdp_tab, above).
                     tab.identity = identity.clone();
                     tab.kind = "SSH".to_owned();
+                    // P9.8 I2: see the RDP counterpart's identical comment
+                    // (reconnect_rdp_tab, above).
+                    tab.connect_started = std::time::Instant::now();
                 }
             }
             if let Some(mut item) = tab_model.row_data(tab_idx) {
@@ -2554,6 +2562,19 @@ fn tick_tab(
     if let Some(mut item) = tab_model.row_data(i)
         && item.status.as_str() != dot
     {
+        // P9.8 I2: the user-perceived connect duration -- only the
+        // connecting -> connected edge (never local shells, which start
+        // "connected" and so never see this transition; never a plain
+        // reconnect-retry-loop edge, since those all still pass through
+        // exactly one "connecting" -> "connected" pair here too).
+        if item.status.as_str() == "connecting" && dot == "connected" {
+            tracing::info!(
+                title = %item.title,
+                kind = %st.tabs[i].kind,
+                perceived_ms = st.tabs[i].connect_started.elapsed().as_millis(),
+                "connection established (user-perceived)"
+            );
+        }
         // P5.3b: emit a toast when a background tab disconnects/fails.
         if i != active
             && st.tabs[i].is_remote

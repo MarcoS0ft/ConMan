@@ -172,6 +172,7 @@ pub(super) fn push_tab(
         search: super::search::SearchState::default(),
         identity,
         kind,
+        connect_started: std::time::Instant::now(),
     });
     st.active = st.tabs.len() - 1;
     let active = st.active;

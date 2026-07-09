@@ -1168,6 +1168,10 @@ pub(super) fn reattach_session(
             // `set_session_identity` just below.
             identity: label.clone(),
             kind: String::new(),
+            // P9.8 I2: same reasoning as `kind` above -- reattach never sees
+            // a `connecting -> connected` transition, so this is never
+            // actually read; `Instant::now()` is just a harmless default.
+            connect_started: std::time::Instant::now(),
         });
         st.active = st.tabs.len() - 1;
         let active = st.active;
@@ -1312,6 +1316,7 @@ mod tests {
             search: super::search::SearchState::default(),
             identity: String::new(),
             kind: String::new(),
+            connect_started: std::time::Instant::now(),
         };
         (tab, sinks)
     }

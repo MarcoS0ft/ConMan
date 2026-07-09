@@ -232,6 +232,13 @@ struct Tab {
     /// text. Empty for local-shell tabs (which never show it: `kind == ""`
     /// falls back to "the connection" with no protocol name).
     kind: String,
+    /// P9.8 I2: when this tab's current connect attempt started -- set at
+    /// push time (`tabs::push_tab`) and reset on every reconnect
+    /// (`reconnect_ssh_tab`/`reconnect_rdp_tab`), mirroring `identity`/`kind`'s
+    /// existing "keep in step with a reconnect" pattern. `tick_tab` diffs
+    /// this against `Instant::now()` on the `connecting -> connected`
+    /// transition to log the user-perceived connect duration.
+    connect_started: std::time::Instant,
 }
 
 struct State {
