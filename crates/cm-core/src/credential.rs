@@ -43,8 +43,14 @@ pub struct Credential {
     pub kind: CredentialKind,
     /// The credential folder this credential belongs to; `None` means root.
     pub folder_id: Option<CredentialFolderId>,
-    /// The login username stored alongside the credential (metadata only, not
-    /// a secret).
+    /// The login username stored alongside the credential (not a secret --
+    /// the password/key material lives in the keychain, keyed separately).
+    /// BUG-cred-username-auth: this is now the *authoritative* auth username
+    /// once a credential is assigned to a connection (own, or inherited via
+    /// [`crate::resolve_effective_credential`]) -- see
+    /// `cm_ui::controller::sessions::effective_auth_username`. A connection's
+    /// inline `settings.username` is only the fallback for connections with
+    /// no credential assigned (e.g. Quick Connect with a typed username).
     pub username: Option<String>,
 }
 
