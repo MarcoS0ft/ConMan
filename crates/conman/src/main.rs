@@ -22,9 +22,10 @@
 //! blocking startup.
 //!
 //! P6.3: installs the `tracing` subscriber before anything else runs (see
-//! `logging.rs`) — console layer in debug, rotating file layer under
-//! `cm_platform::app_log_dir()` in release (`windows_subsystem = "windows"`
-//! swallows stderr there).
+//! `logging.rs`) — a rotating file layer under `cm_platform::app_log_dir()` in
+//! both builds (P9.8 §2a: debug used to be stderr-only, losing repros), plus a
+//! console layer in debug (`windows_subsystem = "windows"` swallows stderr in
+//! release, so the console layer is debug-only).
 //!
 //! P7.1: before any of the above, decides the Slint renderer
 //! (`render_backend::resolve`) — honors an explicit user `SLINT_BACKEND`,
