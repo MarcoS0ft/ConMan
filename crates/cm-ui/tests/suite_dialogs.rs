@@ -42,6 +42,7 @@ fn dialogs_suite() {
     profile_editor_credential_mode_selector_has_no_prompt_option();
     profile_editor_reference_mode_with_named_credential_is_read_only();
     profile_editor_save_persists_and_cancel_discards();
+    profile_editor_cancel_clears_the_transient_inline_password();
     dialog_and_button_bounds();
 }
 
@@ -383,6 +384,28 @@ fn profile_editor_save_persists_and_cancel_discards() {
         "Cancel must not persist a second connection"
     );
     assert!(after_cancel.iter().all(|c| c.name != "Should Not Persist"));
+}
+
+/// Fable non-blocking note (P9.6-A Phase C): Save and a fresh Open already
+/// clear the transient Inline password (secrets hygiene) -- Cancel must too,
+/// or a typed-then-cancelled password lingers in `profile-form` until the
+/// next editor-open.
+fn profile_editor_cancel_clears_the_transient_inline_password() {
+    let (h, _repo, _provider) = harness();
+    h.ui.invoke_new_connection(0);
+    pump_ticks(1);
+    {
+        let mut form = h.ui.get_profile_form();
+        form.inline_password = "hunter2".into();
+        h.ui.set_profile_form(form);
+    }
+    find_by_id(&h.ui, "ProfileEditor::profile-cancel-btn").invoke_accessible_default_action();
+
+    assert_eq!(
+        h.ui.get_profile_form().inline_password.as_str(),
+        "",
+        "Cancel must clear the transient Inline password, not just Save/Open"
+    );
 }
 
 // ── Geometry (P6.17 gap #1's sibling: dialog/button bounds) ─────────────────
