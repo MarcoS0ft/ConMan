@@ -153,7 +153,7 @@ pub fn import_from_path_with_password(
         secrets = stats.secrets_imported,
         secrets_attempted,
         warnings = warnings.len(),
-        "import complete"
+        "foreign import complete"
     );
     Ok(ForeignImportOutcome {
         stats,
@@ -166,7 +166,7 @@ pub fn import_from_path_with_password(
 mod tests {
     use cm_core::{
         Connection, ConnectionId, ConnectionKind, ConnectionSettings, Credential, CredentialId,
-        CredentialKind, Group, GroupId, LocalSettings,
+        CredentialKind, CredentialSource, Group, GroupId, LocalSettings,
     };
 
     use super::*;
@@ -202,7 +202,7 @@ mod tests {
             "web-01".to_string(),
             ConnectionKind::LocalTerminal,
             ConnectionSettings::Local(LocalSettings::default()),
-            Some(cred_id),
+            Some(CredentialSource::Object(cred_id)),
             0,
             0,
             0,

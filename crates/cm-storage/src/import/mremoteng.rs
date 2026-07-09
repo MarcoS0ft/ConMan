@@ -75,7 +75,8 @@ use std::collections::HashMap;
 
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionSettings, Credential, CredentialId,
-    CredentialKind, CredentialPurpose, Group, GroupId, RdpSettings, SshAuthMethod, SshSettings,
+    CredentialKind, CredentialPurpose, CredentialSource, Group, GroupId, RdpSettings,
+    SshAuthMethod, SshSettings,
 };
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -154,6 +155,7 @@ pub fn parse(
         groups: ctx.groups,
         connections: ctx.connections,
         credential_secrets: ctx.credential_secrets,
+        connection_secrets: Vec::new(),
         settings: Vec::new(),
     };
 
@@ -578,13 +580,18 @@ fn push_connection(
     ctx: &mut ParseCtx,
 ) {
     let conn_id = ctx.fresh_conn_id();
+    // mRemoteNG's inline-per-node password always becomes a credential
+    // OBJECT here (never Inline/Prompt) — P9.6-A's Inline mapping for
+    // importers is a documented follow-on, not built here; see the P9.6-A
+    // report.
+    let credential_source = credential.map(CredentialSource::Object);
     match Connection::new(
         conn_id,
         group,
         name.clone(),
         kind,
         settings,
-        credential,
+        credential_source,
         0,
         0,
         0,
@@ -662,9 +669,10 @@ mod tests {
             .iter()
             .find(|c| c.name == "app01-rdp")
             .expect("rdp connection present");
-        let cred_id = rdp
-            .credential
-            .expect("rdp connection should carry a credential");
+        let cred_id = match &rdp.credential_source {
+            Some(CredentialSource::Object(id)) => *id,
+            other => panic!("expected an Object credential source, got {other:?}"),
+        };
         let secret = envelope
             .credential_secrets
             .iter()
@@ -685,9 +693,10 @@ mod tests {
             .iter()
             .find(|c| c.name == "inherited-conn")
             .expect("inherited-conn present");
-        let cred_id = inherited
-            .credential
-            .expect("inherited-conn should carry the container's credential");
+        let cred_id = match &inherited.credential_source {
+            Some(CredentialSource::Object(id)) => *id,
+            other => panic!("expected an Object credential source, got {other:?}"),
+        };
         let secret = envelope
             .credential_secrets
             .iter()

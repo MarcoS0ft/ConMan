@@ -3,7 +3,7 @@ use rusqlite::OptionalExtension as _;
 use crate::error::StorageError;
 
 /// Latest schema version this build understands.
-pub const CURRENT_VERSION: u32 = 3;
+pub const CURRENT_VERSION: u32 = 4;
 
 /// Ordered migration scripts.  Index `i` upgrades from version `i` to `i+1`,
 /// i.e. `MIGRATIONS[0]` is the v0→v1 script (the initial schema).
@@ -11,6 +11,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (1, include_str!("../migrations/v1.sql")),
     (2, include_str!("../migrations/v2.sql")),
     (3, include_str!("../migrations/v3.sql")),
+    (4, include_str!("../migrations/v4.sql")),
 ];
 
 /// Applies all pending migrations on `conn`.  Safe to call on a fresh (empty)
@@ -282,5 +283,108 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM recents", [], |r| r.get(0))
             .expect("count recents");
         assert_eq!(remaining, 0, "recents row should cascade-delete");
+    }
+
+    #[test]
+    fn v3_to_v4_migration_backfills_cred_source_kind() {
+        let mut conn = open_in_memory();
+
+        // Set up v3 (no cred_source_kind/inline_* columns yet).
+        setup_db_at_version(&mut conn, 3).expect("v3 setup");
+
+        conn.execute("INSERT INTO groups (name, sort) VALUES ('g', 0)", [])
+            .expect("insert group");
+        conn.execute(
+            "INSERT INTO credentials (name, kind) VALUES ('cred', 'password')",
+            [],
+        )
+        .expect("insert credential");
+
+        // A connection with an explicit credential_id (today's "Object" case)...
+        conn.execute(
+            "INSERT INTO connections \
+             (group_id, kind, name, settings_json, credential_id, sort, created_at, updated_at) \
+             VALUES (1, 'ssh', 'with-credential', '{}', 1, 0, 0, 0)",
+            [],
+        )
+        .expect("insert connection with credential_id");
+
+        // ...and one without (today's "inherit from group" case).
+        conn.execute(
+            "INSERT INTO connections \
+             (group_id, kind, name, settings_json, credential_id, sort, created_at, updated_at) \
+             VALUES (1, 'ssh', 'without-credential', '{}', NULL, 1, 0, 0)",
+            [],
+        )
+        .expect("insert connection without credential_id");
+
+        let cred_source_kind_missing = conn
+            .query_row(
+                "SELECT cred_source_kind FROM connections LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .is_err();
+        assert!(
+            cred_source_kind_missing,
+            "cred_source_kind should not exist in v3 schema"
+        );
+
+        run_migrations(&mut conn).expect("migrate v3 → current");
+
+        let version: u32 = conn
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .expect("version row");
+        assert_eq!(
+            version, CURRENT_VERSION,
+            "should be at the current version after migration"
+        );
+
+        // The explicit-credential row back-filled to 'object'.
+        let with_cred_kind: String = conn
+            .query_row(
+                "SELECT cred_source_kind FROM connections WHERE name = 'with-credential'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read cred_source_kind");
+        assert_eq!(with_cred_kind, "object");
+
+        // The no-credential row stayed the default 'inherit'.
+        let without_cred_kind: String = conn
+            .query_row(
+                "SELECT cred_source_kind FROM connections WHERE name = 'without-credential'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read cred_source_kind");
+        assert_eq!(without_cred_kind, "inherit");
+
+        // The new inline_* columns exist and default sanely.
+        let (inline_username, inline_domain, inline_has_secret): (
+            Option<String>,
+            Option<String>,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT inline_username, inline_domain, inline_has_secret \
+                 FROM connections WHERE name = 'without-credential'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("read inline_* columns");
+        assert_eq!(inline_username, None);
+        assert_eq!(inline_domain, None);
+        assert_eq!(inline_has_secret, 0);
+
+        // Pre-migration data survives.
+        let name: String = conn
+            .query_row(
+                "SELECT name FROM connections WHERE name = 'with-credential'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read connection");
+        assert_eq!(name, "with-credential");
     }
 }

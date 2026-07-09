@@ -18,8 +18,8 @@ use std::sync::Mutex;
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings, Credential,
     CredentialError, CredentialFolder, CredentialFolderId, CredentialId, CredentialKind,
-    CredentialPurpose, CredentialRef, CredentialStore, Group, GroupId, LocalSettings, RdpSettings,
-    Secret, SshAuthMethod, SshSettings,
+    CredentialPurpose, CredentialRef, CredentialSource, CredentialStore, Group, GroupId,
+    LocalSettings, RdpSettings, Secret, SshAuthMethod, SshSettings,
 };
 use cm_storage::{
     ENVELOPE_VERSION, ExportOptions, ImportExportError, ImportStats, SqliteRepository, export,
@@ -76,7 +76,7 @@ fn mk_rdp_conn(name: &str, group_id: Option<GroupId>, cred: Option<CredentialId>
             username: Some("admin".to_string()),
             ..RdpSettings::default()
         }),
-        cred,
+        cred.map(CredentialSource::Object),
         0,
         1_000,
         1_000,
@@ -96,7 +96,7 @@ fn mk_ssh_conn(name: &str, group_id: Option<GroupId>, cred: Option<CredentialId>
             username: "deploy".to_string(),
             auth_method: SshAuthMethod::Password,
         }),
-        cred,
+        cred.map(CredentialSource::Object),
         0,
         2_000,
         2_000,
@@ -291,12 +291,15 @@ fn round_trip_full_tree() {
 
     assert_eq!(rdp.group_id, Some(dst_prod.id), "rdp-host in Production");
     assert_eq!(
-        rdp.credential,
-        Some(dst_creds[0].id),
+        rdp.credential_source,
+        Some(CredentialSource::Object(dst_creds[0].id)),
         "rdp-host credential relinked"
     );
     assert_eq!(ssh.group_id, Some(dst_servers.id), "ssh-host in Servers");
-    assert_eq!(ssh.credential, None, "ssh-host has no explicit credential");
+    assert_eq!(
+        ssh.credential_source, None,
+        "ssh-host has no explicit credential"
+    );
 }
 
 #[test]
@@ -534,7 +537,10 @@ fn id_remap_group_hierarchy() {
     assert_eq!(dst_servers.default_credential, Some(dst_cred.id));
     assert_eq!(dst_prod.parent_id, Some(dst_servers.id));
     assert_eq!(dst_conn.group_id, Some(dst_prod.id));
-    assert_eq!(dst_conn.credential, Some(dst_cred.id));
+    assert_eq!(
+        dst_conn.credential_source,
+        Some(CredentialSource::Object(dst_cred.id))
+    );
 }
 
 #[test]
@@ -839,7 +845,10 @@ fn dangling_credential_reference_becomes_none() {
     assert_eq!(stats.connections_imported, 1);
 
     let conns = dst.list_connections().expect("list");
-    assert_eq!(conns[0].credential, None, "dangling credential ref → None");
+    assert_eq!(
+        conns[0].credential_source, None,
+        "dangling credential ref → None"
+    );
 }
 
 // ---------------------------------------------------------------------------

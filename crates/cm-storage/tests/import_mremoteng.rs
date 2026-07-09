@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use cm_core::{
     ConnectionKind, ConnectionRepository, ConnectionSettings, CredentialError, CredentialRef,
-    CredentialStore, Secret,
+    CredentialSource, CredentialStore, Secret,
 };
 use cm_storage::SqliteRepository;
 use cm_storage::import::import_from_path;
@@ -96,9 +96,10 @@ fn mremoteng_fixture_round_trips_into_a_real_repo_and_keychain() {
     assert_eq!(ssh.kind, ConnectionKind::Ssh);
 
     // ---- Decrypted password resolves from the keychain ---------------------
-    let rdp_cred_id = rdp
-        .credential
-        .expect("rdp connection should carry a credential");
+    let rdp_cred_id = match &rdp.credential_source {
+        Some(CredentialSource::Object(id)) => *id,
+        other => panic!("expected an Object credential source, got {other:?}"),
+    };
     let secret = store
         .get(&CredentialRef::new(
             rdp_cred_id,
@@ -113,9 +114,10 @@ fn mremoteng_fixture_round_trips_into_a_real_repo_and_keychain() {
         .iter()
         .find(|c| c.name == "inherited-conn")
         .expect("inherited-conn persisted");
-    let inherited_cred_id = inherited
-        .credential
-        .expect("inherited-conn should carry the container's credential");
+    let inherited_cred_id = match &inherited.credential_source {
+        Some(CredentialSource::Object(id)) => *id,
+        other => panic!("expected an Object credential source, got {other:?}"),
+    };
     let inherited_secret = store
         .get(&CredentialRef::new(
             inherited_cred_id,
@@ -186,9 +188,10 @@ fn custom_password_file_requires_password_then_succeeds_with_it() {
         .iter()
         .find(|c| c.name == "custom-pw-conn")
         .expect("custom-pw-conn persisted");
-    let cred_id = conn
-        .credential
-        .expect("connection should carry a credential");
+    let cred_id = match &conn.credential_source {
+        Some(CredentialSource::Object(id)) => *id,
+        other => panic!("expected an Object credential source, got {other:?}"),
+    };
     let secret = store
         .get(&CredentialRef::new(
             cred_id,
@@ -237,7 +240,7 @@ fn json_rjson_and_csv_imports_still_work_after_xml_registration() {
         "web-01".to_string(),
         Kind::LocalTerminal,
         Settings::Local(LocalSettings::default()),
-        Some(cred_id),
+        Some(CredentialSource::Object(cred_id)),
         0,
         0,
         0,

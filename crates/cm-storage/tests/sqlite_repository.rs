@@ -4,12 +4,50 @@
 //! Covers: CRUD, nested-tree create/move/delete, cycle rejection, credential
 //! sharing, inheritance resolution through the repository, and ordering.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings, Credential,
-    CredentialFolder, CredentialFolderId, CredentialId, CredentialKind, Group, GroupId,
-    LocalSettings, RdpSettings, RepositoryError, SshAuthMethod, SshSettings,
+    CredentialError, CredentialFolder, CredentialFolderId, CredentialId, CredentialKind,
+    CredentialPurpose, CredentialRef, CredentialSource, CredentialStore, Group, GroupId,
+    LocalSettings, RdpSettings, RepositoryError, Secret, SshAuthMethod, SshSettings,
 };
 use cm_storage::SqliteRepository;
+
+/// Minimal mock keychain (mirrors the pattern used by `tests/import_csv.rs`
+/// etc.) for [`SqliteRepository::with_credential_store`]'s
+/// delete-connection-cleanup test.
+#[derive(Default)]
+struct MockStore {
+    data: Mutex<HashMap<(String, String), Vec<u8>>>,
+}
+
+impl CredentialStore for MockStore {
+    fn store(&self, key: &CredentialRef, secret: &Secret) -> Result<(), CredentialError> {
+        self.data.lock().expect("lock").insert(
+            (key.service().to_string(), key.account().to_string()),
+            secret.expose().to_vec(),
+        );
+        Ok(())
+    }
+
+    fn get(&self, key: &CredentialRef) -> Result<Option<Secret>, CredentialError> {
+        let data = self.data.lock().expect("lock");
+        Ok(data
+            .get(&(key.service().to_string(), key.account().to_string()))
+            .cloned()
+            .map(Secret::new))
+    }
+
+    fn delete(&self, key: &CredentialRef) -> Result<(), CredentialError> {
+        self.data
+            .lock()
+            .expect("lock")
+            .remove(&(key.service().to_string(), key.account().to_string()));
+        Ok(())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -57,7 +95,7 @@ fn mk_rdp_conn(name: &str, group_id: Option<GroupId>, cred: Option<CredentialId>
             username: Some("admin".to_string()),
             ..RdpSettings::default()
         }),
-        cred,
+        cred.map(CredentialSource::Object),
         0,
         0,
         0,
@@ -77,7 +115,7 @@ fn mk_ssh_conn(name: &str, group_id: Option<GroupId>, cred: Option<CredentialId>
             username: "user".to_string(),
             auth_method: SshAuthMethod::Password,
         }),
-        cred,
+        cred.map(CredentialSource::Object),
         0,
         0,
         0,
@@ -241,6 +279,70 @@ fn connection_delete() {
     let db = repo();
     let cid = db
         .upsert_connection(&mk_local_conn("tmp", None))
+        .expect("insert");
+    db.delete_connection(cid.get_id()).expect("delete");
+    assert!(db.get_connection(cid.get_id()).expect("get").is_none());
+}
+
+/// P9.6-A Decision 2: `delete_connection` also deletes the connection-scoped
+/// inline-secret keychain entry when a [`CredentialStore`] is attached via
+/// [`SqliteRepository::with_credential_store`] — the DB's `ON DELETE SET
+/// NULL` only clears the credential-**object** FK; an inline secret lives
+/// entirely outside SQLite and would otherwise be orphaned.
+#[test]
+fn connection_delete_also_deletes_the_inline_secret_keychain_entry() {
+    let store = Arc::new(MockStore::default());
+    let db = SqliteRepository::open_in_memory()
+        .expect("open in-memory DB")
+        .with_credential_store(store.clone() as Arc<dyn CredentialStore>);
+
+    let conn = Connection::new(
+        ConnectionId::UNSAVED,
+        None,
+        "inline-conn".to_string(),
+        ConnectionKind::Ssh,
+        ConnectionSettings::Ssh(SshSettings {
+            host: "ssh.example".to_string(),
+            port: SshSettings::DEFAULT_PORT,
+            username: "svc".to_string(),
+            auth_method: SshAuthMethod::Password,
+        }),
+        Some(CredentialSource::Inline {
+            username: "svc".to_string(),
+            domain: None,
+            has_secret: true,
+        }),
+        0,
+        0,
+        0,
+    )
+    .expect("build connection");
+    let cid = db.upsert_connection(&conn).expect("insert");
+
+    let key = CredentialRef::for_connection(cid, CredentialPurpose::Password);
+    store
+        .store(&key, &Secret::from_string("inline-secret".to_string()))
+        .expect("seed keychain entry");
+    assert!(
+        store.get(&key).expect("get").is_some(),
+        "keychain entry should exist before delete"
+    );
+
+    db.delete_connection(cid).expect("delete connection");
+
+    assert!(
+        store.get(&key).expect("get").is_none(),
+        "delete_connection must also delete the inline-secret keychain entry"
+    );
+}
+
+/// Without an attached store, `delete_connection` behaves exactly as before
+/// P9.6-A — no keychain interaction attempted, delete still succeeds.
+#[test]
+fn connection_delete_without_a_credential_store_still_succeeds() {
+    let db = repo();
+    let cid = db
+        .upsert_connection(&mk_local_conn("no-store", None))
         .expect("insert");
     db.delete_connection(cid.get_id()).expect("delete");
     assert!(db.get_connection(cid.get_id()).expect("get").is_none());
@@ -464,8 +566,14 @@ fn credential_shared_by_multiple_connections() {
 
     let got1 = db.get_connection(id1.get_id()).expect("get").expect("some");
     let got2 = db.get_connection(id2.get_id()).expect("get").expect("some");
-    assert_eq!(got1.credential, Some(cred_id.get_id()));
-    assert_eq!(got2.credential, Some(cred_id.get_id()));
+    assert_eq!(
+        got1.credential_source,
+        Some(CredentialSource::Object(cred_id.get_id()))
+    );
+    assert_eq!(
+        got2.credential_source,
+        Some(CredentialSource::Object(cred_id.get_id()))
+    );
 }
 
 #[test]
@@ -478,7 +586,10 @@ fn delete_credential_nullifies_connection_reference() {
     db.delete_credential(cred_id.get_id()).expect("delete cred");
 
     let got = db.get_connection(cid.get_id()).expect("get").expect("some");
-    assert_eq!(got.credential, None, "credential_id should be nullified");
+    assert_eq!(
+        got.credential_source, None,
+        "credential_id should be nullified"
+    );
 }
 
 #[test]

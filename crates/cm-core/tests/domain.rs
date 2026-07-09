@@ -8,8 +8,8 @@ use std::sync::Mutex;
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings, Credential,
     CredentialFolder, CredentialFolderId, CredentialId, CredentialKind, CredentialPurpose,
-    CredentialRef, DomainError, Group, GroupId, LocalSettings, RdpSettings, RepositoryError,
-    Secret, SshAuthMethod, SshSettings, resolve_effective_credential,
+    CredentialRef, CredentialSource, DomainError, Group, GroupId, LocalSettings, RdpSettings,
+    RepositoryError, Secret, SshAuthMethod, SshSettings, resolve_effective_credential,
 };
 
 fn rdp_settings() -> ConnectionSettings {
@@ -48,7 +48,7 @@ fn make_connection(group_id: Option<i64>, credential: Option<i64>) -> Connection
         "test-conn".to_string(),
         ConnectionKind::LocalTerminal,
         ConnectionSettings::Local(LocalSettings::default()),
-        credential.map(CredentialId::new),
+        credential.map(|id| CredentialSource::Object(CredentialId::new(id))),
         0,
         0,
         0,
@@ -356,7 +356,7 @@ fn connection_round_trips_through_json() {
         ssh_settings(SshAuthMethod::PublicKey {
             key_ref: CredentialRef::new(CredentialId::new(5), CredentialPurpose::SshKey),
         }),
-        Some(CredentialId::new(5)),
+        Some(CredentialSource::Object(CredentialId::new(5))),
         2,
         1_700_000_000,
         1_700_000_001,

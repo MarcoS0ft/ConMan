@@ -30,7 +30,10 @@ pub use app_settings::{
     AppSettings, KEY_FIRST_RUN_SEEDED, KEY_RENDERER_BACKEND, KEY_SESSION_TABS, SessionTabEntry,
     SessionTabSnapshot, SettingsService,
 };
-pub use connection::{Connection, Group, resolve_effective_credential};
+pub use connection::{
+    Connection, CredentialSource, Group, ResolvedAuth, resolve_connection_auth,
+    resolve_effective_credential,
+};
 pub use credential::{
     Credential, CredentialFolder, CredentialKind, CredentialPurpose, CredentialRef, Secret,
 };

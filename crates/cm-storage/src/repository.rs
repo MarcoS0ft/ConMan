@@ -1,9 +1,9 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings, Credential,
-    CredentialFolder, CredentialFolderId, CredentialId, CredentialKind, Group, GroupId,
-    RepositoryError,
+    CredentialFolder, CredentialFolderId, CredentialId, CredentialKind, CredentialPurpose,
+    CredentialRef, CredentialSource, CredentialStore, Group, GroupId, RepositoryError,
 };
 use rusqlite::OptionalExtension as _;
 
@@ -25,6 +25,12 @@ const MAX_TREE_DEPTH: usize = 1024;
 /// a [`Mutex`].  All structural mutations run inside an explicit transaction.
 pub struct SqliteRepository {
     conn: Mutex<rusqlite::Connection>,
+    /// Optional keychain handle (P9.6-A Decision 2) — when set,
+    /// [`delete_connection`][ConnectionRepository::delete_connection] also
+    /// deletes the connection-scoped inline-secret keychain entry. `None` by
+    /// default (existing `open`/`open_in_memory` callers and most tests are
+    /// unaffected); wire one in via [`Self::with_credential_store`].
+    credential_store: Option<Arc<dyn CredentialStore>>,
 }
 
 impl std::fmt::Debug for SqliteRepository {
@@ -73,7 +79,22 @@ impl SqliteRepository {
         run_migrations(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            credential_store: None,
         })
+    }
+
+    /// Attaches a [`CredentialStore`] (P9.6-A Decision 2) so
+    /// [`delete_connection`][ConnectionRepository::delete_connection] can
+    /// also clean up the connection-scoped inline-secret keychain entry —
+    /// the DB's `ON DELETE SET NULL` only handles the credential-**object**
+    /// foreign key; an inline secret lives entirely outside SQLite
+    /// (`CredentialRef::for_connection`) and must be deleted explicitly.
+    /// Optional and purely additive: a repository with no store attached
+    /// just skips this cleanup, matching pre-P9.6-A behavior exactly.
+    #[must_use]
+    pub fn with_credential_store(mut self, store: Arc<dyn CredentialStore>) -> Self {
+        self.credential_store = Some(store);
+        self
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>, RepositoryError> {
@@ -96,8 +117,9 @@ impl ConnectionRepository for SqliteRepository {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, group_id, kind, name, settings_json, credential_id, sort, \
-                 created_at, updated_at \
+                "SELECT id, group_id, kind, name, settings_json, credential_id, \
+                 cred_source_kind, inline_username, inline_domain, inline_has_secret, \
+                 sort, created_at, updated_at \
                  FROM connections ORDER BY group_id, sort, id",
             )
             .map_err(map_err)?;
@@ -109,8 +131,9 @@ impl ConnectionRepository for SqliteRepository {
     fn get_connection(&self, id: ConnectionId) -> Result<Option<Connection>, RepositoryError> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT id, group_id, kind, name, settings_json, credential_id, sort, \
-             created_at, updated_at \
+            "SELECT id, group_id, kind, name, settings_json, credential_id, \
+             cred_source_kind, inline_username, inline_domain, inline_has_secret, \
+             sort, created_at, updated_at \
              FROM connections WHERE id = ?1",
             [id.get()],
             map_connection_row,
@@ -127,13 +150,16 @@ impl ConnectionRepository for SqliteRepository {
         let settings_json = serde_json::to_string(&c.settings)
             .map_err(|e| RepositoryError::Backend(e.to_string()))?;
         let (host, port) = extract_host_port(&c.settings);
+        let (cred_source_kind, credential_id, inline_username, inline_domain, inline_has_secret) =
+            cred_source_columns(&c.credential_source);
 
         if c.id.is_unsaved() {
             conn.execute(
                 "INSERT INTO connections \
-                 (group_id, kind, name, host, port, settings_json, credential_id, sort, \
-                  created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 (group_id, kind, name, host, port, settings_json, credential_id, \
+                  cred_source_kind, inline_username, inline_domain, inline_has_secret, \
+                  sort, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 rusqlite::params![
                     c.group_id.map(|g| g.get()),
                     kind_str,
@@ -141,7 +167,11 @@ impl ConnectionRepository for SqliteRepository {
                     host,
                     port,
                     settings_json,
-                    c.credential.map(|cr| cr.get()),
+                    credential_id,
+                    cred_source_kind,
+                    inline_username,
+                    inline_domain,
+                    inline_has_secret,
                     c.sort,
                     c.created_at,
                     c.updated_at,
@@ -154,8 +184,10 @@ impl ConnectionRepository for SqliteRepository {
                 .execute(
                     "UPDATE connections SET \
                      group_id=?1, kind=?2, name=?3, host=?4, port=?5, \
-                     settings_json=?6, credential_id=?7, sort=?8, updated_at=?9 \
-                     WHERE id=?10",
+                     settings_json=?6, credential_id=?7, cred_source_kind=?8, \
+                     inline_username=?9, inline_domain=?10, inline_has_secret=?11, \
+                     sort=?12, updated_at=?13 \
+                     WHERE id=?14",
                     rusqlite::params![
                         c.group_id.map(|g| g.get()),
                         kind_str,
@@ -163,7 +195,11 @@ impl ConnectionRepository for SqliteRepository {
                         host,
                         port,
                         settings_json,
-                        c.credential.map(|cr| cr.get()),
+                        credential_id,
+                        cred_source_kind,
+                        inline_username,
+                        inline_domain,
+                        inline_has_secret,
                         c.sort,
                         c.updated_at,
                         c.id.get(),
@@ -178,12 +214,30 @@ impl ConnectionRepository for SqliteRepository {
     }
 
     fn delete_connection(&self, id: ConnectionId) -> Result<(), RepositoryError> {
-        let conn = self.lock()?;
-        let rows = conn
-            .execute("DELETE FROM connections WHERE id = ?1", [id.get()])
-            .map_err(map_err)?;
-        if rows == 0 {
-            return Err(RepositoryError::NotFound);
+        {
+            let conn = self.lock()?;
+            let rows = conn
+                .execute("DELETE FROM connections WHERE id = ?1", [id.get()])
+                .map_err(map_err)?;
+            if rows == 0 {
+                return Err(RepositoryError::NotFound);
+            }
+        } // release the SQLite lock before touching the (unrelated) keychain
+
+        // P9.6-A Decision 2: the DB's ON DELETE SET NULL only clears the
+        // credential-OBJECT foreign key; an inline secret lives entirely
+        // outside SQLite and must be deleted explicitly. Best-effort: a
+        // missing entry or backend failure here must not fail the (already
+        // successful) connection delete.
+        if let Some(store) = &self.credential_store {
+            let key = CredentialRef::for_connection(id, CredentialPurpose::Password);
+            if let Err(e) = store.delete(&key) {
+                tracing::warn!(
+                    connection_id = id.get(),
+                    error = %e,
+                    "failed to delete inline-secret keychain entry for deleted connection"
+                );
+            }
         }
         Ok(())
     }
@@ -575,21 +629,27 @@ impl ConnectionRepository for SqliteRepository {
     ) -> Result<Option<CredentialId>, RepositoryError> {
         let conn = self.lock()?;
 
-        // Fetch the connection's own credential and its group.
-        let row: Option<(Option<i64>, Option<i64>)> = conn
+        // Fetch the connection's own credential-source kind/id and its group.
+        let row: Option<(String, Option<i64>, Option<i64>)> = conn
             .query_row(
-                "SELECT credential_id, group_id FROM connections WHERE id = ?1",
+                "SELECT cred_source_kind, credential_id, group_id FROM connections WHERE id = ?1",
                 [conn_id.get()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
             .map_err(map_err)?;
 
-        let (explicit_cred, mut current_group) = row.ok_or(RepositoryError::NotFound)?;
+        let (kind, explicit_cred, mut current_group) = row.ok_or(RepositoryError::NotFound)?;
 
-        // Explicit credential on the connection wins immediately.
-        if let Some(cid) = explicit_cred {
-            return Ok(Some(CredentialId::new(cid)));
+        // An explicit, non-inherit source resolves (or doesn't) immediately —
+        // mirrors `cm_core::resolve_effective_credential`'s match on
+        // `CredentialSource`: `Object` wins directly, `Inline`/`Prompt` never
+        // fall back to the group chain. Only `Inherit` (the default, and any
+        // unrecognized/legacy value) falls through to the walk below.
+        match kind.as_str() {
+            "object" => return Ok(explicit_cred.map(CredentialId::new)),
+            "inline" | "prompt" => return Ok(None),
+            _ => {}
         }
 
         // Walk up the ancestor group chain, bounded for cycle safety.
@@ -708,6 +768,10 @@ struct ConnectionRow {
     name: String,
     settings_json: String,
     credential_id: Option<i64>,
+    cred_source_kind: String,
+    inline_username: Option<String>,
+    inline_domain: Option<String>,
+    inline_has_secret: i64,
     sort: i64,
     created_at: i64,
     updated_at: i64,
@@ -723,6 +787,19 @@ impl ConnectionRow {
                     self.id
                 ))
             })?;
+        let credential_source = parse_credential_source(
+            &self.cred_source_kind,
+            self.credential_id,
+            self.inline_username,
+            self.inline_domain,
+            self.inline_has_secret,
+        )
+        .map_err(|e| {
+            RepositoryError::Backend(format!(
+                "corrupt credential source for connection {}: {e}",
+                self.id
+            ))
+        })?;
         // Validate kind/settings agreement defensively (untrusted DB content).
         Connection::new(
             ConnectionId::new(self.id),
@@ -730,7 +807,7 @@ impl ConnectionRow {
             self.name,
             kind,
             settings,
-            self.credential_id.map(CredentialId::new),
+            credential_source,
             self.sort,
             self.created_at,
             self.updated_at,
@@ -752,10 +829,62 @@ fn map_connection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionRow
         name: row.get(3)?,
         settings_json: row.get(4)?,
         credential_id: row.get(5)?,
-        sort: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        cred_source_kind: row.get(6)?,
+        inline_username: row.get(7)?,
+        inline_domain: row.get(8)?,
+        inline_has_secret: row.get(9)?,
+        sort: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
+}
+
+/// Splits a [`CredentialSource`] into the 5 v4 columns that represent it:
+/// `(cred_source_kind, credential_id, inline_username, inline_domain,
+/// inline_has_secret)`.
+fn cred_source_columns(
+    source: &Option<CredentialSource>,
+) -> (&'static str, Option<i64>, Option<&str>, Option<&str>, i64) {
+    match source {
+        None => ("inherit", None, None, None, 0),
+        Some(CredentialSource::Object(id)) => ("object", Some(id.get()), None, None, 0),
+        Some(CredentialSource::Inline {
+            username,
+            domain,
+            has_secret,
+        }) => (
+            "inline",
+            None,
+            Some(username.as_str()),
+            domain.as_deref(),
+            i64::from(*has_secret),
+        ),
+        Some(CredentialSource::Prompt) => ("prompt", None, None, None, 0),
+    }
+}
+
+/// The inverse of [`cred_source_columns`] — rebuilds `Option<CredentialSource>`
+/// from the 4 raw column values read back from a row.
+fn parse_credential_source(
+    kind_str: &str,
+    credential_id: Option<i64>,
+    inline_username: Option<String>,
+    inline_domain: Option<String>,
+    inline_has_secret: i64,
+) -> Result<Option<CredentialSource>, RepositoryError> {
+    match kind_str {
+        "inherit" => Ok(None),
+        "object" => Ok(credential_id.map(|id| CredentialSource::Object(CredentialId::new(id)))),
+        "inline" => Ok(Some(CredentialSource::Inline {
+            username: inline_username.unwrap_or_default(),
+            domain: inline_domain,
+            has_secret: inline_has_secret != 0,
+        })),
+        "prompt" => Ok(Some(CredentialSource::Prompt)),
+        other => Err(RepositoryError::Backend(format!(
+            "unknown cred_source_kind '{other}' in database"
+        ))),
+    }
 }
 
 fn map_group_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Group> {
@@ -998,7 +1127,7 @@ mod tests {
                     username: "alice".to_owned(),
                     auth_method: SshAuthMethod::Password,
                 }),
-                Some(cred_id),
+                Some(cm_core::CredentialSource::Object(cred_id)),
                 0,
                 now,
                 now,

@@ -240,10 +240,17 @@ fn build_config(
         first_launch
     };
 
-    let repo: Arc<dyn cm_core::ConnectionRepository> = Arc::new(repo);
-
     // ── Credential store (OS keychain) ─────────────────────────────────────
     let secrets: Arc<dyn cm_core::CredentialStore> = Arc::new(KeyringStore::new());
+
+    // P9.6-A: attach the keychain so `delete_connection` also cleans up a
+    // deleted connection's inline-secret keychain entry (the DB's
+    // `ON DELETE SET NULL` only handles the credential-object FK; an inline
+    // secret lives entirely outside SQLite). Must happen before the `Arc<dyn
+    // ConnectionRepository>` upcast erases the concrete type this builder
+    // method lives on.
+    let repo = repo.with_credential_store(Arc::clone(&secrets));
+    let repo: Arc<dyn cm_core::ConnectionRepository> = Arc::new(repo);
 
     // ── Session provider (P6.15, gap 27) ────────────────────────────────────
     let session_provider: Arc<dyn cm_core::SessionProvider> = Arc::new(SessionProviderImpl::new());
