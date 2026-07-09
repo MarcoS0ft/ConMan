@@ -113,11 +113,24 @@ impl CredentialRef {
     /// The fixed keychain service name for all ConMan credentials.
     pub const SERVICE: &'static str = "conman";
 
-    /// Builds the reference for a given credential and purpose.
+    /// Builds the reference for a given credential **object** and purpose.
     pub fn new(credential: CredentialId, purpose: CredentialPurpose) -> Self {
         Self {
             service: Self::SERVICE.to_string(),
             account: format!("cred:{}:{}", credential.get(), purpose.as_str()),
+        }
+    }
+
+    /// Builds the reference for a **connection-scoped** inline secret
+    /// (P9.6-A `CredentialSource::Inline`) — account
+    /// `"conn:<connection-id>:<purpose>"`, distinct from [`Self::new`]'s
+    /// `"cred:<credential-id>:<purpose>"` so inline secrets never collide
+    /// with a credential object's keychain slot even if the numeric ids
+    /// happen to coincide.
+    pub fn for_connection(connection: crate::ConnectionId, purpose: CredentialPurpose) -> Self {
+        Self {
+            service: Self::SERVICE.to_string(),
+            account: format!("conn:{}:{}", connection.get(), purpose.as_str()),
         }
     }
 
