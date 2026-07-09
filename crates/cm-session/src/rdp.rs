@@ -466,7 +466,14 @@ pub enum RdpError {
     CredentialsRequired,
     #[error("Certificate rejected: {0}")]
     CertRejected(String),
-    #[error("Authentication failed: {0}")]
+    /// A `connect_finalize` (CredSSP/NLA) authentication failure — bad
+    /// username/password/domain, or an unsupported Kerberos/KDC round-trip.
+    /// The string is a clean, user-facing message; the raw ironrdp error
+    /// (which embeds an internal `[CredSSP @ <file>:<line>]` protocol/source
+    /// trace — see `ironrdp_error::Error`'s `Display` impl) is logged via
+    /// `tracing` at the [`map_finalize_error`] call site instead, never
+    /// surfaced here (P9.5 item 5).
+    #[error("{0}")]
     Auth(String),
     #[error("Session error: {0}")]
     Session(String),
@@ -531,9 +538,21 @@ fn credssp_requires_credentials(should_perform_credssp: bool, password: &[u8]) -
 /// `RdpError::Auth`. All other `connect_finalize` failures pass through
 /// unchanged as `RdpError::Protocol`, matching [`map_negotiation_error`]'s
 /// fallback behavior.
+///
+/// **P9.5 item 5:** `e.to_string()` for a `Credssp` failure renders as
+/// `[CredSSP @ <vendored-source-file>:<line>] <sspi message>` (the
+/// `ironrdp_error::Error<Kind>` `Display` impl always prefixes the error's
+/// context + call-site source location). That internal plumbing is
+/// meaningless to a user and was leaking straight into the `ErrorOverlay`
+/// (`Authentication failed [ CredSSP @ … ]`). The raw detail is still useful
+/// for debugging, so it's logged here via `tracing` and *not* placed in the
+/// `RdpError` reason string — the user only ever sees the clean message.
 fn map_finalize_error(e: ConnectorError) -> RdpError {
     if matches!(e.kind(), ConnectorErrorKind::Credssp(_)) {
-        return RdpError::Auth(e.to_string());
+        tracing::debug!(error = %e, "rdp: CredSSP/NLA authentication failed (connect_finalize)");
+        return RdpError::Auth(
+            "Authentication failed — check the username, password, and domain.".to_owned(),
+        );
     }
     RdpError::Protocol(e.to_string())
 }
@@ -1935,6 +1954,34 @@ mod tests {
         assert!(matches!(mapped, RdpError::Auth(_)), "got: {mapped:?}");
     }
 
+    /// P9.5 item 5: the mapped `RdpError::Auth` message is clean and
+    /// user-facing — no `[CredSSP @ …]` internal protocol/source-location
+    /// trace (which `e.to_string()` on the raw `ConnectorError` embeds, per
+    /// `ironrdp_error::Error<Kind>`'s `Display` impl). The raw detail must
+    /// only reach the `tracing` log, never the reason string the
+    /// `ErrorOverlay` renders.
+    #[test]
+    fn map_finalize_error_credssp_kind_message_is_clean() {
+        let sspi_err = ironrdp_connector::sspi::Error::new(
+            ironrdp_connector::sspi::ErrorKind::LogonDenied,
+            "the referenced account is currently locked out",
+        );
+        let err = ConnectorError::new(
+            "CredSSP",
+            ironrdp_connector::ConnectorErrorKind::Credssp(sspi_err),
+        );
+
+        let mapped = map_finalize_error(err);
+        let msg = mapped.to_string();
+
+        assert_eq!(
+            msg, "Authentication failed — check the username, password, and domain.",
+            "got: {msg:?}"
+        );
+        assert!(!msg.contains("CredSSP @"), "leaked internal trace: {msg:?}");
+        assert!(!msg.contains(".rs:"), "leaked source location: {msg:?}");
+    }
+
     /// A non-CredSSP `connect_finalize` failure (e.g. a plain TLS-only-path
     /// finalize error) passes through unchanged as `RdpError::Protocol`,
     /// exactly like the pre-P9.1 behavior — the plain-TLS regression guard
@@ -2092,35 +2139,59 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Integration test (real host, gated)
+    // Integration test (real host, gated) -- P9.5 item 8: env-gated, no
+    // hardcoded lab host/credential in tracked source.
     // ---------------------------------------------------------------------------
 
-    /// Real-host integration test: connect to xrdp at 192.0.2.10 (lab-user/dummy-password),
-    /// accept self-signed cert via FixedCertVerifier, assert non-blank framebuffer.
+    /// Opt-in live proof driven entirely by env vars, so no lab-specific
+    /// host/user/password is ever hardcoded in tracked source (this repo
+    /// keeps infra/host details out of tracked files -- P9.5 item 8; mirrors
+    /// the `ssh_publickey_rsa_live_host_requiring_sha2` live test in
+    /// `cm-session/tests/ssh_loopback.rs`). No-ops (does not fail) when the
+    /// env vars are unset, so `cargo test --ignored` elsewhere never fails on
+    /// missing lab access; only meaningful when explicitly pointed at a host:
     ///
-    /// Prerequisites:
-    ///   - Network access to 192.0.2.10:3389.
+    /// ```text
+    /// CONMAN_LIVE_RDP_HOST=<ip-or-hostname> CONMAN_LIVE_RDP_USER=<user> \
+    ///   CONMAN_LIVE_RDP_PASSWORD=<password> \
+    ///   cargo test -p cm-session -- --ignored rdp_connect_live_host --nocapture
+    /// ```
+    ///
+    /// Prerequisites (xrdp target):
+    ///   - Network access to the target host on port 3389.
     ///   - `/etc/xrdp/xrdp.ini` on the server must have `security_layer=negotiate`
     ///     (or `tls`); the default `security_layer=rdp` uses STANDARD_RDP_SECURITY
     ///     which IronRDP does not support.
-    ///
-    /// Run with:
-    ///   cargo test -p cm-session -- --ignored test_rdp_connect_real_host
     #[tokio::test]
-    #[ignore]
-    async fn test_rdp_connect_real_host() {
+    #[ignore = "opt-in: set CONMAN_LIVE_RDP_HOST/_USER/_PASSWORD to run against a real host"]
+    async fn rdp_connect_live_host() {
+        let (host, user, password) = match (
+            std::env::var("CONMAN_LIVE_RDP_HOST"),
+            std::env::var("CONMAN_LIVE_RDP_USER"),
+            std::env::var("CONMAN_LIVE_RDP_PASSWORD"),
+        ) {
+            (Ok(h), Ok(u), Ok(p)) => (h, u, p),
+            _ => {
+                eprintln!(
+                    "rdp_connect_live_host: skipping -- set \
+                     CONMAN_LIVE_RDP_HOST/_USER/_PASSWORD to exercise a live host"
+                );
+                return;
+            }
+        };
+
         let cfg = cm_core::RdpSettings {
-            host: "192.0.2.10".into(),
+            host,
             port: 3389,
             domain: None,
-            username: Some("lab-user".into()),
+            username: Some(user.clone()),
             width: 1280,
             height: 720,
             color_depth: 32,
         };
         let auth = RdpAuthInput {
-            username: "lab-user".into(),
-            password: Secret::from_string("dummy-password".to_owned()),
+            username: user,
+            password: Secret::from_string(password),
             domain: None,
         };
         let verifier = FixedCertVerifier::new(CertDecision::AcceptAndRemember);
