@@ -21,12 +21,19 @@
 //! 3. That's it — [`ForeignImportOutcome`], the warning surfacing, and the
 //!    `.json` native passthrough are all shared.
 //!
-//! `.rjson` (RoyalTS) and `.csv` (ConMan's own CSV interchange format, P9.3)
-//! are implemented; `.xml` (mRemoteNG, P9.4) remains a reserved extension —
-//! routing it here currently yields [`ImportExportError::Malformed`] ("no
-//! importer registered"), not a panic.
+//! `.rjson` (RoyalTS), `.csv` (ConMan's own CSV interchange format, P9.3),
+//! and `.xml` (mRemoteNG, P9.4) are all implemented. `.xml` is the one
+//! importer whose secrets are encrypted — [`import_from_path`] tries
+//! mRemoteNG's built-in default password; a custom-password file surfaces
+//! [`ImportExportError::PasswordRequired`], which the caller resolves by
+//! re-invoking [`import_from_path_with_password`] with the user-supplied
+//! password. Everything else (`.rtsz`, RoyalTS's encrypted vault format,
+//! etc.) routes here to [`ImportExportError::Malformed`] ("no importer
+//! registered"), not a panic.
 
 pub mod csv;
+pub mod mremoteng;
+mod mremoteng_crypto;
 pub mod royalts;
 
 use std::path::Path;
@@ -71,16 +78,35 @@ pub struct ForeignImportOutcome {
 ///
 /// - `.rjson` → [`royalts::parse`].
 /// - `.csv` → [`csv::parse`] (P9.3).
+/// - `.xml` → [`mremoteng::parse`] (P9.4), tried with mRemoteNG's built-in
+///   default password — a custom-password file returns
+///   [`ImportExportError::PasswordRequired`]; re-invoke via
+///   [`import_from_path_with_password`] once the caller has prompted for it.
 /// - `.json` → the existing native envelope import
 ///   ([`crate::json_io::import_from_json`]), **unchanged** — wrapped in
 ///   [`ForeignImportOutcome`] with no warnings so callers have one return
 ///   shape.
-/// - anything else (including `.xml`, reserved for P9.4 before it lands) →
+/// - anything else (including RoyalTS's encrypted `.rtsz` vault format) →
 ///   [`ImportExportError::Malformed`].
 pub fn import_from_path(
     path: &Path,
     repo: &dyn ConnectionRepository,
     store: Option<&dyn CredentialStore>,
+) -> Result<ForeignImportOutcome, ImportExportError> {
+    import_from_path_with_password(path, repo, store, mremoteng_crypto::DEFAULT_PASSWORD)
+}
+
+/// Password-aware variant of [`import_from_path`] — every extension other
+/// than `.xml` behaves identically (`password` is simply unused for them);
+/// `.xml` decrypts with `password` instead of the built-in default. Exists so
+/// a caller that got [`ImportExportError::PasswordRequired`] back from
+/// [`import_from_path`] can prompt the user and retry without re-dispatching
+/// by hand.
+pub fn import_from_path_with_password(
+    path: &Path,
+    repo: &dyn ConnectionRepository,
+    store: Option<&dyn CredentialStore>,
+    password: &str,
 ) -> Result<ForeignImportOutcome, ImportExportError> {
     let ext = path
         .extension()
@@ -103,6 +129,7 @@ pub fn import_from_path(
     let (envelope, warnings): (ExportEnvelope, Vec<ImportWarning>) = match ext.as_str() {
         "rjson" => royalts::parse(&contents)?,
         "csv" => csv::parse(&contents)?,
+        "xml" => mremoteng::parse(&contents, password)?,
         "json" => {
             if contents.trim().is_empty() {
                 return Err(ImportExportError::Malformed("empty input".into()));
@@ -203,12 +230,13 @@ mod tests {
 
     #[test]
     fn unregistered_extension_is_a_malformed_error_not_a_panic() {
-        // `.xml` (mRemoteNG, P9.4) is still reserved-but-unimplemented — unlike
-        // `.csv`, which this task (P9.3) registers, so it can no longer stand
-        // in as "an extension nothing handles".
+        // `.xml` (mRemoteNG, P9.4) is now registered too (like `.csv` before
+        // it) — use `.rtsz`, RoyalTS's encrypted-vault format, which the
+        // P9.2 spec explicitly leaves out of scope, as a still-genuinely-
+        // unregistered extension.
         let dir = tempfile::tempdir().expect("tmp dir");
-        let path = dir.path().join("export.xml");
-        std::fs::write(&path, b"<connections/>\n").unwrap();
+        let path = dir.path().join("export.rtsz");
+        std::fs::write(&path, b"not a real vault\n").unwrap();
         let repo = SqliteRepository::open_in_memory().expect("open db");
         let err = import_from_path(&path, &repo, None).unwrap_err();
         assert!(matches!(err, ImportExportError::Malformed(_)));
