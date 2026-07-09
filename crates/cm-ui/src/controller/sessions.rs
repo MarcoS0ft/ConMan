@@ -1228,7 +1228,6 @@ pub(super) fn launch_saved_connection(
                             st.keys_panel.credentials(),
                         )
                     };
-                    #[cfg(debug_assertions)]
                     {
                         let st = state.borrow();
                         log_ssh_launch_auth(
@@ -1279,7 +1278,6 @@ pub(super) fn launch_saved_connection(
             };
             match resolved {
                 Ok(auth) => {
-                    #[cfg(debug_assertions)]
                     {
                         let st = state.borrow();
                         log_rdp_launch_auth(
@@ -1768,13 +1766,60 @@ fn has_assigned_credential_source(conn: &Connection, groups: &[Group]) -> bool {
     }
 }
 
+/// P9.8 E1/E3: a non-secret, human-readable tag for *how* `conn` gets its
+/// credential -- `"object:<name>#<id>"` (own or inherited), `"inline"`,
+/// `"prompt"`, or `"none"` (nothing configured at all). Shared by the
+/// release-safe launch log ([`log_ssh_launch_auth`]/[`log_rdp_launch_auth`])
+/// and the E3 keychain-miss warning in [`no_secret_error`] -- never the
+/// secret itself, just which source it would have come from.
+fn cred_source_label(
+    conn: &Connection,
+    groups: &[Group],
+    credentials: &[cm_core::Credential],
+) -> String {
+    match &conn.credential_source {
+        Some(cm_core::CredentialSource::Object(id)) => format!(
+            "object:{}#{}",
+            KeysPanel::cred_display_name(Some(*id), credentials),
+            id.get()
+        ),
+        Some(cm_core::CredentialSource::Inline { .. }) => "inline".to_owned(),
+        Some(cm_core::CredentialSource::Prompt) => "prompt".to_owned(),
+        None => match cm_core::resolve_effective_credential(conn, groups) {
+            Some(id) => format!(
+                "object:{}#{}",
+                KeysPanel::cred_display_name(Some(id), credentials),
+                id.get()
+            ),
+            None => "none".to_owned(),
+        },
+    }
+}
+
 /// Maps a missing secret from [`cm_core::resolve_connection_auth`] to the
 /// right [`AuthResolveError`] variant -- see
-/// [`has_assigned_credential_source`] for the distinction.
-fn no_secret_error(conn: &Connection, groups: &[Group]) -> AuthResolveError {
+/// [`has_assigned_credential_source`] for the distinction -- and logs the
+/// matching P9.8 E2/E3 release-safe warning (never the secret itself; E3
+/// carries [`cred_source_label`], not the credential/keychain contents).
+fn no_secret_error(
+    conn: &Connection,
+    groups: &[Group],
+    kind: &str,
+    credentials: &[cm_core::Credential],
+) -> AuthResolveError {
     if has_assigned_credential_source(conn, groups) {
+        tracing::warn!(
+            conn = %conn.name,
+            cred_source = %cred_source_label(conn, groups, credentials),
+            "connection launch aborted: credential secret missing from keychain"
+        );
         AuthResolveError::NotFoundInKeychain
     } else {
+        tracing::warn!(
+            conn = %conn.name,
+            kind = %kind,
+            "connection launch aborted: no credential assigned"
+        );
         AuthResolveError::NoCredentialAssigned
     }
 }
@@ -1822,7 +1867,7 @@ pub(super) fn resolve_ssh_auth(
             )?;
             let secret = resolved
                 .secret
-                .ok_or_else(|| no_secret_error(conn, groups))?;
+                .ok_or_else(|| no_secret_error(conn, groups, "ssh", credentials))?;
             Ok(SshAuthInput::Password(secret))
         }
         SshAuthMethod::PublicKey { .. } => {
@@ -1835,7 +1880,7 @@ pub(super) fn resolve_ssh_auth(
             )?;
             let key_pem = resolved_key
                 .secret
-                .ok_or_else(|| no_secret_error(conn, groups))?;
+                .ok_or_else(|| no_secret_error(conn, groups, "ssh", credentials))?;
             // Passphrase is optional -- CredentialKind::SshKey has none, and
             // Inline never carries a key/passphrase at all (password-only,
             // per the P9.6 non-goals) -- either way a miss here is `None`,
@@ -1884,7 +1929,7 @@ pub(super) fn resolve_rdp_auth(
     )?;
     let password = resolved
         .secret
-        .ok_or_else(|| no_secret_error(conn, groups))?;
+        .ok_or_else(|| no_secret_error(conn, groups, "rdp", credentials))?;
     Ok(RdpAuthInput {
         username: resolved.username,
         password,
@@ -1892,10 +1937,10 @@ pub(super) fn resolve_rdp_auth(
     })
 }
 
-/// fix-connect-credential-logging: debug-build-only diagnostic that logs the
-/// *non-secret* auth context a successfully-resolved SSH launch is about to
-/// use -- which credential (object name + id) or fallback source
-/// (`ssh-agent`), and which username, are actually being handed to
+/// P9.8 E1: logs the *non-secret* auth context a successfully-resolved SSH
+/// launch is about to use -- which credential (object name + id) or
+/// fallback source (`ssh-agent`/`inline`/`prompt`/`none`), and which
+/// username, are actually being handed to
 /// [`cm_session::SessionProvider::connect_ssh`]. Fires from every launch path
 /// that goes through [`resolve_ssh_auth`]: `launch_saved_connection` (tree
 /// click / `CONMAN_TREE_AUTOLAUNCH` / Launchpad) and `connect_in_split`
@@ -1910,10 +1955,11 @@ pub(super) fn resolve_rdp_auth(
 ///
 /// ABSOLUTE RULE: never log the password/secret/passphrase/key material --
 /// only the credential's name/id, the resolved username, and connection
-/// metadata (host/port). `#[cfg(debug_assertions)]`-gated (definition and
-/// every call site) so this -- and its `info!` line -- never exists in a
-/// release build, regardless of `CONMAN_LOG`.
-#[cfg(debug_assertions)]
+/// metadata (host/port). Release-safe (P9.8 E1, promoted from the old
+/// `#[cfg(debug_assertions)]`-only line): operators debugging
+/// "authed as the wrong user" (the exact BUG-cred-username-auth class) need
+/// this signal outside dev builds too. None of these fields are secret --
+/// see the rule above and [`cred_source_label`]'s own doc comment.
 pub(super) fn log_ssh_launch_auth(
     conn: &Connection,
     groups: &[Group],
@@ -1923,16 +1969,7 @@ pub(super) fn log_ssh_launch_auth(
     let cred_source = if matches!(settings.auth_method, SshAuthMethod::Agent) {
         "ssh-agent".to_owned()
     } else {
-        match cm_core::resolve_effective_credential(conn, groups) {
-            Some(id) => format!(
-                "object:{}#{}",
-                KeysPanel::cred_display_name(Some(id), credentials),
-                id.get()
-            ),
-            // Unreachable in practice: resolve_ssh_auth already errors out
-            // with NoCredentialAssigned before returning Ok(auth) here.
-            None => "none".to_owned(),
-        }
+        cred_source_label(conn, groups, credentials)
     };
     let username = effective_auth_username(conn, groups, &settings.username, credentials);
     tracing::info!(
@@ -1951,23 +1988,13 @@ pub(super) fn log_ssh_launch_auth(
 /// domain field). BUG-cred-username-auth: `username` is likewise the
 /// *effective* username via [`effective_auth_username`], not
 /// `settings.username` directly (see [`resolve_rdp_auth`]).
-#[cfg(debug_assertions)]
 pub(super) fn log_rdp_launch_auth(
     conn: &Connection,
     groups: &[Group],
     settings: &RdpSettings,
     credentials: &[cm_core::Credential],
 ) {
-    let cred_source = match cm_core::resolve_effective_credential(conn, groups) {
-        Some(id) => format!(
-            "object:{}#{}",
-            KeysPanel::cred_display_name(Some(id), credentials),
-            id.get()
-        ),
-        // Unreachable in practice: resolve_rdp_auth already errors out with
-        // NoCredentialAssigned before returning Ok(auth) here.
-        None => "none".to_owned(),
-    };
+    let cred_source = cred_source_label(conn, groups, credentials);
     let username = effective_auth_username(
         conn,
         groups,
@@ -2283,6 +2310,11 @@ pub(super) fn reconnect_rdp_tab(
                     // reconnect, same as the fresh-connect path.
                     tab.identity = identity.clone();
                     tab.kind = "RDP".to_owned();
+                    // P9.8 I2: this reconnect's own connecting -> connected
+                    // transition needs its own start time, not the tab's
+                    // original one (that would report a stale, way-too-long
+                    // "perceived_ms" spanning the whole prior session).
+                    tab.connect_started = std::time::Instant::now();
                 }
             }
             if let Some(mut item) = tab_model.row_data(tab_idx) {
@@ -2336,6 +2368,9 @@ pub(super) fn reconnect_ssh_tab(
                     // (reconnect_rdp_tab, above).
                     tab.identity = identity.clone();
                     tab.kind = "SSH".to_owned();
+                    // P9.8 I2: see the RDP counterpart's identical comment
+                    // (reconnect_rdp_tab, above).
+                    tab.connect_started = std::time::Instant::now();
                 }
             }
             if let Some(mut item) = tab_model.row_data(tab_idx) {
@@ -2527,6 +2562,19 @@ fn tick_tab(
     if let Some(mut item) = tab_model.row_data(i)
         && item.status.as_str() != dot
     {
+        // P9.8 I2: the user-perceived connect duration -- only the
+        // connecting -> connected edge (never local shells, which start
+        // "connected" and so never see this transition; never a plain
+        // reconnect-retry-loop edge, since those all still pass through
+        // exactly one "connecting" -> "connected" pair here too).
+        if item.status.as_str() == "connecting" && dot == "connected" {
+            tracing::info!(
+                title = %item.title,
+                kind = %st.tabs[i].kind,
+                perceived_ms = st.tabs[i].connect_started.elapsed().as_millis(),
+                "connection established (user-perceived)"
+            );
+        }
         // P5.3b: emit a toast when a background tab disconnects/fails.
         if i != active
             && st.tabs[i].is_remote

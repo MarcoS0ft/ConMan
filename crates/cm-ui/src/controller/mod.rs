@@ -232,6 +232,13 @@ struct Tab {
     /// text. Empty for local-shell tabs (which never show it: `kind == ""`
     /// falls back to "the connection" with no protocol name).
     kind: String,
+    /// P9.8 I2: when this tab's current connect attempt started -- set at
+    /// push time (`tabs::push_tab`) and reset on every reconnect
+    /// (`reconnect_ssh_tab`/`reconnect_rdp_tab`), mirroring `identity`/`kind`'s
+    /// existing "keep in step with a reconnect" pattern. `tick_tab` diffs
+    /// this against `Instant::now()` on the `connecting -> connected`
+    /// transition to log the user-perceived connect duration.
+    connect_started: std::time::Instant,
 }
 
 struct State {
@@ -589,6 +596,12 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
 /// # Errors
 /// Returns a [`slint::PlatformError`] if the window/backend cannot be created.
 pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
+    // P9.8 A6: this crate's own share of "how long did startup take" --
+    // main.rs already logs A1 (process start) before calling here; this
+    // Instant doesn't reach back into that (no shared clock needed), it just
+    // times this function's own work (assemble + wiring) through to handing
+    // control to the event loop.
+    let t0 = std::time::Instant::now();
     // Taken before `assemble` consumes the rest of `config` -- only the
     // single-instance listener below needs it, and `assemble` (shared with
     // the test seam, which never has one) has no use for this field.
@@ -644,6 +657,11 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         });
     }
 
+    // P9.8 A6.
+    tracing::info!(
+        elapsed_ms = t0.elapsed().as_millis(),
+        "startup complete, entering event loop"
+    );
     ctx.ui.run()
 }
 
