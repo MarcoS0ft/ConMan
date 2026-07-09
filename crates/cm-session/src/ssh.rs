@@ -626,10 +626,10 @@ async fn drive_inner(
         return Err(SshError::Auth("all methods rejected".to_owned()));
     }
 
-    let channel = handle
-        .channel_open_session()
-        .await
-        .map_err(|e| SshError::Channel(e.to_string()))?;
+    let channel = handle.channel_open_session().await.map_err(|e| {
+        tracing::warn!(host = %cfg.host, error = %e, "ssh: channel/PTY/shell request failed");
+        SshError::Channel(e.to_string())
+    })?;
     channel
         .request_pty(
             false,
@@ -641,11 +641,14 @@ async fn drive_inner(
             &[],
         )
         .await
-        .map_err(|e| SshError::Channel(e.to_string()))?;
-    channel
-        .request_shell(false)
-        .await
-        .map_err(|e| SshError::Channel(e.to_string()))?;
+        .map_err(|e| {
+            tracing::warn!(host = %cfg.host, error = %e, "ssh: channel/PTY/shell request failed");
+            SshError::Channel(e.to_string())
+        })?;
+    channel.request_shell(false).await.map_err(|e| {
+        tracing::warn!(host = %cfg.host, error = %e, "ssh: channel/PTY/shell request failed");
+        SshError::Channel(e.to_string())
+    })?;
 
     set_status(status, SessionStatus::Connected);
     tracing::info!(
@@ -655,7 +658,7 @@ async fn drive_inner(
         "ssh: shell ready"
     );
 
-    pump(channel, control_tx, out_rx, status).await;
+    pump(channel, control_tx, out_rx, status, &cfg.host).await;
     Ok(())
 }
 
@@ -745,8 +748,12 @@ async fn authenticate(
             let pass = passphrase
                 .as_ref()
                 .map(|s| String::from_utf8_lossy(s.expose()).into_owned());
-            let key = load_secret_key(&path, pass.as_deref())
-                .map_err(|e| SshError::Key(e.to_string()))?;
+            let key = load_secret_key(&path, pass.as_deref()).map_err(|e| {
+                // P9.8 C9: path is a filesystem location, not secret material
+                // -- fine to log. The key bytes/passphrase never are.
+                tracing::warn!(path = %path.display(), error = %e, "ssh: key load failed");
+                SshError::Key(e.to_string())
+            })?;
             authenticate_publickey_negotiated(handle, user, Arc::new(key)).await
         }
         // P6.4: a stored credential's key material, fetched from the keychain
@@ -759,8 +766,11 @@ async fn authenticate(
             let pass = passphrase
                 .as_ref()
                 .map(|s| String::from_utf8_lossy(s.expose()).into_owned());
-            let key = decode_secret_key(&pem, pass.as_deref())
-                .map_err(|e| SshError::Key(e.to_string()))?;
+            let key = decode_secret_key(&pem, pass.as_deref()).map_err(|e| {
+                // P9.8 C9: no path (there is none) and NEVER the PEM text.
+                tracing::warn!(error = %e, "ssh: key load failed");
+                SshError::Key(e.to_string())
+            })?;
             authenticate_publickey_negotiated(handle, user, Arc::new(key)).await
         }
         // ssh-agent: Unix reaches it via the domain socket in `SSH_AUTH_SOCK`;
@@ -771,7 +781,10 @@ async fn authenticate(
         SshAuthInput::Agent => {
             let mut agent = russh::keys::agent::client::AgentClient::connect_env()
                 .await
-                .map_err(|e| SshError::Auth(format!("agent: {e}")))?;
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "ssh: agent unavailable");
+                    SshError::Auth(format!("agent: {e}"))
+                })?;
             try_agent_identities(handle, user, &mut agent).await
         }
         #[cfg(windows)]
@@ -780,7 +793,10 @@ async fn authenticate(
                 WINDOWS_OPENSSH_AGENT_PIPE,
             )
             .await
-            .map_err(|e| SshError::Auth(format!("agent: {e}")))?;
+            .map_err(|e| {
+                tracing::warn!(error = %e, "ssh: agent unavailable");
+                SshError::Auth(format!("agent: {e}"))
+            })?;
             try_agent_identities(handle, user, &mut agent).await
         }
         #[cfg(not(any(unix, windows)))]
@@ -904,6 +920,10 @@ async fn keyboard_interactive_auth(
             }
         }
     }
+    tracing::warn!(
+        max = MAX_KBD_INTERACTIVE_ROUNDS,
+        "ssh: kbd-interactive exceeded max rounds"
+    );
     Err(SshError::Auth(
         "keyboard-interactive: too many challenge rounds".to_owned(),
     ))
@@ -915,6 +935,7 @@ async fn pump(
     control_tx: &Sender<Msg>,
     out_rx: &mut UnboundedReceiver<Outbound>,
     status: &Arc<Mutex<SessionStatus>>,
+    host: &str,
 ) {
     let mut exit_code: Option<u32> = None;
     loop {
@@ -947,6 +968,12 @@ async fn pump(
             },
         }
     }
+
+    // P9.8 C15: a clean session end (server sent ExitStatus, or the channel
+    // just closed) previously logged nothing at all -- only C16's catch-all
+    // covers failures. `exit_code` is `?`-debug-formatted since it's an
+    // `Option<u32>`, not secret.
+    tracing::info!(host, exit_code = ?exit_code, "ssh: session ended");
 
     let final_status = match exit_code {
         Some(code) => SessionStatus::Exited(ExitStatus {
