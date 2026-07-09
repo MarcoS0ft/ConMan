@@ -309,10 +309,11 @@ pub(super) fn duplicate_connection(
     // exception: its secret lives in the keychain keyed to `src`'s OWN
     // connection id (`CredentialRef::for_connection`), which this pure
     // mapping function has no store handle to copy -- so the duplicate keeps
-    // the inline username/domain but reports `has_secret: false` rather than
-    // claiming a secret that doesn't actually exist at the new connection's
-    // key. (Copying the inline secret too is a reasonable follow-up once
-    // `duplicate_connection`'s caller threads a `CredentialStore` through.)
+    // the inline username/domain but reports `has_secret: false` here.
+    // `wire_duplicate_conn_row` (this file) is the caller that DOES have a
+    // store handle: it copies the actual secret and persists the corrected
+    // flag via `copy_inline_secret_on_duplicate` immediately after inserting
+    // the row this function returns.
     let credential_source = match &src.credential_source {
         Some(CredentialSource::Inline {
             username, domain, ..
@@ -336,12 +337,63 @@ pub(super) fn duplicate_connection(
     )
 }
 
+/// Follow-up to `duplicate_connection`'s deliberate `has_secret: false`
+/// (that pure mapping function has no store handle to copy the source's
+/// keychain secret -- see its doc comment): copies `conn:<src_id>:password`
+/// to `conn:<new_id>:password`, then persists the corrected `has_secret`
+/// flag. Best-effort and non-fatal -- `conn` (already inserted by the
+/// caller) stays exactly as `duplicate_connection` left it on any failure
+/// here: a working duplicate whose password just needs to be re-entered,
+/// not a broken one. Only called when `src`'s source was Inline with a
+/// secret to begin with.
+fn copy_inline_secret_on_duplicate(
+    repo: &dyn cm_core::ConnectionRepository,
+    secrets: &dyn cm_core::CredentialStore,
+    conn: &Connection,
+    src_id: ConnectionId,
+    new_id: ConnectionId,
+) {
+    let secret = match secrets.get(&CredentialRef::for_connection(
+        src_id,
+        CredentialPurpose::Password,
+    )) {
+        Ok(Some(s)) => s,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!("duplicate: reading source Inline secret failed: {e}");
+            return;
+        }
+    };
+    let new_ref = CredentialRef::for_connection(new_id, CredentialPurpose::Password);
+    if let Err(e) = secrets.store(&new_ref, &secret) {
+        tracing::warn!("duplicate: storing copied Inline secret failed: {e}");
+        return;
+    }
+    let Some(CredentialSource::Inline {
+        username, domain, ..
+    }) = &conn.credential_source
+    else {
+        return; // unreachable given the caller's guard, but stay defensive.
+    };
+    let mut updated = conn.clone();
+    updated.id = new_id;
+    updated.credential_source = Some(CredentialSource::Inline {
+        username: username.clone(),
+        domain: domain.clone(),
+        has_secret: true,
+    });
+    if let Err(e) = repo.upsert_connection(&updated) {
+        tracing::warn!("duplicate: persisting has_secret flag failed: {e}");
+    }
+}
+
 fn wire_duplicate_conn_row(ctx: &Ctx) {
     ctx.ui.on_duplicate_conn_row({
         let state = ctx.state.clone();
         let conn_model = ctx.conn_model.clone();
         let cred_model = ctx.cred_model.clone();
         let repo_dup = ctx.repo.clone();
+        let secrets_dup = ctx.secrets.clone();
         move |id| {
             let mut st = state.borrow_mut();
             let Some(src) = st.conn_tree.conn_by_id(id as i64).cloned() else {
@@ -356,9 +408,24 @@ fn wire_duplicate_conn_row(ctx: &Ctx) {
                     return;
                 }
             };
-            if let Err(e) = repo_dup.upsert_connection(&conn) {
-                tracing::warn!("duplicate connection failed: {e}");
-                return;
+            let new_id = match repo_dup.upsert_connection(&conn) {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!("duplicate connection failed: {e}");
+                    return;
+                }
+            };
+            if let Some(CredentialSource::Inline {
+                has_secret: true, ..
+            }) = &src.credential_source
+            {
+                copy_inline_secret_on_duplicate(
+                    repo_dup.as_ref(),
+                    secrets_dup.as_ref(),
+                    &conn,
+                    src.id,
+                    new_id,
+                );
             }
             if let Err(e) = st.conn_tree.reload(repo_dup.as_ref()) {
                 tracing::warn!("reload after duplicate failed: {e}");
@@ -1010,7 +1077,7 @@ pub(super) fn kind_from_form_int(n: i32) -> ConnectionKind {
 mod tests {
     use std::path::PathBuf;
 
-    use cm_core::Secret;
+    use cm_core::{CredentialStore, Secret};
 
     use super::*;
 
@@ -1110,6 +1177,209 @@ mod tests {
         assert_eq!(dup.sort, 4);
         assert_eq!(dup.created_at, 2_000);
         assert_eq!(dup.updated_at, 2_000);
+    }
+
+    #[test]
+    fn duplicate_connection_inline_reports_no_secret_on_the_copy() {
+        // The pure mapping function has no store handle to copy the actual
+        // keychain secret -- `has_secret` starts false regardless of the
+        // source's own flag. `copy_inline_secret_on_duplicate` (the caller's
+        // follow-up, tested below) is what corrects it after a real copy.
+        let src = Connection::new(
+            ConnectionId::new(5),
+            None,
+            "inline-conn".to_owned(),
+            ConnectionKind::Ssh,
+            ConnectionSettings::Ssh(SshSettings {
+                host: "10.0.0.9".to_owned(),
+                port: 22,
+                username: "root".to_owned(),
+                auth_method: SshAuthMethod::Password,
+            }),
+            Some(CredentialSource::Inline {
+                username: "root".to_owned(),
+                domain: None,
+                has_secret: true,
+            }),
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+
+        let dup = duplicate_connection(&src, 1, 100).unwrap();
+
+        assert_eq!(
+            dup.credential_source,
+            Some(CredentialSource::Inline {
+                username: "root".to_owned(),
+                domain: None,
+                has_secret: false,
+            })
+        );
+    }
+
+    // -- copy_inline_secret_on_duplicate ---------------------------------------
+
+    /// Minimal `(service, account) -> bytes` `CredentialStore` double -- just
+    /// enough to prove `copy_inline_secret_on_duplicate` actually reads the
+    /// source key and writes the destination key, without pulling in a real
+    /// OS keychain.
+    struct MapStore(std::sync::Mutex<std::collections::HashMap<(String, String), Vec<u8>>>);
+
+    impl MapStore {
+        fn new() -> Self {
+            Self(std::sync::Mutex::new(std::collections::HashMap::new()))
+        }
+    }
+
+    impl cm_core::CredentialStore for MapStore {
+        fn store(
+            &self,
+            key: &CredentialRef,
+            secret: &Secret,
+        ) -> Result<(), cm_core::CredentialError> {
+            self.0.lock().unwrap().insert(
+                (key.service().to_owned(), key.account().to_owned()),
+                secret.expose().to_vec(),
+            );
+            Ok(())
+        }
+
+        fn get(&self, key: &CredentialRef) -> Result<Option<Secret>, cm_core::CredentialError> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .get(&(key.service().to_owned(), key.account().to_owned()))
+                .cloned()
+                .map(Secret::new))
+        }
+
+        fn delete(&self, key: &CredentialRef) -> Result<(), cm_core::CredentialError> {
+            self.0
+                .lock()
+                .unwrap()
+                .remove(&(key.service().to_owned(), key.account().to_owned()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn copy_inline_secret_on_duplicate_copies_the_secret_and_flips_has_secret() {
+        use cm_core::ConnectionRepository;
+        let repo = cm_storage::SqliteRepository::open_in_memory().expect("open in-memory db");
+
+        let src = Connection::new(
+            ConnectionId::new(0),
+            None,
+            "inline-conn".to_owned(),
+            ConnectionKind::Ssh,
+            ConnectionSettings::Ssh(SshSettings {
+                host: "10.0.0.9".to_owned(),
+                port: 22,
+                username: "root".to_owned(),
+                auth_method: SshAuthMethod::Password,
+            }),
+            Some(CredentialSource::Inline {
+                username: "root".to_owned(),
+                domain: None,
+                has_secret: true,
+            }),
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+        let src_id = repo.upsert_connection(&src).expect("insert source");
+
+        let store = MapStore::new();
+        store
+            .store(
+                &CredentialRef::for_connection(src_id, CredentialPurpose::Password),
+                &Secret::from_string("s3cret".to_owned()),
+            )
+            .unwrap();
+
+        // The duplicate as `duplicate_connection` + the caller's insert would
+        // leave it: fresh id assigned by the repo, has_secret still false.
+        let dup = duplicate_connection(&src, 1, 100).unwrap();
+        let new_id = repo.upsert_connection(&dup).expect("insert duplicate");
+
+        copy_inline_secret_on_duplicate(&repo, &store, &dup, src_id, new_id);
+
+        let copied = store
+            .get(&CredentialRef::for_connection(
+                new_id,
+                CredentialPurpose::Password,
+            ))
+            .unwrap()
+            .expect("secret should have been copied to the new connection's key");
+        assert_eq!(copied.expose(), b"s3cret");
+
+        let persisted = repo
+            .get_connection(new_id)
+            .expect("load duplicate")
+            .expect("duplicate exists");
+        assert_eq!(
+            persisted.credential_source,
+            Some(CredentialSource::Inline {
+                username: "root".to_owned(),
+                domain: None,
+                has_secret: true,
+            }),
+            "has_secret must be persisted as true once the secret is actually copied"
+        );
+    }
+
+    #[test]
+    fn copy_inline_secret_on_duplicate_is_a_no_op_when_source_has_no_stored_secret() {
+        use cm_core::ConnectionRepository;
+        let repo = cm_storage::SqliteRepository::open_in_memory().expect("open in-memory db");
+        let src = Connection::new(
+            ConnectionId::new(0),
+            None,
+            "inline-conn".to_owned(),
+            ConnectionKind::Ssh,
+            ConnectionSettings::Ssh(SshSettings {
+                host: "10.0.0.9".to_owned(),
+                port: 22,
+                username: "root".to_owned(),
+                auth_method: SshAuthMethod::Password,
+            }),
+            Some(CredentialSource::Inline {
+                username: "root".to_owned(),
+                domain: None,
+                has_secret: true,
+            }),
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+        let src_id = repo.upsert_connection(&src).expect("insert source");
+        // Nothing actually stored under `src_id`'s key -- a real-world
+        // "has_secret said true but the keychain entry is gone" edge case.
+        let store = MapStore::new();
+
+        let dup = duplicate_connection(&src, 1, 100).unwrap();
+        let new_id = repo.upsert_connection(&dup).expect("insert duplicate");
+
+        copy_inline_secret_on_duplicate(&repo, &store, &dup, src_id, new_id);
+
+        let persisted = repo
+            .get_connection(new_id)
+            .expect("load duplicate")
+            .expect("duplicate exists");
+        assert_eq!(
+            persisted.credential_source,
+            Some(CredentialSource::Inline {
+                username: "root".to_owned(),
+                domain: None,
+                has_secret: false,
+            }),
+            "nothing to copy -- has_secret stays false, exactly as duplicate_connection left it"
+        );
     }
 
     #[test]
