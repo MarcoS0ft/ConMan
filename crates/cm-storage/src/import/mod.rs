@@ -21,11 +21,12 @@
 //! 3. That's it — [`ForeignImportOutcome`], the warning surfacing, and the
 //!    `.json` native passthrough are all shared.
 //!
-//! `.rjson` (RoyalTS, this task) is the first format; `.csv` (mRemoteNG-or
-//! generic CSV, P9.3) and `.xml` (mRemoteNG, P9.4) are reserved extensions —
-//! routing them here currently yields
-//! [`ImportExportError::Malformed`] ("no importer registered"), not a panic.
+//! `.rjson` (RoyalTS) and `.csv` (ConMan's own CSV interchange format, P9.3)
+//! are implemented; `.xml` (mRemoteNG, P9.4) remains a reserved extension —
+//! routing it here currently yields [`ImportExportError::Malformed`] ("no
+//! importer registered"), not a panic.
 
+pub mod csv;
 pub mod royalts;
 
 use std::path::Path;
@@ -68,13 +69,14 @@ pub struct ForeignImportOutcome {
 /// import seam, `cm_ui::controller::import_export::import_from_path`, so both
 /// are testable without a file picker).
 ///
-/// - `.rjson` → [`royalts::parse`] (this task).
+/// - `.rjson` → [`royalts::parse`].
+/// - `.csv` → [`csv::parse`] (P9.3).
 /// - `.json` → the existing native envelope import
 ///   ([`crate::json_io::import_from_json`]), **unchanged** — wrapped in
 ///   [`ForeignImportOutcome`] with no warnings so callers have one return
 ///   shape.
-/// - anything else (including the `.csv`/`.xml` reserved for P9.3/P9.4 before
-///   they land) → [`ImportExportError::Malformed`].
+/// - anything else (including `.xml`, reserved for P9.4 before it lands) →
+///   [`ImportExportError::Malformed`].
 pub fn import_from_path(
     path: &Path,
     repo: &dyn ConnectionRepository,
@@ -87,37 +89,50 @@ pub fn import_from_path(
         .to_ascii_lowercase();
 
     let contents = std::fs::read_to_string(path).map_err(|e| {
+        tracing::error!(path = %path.display(), error = %e, "failed to read import file");
         ImportExportError::Malformed(format!("failed to read {}: {e}", path.display()))
     })?;
 
-    match ext.as_str() {
-        "rjson" => {
-            let (envelope, warnings) = royalts::parse(&contents)?;
-            let secrets_attempted = envelope.credential_secrets.len();
-            let stats = json_io::import(&envelope, repo, store)?;
-            Ok(ForeignImportOutcome {
-                stats,
-                secrets_attempted,
-                warnings,
-            })
-        }
+    tracing::info!(
+        path = %path.display(),
+        ext = %ext,
+        bytes = contents.len(),
+        "importing connections file"
+    );
+
+    let (envelope, warnings): (ExportEnvelope, Vec<ImportWarning>) = match ext.as_str() {
+        "rjson" => royalts::parse(&contents)?,
+        "csv" => csv::parse(&contents)?,
         "json" => {
             if contents.trim().is_empty() {
                 return Err(ImportExportError::Malformed("empty input".into()));
             }
             let envelope: ExportEnvelope = serde_json::from_str(&contents)?;
-            let secrets_attempted = envelope.credential_secrets.len();
-            let stats = json_io::import(&envelope, repo, store)?;
-            Ok(ForeignImportOutcome {
-                stats,
-                secrets_attempted,
-                warnings: Vec::new(),
-            })
+            (envelope, Vec::new())
         }
-        other => Err(ImportExportError::Malformed(format!(
-            "no importer registered for extension '.{other}'"
-        ))),
-    }
+        other => {
+            return Err(ImportExportError::Malformed(format!(
+                "no importer registered for extension '.{other}'"
+            )));
+        }
+    };
+
+    let secrets_attempted = envelope.credential_secrets.len();
+    let stats = json_io::import(&envelope, repo, store)?;
+    tracing::info!(
+        groups = stats.groups_imported,
+        connections = stats.connections_imported,
+        credentials = stats.credentials_imported,
+        secrets = stats.secrets_imported,
+        secrets_attempted,
+        warnings = warnings.len(),
+        "import complete"
+    );
+    Ok(ForeignImportOutcome {
+        stats,
+        secrets_attempted,
+        warnings,
+    })
 }
 
 #[cfg(test)]
@@ -188,9 +203,12 @@ mod tests {
 
     #[test]
     fn unregistered_extension_is_a_malformed_error_not_a_panic() {
+        // `.xml` (mRemoteNG, P9.4) is still reserved-but-unimplemented — unlike
+        // `.csv`, which this task (P9.3) registers, so it can no longer stand
+        // in as "an extension nothing handles".
         let dir = tempfile::tempdir().expect("tmp dir");
-        let path = dir.path().join("export.csv");
-        std::fs::write(&path, b"host,port\n").unwrap();
+        let path = dir.path().join("export.xml");
+        std::fs::write(&path, b"<connections/>\n").unwrap();
         let repo = SqliteRepository::open_in_memory().expect("open db");
         let err = import_from_path(&path, &repo, None).unwrap_err();
         assert!(matches!(err, ImportExportError::Malformed(_)));

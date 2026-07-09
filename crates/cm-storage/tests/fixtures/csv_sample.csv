@@ -1,0 +1,10 @@
+name,kind,group_path,host,port,username,domain,cred_name,auth_method,password,ssh_private_key_pem,ssh_passphrase,width,height,color_depth
+web-01-ssh,ssh,Prod/Web,web01.example.test,,deploy,,,password,dummy-pw-1
+win-01-rdp,rdp,Prod/Windows,win01.example.test,,Administrator,CORP,,password,dummy-pw-2,,,1920,1080,32
+scratch-shell,local
+build-box-key,ssh,Prod/Web,build.example.test,2222,ci,,,key,,"-----BEGIN OPENSSH PRIVATE KEY-----
+dummy-fake-key-material-not-real-do-not-use
+-----END OPENSSH PRIVATE KEY-----"
+svc-a,ssh,Prod/Web,svc-a.example.test,,svc,,shared-svc,password,dummy-shared-pw
+svc-b,ssh,Prod/Web,svc-b.example.test,,svc,,shared-svc,password
+no-host-ssh,ssh,,,,,,,password,dummy-pw-3

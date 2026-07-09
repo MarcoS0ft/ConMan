@@ -219,6 +219,15 @@ pub fn export(
         .filter(|(k, _)| !EXPORT_EXCLUDED_SETTING_KEYS.contains(&k.as_str()))
         .collect();
 
+    tracing::info!(
+        credentials = credentials.len(),
+        groups = groups.len(),
+        connections = connections.len(),
+        secrets = credential_secrets.len(),
+        include_secrets = options.include_secrets,
+        "exporting envelope"
+    );
+
     Ok(ExportEnvelope {
         conman_export_version: ENVELOPE_VERSION,
         exported_at: current_epoch_secs(),
@@ -263,6 +272,11 @@ pub fn import(
 ) -> Result<ImportStats, ImportExportError> {
     let found = envelope.conman_export_version;
     if !(MIN_SUPPORTED_VERSION..=ENVELOPE_VERSION).contains(&found) {
+        tracing::warn!(
+            found,
+            supported = ENVELOPE_VERSION,
+            "rejecting import: unsupported envelope version"
+        );
         return Err(ImportExportError::UnsupportedVersion {
             found,
             supported: ENVELOPE_VERSION,
@@ -310,6 +324,16 @@ pub fn import(
         repo.set_setting(key, value)?;
         stats.settings_imported += 1;
     }
+
+    tracing::info!(
+        folders = stats.credential_folders_imported,
+        credentials = stats.credentials_imported,
+        groups = stats.groups_imported,
+        connections = stats.connections_imported,
+        secrets = stats.secrets_imported,
+        settings = stats.settings_imported,
+        "import complete"
+    );
 
     Ok(stats)
 }
