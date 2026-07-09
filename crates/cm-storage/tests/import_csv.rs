@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use cm_core::{
     ConnectionKind, ConnectionRepository, ConnectionSettings, CredentialError, CredentialRef,
-    CredentialStore, Secret, SshAuthMethod,
+    CredentialSource, CredentialStore, Secret, SshAuthMethod,
 };
 use cm_storage::SqliteRepository;
 use cm_storage::import::import_from_path;
@@ -103,7 +103,10 @@ fn csv_fixture_round_trips_into_a_real_repo_and_keychain() {
         .find(|c| c.name == "scratch-shell")
         .expect("local connection persisted");
     assert_eq!(local.kind, ConnectionKind::LocalTerminal);
-    assert_eq!(local.credential, None, "local rows never get a credential");
+    assert_eq!(
+        local.credential_source, None,
+        "local rows never get a credential"
+    );
 
     // ---- Malformed row: missing host is skipped, never silently ----------
     assert!(!connections.iter().any(|c| c.name == "no-host-ssh"));
@@ -124,7 +127,7 @@ fn csv_fixture_round_trips_into_a_real_repo_and_keychain() {
         .expect("shared-svc credential persisted");
     let sharing: Vec<_> = connections
         .iter()
-        .filter(|c| c.credential == Some(shared_cred.id))
+        .filter(|c| c.credential_source == Some(CredentialSource::Object(shared_cred.id)))
         .collect();
     assert_eq!(
         sharing.len(),
@@ -143,7 +146,10 @@ fn csv_fixture_round_trips_into_a_real_repo_and_keychain() {
         }
         other => panic!("expected Ssh settings, got {other:?}"),
     }
-    let key_cred_id = keyed.credential.expect("key row should carry a credential");
+    let key_cred_id = match &keyed.credential_source {
+        Some(CredentialSource::Object(id)) => *id,
+        other => panic!("expected an Object credential source, got {other:?}"),
+    };
     let key_secret = store
         .get(&CredentialRef::new(
             key_cred_id,
@@ -159,9 +165,10 @@ fn csv_fixture_round_trips_into_a_real_repo_and_keychain() {
     );
 
     // ---- Password secret also resolves (per-row credential, no cred_name) -
-    let web_conn_cred_id = ssh
-        .credential
-        .expect("password row should carry a credential");
+    let web_conn_cred_id = match &ssh.credential_source {
+        Some(CredentialSource::Object(id)) => *id,
+        other => panic!("expected an Object credential source, got {other:?}"),
+    };
     let password_secret = store
         .get(&CredentialRef::new(
             web_conn_cred_id,
@@ -208,7 +215,7 @@ fn json_extension_still_works_after_csv_registration() {
         "web-01".to_string(),
         Kind::LocalTerminal,
         Settings::Local(LocalSettings::default()),
-        Some(cred_id),
+        Some(CredentialSource::Object(cred_id)),
         0,
         0,
         0,

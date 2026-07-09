@@ -65,7 +65,8 @@ use std::collections::HashMap;
 
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionSettings, Credential, CredentialId,
-    CredentialKind, CredentialPurpose, Group, GroupId, RdpSettings, SshAuthMethod, SshSettings,
+    CredentialKind, CredentialPurpose, CredentialSource, Group, GroupId, RdpSettings,
+    SshAuthMethod, SshSettings,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -100,6 +101,7 @@ pub fn parse(contents: &str) -> Result<(ExportEnvelope, Vec<ImportWarning>), Imp
         groups: ctx.groups,
         connections: ctx.connections,
         credential_secrets: ctx.credential_secrets,
+        connection_secrets: Vec::new(),
         settings: Vec::new(),
     };
 
@@ -364,13 +366,17 @@ fn push_connection(
 ) {
     let _ = node; // reserved: node kept for future field mapping/diagnostics.
     let conn_id = ctx.fresh_conn_id();
+    // RoyalTS always dedupes to a shared credential OBJECT (never Inline/
+    // Prompt) — P9.6-A's Inline/Prompt mapping for importers is a documented
+    // follow-on, not built here; see the P9.6-A report.
+    let credential_source = credential.map(CredentialSource::Object);
     match Connection::new(
         conn_id,
         group,
         name.clone(),
         kind,
         settings,
-        credential,
+        credential_source,
         0,
         0,
         0,
@@ -446,7 +452,7 @@ mod tests {
         let referencing: Vec<_> = envelope
             .connections
             .iter()
-            .filter(|c| c.credential == Some(cred.id))
+            .filter(|c| c.credential_source == Some(CredentialSource::Object(cred.id)))
             .collect();
         assert_eq!(
             referencing.len(),

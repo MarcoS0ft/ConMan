@@ -68,8 +68,8 @@ use std::collections::HashMap;
 
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionSettings, Credential, CredentialId,
-    CredentialKind, CredentialPurpose, CredentialRef, Group, GroupId, LocalSettings, RdpSettings,
-    SshAuthMethod, SshSettings,
+    CredentialKind, CredentialPurpose, CredentialRef, CredentialSource, Group, GroupId,
+    LocalSettings, RdpSettings, SshAuthMethod, SshSettings,
 };
 
 use crate::json_io::{self, ExportEnvelope, ExportedSecret, ImportExportError};
@@ -148,6 +148,7 @@ pub fn parse(contents: &str) -> Result<(ExportEnvelope, Vec<ImportWarning>), Imp
         groups: ctx.groups,
         connections: ctx.connections,
         credential_secrets: ctx.credential_secrets,
+        connection_secrets: Vec::new(),
         settings: Vec::new(),
     };
 
@@ -479,6 +480,9 @@ fn process_row(row_num: u64, rec: &::csv::StringRecord, idx: &HeaderIndex, ctx: 
     let ssh_passphrase = field(idx, rec, "ssh_passphrase");
     let cred_name = field(idx, rec, "cred_name");
 
+    // CSV only ever produces a credential OBJECT (per-row or cred_name-deduped)
+    // — never Inline/Prompt (P9.6-A's Inline/Prompt mapping for importers is a
+    // documented follow-on, not built here; see the P9.6-A report).
     let credential = resolve_row_credential(
         ctx,
         kind,
@@ -489,7 +493,8 @@ fn process_row(row_num: u64, rec: &::csv::StringRecord, idx: &HeaderIndex, ctx: 
         ssh_passphrase.as_deref(),
         cred_name.as_deref(),
         &name,
-    );
+    )
+    .map(CredentialSource::Object);
 
     let settings = match kind {
         ConnectionKind::Ssh => ConnectionSettings::Ssh(SshSettings {
@@ -612,7 +617,10 @@ mod tests {
             .find(|c| c.name == "scratch-shell")
             .expect("local connection present");
         assert_eq!(local.kind, ConnectionKind::LocalTerminal);
-        assert_eq!(local.credential, None, "local rows never get a credential");
+        assert_eq!(
+            local.credential_source, None,
+            "local rows never get a credential"
+        );
     }
 
     #[test]
@@ -629,7 +637,10 @@ mod tests {
             }
             other => panic!("expected Ssh settings, got {other:?}"),
         }
-        let cred_id = keyed.credential.expect("key row should carry a credential");
+        let cred_id = match &keyed.credential_source {
+            Some(CredentialSource::Object(id)) => *id,
+            other => panic!("expected an Object credential source, got {other:?}"),
+        };
         let cred = envelope
             .credentials
             .iter()
@@ -662,8 +673,13 @@ mod tests {
             .filter(|c| c.name == "svc-a" || c.name == "svc-b")
             .collect();
         assert_eq!(sharing.len(), 2, "both shared-credential rows present");
-        let cred_ids: std::collections::HashSet<_> =
-            sharing.iter().filter_map(|c| c.credential).collect();
+        let cred_ids: std::collections::HashSet<_> = sharing
+            .iter()
+            .filter_map(|c| match c.credential_source {
+                Some(CredentialSource::Object(id)) => Some(id),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
             cred_ids.len(),
             1,
@@ -687,11 +703,16 @@ mod tests {
             !envelope.connections.iter().any(|c| c.name == "no-host-ssh"),
             "the row missing 'host' must not produce a connection"
         );
+        // "row 10", not some off-by-N count — the fixture's preceding
+        // build-box-key row spans a multi-line quoted PEM field (physical
+        // lines 5-7), so this also proves `csv::StringRecord::position`
+        // tracks the real source line across a multi-line record rather than
+        // just counting data rows.
         assert!(
             warnings
                 .iter()
-                .any(|w| w.message.contains("missing 'host'")),
-            "skipping must be counted as a warning, not silent: {warnings:?}"
+                .any(|w| w.message.contains("row 10: missing 'host'")),
+            "skipping must cite the real source line (row 10), not just be a counted warning: {warnings:?}"
         );
     }
 

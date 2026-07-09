@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use cm_core::{
     ConnectionKind, ConnectionRepository, ConnectionSettings, CredentialError, CredentialRef,
-    CredentialStore, Secret,
+    CredentialSource, CredentialStore, Secret,
 };
 use cm_storage::SqliteRepository;
 use cm_storage::import::import_from_path;
@@ -91,7 +91,7 @@ fn royalts_fixture_round_trips_into_a_real_repo_and_keychain() {
     let connections = repo.list_connections().expect("list connections");
     let sharing: Vec<_> = connections
         .iter()
-        .filter(|c| c.credential == Some(cred.id))
+        .filter(|c| c.credential_source == Some(CredentialSource::Object(cred.id)))
         .collect();
     assert_eq!(
         sharing.len(),
