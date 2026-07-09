@@ -14,7 +14,7 @@
 
 import { Theme } from "../theme.slint";
 import { SegmentedControl } from "../components.slint";
-import { LineEdit, Palette } from "std-widgets.slint";
+import { CheckBox, LineEdit, Palette } from "std-widgets.slint";
 
 // ── SettingRow ───────────────────────────────────────────────────────────────
 // One labeled row: title + optional subtitle on the left; a control slot on the right.
@@ -126,6 +126,25 @@ export component SettingsPanel inherits Rectangle {
     // Takes effect on next launch (see the row hint below).
     in-out property <int>  render-backend: 0;
 
+    // ── Automation / Agent mode (P8.6-B) ─────────────────────────────────────
+    // `agent-mode-available`: true only when this binary was actually built
+    // with the `agent-mode` Cargo feature -- Rust never sets this in a normal
+    // release build, so the whole section below stays hidden there (the
+    // markup itself still compiles in, per the P8.6-impl.md trade-off note;
+    // nothing user-visible or functional ships without the feature).
+    in property <bool> agent-mode-available: false;
+    // The `automation.enabled` master toggle.
+    in-out property <bool> agent-mode-enabled: false;
+    // The three granted scopes -- read/write/execute, see the consent copy
+    // below for exactly what each allows.
+    in-out property <bool> agent-mode-scope-read: false;
+    in-out property <bool> agent-mode-scope-write: false;
+    in-out property <bool> agent-mode-scope-execute: false;
+    // "" when not currently listening (enabled but the proxy failed to bind,
+    // or disabled); otherwise "127.0.0.1:<port>" -- the loopback address an
+    // agent connects to.
+    in property <string> agent-mode-connection-details: "";
+
     // ── Callbacks ──────────────────────────────────────────────────────────
     callback theme-changed(int);           // 0 dark · 1 light · 2 system
     callback density-changed(int);         // 0 compact · 1 cosy
@@ -136,6 +155,10 @@ export component SettingsPanel inherits Rectangle {
     callback shell-cwd-changed(string);
     callback startup-behavior-changed(int);
     callback render-backend-changed(int);     // 0 auto · 1 software · 2 hardware
+    callback agent-mode-enabled-changed(bool);
+    callback agent-mode-scope-read-changed(bool);
+    callback agent-mode-scope-write-changed(bool);
+    callback agent-mode-scope-execute-changed(bool);
 
     // P8.1: landmark region — non-interactive, but a genuine navigation aid
     // for screen readers jumping between panels (not required for the audit's
@@ -507,6 +530,101 @@ export component SettingsPanel inherits Rectangle {
                         text: "Auto detects a working GPU on each launch. Software is the safe fallback for machines without one.";
                         color: Theme.color-text-secondary; font-size: Theme.font-sm;
                         font-family: Theme.font-family; wrap: word-wrap;
+                    }
+                }
+            }
+
+            // ════ AUTOMATION / AGENT MODE (P8.6-B) ═══════════════════════
+            // Whole section hidden unless this binary was built with the
+            // `agent-mode` feature (see `agent-mode-available`'s doc comment).
+            if root.agent-mode-available : VerticalLayout {
+                Rectangle { height: 1px; background: Theme.color-stroke; }
+                SectionHeader { label: "AUTOMATION / AGENT MODE"; }
+                Rectangle { height: 1px; background: Theme.color-stroke; }
+
+                VerticalLayout {
+                    padding-left: Theme.space-6; padding-right: Theme.space-6;
+                    padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
+                    spacing: Theme.space-4;
+
+                    // Master enable toggle. Own checkbox text (not a
+                    // separate title Text) so its accessible-label is
+                    // unambiguous -- a plain Text with the same words would
+                    // otherwise tie for "first match" on a label lookup.
+                    VerticalLayout {
+                        spacing: Theme.space-2;
+                        agent-mode-enable-check := CheckBox {
+                            text: "Enable agent mode";
+                            checked <=> root.agent-mode-enabled;
+                            toggled => { root.agent-mode-enabled-changed(self.checked); }
+                        }
+                        Text {
+                            text: "Lets an AI agent connect over MCP (loopback only) and drive this app -- inspect the window, click things, and (if granted) open your saved connections. Off by default. Applied on restart.";
+                            color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                            font-family: Theme.font-family; wrap: word-wrap;
+                        }
+                    }
+
+                    // Scope checkboxes + plain-language consent copy.
+                    VerticalLayout {
+                        spacing: Theme.space-3;
+                        Text {
+                            text: "Granted scopes";
+                            color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                            font-family: Theme.font-family; font-weight: 600;
+                        }
+
+                        HorizontalLayout {
+                            spacing: Theme.space-3;
+                            agent-mode-read-check := CheckBox {
+                                text: "Read";
+                                checked <=> root.agent-mode-scope-read;
+                                toggled => { root.agent-mode-scope-read-changed(self.checked); }
+                            }
+                        }
+                        Text {
+                            text: "Read -- the agent can inspect the window: see what's on screen, read element properties and status text, take screenshots. It cannot change anything.";
+                            color: Theme.color-text-secondary; font-size: Theme.font-xs;
+                            font-family: Theme.font-family; wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            spacing: Theme.space-3;
+                            agent-mode-write-check := CheckBox {
+                                text: "Write";
+                                checked <=> root.agent-mode-scope-write;
+                                toggled => { root.agent-mode-scope-write-changed(self.checked); }
+                            }
+                        }
+                        Text {
+                            text: "Write -- the agent can also click, type, and fill in fields: create/edit connections and credentials, change settings. It still cannot open a session by itself (that needs Execute too).";
+                            color: Theme.color-text-secondary; font-size: Theme.font-xs;
+                            font-family: Theme.font-family; wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            spacing: Theme.space-3;
+                            agent-mode-execute-check := CheckBox {
+                                text: "Execute";
+                                checked <=> root.agent-mode-scope-execute;
+                                toggled => { root.agent-mode-scope-execute-changed(self.checked); }
+                            }
+                        }
+                        Text {
+                            text: "Execute -- the agent can open sessions using your stored credentials (launch a saved SSH/RDP connection, or broadcast input to one already open). The credential's actual password/key is never readable over MCP -- only its name -- even with every scope granted.";
+                            color: Theme.color-text-secondary; font-size: Theme.font-xs;
+                            font-family: Theme.font-family; wrap: word-wrap;
+                        }
+                    }
+
+                    // Connection details.
+                    if root.agent-mode-connection-details != "" : VerticalLayout {
+                        spacing: Theme.space-1;
+                        Text {
+                            text: "Listening on " + root.agent-mode-connection-details + " (loopback only -- never reachable from another machine).";
+                            color: Theme.color-text-disabled; font-size: Theme.font-xs;
+                            font-family: Theme.font-family; wrap: word-wrap;
+                        }
                     }
                 }
             }

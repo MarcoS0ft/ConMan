@@ -29,6 +29,8 @@ fn settings_suite() {
     density_compact_cosy_toggle();
     accent_preset_selection();
     render_backend_toggle_persists();
+    #[cfg(feature = "agent-mode")]
+    agent_mode_section_toggles_persist();
 }
 
 /// Opens Settings via the real command-palette flow (mirrors
@@ -183,4 +185,58 @@ fn render_backend_toggle_persists() {
         None,
         "Auto must clear the persisted backend (re-probe next launch)"
     );
+}
+
+/// P8.6-B: only compiled/run when this binary was built with BOTH
+/// `ui-introspection` and `agent-mode` -- `agent-mode-available` (and hence
+/// the whole Automation section) is otherwise `false` and nothing below
+/// would exist in the tree at all (see `AgentModeConfig`'s doc comment for
+/// why the section's *markup* still ships either way, just inert). No
+/// harness scenario starts a real agent-mode proxy (that is `conman`'s own
+/// process, out of scope for this in-process harness) -- this only exercises
+/// the Settings UI's persistence, matching `render_backend_toggle_persists`'s
+/// shape.
+#[cfg(feature = "agent-mode")]
+fn agent_mode_section_toggles_persist() {
+    use cm_core::SettingsService;
+
+    let (h, repo, _provider) = harness();
+    open_settings(&h);
+    let panel = find_singleton(&h.ui, "SettingsPanel");
+
+    assert!(!h.ui.get_agent_mode_enabled(), "agent mode defaults to off");
+    assert!(
+        !SettingsService::new(repo.as_ref())
+            .load_automation()
+            .unwrap()
+            .enabled,
+        "automation.enabled defaults to off"
+    );
+
+    find_descendant_by_label(&panel, "Enable agent mode").invoke_accessible_default_action();
+    pump_ticks(1);
+    assert!(
+        h.ui.get_agent_mode_enabled(),
+        "toggling the checkbox must flip the model"
+    );
+    assert!(
+        SettingsService::new(repo.as_ref())
+            .load_automation()
+            .unwrap()
+            .enabled,
+        "toggling must persist automation.enabled=true"
+    );
+
+    find_descendant_by_label(&panel, "Read").invoke_accessible_default_action();
+    pump_ticks(1);
+    let persisted = SettingsService::new(repo.as_ref())
+        .load_automation()
+        .unwrap()
+        .scopes;
+    assert!(
+        persisted.read,
+        "Read checkbox must persist to automation.scopes"
+    );
+    assert!(!persisted.write, "Write must stay ungranted");
+    assert!(!persisted.execute, "Execute must stay ungranted");
 }

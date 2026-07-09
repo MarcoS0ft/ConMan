@@ -372,6 +372,15 @@ pub(crate) struct Ctx {
     bc_check_model: Rc<VecModel<bool>>,
     bc_group_model: Rc<VecModel<SharedString>>,
     bc_draft: Rc<RefCell<BTreeSet<usize>>>,
+    /// P8.6-B: `Some(_)` only when the composition root actually started the
+    /// agent-mode proxy this session -- see [`crate::AgentModeConfig`]'s doc
+    /// comment. Unconditional field for the same reason `AppConfig`'s is;
+    /// only the code that *reads* it (`settings_ctl`'s agent-mode wiring, and
+    /// eventually the execute-scope launch gate) is
+    /// `#[cfg(feature = "agent-mode")]`-gated -- so a non-agent-mode build
+    /// never reads it at all.
+    #[allow(dead_code)]
+    agent_mode: Option<crate::AgentModeConfig>,
 }
 
 /// Shared assembly behind [`run`] (production) and [`build_for_test`] (P8.2's
@@ -395,6 +404,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
     let secrets = config.secrets;
     let session_provider = config.session_provider;
     let first_launch = config.first_launch;
+    let agent_mode = config.agent_mode;
 
     let ui = AppWindow::new()?;
     let scale = ui.window().scale_factor();
@@ -449,6 +459,8 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         }
     };
     settings_ctl::apply_settings_to_ui(&stored_settings, &ui);
+    #[cfg(feature = "agent-mode")]
+    settings_ctl::apply_agent_mode_to_ui(repo.as_ref(), agent_mode.as_ref(), &ui);
     util::apply_early_env_overrides(&ui);
 
     // Load initial tree data.
@@ -566,6 +578,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         bc_check_model: bc_check_model.clone(),
         bc_group_model: bc_group_model.clone(),
         bc_draft: bc_draft.clone(),
+        agent_mode,
     };
 
     tabs::wire_tabs(&ctx);
