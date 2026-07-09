@@ -24,7 +24,8 @@ mod support;
 use i_slint_backend_testing::{ElementHandle, ElementRoot};
 
 use support::{
-    find_by_id, find_by_id_opt, find_descendant_by_label, find_singleton, harness, pump_ticks,
+    find_by_id, find_by_id_opt, find_descendant_by_label, find_descendant_by_label_opt,
+    find_singleton, harness, pump_ticks,
 };
 
 #[test]
@@ -38,7 +39,7 @@ fn dialogs_suite() {
     profile_editor_kind_switch_updates_port_and_manifest();
     profile_editor_new_connection_username_is_editable_with_no_credential();
     profile_editor_inline_mode_shows_password_hides_credential_picker();
-    profile_editor_prompt_mode_hides_picker_and_password();
+    profile_editor_credential_mode_selector_has_no_prompt_option();
     profile_editor_reference_mode_with_named_credential_is_read_only();
     profile_editor_save_persists_and_cancel_discards();
     dialog_and_button_bounds();
@@ -256,21 +257,27 @@ fn profile_editor_inline_mode_shows_password_hides_credential_picker() {
     );
 }
 
-/// Switching to Prompt hides both the credential picker and the Inline
-/// password field, replacing them with the explanatory text.
-fn profile_editor_prompt_mode_hides_picker_and_password() {
+/// Per Fable's guidance: "Prompt" must NOT be a selectable mode yet -- there
+/// is no connect-time password-prompt UX to route into, so a Prompt
+/// connection would surface a confusing "no credential assigned" error.
+/// `CredentialSource::Prompt` stays in the model (harmless, unreachable);
+/// this asserts the mode selector itself only ever offers Reference/Inline,
+/// guarding against it being accidentally re-exposed.
+fn profile_editor_credential_mode_selector_has_no_prompt_option() {
     let (h, _repo, _provider) = harness();
     h.ui.invoke_new_connection(0);
     pump_ticks(1);
 
     let editor = find_singleton(&h.ui, "ProfileEditor");
-    find_descendant_by_label(&editor, "Prompt").invoke_accessible_default_action();
-    pump_ticks(1);
-
-    let form = h.ui.get_profile_form();
-    assert_eq!(form.cred_mode, 2, "mode switch to Prompt did not take");
-    assert!(find_by_id_opt(&h.ui, "ProfileEditor::profile-cred-combo").is_none());
-    assert!(find_by_id_opt(&h.ui, "ProfileEditor::profile-inline-password-field").is_none());
+    // Reference/Inline still exist and are switchable (exercised end to end
+    // by the other mode-selector tests above); here just confirm Prompt
+    // specifically does NOT exist in the tree at all -- not merely hidden.
+    find_descendant_by_label(&editor, "Reference");
+    find_descendant_by_label(&editor, "Inline");
+    assert!(
+        find_descendant_by_label_opt(&editor, "Prompt").is_none(),
+        "Prompt must not be a selectable mode yet (no connect-time prompt UX exists)"
+    );
 }
 
 /// P9.5 #6/#7: a connection whose Reference credential HAS its own username

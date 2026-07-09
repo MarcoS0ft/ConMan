@@ -272,8 +272,17 @@ export component ProfileEditor inherits Rectangle {
                 // credential-object picker, unchanged, incl. "Inherit from
                 // group"), "Inline" (username/password +domain-for-RDP typed
                 // directly on this connection, stored in the OS keychain
-                // keyed to the CONNECTION -- never in the DB), "Prompt" (no
-                // stored secret at all; prompted at connect time).
+                // keyed to the CONNECTION -- never in the DB). Per Fable: NOT
+                // exposing "Prompt" here yet -- there is no connect-time
+                // password-prompt UX to route into (SSH-agent returns early,
+                // kbd-interactive is server-driven, RDP always required a
+                // password), so a selectable Prompt mode would surface a
+                // confusing "no credential assigned" error at connect time.
+                // `CredentialSource::Prompt` stays in the model and
+                // `cred_mode_fields`/`credential_source_from_form` (cm-ui,
+                // controller/tree_ctl.rs) still handle it correctly -- it's
+                // just unreachable from this selector until the connect-time
+                // prompt UX lands as its own P9.6 follow-up.
                 VerticalLayout {
                     spacing: Theme.space-2;
                     Text {
@@ -284,7 +293,7 @@ export component ProfileEditor inherits Rectangle {
                         font-weight: 600;
                     }
                     SegmentedControl {
-                        options: ["Reference", "Inline", "Prompt"];
+                        options: ["Reference", "Inline"];
                         selected <=> root.form.cred-mode;
                     }
 
@@ -350,13 +359,9 @@ export component ProfileEditor inherits Rectangle {
                         }
                     }
 
-                    if root.form.cred-mode == 2 : Text {
-                        text: "No stored credential -- you will be prompted at connect time.";
-                        color: Theme.color-text-disabled;
-                        font-size: Theme.font-xs;
-                        font-family: Theme.font-family;
-                        wrap: word-wrap;
-                    }
+                    // No cred-mode == 2 (Prompt) branch here -- see the
+                    // section doc comment above; the mode isn't selectable
+                    // from this control yet.
                 }
             }
         }
