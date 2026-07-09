@@ -25,6 +25,18 @@ qa-harness = ["cm-ui/qa-harness"]
 # docs/devel/memos/P8.3-slint-mcp-feature.md for the rationale. Never present
 # in a shipped/release artifact (same posture as `qa-harness`).
 automation = ["slint/mcp", "cm-ui/ui-introspection"]
+# P8.6: the agent-mode product feature (scoped MCP surface) — extends
+# `automation` (same underlying Slint MCP server + introspection debug info)
+# with `cm-ui/agent-mode`, the leaf feature P8.6-B's Settings UI / active
+# indicator / execute-scope launch-gate compile behind, and `dep:httparse`,
+# the scope-enforcement proxy's HTTP request parser (memos/
+# P8.6-proxy-httparse-dep.md — already resolved at this exact version
+# transitively via slint/mcp, zero new lockfile entries). Off by default; opt
+# in with `cargo build -p conman --features agent-mode`. `automation` keeps
+# working standalone (e.g. for QA/introspection use without the full
+# agent-mode product surface); `agent-mode` is what a real deployment
+# enables. See docs/devel/tasks/P8.6-impl.md.
+agent-mode = ["automation", "cm-ui/agent-mode", "dep:httparse", "dep:serde_json"]
 # Dev-only convenience: seeds a small example DB on first launch. Off by
 # default; NEVER present in a shipped/release artifact. Opt in with
 # `cargo build -p conman --features demo-seed`.
@@ -60,6 +72,16 @@ slint = { version = "1.17", default-features = false, features = [
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+# P8.6: the `agent-mode` scope-enforcement proxy's HTTP request parser — see
+# memos/P8.6-proxy-httparse-dep.md. Optional, only compiled when `agent-mode`
+# is enabled (`dep:httparse` in that feature's requirement list). Pinned to
+# the exact version already resolved transitively via `slint/mcp`.
+httparse = { version = "=1.10.1", optional = true }
+# P8.6: the proxy's JSON-RPC body inspection (tools/call gating, tools/list
+# filtering). Optional, only compiled when `agent-mode` is enabled. Already a
+# direct dependency of cm-core/cm-storage/cm-ui at this exact version —
+# adding it here too is lockfile-neutral (no new package/version entries).
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 # Fresh temp-file DBs for the demo-seed gating tests below (mirrors

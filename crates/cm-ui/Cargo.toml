@@ -57,6 +57,13 @@ qa-harness = ["dep:png"]
 # `--release` — stays debug-info-free: no element-name strings in the shipped binary.
 # See docs/devel/tasks/P8.1-a11y-element-contract.md.
 ui-introspection = []
+# P8.6-B leaf feature (empty for now): the Settings "Automation / Agent mode"
+# section, the persistent active indicator, and the execute-scope
+# session-launch gate compile behind this. Reserved by P8.6-A (storage-dev)
+# so `conman`'s `agent-mode` feature has a valid forward target; the actual
+# gated code is P8.6-B (ui-dev, after Phase C). Off by default, same posture
+# as `qa-harness`/`ui-introspection`. See docs/devel/tasks/P8.6-impl.md.
+agent-mode = []
 
 [dev-dependencies]
 # Already a workspace dep (dev-only, in cm-storage) — used here for the P6.6
