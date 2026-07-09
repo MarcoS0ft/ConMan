@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use cm_core::SessionStatus;
 use i_slint_backend_testing::{ElementHandle, ElementRoot};
 
-use support::{find_by_id, harness, pump_ticks, pump_until};
+use support::{find_by_id, harness, nth_by_id, pump_ticks, pump_until};
 
 #[test]
 fn overlays_suite() {
@@ -32,6 +32,7 @@ fn overlays_suite() {
     connecting_overlay_holds_indefinitely_and_chrome_stays_reachable();
     connecting_resolves_to_error_overlay_with_reconnect_and_edit();
     background_tab_failure_toasts_and_auto_expires();
+    switching_tabs_shows_each_tabs_own_identity_not_the_others();
 }
 
 fn toast_count(ui: &cm_ui::AppWindow) -> usize {
@@ -41,17 +42,20 @@ fn toast_count(ui: &cm_ui::AppWindow) -> usize {
 /// Drives the quick-connect SSH flow through the real dialog + Connect
 /// button, with the provider scripted to report `Connecting` and never
 /// anything else, then hands back the shared status cell so the caller can
-/// move the session forward later.
+/// move the session forward later. `host` is parameterized (P9.5 #3's
+/// per-tab-identity scenario opens two SSH tabs to two different hosts to
+/// prove they don't bleed into each other).
 fn connect_ssh_via_quick_connect(
     h: &cm_ui::TestHarness,
     provider: &Arc<support::MockSessionProvider>,
+    host: &str,
 ) -> Arc<Mutex<SessionStatus>> {
     let cell = Arc::new(Mutex::new(SessionStatus::Connecting));
     provider.script_next_remote(cell.clone());
 
     h.ui.invoke_quick_connect();
     h.ui.set_qc_kind(0); // SSH
-    h.ui.set_qc_host("mock-host".into());
+    h.ui.set_qc_host(host.into());
     h.ui.set_qc_username("ops".into());
     h.ui.set_qc_auth_method(1); // Password
     h.ui.set_qc_secret("mock-password".into());
@@ -68,7 +72,7 @@ fn connect_ssh_via_quick_connect(
 /// of that cell, not the window). A Cancel affordance exists throughout.
 fn connecting_overlay_holds_indefinitely_and_chrome_stays_reachable() {
     let (h, _repo, provider) = harness();
-    let _cell = connect_ssh_via_quick_connect(&h, &provider);
+    let _cell = connect_ssh_via_quick_connect(&h, &provider, "mock-host");
 
     assert!(
         h.ui.get_overlay_connecting(),
@@ -140,7 +144,7 @@ fn connecting_overlay_holds_indefinitely_and_chrome_stays_reachable() {
 /// mock ticks.
 fn connecting_resolves_to_error_overlay_with_reconnect_and_edit() {
     let (h, _repo, provider) = harness();
-    let cell = connect_ssh_via_quick_connect(&h, &provider);
+    let cell = connect_ssh_via_quick_connect(&h, &provider, "mock-host");
     assert!(h.ui.get_overlay_connecting());
 
     *cell.lock().expect("cell poisoned") = SessionStatus::Failed("mock connect failure".into());
@@ -170,7 +174,7 @@ fn connecting_resolves_to_error_overlay_with_reconnect_and_edit() {
 /// a duration this suite's determinism/teeth relies on staying instant.
 fn background_tab_failure_toasts_and_auto_expires() {
     let (h, _repo, provider) = harness();
-    let cell = connect_ssh_via_quick_connect(&h, &provider); // tab 1 (active), Connecting
+    let cell = connect_ssh_via_quick_connect(&h, &provider, "mock-host"); // tab 1 (active), Connecting
 
     // Open a second local tab (tab 2) so the SSH tab becomes a background tab.
     find_by_id(&h.ui, "AppWindow::new-tab-btn").invoke_accessible_default_action();
@@ -197,5 +201,59 @@ fn background_tab_failure_toasts_and_auto_expires() {
         dismissed,
         "the toast must auto-dismiss after its 3.2s mock-time timer, got count={}",
         toast_count(&h.ui)
+    );
+}
+
+/// P9.5 #3: the actual bug the user hit -- alternating tabs while a connect
+/// is in progress showed the *connecting* tab's content in the tab switched
+/// to. `AppWindow::session-identity`/`connecting-kind` are single properties
+/// shared by whichever tab is active (feeding `ConnectingOverlay`); this
+/// proves `select_tab` re-pushes the TARGET tab's own cached identity/kind
+/// rather than leaving whichever tab most recently connected "stuck" on
+/// screen. Two SSH tabs to two different (mock) hosts, both left
+/// `Connecting` (scripted, never resolved) -- switching between them must
+/// always show the switched-to tab's own host, never the other one's.
+fn switching_tabs_shows_each_tabs_own_identity_not_the_others() {
+    let (h, _repo, provider) = harness();
+    let _cell_a = connect_ssh_via_quick_connect(&h, &provider, "host-a"); // tab 1, Connecting
+    assert!(
+        h.ui.get_session_identity().contains("host-a"),
+        "tab 1 must show its own identity right after connecting, got {:?}",
+        h.ui.get_session_identity()
+    );
+
+    let _cell_b = connect_ssh_via_quick_connect(&h, &provider, "host-b"); // tab 2, Connecting
+    assert_eq!(h.ui.get_active_tab(), 2, "the just-opened tab is active");
+    assert!(
+        h.ui.get_session_identity().contains("host-b"),
+        "the just-opened tab must show its own identity, got {:?}",
+        h.ui.get_session_identity()
+    );
+
+    // Switch back to tab 1 (host-a) -- this is the repro: before the fix,
+    // session-identity/connecting-kind were only ever set at connect time,
+    // never refreshed on a plain tab switch, so this would still show
+    // host-b's identity (whichever tab connected most recently) bled into
+    // tab 1's view.
+    nth_by_id(&h.ui, "AppWindow::tab-item", 1).invoke_accessible_default_action();
+    assert_eq!(h.ui.get_active_tab(), 1);
+    assert!(
+        h.ui.get_session_identity().contains("host-a"),
+        "switching to tab 1 (host-a) must show host-a's identity, not host-b's; got {:?}",
+        h.ui.get_session_identity()
+    );
+    assert_eq!(h.ui.get_connecting_kind().as_str(), "SSH");
+    assert!(
+        h.ui.get_overlay_connecting(),
+        "tab 1 is still Connecting (scripted, never resolved)"
+    );
+
+    // And switching to tab 2 (host-b) shows host-b's again -- the isolation
+    // holds in both directions, not just "whichever was opened last".
+    nth_by_id(&h.ui, "AppWindow::tab-item", 2).invoke_accessible_default_action();
+    assert!(
+        h.ui.get_session_identity().contains("host-b"),
+        "switching to tab 2 (host-b) must show host-b's identity, not host-a's; got {:?}",
+        h.ui.get_session_identity()
     );
 }
