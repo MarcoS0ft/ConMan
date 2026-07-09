@@ -45,6 +45,7 @@ use std::sync::mpsc::Receiver;
 use cm_core::ConnectionRepository as _;
 use cm_core::SettingsService;
 use cm_platform::app_db_path;
+use cm_platform::app_log_dir;
 use cm_platform::single_instance::{self, AcquireOutcome};
 use cm_secrets::KeyringStore;
 use cm_session::SessionProviderImpl;
@@ -96,6 +97,21 @@ fn main() -> ExitCode {
 
     // Install the tracing subscriber — everything below may log.
     let _logging_guard = logging::init();
+
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        build = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+        "conman starting"
+    );
+    tracing::info!(
+        db = %db_path.display(),
+        log_dir = %app_log_dir().unwrap_or_else(|_| std::env::temp_dir()).display(),
+        "app dirs resolved"
+    );
 
     // Now that a subscriber exists, report the decision made above.
     render_backend::log_decision(&renderer_decision);
