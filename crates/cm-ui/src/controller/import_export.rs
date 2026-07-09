@@ -227,7 +227,12 @@ pub(super) fn import_from_path(
     }
     let envelope: ExportEnvelope = serde_json::from_str(&json)
         .map_err(|e| ImportError::Other(format!("malformed JSON: {e}")))?;
-    let total_secrets = envelope.credential_secrets.len();
+    // P9.6-A: `secrets_imported` (below) counts BOTH credential-object and
+    // Inline connection secrets (json_io.rs's `import_connection_secrets`
+    // increments the same counter) -- the denominator must too, or an
+    // Inline-secret import failure silently vanishes from the "N secrets
+    // skipped" toast instead of surfacing.
+    let total_secrets = envelope.credential_secrets.len() + envelope.connection_secrets.len();
     let stats = cm_storage::import(&envelope, repo, Some(secrets))
         .map_err(|e| ImportError::Other(format!("import failed: {e}")))?;
     let skipped_secrets = total_secrets.saturating_sub(stats.secrets_imported);
@@ -475,7 +480,12 @@ mod tests {
         Connection, ConnectionId, ConnectionKind, ConnectionSettings, Credential, CredentialError,
         CredentialId, CredentialKind, CredentialRef, Group, GroupId, LocalSettings, Secret,
     };
+    // `ExportedConnectionSecret` isn't re-exported at `cm_storage`'s crate
+    // root (only `ExportedSecret`, its credential-object counterpart, is) --
+    // reach it via the `pub mod json_io` path instead of widening that
+    // crate's public surface just for this one test.
     use cm_storage::SqliteRepository;
+    use cm_storage::json_io::ExportedConnectionSecret;
     use slint::Model;
 
     use super::*;
@@ -563,6 +573,52 @@ mod tests {
         let conns = dst_repo.list_connections().expect("list connections");
         assert_eq!(conns.len(), 1);
         assert_eq!(conns[0].name, "web-01");
+    }
+
+    /// Item (e): `total_secrets` (the "N secrets skipped" toast's
+    /// denominator) must count BOTH `credential_secrets` and
+    /// `connection_secrets` -- not just the former. An Inline connection
+    /// secret whose connection isn't in this import batch is silently
+    /// skipped by `import_connection_secrets` (never increments
+    /// `secrets_imported`) without erroring the whole import; the only way
+    /// this becomes visible to the user at all is via `skipped_secrets`.
+    /// Before the fix, `total_secrets` (credential_secrets.len() alone) was
+    /// `0` here, so `skipped_secrets` (a `saturating_sub`) came out `0` too
+    /// -- the failure vanished instead of surfacing.
+    #[test]
+    fn import_from_path_counts_a_skipped_inline_connection_secret() {
+        let envelope = ExportEnvelope {
+            conman_export_version: 1,
+            exported_at: 0,
+            credential_folders: vec![],
+            credentials: vec![],
+            groups: vec![],
+            connections: vec![],
+            credential_secrets: vec![],
+            // No connection in this envelope has id 999 -- unresolvable, so
+            // `import_connection_secrets` skips it without counting it as
+            // imported (see json_io.rs).
+            connection_secrets: vec![ExportedConnectionSecret {
+                connection_id: ConnectionId::new(999),
+                purpose: "password".to_string(),
+                secret_hex: "deadbeef".to_string(),
+            }],
+            settings: vec![],
+        };
+        let json = serde_json::to_string(&envelope).expect("serialize envelope");
+        let dir = tempfile::tempdir().expect("tmp dir");
+        let path = dir.path().join("export.json");
+        std::fs::write(&path, json).expect("write envelope");
+
+        let repo = SqliteRepository::open_in_memory().expect("open db");
+        let mock_store = MockStore::default();
+        let outcome = import_from_path(&path, &repo, &mock_store).expect("import should not error");
+
+        assert_eq!(outcome.stats.secrets_imported, 0);
+        assert_eq!(
+            outcome.skipped_secrets, 1,
+            "the unresolvable connection secret must count as skipped, not vanish"
+        );
     }
 
     #[test]
