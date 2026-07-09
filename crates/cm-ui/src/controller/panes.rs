@@ -1220,6 +1220,14 @@ pub(super) fn reattach_session(
             id: 0,
             status: SharedString::from(initial_status),
             pane_count: 1,
+            // A reattached detached session is always a real connection --
+            // never the Home tab.
+            is_home: false,
+            // P9.10 #1: `origin_connection_id` is always `None` for a
+            // reattached tab (see the comment just above, in the `Tab {
+            // ... }` construction) -- can only "duplicate" as a new local
+            // shell, and only if this reattached session actually was one.
+            can_duplicate: !is_remote,
         });
         ui.set_active_tab(active as i32);
         ui.set_pane_layout(0);

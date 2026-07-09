@@ -42,6 +42,19 @@ export struct TabItem {
     id: int,
     status: string,
     pane-count: int,
+    // P9.10 #3: the Launchpad-fronted "Home"/new-tab-without-a-live-session
+    // tab (`Tab::is_empty` in the controller) isn't a connection -- it must
+    // not show the connection StatusDot. Mirrors `Tab::is_empty` 1:1 (see
+    // `push_tab`, the only place `TabItem` is constructed for a real
+    // controller-driven tab).
+    is-home: bool,
+    // P9.10 #1: whether the tab context menu's "Duplicate" item has a
+    // target to relaunch -- a stored-connection tab (`origin_connection_id`
+    // is `Some`) or a plain local shell (`!is_remote`). `false` for a
+    // quick-connect-originated remote tab (no stored settings to safely
+    // relaunch) and for a reattached tab whose origin wasn't preserved --
+    // omit the item rather than launch nothing (spec's explicit rule).
+    can-duplicate: bool,
 }
 
 // P6.11: one entry per pane in the active tab's N-way split, computed in Rust
@@ -299,13 +312,27 @@ component Tab inherits Rectangle {
     in property <string> status;
     in property <int>    pane-count: 1;
     in property <bool>   active;
+    // P9.10 #3: the Home tab isn't a connection -- it shows a house glyph
+    // (Codicon `cod-home`, same icon family as this row's own close button
+    // just below) instead of the connection StatusDot.
+    in property <bool>   is-home: false;
     // P8.1: position within the tab strip, supplied by the `for` loop at the
     // call site — repeated items disambiguate via item-index/item-count, not
     // label suffixes (the contract's rule).
     in property <int>    item-index: 0;
     in property <int>    item-count: 1;
+    // P9.10 #1: whether "Duplicate" has a target to relaunch -- see
+    // `TabItem::can_duplicate`'s doc comment (Rust side) for the exact rule.
+    in property <bool>   can-duplicate: false;
     callback clicked();
     callback closed();
+    // P9.10 #1: the tab context menu's session actions -- Home never wires
+    // these (see the ContextMenuArea below), so the controller doesn't need
+    // its own `is-home` guard at the callback site, just the usual
+    // out-of-range `idx` one every other tab callback already has.
+    callback reconnect-clicked();
+    callback disconnect-clicked();
+    callback duplicate-clicked();
 
     // P8.1: one tab per session; label is the (dynamic) tab title.
     accessible-role: tab;
@@ -321,11 +348,55 @@ component Tab inherits Rectangle {
 
     touch := TouchArea { clicked => { root.clicked(); } }
 
+    // P9.10 #1: right-click menu, mirroring the connection tree row's
+    // ContextMenuArea/Menu/MenuItem shape (app.slint's ConnectionRow,
+    // `if !data.is-group : MenuItem {...}` conditional-item pattern). Home
+    // suppresses every session item -- there is no session to reconnect/
+    // disconnect/duplicate -- but "Close" is still offered everywhere,
+    // mirroring `close-tab-btn`'s own always-present behavior.
+    ContextMenuArea {
+        Menu {
+            if !root.is-home : MenuItem {
+                title: "Reconnect";
+                activated => { root.reconnect-clicked(); }
+            }
+            if !root.is-home : MenuItem {
+                title: "Disconnect";
+                activated => { root.disconnect-clicked(); }
+            }
+            if !root.is-home && root.can-duplicate : MenuItem {
+                title: "Duplicate";
+                activated => { root.duplicate-clicked(); }
+            }
+            if !root.is-home : MenuSeparator {}
+            MenuItem {
+                title: "Close";
+                activated => { root.closed(); }
+            }
+        }
+    }
+
     HorizontalLayout {
         padding-left: Theme.space-3;
         padding-right: Theme.space-2;
         spacing: Theme.space-2;
-        VerticalLayout { alignment: center; StatusDot { state: root.status; } }
+        // P9.10 #3: an explicit fixed width (the larger of the dot's default
+        // 7px diameter and the glyph's icon-xs size) so this cell reserves
+        // the SAME space in every tab -- the title's x-position never shifts
+        // between a Home tab and a normal one.
+        VerticalLayout {
+            width: Theme.icon-xs;
+            alignment: center;
+            if !root.is-home : StatusDot { state: root.status; }
+            if root.is-home : Text {
+                text: "\u{EB06}"; // cod-home
+                font-family: Theme.font-family-icons;
+                font-size: Theme.icon-xs;
+                color: Theme.color-text-secondary;
+                horizontal-alignment: center;
+                width: 100%;
+            }
+        }
         Text {
             text: title;
             color: active ? Theme.color-text : Theme.color-text-secondary;
@@ -1158,6 +1229,13 @@ export component AppWindow inherits Window {
     // ── Shell callbacks ───────────────────────────────────────────────
     callback select-tab(int);
     callback close-tab(int);
+    // P9.10 #1: the tab strip's right-click context menu (mirrors the
+    // connection tree row's ContextMenuArea/MenuItem shape). Home suppresses
+    // these entirely (see the `Tab` instantiation below) -- there is no
+    // session to reconnect/disconnect/duplicate.
+    callback tab-reconnect(int);
+    callback tab-disconnect(int);
+    callback tab-duplicate(int);
     callback new-tab();
     callback select-panel(int);
     callback toggle-sidebar();
@@ -1708,10 +1786,15 @@ export component AppWindow inherits Window {
                         status: tab.status;
                         pane-count: tab.pane-count;
                         active: idx == active-tab;
+                        is-home: tab.is-home;
+                        can-duplicate: tab.can-duplicate;
                         item-index: idx;
                         item-count: tabs.length;
                         clicked => { root.select-tab(idx); }
                         closed => { root.close-tab(idx); }
+                        reconnect-clicked => { root.tab-reconnect(idx); }
+                        disconnect-clicked => { root.tab-disconnect(idx); }
+                        duplicate-clicked => { root.tab-duplicate(idx); }
                     }
                     new-tab-btn := IconButton {
                         glyph: "\u{EA60}";
