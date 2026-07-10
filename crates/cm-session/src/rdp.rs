@@ -96,13 +96,17 @@
 //! **P9.9-FIX**: `encode_resize` returns `None` (a silent no-op) unless the
 //! `DisplayControl` DVC is registered AND the server has opened it --
 //! `drive_inner` registers a `DrdynvcClient` carrying a `DisplayControlClient`
-//! alongside `cliprdr` for exactly this reason. Before this fix, no DVC was
-//! registered at all, so `encode_resize` always returned `None`: the resize
-//! PDU was never written to the wire, no server ever saw a resize request,
-//! `DeactivateAll` never fired, and the whole state machine above -- correct
-//! on its own terms -- was unreachable. (An earlier version of this doc
-//! block claimed `static_channels` already included the DisplayControl DVC;
-//! that was aspirational and untrue until this fix landed.) Timing caveat,
+//! alongside `cliprdr` for exactly this reason (unless
+//! `CONMAN_RDP_DISABLE_DISPLAYCONTROL=1` opts out -- see
+//! `rdp_displaycontrol_disabled`, a manual escape hatch for hosts that hang
+//! on the DVC channel-join, not an automatic fallback). Before this fix, no
+//! DVC was registered at all, so `encode_resize` always returned `None`: the
+//! resize PDU was never written to the wire, no server ever saw a resize
+//! request, `DeactivateAll` never fired, and the whole state machine above
+//! -- correct on its own terms -- was unreachable. (An earlier version of
+//! this doc block claimed `static_channels` already included the
+//! DisplayControl DVC; that was aspirational and untrue until this fix
+//! landed.) Timing caveat,
 //! not a defect: `encode_resize` still returns `None` until the DVC's
 //! capability exchange completes after connect (the server must open the
 //! channel first) -- a resize fired in the sub-second window right after
@@ -840,6 +844,32 @@ fn rdp_connect_phase_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// P9.9-FIX follow-up (N1, Fable non-blocking recommendation): an escape
+/// hatch for hosts that hang during connect once the DRDYNVC/DisplayControl
+/// channel is requested (see `rdp_connect_phase_timeout`'s doc comment --
+/// observed live against xrdp 192.0.2.10). Setting this skips registering
+/// the DVC entirely, trading away dynamic resize for a connect that can't be
+/// affected by a server declining to grant that channel. This is a manual
+/// opt-out, not an automatic fallback: an automatic retry-without-DVC was
+/// considered and rejected (Fable review) -- NOT because the one observed
+/// hang (xrdp 192.0.2.10) was deterministic; it wasn't (it reproduced
+/// once out of several attempts, correlated with that host's reconnect
+/// throttle -- see `test-hosts` memory and e8438e7's commit message).
+/// Rejected instead because firing a second connect attempt immediately
+/// after a timeout is exactly the rapid-reconnect pattern that trips this
+/// same host's throttle: auto-retry would risk hammering an already-
+/// stressed host into a worse state, while a server that grants the DVC
+/// cleanly never needs the retry in the first place. The manual escape
+/// hatch covers the case without that risk. Automatic retry-without-DVC
+/// remains a documented FUTURE option, not dropped for good -- revisit it
+/// if a host is found where a fresh retry reliably recovers *without*
+/// triggering a reconnect-throttle risk.
+fn rdp_displaycontrol_disabled() -> bool {
+    std::env::var("CONMAN_RDP_DISABLE_DISPLAYCONTROL")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
 async fn drive(cfg: RdpSettings, auth: RdpAuthInput, ctx: DriveCtx) {
     let status = ctx.status.clone();
     match drive_inner(&cfg, auth, ctx).await {
@@ -945,14 +975,28 @@ async fn drive_inner(
     // sends its capabilities); a client that only ever *sends* resize
     // requests (never needs to react to the server's capabilities) replies
     // with no immediate message.
-    let drdynvc = DrdynvcClient::new()
-        .with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new())));
+    // N1: escape hatch for hosts that hang once DRDYNVC is requested (see
+    // `rdp_displaycontrol_disabled`'s doc comment) -- skip the DVC
+    // registration entirely rather than retry, trading away resize for a
+    // connect that's unaffected by the server's channel-grant behavior.
+    let displaycontrol_disabled = rdp_displaycontrol_disabled();
+    if displaycontrol_disabled {
+        tracing::info!(
+            host = %cfg.host,
+            "rdp: CONMAN_RDP_DISABLE_DISPLAYCONTROL set -- connecting without \
+             the DisplayControl DVC (dynamic resize will be unavailable)"
+        );
+    }
     let local_addr: std::net::SocketAddr = "0.0.0.0:0"
         .parse()
         .expect("hardcoded \"0.0.0.0:0\" is a valid SocketAddr");
-    let mut connector = ClientConnector::new(connector_config, local_addr)
-        .with_static_channel(cliprdr)
-        .with_static_channel(drdynvc);
+    let mut connector =
+        ClientConnector::new(connector_config, local_addr).with_static_channel(cliprdr);
+    if !displaycontrol_disabled {
+        let drdynvc = DrdynvcClient::new()
+            .with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new())));
+        connector = connector.with_static_channel(drdynvc);
+    }
 
     // 4. Initial connection phase (before TLS upgrade).
     let mut framed: TokioFramed<TcpStream> = TokioFramed::new(tcp);
@@ -1119,8 +1163,20 @@ async fn drive_inner(
                 "rdp: connect finalization timed out (server stopped responding \
                  -- e.g. not granting a requested channel during MCS channel-join)"
             );
+            // N2 (Fable follow-up): a short cause hint appended to the raw
+            // timeout message -- self-diagnosing for a support ticket. Only
+            // relevant when the DVC was actually requested; a host that
+            // already has it disabled hung for some other reason, so the
+            // hint would be misleading there.
+            let hint = if displaycontrol_disabled {
+                String::new()
+            } else {
+                " -- server may not grant the DisplayControl channel; set \
+                 CONMAN_RDP_DISABLE_DISPLAYCONTROL=1 to connect without resize"
+                    .to_owned()
+            };
             return Err(RdpError::Protocol(format!(
-                "connect finalization timed out after {}s",
+                "connect finalization timed out after {}s{hint}",
                 rdp_connect_phase_timeout().as_secs()
             )));
         }
