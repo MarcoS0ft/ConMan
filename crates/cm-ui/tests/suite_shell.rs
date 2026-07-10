@@ -265,7 +265,10 @@ fn tab_duplicate_is_available_for_a_saved_connection_but_not_for_quick_connect()
 
     // Local shell (harness()'s own seed tab) -- no origin, not remote.
     assert!(
-        h.ui.get_tabs().row_data(0).expect("seed tab row").can_duplicate,
+        h.ui.get_tabs()
+            .row_data(0)
+            .expect("seed tab row")
+            .can_duplicate,
         "a plain local shell must be duplicable (relaunch = a new shell)"
     );
 
@@ -288,8 +291,7 @@ fn tab_duplicate_is_available_for_a_saved_connection_but_not_for_quick_connect()
     pump_ticks(1);
     let saved_tab_idx = tab_count(&h.ui) - 1;
     assert!(
-        h.ui
-            .get_tabs()
+        h.ui.get_tabs()
             .row_data(saved_tab_idx)
             .expect("saved-connection tab row")
             .can_duplicate,
@@ -345,8 +347,7 @@ fn tab_disconnect_keeps_the_tab_open_and_tab_reconnect_dials_again() {
         h.ui.get_error_reason()
     );
     assert_eq!(
-        h.ui
-            .get_tabs()
+        h.ui.get_tabs()
             .row_data(idx as usize)
             .expect("tab row")
             .status

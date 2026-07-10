@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use cm_core::SessionStatus;
 use i_slint_backend_testing::{ElementHandle, ElementRoot};
+use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 
 use support::{find_by_id, harness, nth_by_id, pump_ticks, pump_until};
 
@@ -34,6 +35,9 @@ fn overlays_suite() {
     background_tab_failure_toasts_and_auto_expires();
     switching_tabs_shows_each_tabs_own_identity_not_the_others();
     reconnect_is_refused_when_agent_mode_lacks_execute_scope();
+    clean_disconnect_and_exit_are_not_shown_as_a_failure();
+    opening_a_new_ssh_tab_blanks_the_shared_frame_property();
+    opening_a_new_rdp_tab_blanks_the_shared_rdp_frame_property();
 }
 
 fn toast_count(ui: &cm_ui::AppWindow) -> usize {
@@ -164,9 +168,60 @@ fn connecting_resolves_to_error_overlay_with_reconnect_and_edit() {
         "error overlay must surface the session's failure reason, got {:?}",
         h.ui.get_error_reason()
     );
+    assert!(
+        h.ui.get_error_is_failure(),
+        "a genuine SessionStatus::Failed must mark the overlay as a real failure \
+         (P9.12 #3 -- \"Connection failed\" framing)"
+    );
 
     find_by_id(&h.ui, "ErrorOverlay::error-reconnect-btn");
     find_by_id(&h.ui, "ErrorOverlay::error-edit-btn");
+}
+
+/// P9.12 #3: a clean SSH `exit`/disconnect must NOT show the same
+/// "Connection failed" framing a real failure does -- `overlays::update_
+/// overlays_from_status` used to set `overlay_error(true)` identically for
+/// `Failed`, `Disconnected`, and `Exited`, so exiting a shell normally
+/// looked exactly like a connection failure. Drives both neutral-ending
+/// variants through the real tick loop (not a duplicated match statement)
+/// and asserts `error-is-failure` is false for both, while the overlay
+/// itself still shows (Reconnect stays available either way).
+fn clean_disconnect_and_exit_are_not_shown_as_a_failure() {
+    let (h, _repo, provider) = harness();
+    let cell = connect_ssh_via_quick_connect(&h, &provider, "mock-host");
+
+    *cell.lock().expect("cell poisoned") = SessionStatus::Disconnected;
+    let resolved = pump_until(50, || h.ui.get_overlay_error());
+    assert!(
+        resolved,
+        "error overlay must appear after a clean disconnect too"
+    );
+    assert!(
+        !h.ui.get_error_is_failure(),
+        "a clean Disconnected must NOT be framed as a failure"
+    );
+    assert_eq!(
+        h.ui.get_error_reason().as_str(),
+        "Session disconnected",
+        "the reason text is unchanged by this fix, only the failure framing is"
+    );
+
+    // A second tab, exited cleanly (success: true) -- the OTHER neutral-ending
+    // variant `update_overlays_from_status` handles identically.
+    let cell2 = connect_ssh_via_quick_connect(&h, &provider, "mock-host-2");
+    *cell2.lock().expect("cell poisoned") = SessionStatus::Exited(cm_session::ExitStatus {
+        success: true,
+        code: 0,
+    });
+    let resolved2 = pump_until(50, || h.ui.get_overlay_error());
+    assert!(
+        resolved2,
+        "error overlay must appear after a clean exit too"
+    );
+    assert!(
+        !h.ui.get_error_is_failure(),
+        "a clean Exited{{success: true}} must NOT be framed as a failure either"
+    );
 }
 
 /// A background (non-active) remote tab failing pushes a toast (P5.3b); the
@@ -312,5 +367,72 @@ fn reconnect_is_refused_when_agent_mode_lacks_execute_scope() {
             .contains("execute scope not granted"),
         "the error overlay must surface the gate's own reason, got {:?}",
         h.ui.get_error_reason()
+    );
+}
+
+/// P9.12 #2: opening a brand-new SSH tab must blank the shared `root.frame`
+/// property immediately -- `push_tab` makes the new tab active but never
+/// touches `frame`, and (unlike a tab switch, a reconnect, or a session's
+/// own new-snapshot tick) nothing else runs on the routine tick loop to
+/// refresh it until this fresh session's first real `GridSnapshot` drains.
+/// Without the fix, the property would stay bound to whatever the
+/// previously-active tab (here, the Home tab) last painted -- the "local
+/// shell flashes before the remote paints" bleed.
+///
+/// `MockSessionProvider`'s sessions never produce a real `GridSnapshot` on
+/// their own (this suite's own module doc), so `root.frame` would already
+/// be blank in every OTHER scenario regardless of whether this fix exists --
+/// that's exactly Bug B's own documented harness limitation. To actually
+/// prove the launch path itself blanks it (not just that it started blank),
+/// this seeds a non-default image directly first, simulating "a previous
+/// tab already painted something real".
+fn opening_a_new_ssh_tab_blanks_the_shared_frame_property() {
+    let (h, _repo, provider) = harness();
+    h.ui.set_frame(Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::new(
+        4, 4,
+    )));
+    assert_ne!(
+        h.ui.get_frame().size(),
+        Image::default().size(),
+        "seed: a non-blank frame, simulating the Home tab having already painted"
+    );
+
+    let _cell = connect_ssh_via_quick_connect(&h, &provider, "mock-fresh-host");
+
+    assert_eq!(
+        h.ui.get_frame().size(),
+        Image::default().size(),
+        "opening a new SSH tab must blank the previously-active tab's frame \
+         immediately, not leave it showing until the new session's first frame"
+    );
+}
+
+/// P9.12 #2, RDP counterpart -- `root.rdp-frame` is the same kind of single
+/// AppWindow-level property as `root.frame` above, and `open_rdp_tab`'s fix
+/// is the identical one-line blank. Same seed-then-launch proof.
+fn opening_a_new_rdp_tab_blanks_the_shared_rdp_frame_property() {
+    let (h, _repo, _provider) = harness();
+    h.ui.set_rdp_frame(Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::new(
+        4, 4,
+    )));
+    assert_ne!(
+        h.ui.get_rdp_frame().size(),
+        Image::default().size(),
+        "seed: a non-blank rdp-frame, simulating a previous tab having already painted"
+    );
+
+    h.ui.invoke_quick_connect();
+    pump_ticks(1);
+    h.ui.set_qc_kind(1); // RDP
+    h.ui.set_qc_host("mock-rdp-host".into());
+    h.ui.set_qc_username("ops".into());
+    h.ui.set_qc_secret("mock-password".into());
+    find_by_id(&h.ui, "QuickConnectForm::qc-connect-btn").invoke_accessible_default_action();
+
+    assert_eq!(
+        h.ui.get_rdp_frame().size(),
+        Image::default().size(),
+        "opening a new RDP tab must blank the previously-active tab's rdp-frame \
+         immediately, not leave it showing until the new session's first frame"
     );
 }

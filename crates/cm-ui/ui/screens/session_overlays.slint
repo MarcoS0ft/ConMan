@@ -148,12 +148,18 @@ export component ErrorOverlay inherits Rectangle {
     in property <string> identity: "ops@web-prod-01:22";
     in property <string> reason: "Connection refused · ECONNREFUSED";
     in property <string> detail: "after 4.2s";
+    // P9.12 #3: `true` for a genuine `SessionStatus::Failed` (red "Connection
+    // failed" framing); `false` for a clean `Disconnected`/`Exited` end (a
+    // neutral "Session ended" title + neutral accent color) -- exiting a
+    // shell normally must not look like a failure. Reconnect stays available
+    // either way (see `root.reconnect` below).
+    in property <bool> is-failure: true;
     callback reconnect();
     callback edit();
 
     // P8.1: same region rationale as ConnectingOverlay.
     accessible-role: region;
-    accessible-label: "Connection error for " + root.identity;
+    accessible-label: (root.is-failure ? "Connection error for " : "Session ended for ") + root.identity;
 
     background: Theme.color-terminal-bg;
 
@@ -166,15 +172,16 @@ export component ErrorOverlay inherits Rectangle {
             Rectangle {
                 width: 46px; height: 46px;
                 border-radius: Theme.radius-md;
-                background: Theme.color-error.with-alpha(0.13);
+                background: (root.is-failure ? Theme.color-error : Theme.color-disconnected).with-alpha(0.13);
                 // Error icon — Theme.icon-xl token (was 22px literal).
                 Text { text: "\u{F0026}"; font-family: Theme.font-family-icons;
                     font-size: Theme.icon-xl;
-                    color: Theme.color-error; horizontal-alignment: center; vertical-alignment: center;
+                    color: root.is-failure ? Theme.color-error : Theme.color-disconnected;
+                    horizontal-alignment: center; vertical-alignment: center;
                     width: parent.width; height: parent.height; }
             }
         }
-        Text { text: "Connection failed"; color: Theme.color-text; font-size: Theme.font-lg;
+        Text { text: root.is-failure ? "Connection failed" : "Session ended"; color: Theme.color-text; font-size: Theme.font-lg;
             font-family: Theme.font-family; font-weight: 600; horizontal-alignment: center; }
         HorizontalLayout {
             alignment: center;
@@ -184,7 +191,8 @@ export component ErrorOverlay inherits Rectangle {
             VerticalLayout {
                 width: min(680px, root.width - Theme.space-8 * 2);
                 spacing: Theme.space-1;
-                Text { text: reason; color: Theme.color-error; font-size: Theme.font-mono;
+                Text { text: reason; color: root.is-failure ? Theme.color-error : Theme.color-text-secondary;
+                    font-size: Theme.font-mono;
                     font-family: Theme.font-family-mono; horizontal-alignment: center;
                     wrap: word-wrap; }
                 Text { text: identity + " · " + detail; color: Theme.color-text-secondary;

@@ -158,26 +158,37 @@ pub(super) fn update_overlays_from_status(ui: &AppWindow, tab: &Tab, status: &Se
                 ui.set_overlay_connecting(false);
                 ui.set_overlay_error(true);
                 ui.set_launchpad_open(false);
+                ui.set_error_is_failure(true);
                 ui.set_error_reason(SharedString::from(reason.as_str()));
                 ui.set_error_detail(SharedString::from(""));
             }
             ui.set_session_status(SharedString::from("error"));
         }
         SessionStatus::Disconnected => {
+            // P9.12 #3: a clean disconnect is not a failure -- neutral
+            // "Session ended" framing (see `error_is_failure`'s doc comment,
+            // ErrorOverlay). Reconnect stays available either way.
             if tab.is_remote {
                 ui.set_overlay_connecting(false);
                 ui.set_overlay_error(true);
                 ui.set_launchpad_open(false);
+                ui.set_error_is_failure(false);
                 ui.set_error_reason(SharedString::from("Session disconnected"));
                 ui.set_error_detail(SharedString::from(""));
             }
             ui.set_session_status(SharedString::from("disconnected"));
         }
         SessionStatus::Exited(exit) => {
+            // P9.12 #3: a shell `exit` -- clean (`success: true`) or a
+            // non-zero exit code -- is still not a *connection* failure
+            // (the connection itself worked; the remote command just
+            // ended). Neutral framing either way, matching `Disconnected`
+            // above; the exit code itself is still surfaced in `detail`.
             if tab.is_remote {
                 ui.set_overlay_connecting(false);
                 ui.set_overlay_error(true);
                 ui.set_launchpad_open(false);
+                ui.set_error_is_failure(false);
                 ui.set_error_reason(SharedString::from("Remote shell exited"));
                 ui.set_error_detail(SharedString::from(if exit.success {
                     "Exit code 0"

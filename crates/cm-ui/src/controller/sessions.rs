@@ -1537,7 +1537,9 @@ pub(super) fn reconnect_tab(
                     pending: hk_pending.clone(),
                     auto_accept,
                 });
-                reconnect_ssh_tab(state, tab_model, ui, tab_idx, settings, auth, provenance, verifier);
+                reconnect_ssh_tab(
+                    state, tab_model, ui, tab_idx, settings, auth, provenance, verifier,
+                );
             }
             Err(e) => {
                 fail_reconnect_in_place(state, tab_model, ui, tab_idx, e.to_string());
@@ -1551,7 +1553,9 @@ pub(super) fn reconnect_tab(
                     pending: cert_pending.clone(),
                     auto_accept,
                 });
-                reconnect_rdp_tab(state, tab_model, ui, tab_idx, settings, auth, provenance, verifier);
+                reconnect_rdp_tab(
+                    state, tab_model, ui, tab_idx, settings, auth, provenance, verifier,
+                );
             }
             Err(e) => {
                 fail_reconnect_in_place(state, tab_model, ui, tab_idx, e.to_string());
@@ -2101,11 +2105,16 @@ pub(super) fn log_rdp_launch_auth(
 
 /// Sets the error-overlay UI state for `reason` -- shared by the synchronous
 /// connect-failure branches and the P6.4 credential-resolution failure paths
-/// below.
+/// below. Every caller here is a genuine failure (a synchronous connect
+/// error, a missing/unresolvable credential, an agent-mode execute-gate
+/// denial) -- P9.12 #3's neutral "Session ended" framing is only for a
+/// clean `Disconnected`/`Exited` end (`overlays::update_overlays_from_status`),
+/// never for these, so this always marks the overlay as a real failure.
 fn set_error_overlay(ui: &AppWindow, reason: &str) {
     ui.set_overlay_connecting(false);
     ui.set_overlay_error(true);
     ui.set_launchpad_open(false);
+    ui.set_error_is_failure(true);
     ui.set_error_reason(SharedString::from(reason));
     ui.set_error_detail(SharedString::from(""));
 }
@@ -2270,6 +2279,18 @@ pub(super) fn open_ssh_tab(
             ui.set_launchpad_open(false);
             ui.set_connecting_kind(SharedString::from("SSH"));
             ui.set_rdp_active(false);
+            // P9.12 #2: `push_tab` makes this brand-new tab active but never
+            // touches `root.frame` -- the same single AppWindow-level
+            // property Bug B's fix (`de72222`) already established isn't
+            // per-tab, and neither `push_tab` nor the routine tick loop
+            // calls `render_active` to refresh it on a fresh launch (only
+            // `select_tab`/`close_tab`/reconnect do). Without this, the
+            // property stays bound to whatever the PREVIOUSLY active tab
+            // last painted (typically the Home tab's local shell) until
+            // this session's own first `GridSnapshot` drains -- exactly the
+            // "local shell flashes before the remote paints" bleed. Blank
+            // it immediately, mirroring `reconnect_ssh_tab`'s identical fix.
+            ui.set_frame(Image::default());
         }
         Err(e) => {
             // Carry-over fix (b): surface synchronous setup errors as a Failed
@@ -2413,6 +2434,11 @@ pub(super) fn open_rdp_tab(
     ui.set_launchpad_open(false);
     ui.set_connecting_kind(SharedString::from("RDP"));
     ui.set_rdp_active(true);
+    // P9.12 #2: see `open_ssh_tab`'s identical comment -- `root.rdp-frame`
+    // is the same kind of single AppWindow-level property, and `push_tab`
+    // doesn't touch it either. Blank it so this fresh RDP tab never briefly
+    // shows the previously-active tab's last painted frame.
+    ui.set_rdp_frame(Image::default());
 }
 
 /// RDP counterpart to [`reconnect_ssh_tab`] (P6.12, gap 19): replaces the
