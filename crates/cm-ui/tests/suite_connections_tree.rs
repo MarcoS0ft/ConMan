@@ -41,6 +41,7 @@ fn connections_tree_suite() {
 
     select_does_not_launch_but_activate_does();
     tree_row_status_dot_tracks_its_connection_s_live_tab();
+    connection_row_still_carries_its_context_menu_area();
 }
 
 fn tab_count(ui: &cm_ui::AppWindow) -> usize {
@@ -172,5 +173,40 @@ fn tree_row_status_dot_tracks_its_connection_s_live_tab() {
             .as_str(),
         "disconnected",
         "the tree row must revert once its tab disconnects, not stay stuck showing connected"
+    );
+}
+
+/// P9.12 #1 (right-click regression, fixed): `ContextMenuArea` is not
+/// queryable the way an ordinary `Rectangle`/`TouchArea` is via
+/// `accessible_*` attributes, and its `Menu`/`MenuItem` children are
+/// invisible to `ElementHandle` entirely until the menu actually opens (a
+/// real right-click gesture -- confirmed empirically: `find_by_element_
+/// type_name(&h.ui, "Menu"/"MenuItem")` returns zero even with rows present).
+/// So this can't prove the right-click GESTURE reaches the menu (that's
+/// .99-verify, same as the rest of Bug A) -- but `ContextMenuArea` itself
+/// IS queryable by type name, so this proves the fix's declaration-order
+/// move (to the end of `ConnectionRow`, past the `HorizontalLayout`) didn't
+/// accidentally drop, duplicate, or mis-nest it: exactly one extra
+/// `ContextMenuArea` must exist per row added to the tree.
+fn connection_row_still_carries_its_context_menu_area() {
+    let (h, _repo, _provider) = harness();
+    let before = ElementHandle::find_by_element_type_name(&h.ui, "ContextMenuArea").count();
+
+    h.ui.invoke_new_connection(0);
+    {
+        let mut form = h.ui.get_profile_form();
+        form.name = "Ctx Menu Row".into();
+        form.kind = 2; // Local
+        h.ui.set_profile_form(form);
+    }
+    find_by_id(&h.ui, "ProfileEditor::profile-save-btn").invoke_accessible_default_action();
+
+    let after = ElementHandle::find_by_element_type_name(&h.ui, "ContextMenuArea").count();
+    assert_eq!(
+        after,
+        before + 1,
+        "a new connection row must add exactly one ContextMenuArea, proving the \
+         P9.12 #1 fix (declaring it last, after the row's HorizontalLayout) kept it \
+         present -- not dropped or accidentally duplicated"
     );
 }

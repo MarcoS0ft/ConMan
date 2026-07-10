@@ -518,63 +518,6 @@ component ConnectionRow inherits Rectangle {
         background: data.selected ? Theme.color-accent : transparent;
     }
 
-    // P6.10 (gap 15): right-click (or the keyboard Menu key, via the shared
-    // tree-level ContextMenuArea in AppWindow) opens this row's menu. Items
-    // reuse the EXACT SAME callbacks as the hover CRUD buttons above — no new
-    // backend beyond `duplicate-clicked` (P6.10 bundled: clone via the
-    // existing `upsert_connection` repo call, see tree_ctl.rs) and
-    // `connect-in-split-clicked` (P6.10 fix round 2, see below).
-    //
-    // "Connect in split" (P6.10 fix round 2 / P6.11): reuses the SAME
-    // N-way-pane machinery `do_split()` already has (`PaneGroup::split`,
-    // `ExtraPaneState`, `Box<dyn Session>` — see
-    // `controller/panes.rs::connect_in_split`). Local profiles delegate
-    // straight to `do_split`; SSH/RDP profiles resolve credentials via the
-    // existing P6.4 paths (`sessions::resolve_ssh_auth`/`resolve_rdp_auth`)
-    // and spawn a real session into the pane slot. RDP is no longer excluded
-    // here (P6.11 lifted the P6.10 deferral): `ExtraPaneState` now carries
-    // the `last_frame`/`rdp_w`/`rdp_h` fields a `Surface::Framebuffer`
-    // session needs, mirroring `Tab`'s primary-pane fields.
-    ContextMenuArea {
-        Menu {
-            if !data.is-group : MenuItem {
-                title: "Connect";
-                activated => { root.activated(); }
-            }
-            if !data.is-group : MenuItem {
-                title: "Connect in split";
-                activated => { root.connect-in-split-clicked(); }
-            }
-            if data.is-group : MenuItem {
-                title: "New child";
-                activated => { root.new-sub(); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: data.is-group ? "Edit group" : "Edit";
-                activated => { root.edit-clicked(); }
-            }
-            if !data.is-group : MenuItem {
-                title: "Duplicate";
-                activated => { root.duplicate-clicked(); }
-            }
-            if !data.is-group : MenuSeparator {}
-            if !data.is-group : MenuItem {
-                title: "Move up";
-                activated => { root.move-up(); }
-            }
-            if !data.is-group : MenuItem {
-                title: "Move down";
-                activated => { root.move-down(); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Delete";
-                activated => { root.delete-clicked(); }
-            }
-        }
-    }
-
     HorizontalLayout {
         padding-left: (data.depth * 16px) + (data.is-group ? Theme.space-1 : Theme.space-3);
         padding-right: Theme.space-1;
@@ -718,6 +661,74 @@ component ConnectionRow inherits Rectangle {
             }
         }
     }
+
+    // P9.12 #1 (regression from Bug A `269a5e5`, fixed): right-click on a
+    // connection row stopped opening this menu after `touch` moved from a
+    // bare row-spanning sibling into the `content` cell above. Root cause,
+    // confirmed against i-slint-core: mouse dispatch visits siblings
+    // FrontToBack (last-declared first); `TouchArea::input_event` grabs
+    // UNCONDITIONALLY on Press for ANY button, not just left (`items/
+    // input_items.rs`'s `Pressed` arm sets `self.grabbed`/returns
+    // `GrabMouse` regardless of `button`). Before `269a5e5`, this
+    // `ContextMenuArea` was declared BEFORE the row's content, so it was
+    // visited (and got first crack at every click, including right-clicks)
+    // BEFORE `touch`. Wrapping `touch` inside `content` (still needed --
+    // that fix is correct and unrelated) left `ContextMenuArea` declared
+    // BEFORE the HorizontalLayout that now contains `touch`, inverting the
+    // priority: `touch` got visited first and grabbed the right-click before
+    // `ContextMenuArea` ever saw it. Fix: declare `ContextMenuArea` LAST
+    // (after the row's whole HorizontalLayout) instead of nesting it around
+    // the content -- nesting alone wouldn't help, since `touch` would still
+    // be reached (and still grab) as a DESCENDANT before `ContextMenuArea`'s
+    // own fallback `input_event` ever runs. Declaring it last means it's
+    // visited FIRST: for a right-click, its own `input_event` (`items.rs`'s
+    // `ContextMenu` impl) matches `PointerEventButton::Right` immediately and
+    // accepts, before `touch` is ever reached. For anything else (left
+    // click), it returns `EventIgnored`, which continues the sibling walk to
+    // the HorizontalLayout/`touch`/icon-strip exactly as before -- so
+    // left-click select, double-click launch, and the hover-icon clicks
+    // (the whole Bug-A/A' set) are all unaffected; verified via the full
+    // existing element-suite pass, which still exercises every one of those
+    // paths and stayed green. Items/callbacks below are unchanged.
+    ContextMenuArea {
+        Menu {
+            if !data.is-group : MenuItem {
+                title: "Connect";
+                activated => { root.activated(); }
+            }
+            if !data.is-group : MenuItem {
+                title: "Connect in split";
+                activated => { root.connect-in-split-clicked(); }
+            }
+            if data.is-group : MenuItem {
+                title: "New child";
+                activated => { root.new-sub(); }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: data.is-group ? "Edit group" : "Edit";
+                activated => { root.edit-clicked(); }
+            }
+            if !data.is-group : MenuItem {
+                title: "Duplicate";
+                activated => { root.duplicate-clicked(); }
+            }
+            if !data.is-group : MenuSeparator {}
+            if !data.is-group : MenuItem {
+                title: "Move up";
+                activated => { root.move-up(); }
+            }
+            if !data.is-group : MenuItem {
+                title: "Move down";
+                activated => { root.move-down(); }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: "Delete";
+                activated => { root.delete-clicked(); }
+            }
+        }
+    }
 }
 
 // ── CredTreeRow — Keys panel tree row ─────────────────────────────────────
@@ -764,27 +775,6 @@ component CredTreeRow inherits Rectangle {
     background: data.selected ? Theme.color-accent-subtle
               : root.highlighted ? Theme.color-accent-subtle.with-alpha(0.5)
               : root.action-hover ? Theme.color-hover : transparent;
-
-    // P9.11 (Bug A geometry twin, see `ConnectionRow`'s identical `content`/
-    // `touch` shape): right-click / keyboard Menu key context menu, reusing
-    // the exact same callbacks as the hover buttons — no new backend.
-    ContextMenuArea {
-        Menu {
-            if data.is-folder : MenuItem {
-                title: "New credential";
-                activated => { root.new-sub(); }
-            }
-            if !data.is-folder : MenuItem {
-                title: "Edit";
-                activated => { root.activated(); }
-            }
-            MenuSeparator {}
-            MenuItem {
-                title: "Delete";
-                activated => { root.delete-clicked(); }
-            }
-        }
-    }
 
     HorizontalLayout {
         padding-left: (data.depth * 16px) + (data.is-folder ? Theme.space-1 : Theme.space-3);
@@ -927,6 +917,29 @@ component CredTreeRow inherits Rectangle {
                 tooltip: "Delete";
                 clicked => { root.delete-clicked(); }
                 hover-changed(h) => { root.delete-cred-hover = h; }
+            }
+        }
+    }
+
+    // P9.12 #1 (regression from Bug A's `content`/`touch` restructure,
+    // ported to CredTreeRow in P9.11 -- see `ConnectionRow`'s identical
+    // comment for the full i-slint-core mechanism): declared LAST so
+    // FrontToBack visits it FIRST, before `touch` (a descendant of the
+    // HorizontalLayout above) ever gets a chance to grab the right-click.
+    ContextMenuArea {
+        Menu {
+            if data.is-folder : MenuItem {
+                title: "New credential";
+                activated => { root.new-sub(); }
+            }
+            if !data.is-folder : MenuItem {
+                title: "Edit";
+                activated => { root.activated(); }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: "Delete";
+                activated => { root.delete-clicked(); }
             }
         }
     }
