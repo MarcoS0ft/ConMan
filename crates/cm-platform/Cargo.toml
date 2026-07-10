@@ -28,8 +28,11 @@ tracing = "0.1"
 zbus = "5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# `DwmGetColorizationColor` (Win32_Graphics_Dwm) for the OS accent read.
-windows = { version = "0.62", features = ["Win32_Graphics_Dwm"] }
+# `DwmGetColorizationColor` (Win32_Graphics_Dwm) for the OS accent read;
+# `Get`/`SetConsoleMode` (Win32_System_Console) for the stderr VT-processing
+# probe/enable in `console.rs` (`Win32_Foundation` comes in transitively via
+# `Win32_System_Console` -> `Win32_System` -> `Win32` -> `Win32_Foundation`).
+windows = { version = "0.62", features = ["Win32_Graphics_Dwm", "Win32_System_Console"] }
 
 [lints]
 workspace = true
