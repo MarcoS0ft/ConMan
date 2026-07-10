@@ -46,7 +46,8 @@ russh = { version = "0.61", optional = true, default-features = false, features 
 dirs = { version = "6", optional = true }
 # P4.1: IronRDP pure-Rust RDP client (versions verified 2026-06-28 against crates.io).
 # ironrdp-connector 0.9, ironrdp-session 0.10, ironrdp-tokio 0.9, ironrdp-graphics 0.8.1,
-# ironrdp-input 0.6, ironrdp-pdu 0.8, ironrdp-cliprdr 0.6.
+# ironrdp-input 0.6, ironrdp-pdu 0.8, ironrdp-cliprdr 0.6, ironrdp-dvc 0.7,
+# ironrdp-displaycontrol 0.7 (both added P9.9-FIX).
 # Note: ironrdp-svc is a transitive dep only (via ironrdp-cliprdr); not used directly.
 # TLS uses rustls with ring backend to avoid aws-lc-rs / NASM requirement (P3.1 lesson).
 ironrdp-connector = { version = "0.9", features = ["credssp"] }
@@ -63,6 +64,12 @@ ironrdp-graphics = "0.8"
 ironrdp-input = "0.6"
 ironrdp-pdu = "0.8"
 ironrdp-cliprdr = "0.6"
+# P9.9-FIX: register the DisplayControl DVC (DRDYNVC) so mid-session resize
+# PDUs are actually transmitted -- both already at 0.7.0 in Cargo.lock as
+# transitive deps of ironrdp-session, so this adds zero new packages (same
+# discipline as the P9.4 aes-gcm pin).
+ironrdp-dvc = "0.7"
+ironrdp-displaycontrol = "0.7"
 ironrdp-tls = { version = "0.2", features = ["rustls"] }
 # tokio-rustls / rustls: direct deps to force the `ring` feature and silence the
 # "multiple providers" panic from ironrdp-tls's own tokio-rustls dep (which enables
@@ -93,6 +100,13 @@ serde_json = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
+# P9.9-FIX: rdp_connect_live_host captures its own driver-thread log output
+# (via a private in-memory MakeWriter) to assert the resize PDU was actually
+# emitted, not just "session stable" -- the exact signal whose silent `None`
+# masked the missing-DisplayControl-DVC bug. Already in Cargo.lock at 0.3.x
+# (transitive via other workspace crates' dev/build graph); confirm no new
+# packages before committing.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [lints]
 workspace = true
