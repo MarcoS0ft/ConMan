@@ -50,6 +50,12 @@ codegen-units = 1
 [patch.crates-io]
 ironrdp-connector = { path = "vendor/ironrdp-connector" }
 ironrdp-async = { path = "vendor/ironrdp-async" }
+# Portable build: vendored libghostty-vt-sys whose build.rs passes
+# `-Dcpu=x86_64_v3` to zig by default (see its build.rs / the
+# ghostty-dll-cpu-portability note). A stock native build on a bleeding-edge CPU
+# (.99 = Zen 5) bakes in AVX-512/newer instructions that crash 0xc000001d on
+# older x86-64 targets (e.g. a Haswell Xeon); x86_64_v3 runs on Haswell+.
+libghostty-vt-sys = { path = "vendor/libghostty-vt-sys" }
 # P9.1: vendor sspi 0.21.0 with its exact RustCrypto RC pins re-aligned to the
 # snapshot russh 0.61.2 uses (picky rc.24 / rsa rc.18 / ecdsa rc.18 / p256-p521
 # rc.10). Stock sspi 0.21.0 pins picky=rc.23+rsa=rc.17 and sspi 0.21.1 pins
