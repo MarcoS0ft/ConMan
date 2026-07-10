@@ -1537,7 +1537,9 @@ pub(super) fn reconnect_tab(
                     pending: hk_pending.clone(),
                     auto_accept,
                 });
-                reconnect_ssh_tab(state, tab_model, ui, tab_idx, settings, auth, provenance, verifier);
+                reconnect_ssh_tab(
+                    state, tab_model, ui, tab_idx, settings, auth, provenance, verifier,
+                );
             }
             Err(e) => {
                 fail_reconnect_in_place(state, tab_model, ui, tab_idx, e.to_string());
@@ -1551,7 +1553,9 @@ pub(super) fn reconnect_tab(
                     pending: cert_pending.clone(),
                     auto_accept,
                 });
-                reconnect_rdp_tab(state, tab_model, ui, tab_idx, settings, auth, provenance, verifier);
+                reconnect_rdp_tab(
+                    state, tab_model, ui, tab_idx, settings, auth, provenance, verifier,
+                );
             }
             Err(e) => {
                 fail_reconnect_in_place(state, tab_model, ui, tab_idx, e.to_string());

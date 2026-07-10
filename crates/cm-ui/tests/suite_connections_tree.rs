@@ -150,8 +150,7 @@ fn tree_row_status_dot_tracks_its_connection_s_live_tab() {
     *cell.lock().expect("cell poisoned") = SessionStatus::Connected;
     pump_ticks(1);
     assert_eq!(
-        h.ui
-            .get_connections()
+        h.ui.get_connections()
             .row_data(0)
             .expect("tree row")
             .status
@@ -165,8 +164,7 @@ fn tree_row_status_dot_tracks_its_connection_s_live_tab() {
     *cell.lock().expect("cell poisoned") = SessionStatus::Disconnected;
     pump_ticks(1);
     assert_eq!(
-        h.ui
-            .get_connections()
+        h.ui.get_connections()
             .row_data(0)
             .expect("tree row")
             .status

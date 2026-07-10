@@ -192,7 +192,10 @@ fn clean_disconnect_and_exit_are_not_shown_as_a_failure() {
 
     *cell.lock().expect("cell poisoned") = SessionStatus::Disconnected;
     let resolved = pump_until(50, || h.ui.get_overlay_error());
-    assert!(resolved, "error overlay must appear after a clean disconnect too");
+    assert!(
+        resolved,
+        "error overlay must appear after a clean disconnect too"
+    );
     assert!(
         !h.ui.get_error_is_failure(),
         "a clean Disconnected must NOT be framed as a failure"
@@ -211,7 +214,10 @@ fn clean_disconnect_and_exit_are_not_shown_as_a_failure() {
         code: 0,
     });
     let resolved2 = pump_until(50, || h.ui.get_overlay_error());
-    assert!(resolved2, "error overlay must appear after a clean exit too");
+    assert!(
+        resolved2,
+        "error overlay must appear after a clean exit too"
+    );
     assert!(
         !h.ui.get_error_is_failure(),
         "a clean Exited{{success: true}} must NOT be framed as a failure either"
@@ -382,9 +388,9 @@ fn reconnect_is_refused_when_agent_mode_lacks_execute_scope() {
 /// tab already painted something real".
 fn opening_a_new_ssh_tab_blanks_the_shared_frame_property() {
     let (h, _repo, provider) = harness();
-    h.ui.set_frame(Image::from_rgba8(SharedPixelBuffer::<
-        Rgba8Pixel,
-    >::new(4, 4)));
+    h.ui.set_frame(Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::new(
+        4, 4,
+    )));
     assert_ne!(
         h.ui.get_frame().size(),
         Image::default().size(),
@@ -406,9 +412,9 @@ fn opening_a_new_ssh_tab_blanks_the_shared_frame_property() {
 /// is the identical one-line blank. Same seed-then-launch proof.
 fn opening_a_new_rdp_tab_blanks_the_shared_rdp_frame_property() {
     let (h, _repo, _provider) = harness();
-    h.ui.set_rdp_frame(Image::from_rgba8(SharedPixelBuffer::<
-        Rgba8Pixel,
-    >::new(4, 4)));
+    h.ui.set_rdp_frame(Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::new(
+        4, 4,
+    )));
     assert_ne!(
         h.ui.get_rdp_frame().size(),
         Image::default().size(),
