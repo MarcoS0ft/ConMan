@@ -25,7 +25,7 @@ use i_slint_backend_testing::{ElementHandle, ElementRoot};
 
 use support::{
     find_by_id, find_by_id_opt, find_descendant_by_label, find_descendant_by_label_opt,
-    find_singleton, harness, pump_ticks,
+    find_singleton, harness, nth_by_id, pump_ticks,
 };
 
 #[test]
@@ -44,6 +44,7 @@ fn dialogs_suite() {
     profile_editor_save_persists_and_cancel_discards();
     profile_editor_cancel_clears_the_transient_inline_password();
     dialog_and_button_bounds();
+    cred_row_activate_and_a11y_survive_the_content_cell_restructure();
 }
 
 // ── Quick-connect (screens/dialogs.slint::QuickConnectForm) ────────────────
@@ -467,6 +468,58 @@ fn dialog_and_button_bounds() {
         &qc,
         "Cancel button",
         "QuickConnectForm dialog",
+    );
+}
+
+/// P9.11 (Bug A geometry twin for `CredTreeRow`, the Keys panel's hover-icon
+/// click fix): after moving `touch` into its own `content` cell (mirroring
+/// `ConnectionRow`'s `269a5e5` fix exactly), the row's activate path and its
+/// accessible attributes -- which stayed on the `CredTreeRow` ROOT rather
+/// than moving into `content`, per the port's own explicit instruction --
+/// must be unchanged. The real-pointer hover-icon click this port actually
+/// fixes is .99-verify territory (same class as Bug A -- no pointer-
+/// coordinate synthesis in this harness); this proves the structural
+/// refactor didn't regress the one thing this suite CAN drive: the row's
+/// own click/accessible-default-action activation and its a11y label/
+/// selection state.
+fn cred_row_activate_and_a11y_survive_the_content_cell_restructure() {
+    let (h, _repo, _provider) = harness();
+    h.ui.invoke_select_panel(1); // Keys panel
+    pump_ticks(1);
+
+    h.ui.invoke_new_cred(0);
+    pump_ticks(1);
+    {
+        let mut cred_form = h.ui.get_cred_form();
+        cred_form.name = "Row Restructure Target".into();
+        h.ui.set_cred_form(cred_form);
+    }
+    h.ui.invoke_cred_save();
+    pump_ticks(1);
+
+    let row = nth_by_id(&h.ui, "AppWindow::cred-row", 0);
+    assert_eq!(
+        row.accessible_label().as_deref(),
+        Some("Row Restructure Target"),
+        "the a11y label (kept on the CredTreeRow root, not moved into `content`) \
+         must still expose the credential's name"
+    );
+    assert_eq!(
+        row.accessible_item_selected(),
+        Some(false),
+        "a freshly-created row starts unselected"
+    );
+
+    assert!(
+        !h.ui.get_cred_editor_open(),
+        "seed: the credential editor is closed before activation"
+    );
+    row.invoke_accessible_default_action();
+    pump_ticks(1);
+    assert!(
+        h.ui.get_cred_editor_open(),
+        "the row's accessible-default-action (mirrors a real click on `touch`, \
+         now scoped inside `content`) must still activate -- open the credential editor"
     );
 }
 
