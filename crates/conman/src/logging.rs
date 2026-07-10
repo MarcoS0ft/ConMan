@@ -77,7 +77,11 @@ pub(crate) fn init() -> LoggingGuard {
     let subscriber = Registry::default().with(build_filter()).with(file_layer);
 
     #[cfg(debug_assertions)]
-    let subscriber = subscriber.with(fmt::layer().with_writer(std::io::stderr));
+    let subscriber = subscriber.with(
+        fmt::layer()
+            .with_ansi(cm_platform::stderr_supports_ansi())
+            .with_writer(std::io::stderr),
+    );
 
     let _ = subscriber.try_init();
 

@@ -13,11 +13,17 @@
 //!   protocol.
 //! - [`accent`]: OS accent-color read + best-effort live watch (P6.8, gap 10).
 //!   Clipboard access and DPI helpers remain unimplemented (not yet scheduled).
+//! - [`console::stderr_supports_ansi`]: terminal ANSI/VT capability detection,
+//!   used by `conman`'s debug console logging layer so a legacy Windows
+//!   console (no VT processing) gets plain text instead of raw escape
+//!   literals.
 
 pub mod accent;
+pub mod console;
 mod error;
 pub mod single_instance;
 
+pub use console::stderr_supports_ansi;
 pub use error::PlatformError;
 
 use std::path::PathBuf;
