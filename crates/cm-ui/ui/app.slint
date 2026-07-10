@@ -1178,6 +1178,13 @@ export component AppWindow inherits Window {
     in property <string>     connecting-kind: "";
     in property <string>     error-reason: "";
     in property <string>     error-detail: "";
+    // P9.12 #3: `ErrorOverlay` used to show the same "Connection failed"
+    // title + red error styling for a genuine `Failed` session AND a clean
+    // `Disconnected`/`Exited` end -- misleading (exiting a shell normally
+    // looked like a failure). `true` only for a real `Failed` status;
+    // `false` for `Disconnected`/`Exited` (see `overlays::update_overlays_
+    // from_status`), which get a neutral "Session ended" title instead.
+    in property <bool>       error-is-failure: true;
     in property <[RecentItem]> launchpad-recents;
     in-out property <string> launchpad-query: "";
     // P6.14: a real (time-of-day) greeting computed in Rust, replacing the
@@ -2170,6 +2177,7 @@ export component AppWindow inherits Window {
                 identity: session-identity;
                 reason: error-reason;
                 detail: error-detail;
+                is-failure: error-is-failure;
                 reconnect => { root.reconnect(); }
                 edit => { root.edit-failed-profile(); }
             }

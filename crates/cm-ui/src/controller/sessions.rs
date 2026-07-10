@@ -2101,11 +2101,16 @@ pub(super) fn log_rdp_launch_auth(
 
 /// Sets the error-overlay UI state for `reason` -- shared by the synchronous
 /// connect-failure branches and the P6.4 credential-resolution failure paths
-/// below.
+/// below. Every caller here is a genuine failure (a synchronous connect
+/// error, a missing/unresolvable credential, an agent-mode execute-gate
+/// denial) -- P9.12 #3's neutral "Session ended" framing is only for a
+/// clean `Disconnected`/`Exited` end (`overlays::update_overlays_from_status`),
+/// never for these, so this always marks the overlay as a real failure.
 fn set_error_overlay(ui: &AppWindow, reason: &str) {
     ui.set_overlay_connecting(false);
     ui.set_overlay_error(true);
     ui.set_launchpad_open(false);
+    ui.set_error_is_failure(true);
     ui.set_error_reason(SharedString::from(reason));
     ui.set_error_detail(SharedString::from(""));
 }

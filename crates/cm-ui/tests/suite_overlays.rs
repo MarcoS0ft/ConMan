@@ -34,6 +34,7 @@ fn overlays_suite() {
     background_tab_failure_toasts_and_auto_expires();
     switching_tabs_shows_each_tabs_own_identity_not_the_others();
     reconnect_is_refused_when_agent_mode_lacks_execute_scope();
+    clean_disconnect_and_exit_are_not_shown_as_a_failure();
 }
 
 fn toast_count(ui: &cm_ui::AppWindow) -> usize {
@@ -164,9 +165,54 @@ fn connecting_resolves_to_error_overlay_with_reconnect_and_edit() {
         "error overlay must surface the session's failure reason, got {:?}",
         h.ui.get_error_reason()
     );
+    assert!(
+        h.ui.get_error_is_failure(),
+        "a genuine SessionStatus::Failed must mark the overlay as a real failure \
+         (P9.12 #3 -- \"Connection failed\" framing)"
+    );
 
     find_by_id(&h.ui, "ErrorOverlay::error-reconnect-btn");
     find_by_id(&h.ui, "ErrorOverlay::error-edit-btn");
+}
+
+/// P9.12 #3: a clean SSH `exit`/disconnect must NOT show the same
+/// "Connection failed" framing a real failure does -- `overlays::update_
+/// overlays_from_status` used to set `overlay_error(true)` identically for
+/// `Failed`, `Disconnected`, and `Exited`, so exiting a shell normally
+/// looked exactly like a connection failure. Drives both neutral-ending
+/// variants through the real tick loop (not a duplicated match statement)
+/// and asserts `error-is-failure` is false for both, while the overlay
+/// itself still shows (Reconnect stays available either way).
+fn clean_disconnect_and_exit_are_not_shown_as_a_failure() {
+    let (h, _repo, provider) = harness();
+    let cell = connect_ssh_via_quick_connect(&h, &provider, "mock-host");
+
+    *cell.lock().expect("cell poisoned") = SessionStatus::Disconnected;
+    let resolved = pump_until(50, || h.ui.get_overlay_error());
+    assert!(resolved, "error overlay must appear after a clean disconnect too");
+    assert!(
+        !h.ui.get_error_is_failure(),
+        "a clean Disconnected must NOT be framed as a failure"
+    );
+    assert_eq!(
+        h.ui.get_error_reason().as_str(),
+        "Session disconnected",
+        "the reason text is unchanged by this fix, only the failure framing is"
+    );
+
+    // A second tab, exited cleanly (success: true) -- the OTHER neutral-ending
+    // variant `update_overlays_from_status` handles identically.
+    let cell2 = connect_ssh_via_quick_connect(&h, &provider, "mock-host-2");
+    *cell2.lock().expect("cell poisoned") = SessionStatus::Exited(cm_session::ExitStatus {
+        success: true,
+        code: 0,
+    });
+    let resolved2 = pump_until(50, || h.ui.get_overlay_error());
+    assert!(resolved2, "error overlay must appear after a clean exit too");
+    assert!(
+        !h.ui.get_error_is_failure(),
+        "a clean Exited{{success: true}} must NOT be framed as a failure either"
+    );
 }
 
 /// A background (non-active) remote tab failing pushes a toast (P5.3b); the
