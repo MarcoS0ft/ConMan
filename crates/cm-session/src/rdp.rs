@@ -92,6 +92,23 @@
 //! (`ActiveStage::encode_resize`); the `RdpCmd::Resize` handler coalesces a
 //! burst of pending resizes (`coalesce_latest_resize`) down to one PDU for
 //! the settled size, avoiding a reactivation storm on a live window drag.
+//!
+//! **P9.9-FIX**: `encode_resize` returns `None` (a silent no-op) unless the
+//! `DisplayControl` DVC is registered AND the server has opened it --
+//! `drive_inner` registers a `DrdynvcClient` carrying a `DisplayControlClient`
+//! alongside `cliprdr` for exactly this reason. Before this fix, no DVC was
+//! registered at all, so `encode_resize` always returned `None`: the resize
+//! PDU was never written to the wire, no server ever saw a resize request,
+//! `DeactivateAll` never fired, and the whole state machine above -- correct
+//! on its own terms -- was unreachable. (An earlier version of this doc
+//! block claimed `static_channels` already included the DisplayControl DVC;
+//! that was aspirational and untrue until this fix landed.) Timing caveat,
+//! not a defect: `encode_resize` still returns `None` until the DVC's
+//! capability exchange completes after connect (the server must open the
+//! channel first) -- a resize fired in the sub-second window right after
+//! connect can still no-op. Resizes are user-driven window/pane drags, well
+//! after connect, so this is not expected to matter in practice; not worth
+//! buffering unless a live test shows a real first-resize miss.
 
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -112,6 +129,8 @@ use ironrdp_connector::{
     DesktopSize, Sequence as _,
 };
 use ironrdp_core::WriteBuf;
+use ironrdp_displaycontrol::client::DisplayControlClient;
+use ironrdp_dvc::DrdynvcClient;
 use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_input::{
     Database as InputDatabase, MouseButton, MousePosition, Operation as InputOperation, Scancode,
@@ -799,6 +818,28 @@ impl ironrdp_async::NetworkClient for NtlmOnlyNetworkClient {
     }
 }
 
+/// P9.9-FIX (found live, not spec'd): bounded safety timeout around the
+/// `connect_begin`/`connect_finalize` negotiation calls. Both drive an
+/// internal `loop { single_sequence_step(...).await?; ... }` (vendored
+/// ironrdp-connector/-async) with no timeout of their own -- if the server
+/// stops responding mid-exchange (observed live: xrdp 192.0.2.10 hangs
+/// waiting for an MCS Channel Join Confirm once a DRDYNVC channel is
+/// requested, seemingly not granting it), the `.await` blocks forever. That
+/// alone would just mean a slow connect, except `RdpSession::shutdown()`
+/// blocks on `JoinHandle::join()`, which ALSO never returns while this task
+/// is stuck -- so a caller that gives up waiting for `Connected` and calls
+/// `shutdown()` hangs too, with no way to recover short of killing the
+/// process. This is not new to P9.9-FIX (the vendored loops always lacked a
+/// timeout); the DVC registration is simply the first thing that reliably
+/// triggers it against a real host. Env-tunable like the other RDP timeouts.
+fn rdp_connect_phase_timeout() -> std::time::Duration {
+    let secs: u64 = std::env::var("CONMAN_RDP_CONNECT_PHASE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+    std::time::Duration::from_secs(secs)
+}
+
 async fn drive(cfg: RdpSettings, auth: RdpAuthInput, ctx: DriveCtx) {
     let status = ctx.status.clone();
     match drive_inner(&cfg, auth, ctx).await {
@@ -890,22 +931,42 @@ async fn drive_inner(
         multitransport_flags: None,
     };
 
-    // 3. Build connector with CLIPRDR static channel attached.
-    //    `ClientConnector::new` takes a local socket address used only for
-    //    RDPDR client identification; "0.0.0.0:0" is the right value for
-    //    clients that do not bind a fixed local port.
+    // 3. Build connector with the CLIPRDR and DRDYNVC static channels
+    //    attached. `ClientConnector::new` takes a local socket address used
+    //    only for RDPDR client identification; "0.0.0.0:0" is the right
+    //    value for clients that do not bind a fixed local port.
     let cliprdr = CliprdrClient::new(Box::new(TextCliprdrBackend::new(ctx.remote_clipboard)));
+    // P9.9-FIX: DRDYNVC carrying the DisplayControl DVC -- without this,
+    // `ActiveStage::encode_resize` always returns `None` (the DVC is simply
+    // not there to ask), so `RdpCmd::Resize` never actually writes a resize
+    // PDU to the wire and the reactivation state machine (P9.9) is
+    // unreachable. `DisplayControlClient::new`'s callback is the
+    // `OnCapabilitiesReceived` hook (fires once the server opens the DVC and
+    // sends its capabilities); a client that only ever *sends* resize
+    // requests (never needs to react to the server's capabilities) replies
+    // with no immediate message.
+    let drdynvc = DrdynvcClient::new()
+        .with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new())));
     let local_addr: std::net::SocketAddr = "0.0.0.0:0"
         .parse()
         .expect("hardcoded \"0.0.0.0:0\" is a valid SocketAddr");
-    let mut connector =
-        ClientConnector::new(connector_config, local_addr).with_static_channel(cliprdr);
+    let mut connector = ClientConnector::new(connector_config, local_addr)
+        .with_static_channel(cliprdr)
+        .with_static_channel(drdynvc);
 
     // 4. Initial connection phase (before TLS upgrade).
     let mut framed: TokioFramed<TcpStream> = TokioFramed::new(tcp);
-    let should_upgrade = connect_begin(&mut framed, &mut connector)
-        .await
-        .map_err(|e| {
+    // P9.9-FIX: `connect_begin` drives an unbounded internal loop with no
+    // timeout of its own -- bound it here so a server that stops responding
+    // mid-negotiation fails the session cleanly instead of hanging forever
+    // (see `rdp_connect_phase_timeout`'s doc comment for why this matters).
+    let should_upgrade = match tokio::time::timeout(
+        rdp_connect_phase_timeout(),
+        connect_begin(&mut framed, &mut connector),
+    )
+    .await
+    {
+        Ok(result) => result.map_err(|e| {
             // P9.8 B4: `map_negotiation_error` stays a pure, unit-testable
             // function (no host/port); log the actionable case here at the
             // IO boundary where those fields are in scope.
@@ -918,7 +979,19 @@ async fn drive_inner(
                 );
             }
             mapped
-        })?;
+        })?,
+        Err(_elapsed) => {
+            tracing::warn!(
+                host = %cfg.host,
+                port = cfg.port,
+                "rdp: connect negotiation timed out (server stopped responding)"
+            );
+            return Err(RdpError::Protocol(format!(
+                "connect negotiation timed out after {}s",
+                rdp_connect_phase_timeout().as_secs()
+            )));
+        }
+    };
 
     // 5. TLS upgrade — ironrdp-tls performs the handshake; CA validation and
     //    TOFU follow in verify_cert.
@@ -1000,31 +1073,58 @@ async fn drive_inner(
     // selected HYBRID (should_perform_credssp(), checked in step 7b above);
     // TLS-only servers never reach the CredSSP branch inside this call.
     let mut network_client = NtlmOnlyNetworkClient;
-    let connection_result: ConnectionResult = connect_finalize(
-        upgraded,
-        connector,
-        &mut framed,
-        &mut network_client,
-        ironrdp_connector::ServerName::new(cfg.host.clone()),
-        server_public_key,
-        None,
+    // P9.9-FIX: found live against xrdp 192.0.2.10 once the DisplayControl
+    // DVC was registered -- `connect_finalize` drives an unbounded internal
+    // loop (CredSSP, then BasicSettingsExchange -> ChannelConnection ->
+    // SecureSettingsExchange -> ConnectionFinalization) with no timeout of
+    // its own. This server appears to not grant the requested DRDYNVC
+    // channel, so the vendored `ChannelConnectionSequence` hangs forever
+    // awaiting an MCS Channel Join Confirm that never arrives -- and because
+    // `RdpSession::shutdown()` blocks on joining this very task, a caller
+    // that gives up waiting for `Connected` and calls `shutdown()` hangs
+    // too. Bound the whole call so a non-responsive server always fails the
+    // session cleanly instead of wedging it (see `rdp_connect_phase_timeout`).
+    let connection_result: ConnectionResult = match tokio::time::timeout(
+        rdp_connect_phase_timeout(),
+        connect_finalize(
+            upgraded,
+            connector,
+            &mut framed,
+            &mut network_client,
+            ironrdp_connector::ServerName::new(cfg.host.clone()),
+            server_public_key,
+            None,
+        ),
     )
     .await
-    .map_err(|e| {
-        // P9.8 B7: `map_finalize_error` stays pure/testable (no host/username
-        // in scope); log the actionable, operator-facing event here where
-        // they're available. `map_finalize_error` still separately logs the
-        // raw ironrdp error at `debug` for deep diagnosis (P9.5 item 5) --
-        // this ERROR line is the "what happened, to whom" summary.
-        if matches!(e.kind(), ConnectorErrorKind::Credssp(_)) {
-            tracing::error!(
+    {
+        Ok(result) => result.map_err(|e| {
+            // P9.8 B7: `map_finalize_error` stays pure/testable (no host/username
+            // in scope); log the actionable, operator-facing event here where
+            // they're available. `map_finalize_error` still separately logs the
+            // raw ironrdp error at `debug` for deep diagnosis (P9.5 item 5) --
+            // this ERROR line is the "what happened, to whom" summary.
+            if matches!(e.kind(), ConnectorErrorKind::Credssp(_)) {
+                tracing::error!(
+                    host = %cfg.host,
+                    username = %auth.username,
+                    "rdp: CredSSP/NTLM auth rejected"
+                );
+            }
+            map_finalize_error(e)
+        })?,
+        Err(_elapsed) => {
+            tracing::warn!(
                 host = %cfg.host,
-                username = %auth.username,
-                "rdp: CredSSP/NTLM auth rejected"
+                "rdp: connect finalization timed out (server stopped responding \
+                 -- e.g. not granting a requested channel during MCS channel-join)"
             );
+            return Err(RdpError::Protocol(format!(
+                "connect finalization timed out after {}s",
+                rdp_connect_phase_timeout().as_secs()
+            )));
         }
-        map_finalize_error(e)
-    })?;
+    };
 
     let desktop_size = connection_result.desktop_size;
 
@@ -1329,10 +1429,43 @@ where
                                 other => trailing.push(other),
                             }
                         }
-                        if let Some((width, height)) = coalesce_latest_resize(sizes.into_iter())
-                            && let Some(Ok(data)) = active_stage.encode_resize(width, height, None, None)
-                        {
-                            let _ = framed.write_all(&data).await;
+                        if let Some((width, height)) = coalesce_latest_resize(sizes.into_iter()) {
+                            // P9.9-FIX: the three outcomes were previously
+                            // collapsed into one silent no-op via `if let
+                            // Some(Ok(data)) = ...` -- that pattern is
+                            // exactly what hid the missing-DVC bug (a `None`
+                            // here looked identical to "sent, server
+                            // ignored it"). Log all three distinctly.
+                            match active_stage.encode_resize(width, height, None, None) {
+                                Some(Ok(data)) => {
+                                    tracing::debug!(width, height, "rdp: resize PDU sent");
+                                    let _ = framed.write_all(&data).await;
+                                }
+                                Some(Err(e)) => {
+                                    tracing::warn!(
+                                        width,
+                                        height,
+                                        error = %e,
+                                        "rdp: resize PDU encode failed"
+                                    );
+                                }
+                                None => {
+                                    // The DisplayControl DVC isn't registered
+                                    // (shouldn't happen -- it's always
+                                    // registered at connect, see `drive_inner`)
+                                    // or the server hasn't opened it yet (the
+                                    // documented timing caveat: a resize fired
+                                    // in the sub-second window right after
+                                    // connect, before the DVC's capability
+                                    // exchange completes, still no-ops).
+                                    tracing::warn!(
+                                        width,
+                                        height,
+                                        "rdp: resize request dropped -- DisplayControl DVC not \
+                                         registered or not yet open"
+                                    );
+                                }
+                            }
                         }
                         for cmd in trailing {
                             if handle_rdp_cmd(cmd, framed, active_stage, image, input_db).await?
@@ -2683,6 +2816,44 @@ mod tests {
     // hardcoded lab host/credential in tracked source.
     // ---------------------------------------------------------------------------
 
+    /// In-memory `tracing` sink for `rdp_connect_live_host` (P9.9-FIX): the
+    /// RDP driver runs on its own dedicated OS thread (spawned inside
+    /// `RdpSession::connect`), so a thread-local `tracing::subscriber::
+    /// set_default` in the test's own task would never see its events --
+    /// this installs a real global subscriber (`try_init`, safe here because
+    /// this test is `#[ignore]`d and is expected to be run alone via
+    /// `--ignored rdp_connect_live_host`) writing formatted log lines into a
+    /// shared buffer the test can `.contains()` on afterward, instead of
+    /// requiring a human to eyeball `--nocapture` output.
+    #[derive(Clone, Default)]
+    struct SharedLogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogBuf {
+        type Writer = SharedLogBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl SharedLogBuf {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+        }
+    }
+
     /// Opt-in live proof driven entirely by env vars, so no lab-specific
     /// host/user/password is ever hardcoded in tracked source (this repo
     /// keeps infra/host details out of tracked files -- P9.5 item 8; mirrors
@@ -2748,6 +2919,19 @@ mod tests {
                 return;
             }
         };
+
+        // P9.9-FIX: capture the driver's own log output so the resize
+        // round-trip below can assert the PDU was actually emitted, not
+        // just that the session stayed stable (which passed trivially even
+        // when nothing was sent -- the exact gap that hid the missing-DVC
+        // bug). `try_init` is a global, process-wide install; safe here
+        // because this test is `#[ignore]`d and meant to be run alone.
+        let log_buf = SharedLogBuf::default();
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("debug")
+            .with_writer(log_buf.clone())
+            .with_ansi(false)
+            .try_init();
 
         // Hardening: tunable connect-wait, defaulting to the original 15 s.
         // A real target's reconnect-throttling (or general slow-host
@@ -3003,6 +3187,29 @@ mod tests {
              request -- the §3 degradation contract: a stable no-op (xrdp) \
              is acceptable, a wedged or failed session is not; got {:?}",
             session.status()
+        );
+
+        // P9.9-FIX: the actual bug this whole test extension exists to catch
+        // -- "session stayed Connected" passed trivially even when the
+        // resize PDU was never sent at all (no DisplayControl DVC
+        // registered), because a `None` from `encode_resize` looked
+        // identical to "sent, but the server ignored it" from the outside.
+        // Assert the driver's own log proves the PDU was actually written
+        // to the wire, not silently dropped.
+        let logged = log_buf.contents();
+        assert!(
+            logged.contains("rdp: resize PDU sent"),
+            "the resize PDU was never logged as sent -- most likely the \
+             DisplayControl DVC isn't registered/open (the exact bug this \
+             assertion exists to catch; see the P9.9-FIX doc comment on \
+             `drive_inner`'s DRDYNVC registration). Captured log:\n{logged}"
+        );
+        assert!(
+            !logged.contains("rdp: resize request dropped"),
+            "the resize request was explicitly dropped (DisplayControl DVC \
+             not registered or not yet open) -- see the P9.9-FIX timing \
+             caveat if this fires right after connect; a resize well after \
+             connect should never hit it. Captured log:\n{logged}"
         );
 
         match post_resize_frame {
