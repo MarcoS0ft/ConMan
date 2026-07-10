@@ -744,14 +744,15 @@ component CredTreeRow inherits Rectangle {
 
     // P9.5 #1 (closing the identical latent bug flagged in the connection
     // tree's own fix): same reasoning as `ConnectionRow::action-hover` in
-    // this file -- `touch` and the action-icon strip are overlapping
-    // siblings, so gating the strip's existence on `touch.has-hover` alone
-    // is unstable (Slint hands the pointer to whichever button is topmost,
-    // synthesizing an Exit for `touch` that destroys the `if`-gated strip
-    // out from under the pointer). ORing in each button's own latched hover
-    // (via `IconButton::hover-changed`, see `move-up-hover` etc. on
-    // ConnectionRow for the full mechanism/why) keeps the combined signal
-    // stable across that boundary.
+    // this file -- `touch` (now scoped to `content`, see below) and the
+    // action-icon strip are adjacent, non-overlapping cells, so gating the
+    // strip's existence on `touch.has-hover` alone is unstable across that
+    // cell boundary (Slint hands the pointer to whichever button is
+    // topmost, synthesizing an Exit for `touch` that destroys the
+    // `if`-gated strip out from under the pointer). ORing in each button's
+    // own latched hover (via `IconButton::hover-changed`, see
+    // `move-up-hover` etc. on ConnectionRow for the full mechanism/why)
+    // keeps the combined signal stable across that boundary.
     property <bool> new-cred-hover: false;
     property <bool> edit-cred-hover: false;
     property <bool> delete-cred-hover: false;
@@ -764,14 +765,8 @@ component CredTreeRow inherits Rectangle {
               : root.highlighted ? Theme.color-accent-subtle.with-alpha(0.5)
               : root.action-hover ? Theme.color-hover : transparent;
 
-    touch := TouchArea {
-        clicked => {
-            if (data.is-folder) { root.toggled(); }
-            else { root.activated(); }
-        }
-    }
-
-    // P6.10 (gap 15): right-click / keyboard Menu key context menu, reusing
+    // P9.11 (Bug A geometry twin, see `ConnectionRow`'s identical `content`/
+    // `touch` shape): right-click / keyboard Menu key context menu, reusing
     // the exact same callbacks as the hover buttons — no new backend.
     ContextMenuArea {
         Menu {
@@ -796,88 +791,118 @@ component CredTreeRow inherits Rectangle {
         padding-right: Theme.space-1;
         spacing: Theme.space-2;
 
-        VerticalLayout {
-            alignment: center;
-            if data.is-folder : Text {
-                text: data.expanded ? "\u{EAB4}" : "\u{EAB6}";
-                font-family: Theme.font-family-icons;
-                font-size: Theme.icon-xs;
-                color: Theme.color-text-secondary;
-            }
-            if !data.is-folder : Rectangle {
-                width: 7px; height: 7px;
-                border-radius: 4px;
-                background: Theme.color-accent-subtle;
-            }
-        }
-
-        Text {
-            text: data.label;
-            color: data.is-folder ? Theme.color-text : Theme.color-text-secondary;
-            font-size: Theme.font-base;
-            font-family: Theme.font-family;
-            font-weight: data.is-folder ? 600 : 500;
-            vertical-alignment: center;
+        // P9.11: mirrors `ConnectionRow`'s identical `content` cell (Bug A,
+        // `269a5e5`) -- `touch` used to be a bare sibling of this whole
+        // HorizontalLayout, sized to cover the entire row including the
+        // pixels the hover action-icon strip (below) renders into once it
+        // exists, leaving `touch` and the strip as OVERLAPPING siblings
+        // whose relative click priority depended on Slint's FrontToBack
+        // sibling-traversal order. See `ConnectionRow`'s `content` comment
+        // for the full investigation (i-slint-core's `send_mouse_event_to_
+        // item`/`TouchArea::input_event`) -- correctness now rests on
+        // non-overlapping geometry instead: `content` scopes `touch` to the
+        // tree-icon/label/tag cell only; the icon strip is a separate later
+        // cell entirely outside `touch`'s geometry.
+        content := Rectangle {
             horizontal-stretch: 1;
-            overflow: elide;
-        }
 
-        if !data.is-folder && data.username != "" : VerticalLayout {
-            alignment: center;
-            Text {
-                text: data.username;
-                color: Theme.color-text-disabled;
-                font-size: Theme.font-xxs;
-                font-family: Theme.font-family-mono;
-                vertical-alignment: center;
+            touch := TouchArea {
+                clicked => {
+                    if (data.is-folder) { root.toggled(); }
+                    else { root.activated(); }
+                }
             }
-        }
 
-        if !data.is-folder && data.kind != "" : VerticalLayout {
-            alignment: center;
-            Rectangle {
-                height: Theme.tag-height;
-                border-radius: Theme.radius-xs;
-                background: Theme.color-hover;
-                HorizontalLayout {
-                    padding-left: 5px; padding-right: 5px;
-                    Text {
-                        text: data.kind;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+
+                VerticalLayout {
+                    alignment: center;
+                    if data.is-folder : Text {
+                        text: data.expanded ? "\u{EAB4}" : "\u{EAB6}";
+                        font-family: Theme.font-family-icons;
+                        font-size: Theme.icon-xs;
                         color: Theme.color-text-secondary;
+                    }
+                    if !data.is-folder : Rectangle {
+                        width: 7px; height: 7px;
+                        border-radius: 4px;
+                        background: Theme.color-accent-subtle;
+                    }
+                }
+
+                Text {
+                    text: data.label;
+                    color: data.is-folder ? Theme.color-text : Theme.color-text-secondary;
+                    font-size: Theme.font-base;
+                    font-family: Theme.font-family;
+                    font-weight: data.is-folder ? 600 : 500;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+
+                if !data.is-folder && data.username != "" : VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: data.username;
+                        color: Theme.color-text-disabled;
                         font-size: Theme.font-xxs;
                         font-family: Theme.font-family-mono;
-                        font-weight: 600;
                         vertical-alignment: center;
                     }
                 }
-            }
-        }
 
-        // P9.5 #6: "used by N connections" indicator -- mirrors the `kind`
-        // tag immediately above; hidden (empty label) for folders and for a
-        // credential nothing currently references directly.
-        if !data.is-folder && data.used-by-label != "" : VerticalLayout {
-            alignment: center;
-            Rectangle {
-                height: Theme.tag-height;
-                border-radius: Theme.radius-xs;
-                background: Theme.color-hover;
-                HorizontalLayout {
-                    padding-left: 5px; padding-right: 5px;
-                    Text {
-                        text: data.used-by-label;
-                        color: Theme.color-text-secondary;
-                        font-size: Theme.font-xxs;
-                        font-family: Theme.font-family-mono;
-                        font-weight: 600;
-                        vertical-alignment: center;
+                if !data.is-folder && data.kind != "" : VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        height: Theme.tag-height;
+                        border-radius: Theme.radius-xs;
+                        background: Theme.color-hover;
+                        HorizontalLayout {
+                            padding-left: 5px; padding-right: 5px;
+                            Text {
+                                text: data.kind;
+                                color: Theme.color-text-secondary;
+                                font-size: Theme.font-xxs;
+                                font-family: Theme.font-family-mono;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // P9.5 #6: "used by N connections" indicator -- mirrors the
+                // `kind` tag immediately above; hidden (empty label) for
+                // folders and for a credential nothing currently references
+                // directly.
+                if !data.is-folder && data.used-by-label != "" : VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        height: Theme.tag-height;
+                        border-radius: Theme.radius-xs;
+                        background: Theme.color-hover;
+                        HorizontalLayout {
+                            padding-left: 5px; padding-right: 5px;
+                            Text {
+                                text: data.used-by-label;
+                                color: Theme.color-text-secondary;
+                                font-size: Theme.font-xxs;
+                                font-family: Theme.font-family-mono;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
                 }
             }
         }
 
         // Gated on `root.action-hover`, not bare `touch.has-hover` -- see the
-        // property's doc comment above (P9.5 #1).
+        // property's doc comment above (P9.5 #1). A separate cell from
+        // `content` above, never overlapping it, so a click here can never
+        // also land on `touch` (P9.11).
         if root.action-hover : HorizontalLayout {
             spacing: Theme.gap-hairline;
             alignment: center;
