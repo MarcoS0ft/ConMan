@@ -2275,6 +2275,18 @@ pub(super) fn open_ssh_tab(
             ui.set_launchpad_open(false);
             ui.set_connecting_kind(SharedString::from("SSH"));
             ui.set_rdp_active(false);
+            // P9.12 #2: `push_tab` makes this brand-new tab active but never
+            // touches `root.frame` -- the same single AppWindow-level
+            // property Bug B's fix (`de72222`) already established isn't
+            // per-tab, and neither `push_tab` nor the routine tick loop
+            // calls `render_active` to refresh it on a fresh launch (only
+            // `select_tab`/`close_tab`/reconnect do). Without this, the
+            // property stays bound to whatever the PREVIOUSLY active tab
+            // last painted (typically the Home tab's local shell) until
+            // this session's own first `GridSnapshot` drains -- exactly the
+            // "local shell flashes before the remote paints" bleed. Blank
+            // it immediately, mirroring `reconnect_ssh_tab`'s identical fix.
+            ui.set_frame(Image::default());
         }
         Err(e) => {
             // Carry-over fix (b): surface synchronous setup errors as a Failed
@@ -2418,6 +2430,11 @@ pub(super) fn open_rdp_tab(
     ui.set_launchpad_open(false);
     ui.set_connecting_kind(SharedString::from("RDP"));
     ui.set_rdp_active(true);
+    // P9.12 #2: see `open_ssh_tab`'s identical comment -- `root.rdp-frame`
+    // is the same kind of single AppWindow-level property, and `push_tab`
+    // doesn't touch it either. Blank it so this fresh RDP tab never briefly
+    // shows the previously-active tab's last painted frame.
+    ui.set_rdp_frame(Image::default());
 }
 
 /// RDP counterpart to [`reconnect_ssh_tab`] (P6.12, gap 19): replaces the

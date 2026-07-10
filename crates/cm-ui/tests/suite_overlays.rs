@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use cm_core::SessionStatus;
 use i_slint_backend_testing::{ElementHandle, ElementRoot};
+use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 
 use support::{find_by_id, harness, nth_by_id, pump_ticks, pump_until};
 
@@ -35,6 +36,8 @@ fn overlays_suite() {
     switching_tabs_shows_each_tabs_own_identity_not_the_others();
     reconnect_is_refused_when_agent_mode_lacks_execute_scope();
     clean_disconnect_and_exit_are_not_shown_as_a_failure();
+    opening_a_new_ssh_tab_blanks_the_shared_frame_property();
+    opening_a_new_rdp_tab_blanks_the_shared_rdp_frame_property();
 }
 
 fn toast_count(ui: &cm_ui::AppWindow) -> usize {
@@ -358,5 +361,72 @@ fn reconnect_is_refused_when_agent_mode_lacks_execute_scope() {
             .contains("execute scope not granted"),
         "the error overlay must surface the gate's own reason, got {:?}",
         h.ui.get_error_reason()
+    );
+}
+
+/// P9.12 #2: opening a brand-new SSH tab must blank the shared `root.frame`
+/// property immediately -- `push_tab` makes the new tab active but never
+/// touches `frame`, and (unlike a tab switch, a reconnect, or a session's
+/// own new-snapshot tick) nothing else runs on the routine tick loop to
+/// refresh it until this fresh session's first real `GridSnapshot` drains.
+/// Without the fix, the property would stay bound to whatever the
+/// previously-active tab (here, the Home tab) last painted -- the "local
+/// shell flashes before the remote paints" bleed.
+///
+/// `MockSessionProvider`'s sessions never produce a real `GridSnapshot` on
+/// their own (this suite's own module doc), so `root.frame` would already
+/// be blank in every OTHER scenario regardless of whether this fix exists --
+/// that's exactly Bug B's own documented harness limitation. To actually
+/// prove the launch path itself blanks it (not just that it started blank),
+/// this seeds a non-default image directly first, simulating "a previous
+/// tab already painted something real".
+fn opening_a_new_ssh_tab_blanks_the_shared_frame_property() {
+    let (h, _repo, provider) = harness();
+    h.ui.set_frame(Image::from_rgba8(SharedPixelBuffer::<
+        Rgba8Pixel,
+    >::new(4, 4)));
+    assert_ne!(
+        h.ui.get_frame().size(),
+        Image::default().size(),
+        "seed: a non-blank frame, simulating the Home tab having already painted"
+    );
+
+    let _cell = connect_ssh_via_quick_connect(&h, &provider, "mock-fresh-host");
+
+    assert_eq!(
+        h.ui.get_frame().size(),
+        Image::default().size(),
+        "opening a new SSH tab must blank the previously-active tab's frame \
+         immediately, not leave it showing until the new session's first frame"
+    );
+}
+
+/// P9.12 #2, RDP counterpart -- `root.rdp-frame` is the same kind of single
+/// AppWindow-level property as `root.frame` above, and `open_rdp_tab`'s fix
+/// is the identical one-line blank. Same seed-then-launch proof.
+fn opening_a_new_rdp_tab_blanks_the_shared_rdp_frame_property() {
+    let (h, _repo, _provider) = harness();
+    h.ui.set_rdp_frame(Image::from_rgba8(SharedPixelBuffer::<
+        Rgba8Pixel,
+    >::new(4, 4)));
+    assert_ne!(
+        h.ui.get_rdp_frame().size(),
+        Image::default().size(),
+        "seed: a non-blank rdp-frame, simulating a previous tab having already painted"
+    );
+
+    h.ui.invoke_quick_connect();
+    pump_ticks(1);
+    h.ui.set_qc_kind(1); // RDP
+    h.ui.set_qc_host("mock-rdp-host".into());
+    h.ui.set_qc_username("ops".into());
+    h.ui.set_qc_secret("mock-password".into());
+    find_by_id(&h.ui, "QuickConnectForm::qc-connect-btn").invoke_accessible_default_action();
+
+    assert_eq!(
+        h.ui.get_rdp_frame().size(),
+        Image::default().size(),
+        "opening a new RDP tab must blank the previously-active tab's rdp-frame \
+         immediately, not leave it showing until the new session's first frame"
     );
 }
