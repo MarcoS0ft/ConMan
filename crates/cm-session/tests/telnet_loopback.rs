@@ -406,3 +406,99 @@ fn hostile_vt_query_saturation_shutdown_remains_prompt() {
     close_tx.send(()).expect("release server");
     server.join().expect("TELNET server thread");
 }
+
+/// Opt-in live interoperability smoke. Endpoint and login material come only
+/// from the environment so lab details and credentials never enter source or
+/// test output. The command must be harmless and its expected output marker
+/// should be stable for the authorized target.
+#[test]
+#[ignore = "opt-in: set CONMAN_LIVE_TELNET_* for an authorized endpoint"]
+fn telnet_live_authorized_smoke() {
+    let (host, port, username, password, command, expected) = match (
+        std::env::var("CONMAN_LIVE_TELNET_HOST"),
+        std::env::var("CONMAN_LIVE_TELNET_PORT"),
+        std::env::var("CONMAN_LIVE_TELNET_USER"),
+        std::env::var("CONMAN_LIVE_TELNET_PASSWORD"),
+        std::env::var("CONMAN_LIVE_TELNET_COMMAND"),
+        std::env::var("CONMAN_LIVE_TELNET_EXPECT"),
+    ) {
+        (Ok(host), Ok(port), Ok(username), Ok(password), Ok(command), Ok(expected)) => (
+            host,
+            port.parse::<u16>().expect("valid live TELNET port"),
+            username,
+            password,
+            command,
+            expected,
+        ),
+        _ => {
+            eprintln!("telnet_live_authorized_smoke: skipping; live environment is incomplete");
+            return;
+        }
+    };
+    let timeout = Duration::from_secs(
+        std::env::var("CONMAN_LIVE_TELNET_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(15),
+    );
+    let cfg = TelnetSettings { host, port };
+
+    fn enter(session: &dyn TerminalSession) {
+        session.send_key(KeyEvent {
+            key: Key::Enter,
+            mods: KeyModifiers::default(),
+        });
+    }
+
+    fn wait_live(session: &dyn TerminalSession, needle: &str, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "live TELNET output marker was not rendered"
+            );
+            match session.snapshots().recv_timeout(remaining) {
+                Ok(snapshot) if snapshot_contains(&snapshot, needle) => return,
+                Ok(_) => {}
+                Err(error) => panic!("live TELNET snapshot stream closed: {error}"),
+            }
+        }
+    }
+
+    fn login(session: &dyn TerminalSession, username: &str, password: &str, timeout: Duration) {
+        enter(session);
+        wait_live(session, "login:", timeout);
+        session.paste(username.as_bytes().to_vec());
+        enter(session);
+        wait_live(session, "Password:", timeout);
+        session.paste(password.as_bytes().to_vec());
+        enter(session);
+        // Serial consoles may wait for one more newline before repainting the
+        // command prompt after a successful PAM/login transition.
+        thread::sleep(Duration::from_millis(250));
+        enter(session);
+        wait_live(session, "#", timeout);
+    }
+
+    for attempt in 0..2 {
+        let session = TelnetTerminalSession::connect(&cfg, size()).expect("start live TELNET");
+        wait_for_connected(&session);
+        login(&session, &username, &password, timeout);
+
+        if attempt == 0 {
+            session.resize(TerminalSize {
+                cols: 100,
+                rows: 30,
+            });
+        }
+        session.paste(command.as_bytes().to_vec());
+        enter(&session);
+        wait_live(&session, &expected, timeout);
+
+        session.paste(b"exit".to_vec());
+        enter(&session);
+        wait_live(&session, "login:", timeout);
+        session.shutdown();
+    }
+}
