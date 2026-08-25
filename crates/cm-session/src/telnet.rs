@@ -288,23 +288,23 @@ impl TerminalSession for TelnetTerminalSession {
     }
 
     fn send_key(&self, event: KeyEvent) {
-        self.enqueue_control(Msg::Key(event));
+        let _ = self.enqueue_control(Msg::Key(event));
     }
 
     fn send_mouse(&self, event: MouseEvent) {
-        self.enqueue_control(Msg::Mouse(event));
+        let _ = self.enqueue_control(Msg::Mouse(event));
     }
 
     fn paste(&self, bytes: Vec<u8>) {
-        self.enqueue_control(Msg::Paste(bytes));
+        let _ = self.enqueue_control(Msg::Paste(bytes));
     }
 
     fn resize(&self, size: TerminalSize) {
-        self.enqueue_control(Msg::Resize(size));
+        let _ = self.enqueue_control(Msg::Resize(size));
     }
 
     fn set_scroll(&self, offset: u32) {
-        self.enqueue_control(Msg::SetScroll(offset));
+        let _ = self.enqueue_control(Msg::SetScroll(offset));
     }
 
     fn status(&self) -> SessionStatus {
@@ -347,9 +347,9 @@ impl TelnetTerminalSession {
     /// Queue one UI action without blocking the caller. Exhausting the bounded
     /// queue is a terminal fail-closed condition: continuing after losing a
     /// key or paste would silently corrupt the interactive byte stream.
-    fn enqueue_control(&self, message: Msg) {
+    fn enqueue_control(&self, message: Msg) -> bool {
         match self.control_tx.try_send(message) {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(TrySendError::Full(_)) => {
                 set_status(
                     &self.status,
@@ -357,8 +357,9 @@ impl TelnetTerminalSession {
                 );
                 self.shutdown_flag.store(true, Ordering::Release);
                 let _ = self.shutdown_tx.send(true);
+                false
             }
-            Err(TrySendError::Disconnected(_)) => {}
+            Err(TrySendError::Disconnected(_)) => false,
         }
     }
 }
@@ -406,7 +407,7 @@ impl Session for TelnetTerminalSession {
 
     fn request_search_text(&self, reply: Sender<Vec<String>>) {
         let fallback = reply.clone();
-        if self.control_tx.send(Msg::QueryBuffer(reply)).is_err() {
+        if !self.enqueue_control(Msg::QueryBuffer(reply)) {
             let _ = fallback.send(Vec::new());
         }
     }
@@ -699,6 +700,14 @@ mod tests {
         };
 
         let started = Instant::now();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        <TelnetTerminalSession as Session>::request_search_text(&session, reply_tx);
+        assert_eq!(
+            reply_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("overloaded search fallback"),
+            Vec::<String>::new()
+        );
         session.enqueue_control(Msg::Paste(b"must-not-disappear".to_vec()));
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(
