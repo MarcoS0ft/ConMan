@@ -228,6 +228,8 @@ pub(super) struct PushTabArgs {
     pub(super) identity: String,
     /// See `Tab::kind` (P9.5 #3). `"SSH"`/`"RDP"`, or empty for local shells.
     pub(super) kind: String,
+    /// See `Tab::insecure_transport`. True only for plain Telnet.
+    pub(super) insecure_transport: bool,
 }
 
 pub(super) fn push_tab(
@@ -247,6 +249,7 @@ pub(super) fn push_tab(
         is_empty,
         identity,
         kind,
+        insecure_transport,
     } = args;
     let mut st = state.borrow_mut();
     let scale = st.scale;
@@ -289,7 +292,8 @@ pub(super) fn push_tab(
         broadcast_saved_groups: Vec::new(),
         search: super::search::SearchState::default(),
         identity,
-        kind,
+        kind: kind.clone(),
+        insecure_transport,
         connect_started: std::time::Instant::now(),
     });
     st.active = st.tabs.len() - 1;
@@ -309,6 +313,8 @@ pub(super) fn push_tab(
     });
     ui.set_active_tab(active as i32);
     ui.set_session_status(SharedString::from(initial_status));
+    ui.set_connecting_kind(SharedString::from(kind));
+    ui.set_session_insecure(insecure_transport);
     // P6.14: keep the "restore last session" snapshot current on every tab
     // open (write-through rather than a single on-exit hook -- robust
     // against a crash/kill, matching how other UI prefs already persist
@@ -410,12 +416,14 @@ fn spawn_local_tab(
             is_empty,
             identity: identity.clone(),
             kind: String::new(),
+            insecure_transport: false,
         },
     );
     ui.set_session_identity(SharedString::from(identity));
     ui.set_overlay_connecting(false);
     ui.set_overlay_error(false);
     ui.set_rdp_active(false);
+    ui.set_session_insecure(false);
     if is_empty {
         ui.set_launchpad_open(true);
         launchpad::refresh_recents(state, ui);
@@ -448,6 +456,9 @@ pub(super) fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
     // bleed the user reported.
     ui.set_session_identity(SharedString::from(tab.identity.as_str()));
     ui.set_connecting_kind(SharedString::from(tab.kind.as_str()));
+    ui.set_session_insecure(
+        tab.insecure_transport || tab.extra_panes.iter().any(|ep| ep.insecure_transport),
+    );
     sessions::render_active(&mut st, ui);
     drop(st);
     panes::refresh_broadcast_label(state, ui);
@@ -515,6 +526,9 @@ pub(super) fn close_tab(
         Disposition::Detach => st.detached.push(DetachedEntry {
             session: tab.session,
             label: label.clone(),
+            is_remote: tab.is_remote,
+            insecure_transport: tab.insecure_transport,
+            kind: tab.kind.clone(),
         }),
         Disposition::Shutdown => tab.session.shutdown(),
         Disposition::AbortConnecting => abort_connecting(tab.session),
@@ -524,6 +538,9 @@ pub(super) fn close_tab(
             Disposition::Detach => st.detached.push(DetachedEntry {
                 session: ep.session,
                 label: format!("{} [pane {}]", label, i + 2),
+                is_remote: ep.is_remote,
+                insecure_transport: ep.insecure_transport,
+                kind: ep.kind,
             }),
             Disposition::Shutdown => ep.session.shutdown(),
             Disposition::AbortConnecting => abort_connecting(ep.session),
@@ -556,6 +573,15 @@ pub(super) fn close_tab(
     ui.set_active_pane(st.tabs[active].pane_group.focused() as i32);
     let status = st.tabs[active].session.status();
     overlays::update_overlays_from_status(ui, &st.tabs[active], &status);
+    ui.set_session_identity(SharedString::from(st.tabs[active].identity.as_str()));
+    ui.set_connecting_kind(SharedString::from(st.tabs[active].kind.as_str()));
+    ui.set_session_insecure(
+        st.tabs[active].insecure_transport
+            || st.tabs[active]
+                .extra_panes
+                .iter()
+                .any(|ep| ep.insecure_transport),
+    );
     sessions::render_active(&mut st, ui);
     drop(st);
     panes::refresh_broadcast_label(state, ui);

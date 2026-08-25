@@ -30,6 +30,7 @@ fn panes_suite() {
     focus_move_updates_active_pane();
     broadcast_toggle_and_target_menu();
     connect_in_split_is_refused_when_agent_mode_lacks_execute_scope();
+    telnet_connect_in_split_dispatches_and_marks_insecure();
     pane_disconnect_closes_the_targeted_pane_and_collapses_the_split();
 }
 
@@ -236,5 +237,42 @@ fn connect_in_split_is_refused_when_agent_mode_lacks_execute_scope() {
             .contains("execute scope not granted"),
         "the toast must surface the gate's own reason, got {:?}",
         toasts.row_data(0).map(|t| t.message)
+    );
+}
+
+fn telnet_connect_in_split_dispatches_and_marks_insecure() {
+    let (h, repo, provider) = harness();
+    h.ui.invoke_new_connection(0);
+    let mut form = h.ui.get_profile_form();
+    form.name = "Telnet Split".into();
+    form.kind = 2;
+    form.host = "split-telnet".into();
+    form.port = "23".into();
+    h.ui.set_profile_form(form);
+    h.ui.invoke_profile_save();
+    let conn_id = repo
+        .list_connections()
+        .expect("list connections")
+        .into_iter()
+        .find(|c| c.name == "Telnet Split")
+        .expect("saved Telnet connection")
+        .id
+        .get();
+
+    h.ui.invoke_connect_in_split_row(conn_id as i32);
+    pump_ticks(1);
+    assert_eq!(provider.telnet_connect_count(), 1);
+    assert_eq!(active_tab_pane_count(&h), 2);
+    assert!(
+        h.ui.get_session_insecure(),
+        "a Telnet pane must make the tab's insecure transport explicit"
+    );
+
+    h.ui.invoke_pane_disconnect(1);
+    pump_ticks(1);
+    assert_eq!(active_tab_pane_count(&h), 1);
+    assert!(
+        !h.ui.get_session_insecure(),
+        "closing the only Telnet pane must clear the tab-level warning"
     );
 }

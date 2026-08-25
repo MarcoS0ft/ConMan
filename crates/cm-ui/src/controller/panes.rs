@@ -652,6 +652,9 @@ fn commit_split_pane(
     pane_w: f32,
     pane_h: f32,
     scale: f32,
+    is_remote: bool,
+    insecure_transport: bool,
+    kind: &'static str,
 ) {
     {
         let mut st = state.borrow_mut();
@@ -670,6 +673,9 @@ fn commit_split_pane(
                 last_frame: None,
                 rdp_w: 0,
                 rdp_h: 0,
+                is_remote,
+                insecure_transport,
+                kind: kind.to_owned(),
             };
             // New pane ids are always appended (`PaneGroup::split` returns
             // `count() - 1` after the split, i.e. the previous `count()`),
@@ -696,6 +702,13 @@ fn commit_split_pane(
 
     ui.set_pane_layout(layout_to_int(layout));
     ui.set_active_pane(new_pane_idx as i32);
+    let insecure = {
+        let st = state.borrow();
+        st.tabs.get(st.active).is_some_and(|tab| {
+            tab.insecure_transport || tab.extra_panes.iter().any(|ep| ep.insecure_transport)
+        })
+    };
+    ui.set_session_insecure(insecure);
     rebuild_pane_cells(state);
     refresh_broadcast_label(state, ui);
 }
@@ -749,6 +762,9 @@ pub(super) fn do_split(
         pane_w,
         pane_h,
         slot.scale,
+        false,
+        false,
+        "",
     );
 }
 
@@ -791,14 +807,64 @@ pub(super) fn connect_in_split(
 
     match &conn.settings {
         cm_core::ConnectionSettings::Local(_) => do_split(state, tab_model, ui, layout),
-        cm_core::ConnectionSettings::Telnet(_) => push_toast(
-            toast_model,
-            toast_next_id,
-            format!(
-                "{}: Telnet split integration is not implemented yet",
-                conn.name
-            ),
-        ),
+        cm_core::ConnectionSettings::Telnet(settings) => {
+            let Some(slot) = reserve_split_slot(state, layout) else {
+                return;
+            };
+            let renderer = TerminalRenderer::with_fonts(
+                slot.fonts,
+                slot.font_size_px,
+                slot.scale,
+                util::terminal_theme_for(ui),
+            );
+            let (pane_w, pane_h) = split_pane_dims(layout, slot.surface_w, slot.surface_h);
+            let size = if pane_w > 0.0 && pane_h > 0.0 {
+                util::grid_for(&renderer, pane_w, pane_h, slot.scale)
+            } else {
+                INITIAL_SIZE
+            };
+
+            if sessions::agent_mode_execute_blocked(&state.borrow().agent_mode) {
+                tracing::warn!(
+                    conn = %conn.name,
+                    "agent mode: Telnet connect-in-split blocked while automation is active without execute scope"
+                );
+                rollback_split_slot(state);
+                push_toast(
+                    toast_model,
+                    toast_next_id,
+                    format!("{}: agent mode: execute scope not granted", conn.name),
+                );
+                return;
+            }
+
+            let provider = state.borrow().session_provider.clone();
+            let session = match provider.connect_telnet(settings, size) {
+                Ok(session) => session,
+                Err(e) => {
+                    tracing::warn!("connect-in-split Telnet connect failed: {e}");
+                    rollback_split_slot(state);
+                    push_toast(toast_model, toast_next_id, format!("{}: {e}", conn.name));
+                    return;
+                }
+            };
+            commit_split_pane(
+                state,
+                tab_model,
+                ui,
+                layout,
+                slot.new_pane_idx,
+                session,
+                renderer,
+                size,
+                pane_w,
+                pane_h,
+                slot.scale,
+                true,
+                true,
+                "TELNET",
+            );
+        }
         cm_core::ConnectionSettings::Ssh(s) => {
             let resolved = {
                 let st = state.borrow();
@@ -909,6 +975,9 @@ pub(super) fn connect_in_split(
                 pane_w,
                 pane_h,
                 slot.scale,
+                true,
+                false,
+                "SSH",
             );
         }
         cm_core::ConnectionSettings::Rdp(s) => {
@@ -1020,6 +1089,9 @@ pub(super) fn connect_in_split(
                 pane_w,
                 pane_h,
                 slot.scale,
+                true,
+                false,
+                "RDP",
             );
         }
     }
@@ -1074,6 +1146,8 @@ fn promote_extra_to_primary(tab: &mut Tab, ep_idx: usize) {
     std::mem::swap(&mut tab.last_frame, &mut ep.last_frame);
     std::mem::swap(&mut tab.rdp_w, &mut ep.rdp_w);
     std::mem::swap(&mut tab.rdp_h, &mut ep.rdp_h);
+    std::mem::swap(&mut tab.insecure_transport, &mut ep.insecure_transport);
+    std::mem::swap(&mut tab.kind, &mut ep.kind);
 }
 
 /// Close a specific pane (by id) in the active tab (P6.11: any pane,
@@ -1163,6 +1237,9 @@ pub(super) fn do_close_pane(
             st.detached.push(DetachedEntry {
                 session: ep.session,
                 label: closed_label,
+                is_remote: ep.is_remote,
+                insecure_transport: ep.insecure_transport,
+                kind: ep.kind,
             });
             ui.set_detached_count(st.detached.len() as i32);
         } else {
@@ -1186,6 +1263,15 @@ pub(super) fn do_close_pane(
 
     ui.set_pane_layout(layout_to_int(new_layout));
     ui.set_active_pane(new_focused as i32);
+    {
+        let st = state.borrow();
+        if let Some(tab) = st.tabs.get(st.active) {
+            ui.set_connecting_kind(SharedString::from(tab.kind.as_str()));
+            ui.set_session_insecure(
+                tab.insecure_transport || tab.extra_panes.iter().any(|ep| ep.insecure_transport),
+            );
+        }
+    }
     rebuild_pane_cells(state);
     refresh_broadcast_label(state, ui);
     // Re-render the newly focused pane.
@@ -1204,8 +1290,13 @@ pub(super) fn reattach_session(
     ui: &AppWindow,
     entry: DetachedEntry,
 ) {
-    let label = entry.label.clone();
-    let session = entry.session;
+    let DetachedEntry {
+        session,
+        label,
+        is_remote,
+        insecure_transport,
+        kind,
+    } = entry;
     // Use a transient renderer; the session will re-render on first tick.
     let (scale, fonts, font_size_px) = {
         let st = state.borrow();
@@ -1220,9 +1311,6 @@ pub(super) fn reattach_session(
         _ => "disconnected",
     };
     let initial_status: &'static str = status_dot;
-    let is_remote = !matches!(session.surface(), Surface::TerminalGrid(_))
-        || label.starts_with("SSH ")
-        || label.starts_with("RDP ");
     {
         let mut st = state.borrow_mut();
         let used: Vec<u32> = st.tabs.iter().map(|t| t.num).collect();
@@ -1259,7 +1347,8 @@ pub(super) fn reattach_session(
             // renders; `identity` mirrors what's pushed to
             // `set_session_identity` just below.
             identity: label.clone(),
-            kind: String::new(),
+            kind: kind.clone(),
+            insecure_transport,
             // P9.8 I2: same reasoning as `kind` above -- reattach never sees
             // a `connecting -> connected` transition, so this is never
             // actually read; `Instant::now()` is just a harmless default.
@@ -1289,10 +1378,12 @@ pub(super) fn reattach_session(
         ui.set_active_pane(0);
         ui.set_session_status(SharedString::from(initial_status));
         ui.set_session_identity(SharedString::from(label.as_str()));
+        ui.set_connecting_kind(SharedString::from(kind));
         ui.set_overlay_connecting(false);
         ui.set_overlay_error(false);
         ui.set_launchpad_open(false);
         ui.set_rdp_active(false);
+        ui.set_session_insecure(insecure_transport);
         startup::persist_session_tabs(state);
     }
     rebuild_pane_cells(state);
@@ -1388,6 +1479,9 @@ mod tests {
                 last_frame: None,
                 rdp_w: 0,
                 rdp_h: 0,
+                is_remote: false,
+                insecure_transport: false,
+                kind: String::new(),
             });
         }
 
@@ -1416,6 +1510,7 @@ mod tests {
             search: super::search::SearchState::default(),
             identity: String::new(),
             kind: String::new(),
+            insecure_transport: false,
             connect_started: std::time::Instant::now(),
         };
         (tab, sinks)

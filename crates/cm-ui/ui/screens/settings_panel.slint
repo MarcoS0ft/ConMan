@@ -611,7 +611,7 @@ export component SettingsPanel inherits Rectangle {
                             }
                         }
                         Text {
-                            text: "Execute -- the agent can open sessions using your stored credentials (launch a saved SSH/RDP connection, or broadcast input to one already open). The credential's actual password/key is never readable over MCP -- only its name -- even with every scope granted.";
+                            text: "Execute -- the agent can open remote sessions (including saved SSH, RDP, and Telnet connections) or broadcast input to one already open. Stored password/key material is never readable over MCP -- only its credential name -- even with every scope granted.";
                             color: Theme.color-text-secondary; font-size: Theme.font-xs;
                             font-family: Theme.font-family; wrap: word-wrap;
                         }

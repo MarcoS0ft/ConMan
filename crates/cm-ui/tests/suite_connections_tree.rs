@@ -67,7 +67,7 @@ fn select_does_not_launch_but_activate_does() {
     {
         let mut form = h.ui.get_profile_form();
         form.name = "Test Row".into();
-        form.kind = 2; // Local
+        form.kind = 3; // Local
         h.ui.set_profile_form(form);
     }
     find_by_id(&h.ui, "ProfileEditor::profile-save-btn").invoke_accessible_default_action();
@@ -194,7 +194,7 @@ fn connection_row_still_carries_its_context_menu_area() {
     {
         let mut form = h.ui.get_profile_form();
         form.name = "Ctx Menu Row".into();
-        form.kind = 2; // Local
+        form.kind = 3; // Local
         h.ui.set_profile_form(form);
     }
     find_by_id(&h.ui, "ProfileEditor::profile-save-btn").invoke_accessible_default_action();

@@ -134,7 +134,7 @@ pub struct AppConfig {
     pub repo: Arc<dyn ConnectionRepository>,
     /// The OS-keychain credential store.
     pub secrets: Arc<dyn CredentialStore>,
-    /// P6.15 (gap 27): establishes live sessions for local/SSH/RDP tabs. The
+    /// Establishes live sessions for Local, SSH, RDP, and Telnet tabs. The
     /// controller calls this port instead of naming the concrete
     /// `cm_session::{LocalTerminalSession, SshTerminalSession, RdpSession}`
     /// adapters directly — the binary builds `cm_session::

@@ -24,7 +24,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cm_core::terminal::{GridSnapshot, TerminalSize};
-use cm_core::{LocalSettings, RdpSettings, SessionProvider, SettingsService, SshSettings};
+use cm_core::{
+    LocalSettings, RdpSettings, SessionProvider, SettingsService, SshSettings, TelnetSettings,
+};
 use cm_session::{CertDecision, HostKeyDecision, PaneGroup, RdpAuthInput, Session, SshAuthInput};
 use slint::{ComponentHandle, Image, ModelRc, SharedString, Timer, VecModel};
 
@@ -108,14 +110,14 @@ struct RdpConnectInfo {
 }
 
 /// What a remote tab was launched with, for the error/disconnect overlay's
-/// Reconnect button (P6.4 added the SSH side; P6.12 gap 19 adds RDP). A tab
-/// is either an SSH or an RDP remote session (or neither, for local shells)
+/// Reconnect button. A tab is SSH, RDP, or Telnet (or neither, for local shells)
 /// -- never both -- so this is a plain sum type rather than two `Option`
 /// fields on [`Tab`]. [`sessions::wire_reconnect`] matches on this to pick
 /// the SSH or RDP reconnect path.
 enum ConnectInfo {
     Ssh(SshConnectInfo),
     Rdp(RdpConnectInfo),
+    Telnet(TelnetSettings),
 }
 
 /// State for an additional (non-primary) pane within a split tab.
@@ -140,6 +142,9 @@ struct ExtraPaneState {
     last_frame: Option<Image>,
     rdp_w: u16,
     rdp_h: u16,
+    is_remote: bool,
+    insecure_transport: bool,
+    kind: String,
 }
 
 /// A session that has been detached from its tab but is still running.
@@ -149,6 +154,9 @@ struct ExtraPaneState {
 struct DetachedEntry {
     session: Box<dyn Session>,
     label: String,
+    is_remote: bool,
+    insecure_transport: bool,
+    kind: String,
 }
 
 struct Tab {
@@ -168,14 +176,14 @@ struct Tab {
     // Common:
     scale: f32,
     num: u32,
-    /// Present for remote sessions (SSH + RDP) — enables the error overlay's
+    /// Present for remote sessions (SSH + RDP + Telnet) — enables the error overlay's
     /// Reconnect button. The `Ssh`/`Rdp` variant (P6.12, gap 19) determines
     /// which reconnect path [`sessions::wire_reconnect`] takes.
     connect_info: Option<ConnectInfo>,
-    /// True for any remote session (SSH or RDP) — drives the error overlay.
+    /// True for any remote session (SSH, RDP, or Telnet) — drives the error overlay.
     is_remote: bool,
     /// The stored connection profile this tab was launched from (tree-launched
-    /// SSH/RDP), if any. `None` for quick-connect and local-shell tabs, which
+    /// SSH/RDP/Telnet), if any. `None` for quick-connect and local-shell tabs, which
     /// have no profile to edit. Drives the ErrorOverlay "Edit…" button (P6.9
     /// gap 16): with an id, it opens that profile's editor; without one, it
     /// falls back to quick-connect (the only thing there ever was to edit).
@@ -232,6 +240,9 @@ struct Tab {
     /// text. Empty for local-shell tabs (which never show it: `kind == ""`
     /// falls back to "the connection" with no protocol name).
     kind: String,
+    /// Explicit security presentation state. True only for plain Telnet;
+    /// never inferred from a title/status/error string.
+    insecure_transport: bool,
     /// P9.8 I2: when this tab's current connect attempt started -- set at
     /// push time (`tabs::push_tab`) and reset on every reconnect
     /// (`reconnect_ssh_tab`/`reconnect_rdp_tab`), mirroring `identity`/`kind`'s
@@ -275,7 +286,7 @@ struct State {
     // outside this lane this wave — don't need to change. See
     // `import_export.rs`.
     io: import_export::ImportExportHandles,
-    /// P6.15 (gap 27): establishes live sessions for local/SSH/RDP tabs.
+    /// Establishes live sessions for Local, SSH, RDP, and Telnet tabs.
     /// Lives on `State` (like `io` above) so every tab-open/reconnect
     /// function — all of which already take `state: &Rc<RefCell<State>>`,
     /// not the wider `Ctx` — can reach it without widening their signatures.

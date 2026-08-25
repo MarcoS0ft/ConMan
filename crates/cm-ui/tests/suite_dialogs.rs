@@ -34,9 +34,11 @@ fn dialogs_suite() {
 
     quick_connect_ssh_default_manifest();
     quick_connect_rdp_manifest_and_kind_switch();
+    quick_connect_telnet_manifest_warning_and_port_rules();
     quick_connect_local_manifest();
     profile_editor_new_ssh_default_manifest();
     profile_editor_kind_switch_updates_port_and_manifest();
+    profile_editor_telnet_clears_credentials_and_saves_prompt();
     profile_editor_new_connection_username_is_editable_with_no_credential();
     profile_editor_inline_mode_shows_password_hides_credential_picker();
     profile_editor_credential_mode_selector_has_no_prompt_option();
@@ -128,6 +130,50 @@ fn quick_connect_rdp_manifest_and_kind_switch() {
     }
 }
 
+fn quick_connect_telnet_manifest_warning_and_port_rules() {
+    let (h, _repo, _provider) = harness();
+    h.ui.invoke_quick_connect();
+    pump_ticks(1);
+
+    let qc = find_singleton(&h.ui, "QuickConnectForm");
+    find_descendant_by_label(&qc, "Telnet").invoke_accessible_default_action();
+    pump_ticks(1);
+
+    assert_eq!(h.ui.get_qc_kind(), 2);
+    assert_eq!(h.ui.get_qc_port().as_str(), "23");
+    find_by_id(&h.ui, "QuickConnectForm::qc-host-field");
+    find_by_id(&h.ui, "QuickConnectForm::qc-port-field");
+    let warning = find_by_id(&h.ui, "QuickConnectForm::qc-telnet-warning");
+    assert_eq!(
+        warning.accessible_label().as_deref(),
+        Some("Telnet is unencrypted. Credentials and session data are sent in clear text.")
+    );
+    for absent in [
+        "QuickConnectForm::qc-username-field",
+        "QuickConnectForm::qc-secret-field",
+        "QuickConnectForm::qc-passphrase-field",
+        "QuickConnectForm::qc-password-field",
+        "QuickConnectForm::qc-rdp-domain-field",
+        "QuickConnectForm::qc-rdp-resolution-field",
+        "QuickConnectForm::qc-rdp-password-field",
+        "QuickConnectForm::qc-local-program-field",
+    ] {
+        assert!(
+            find_by_id_opt(&h.ui, absent).is_none(),
+            "{absent} must not exist for Telnet"
+        );
+    }
+
+    // A non-default typed port survives protocol switches.
+    h.ui.set_qc_port("2323".into());
+    find_descendant_by_label(&qc, "SSH").invoke_accessible_default_action();
+    pump_ticks(1);
+    assert_eq!(h.ui.get_qc_port().as_str(), "2323");
+    find_descendant_by_label(&qc, "Telnet").invoke_accessible_default_action();
+    pump_ticks(1);
+    assert_eq!(h.ui.get_qc_port().as_str(), "2323");
+}
+
 /// Local has no host/port/username/auth at all -- just the program/args/cwd
 /// trio.
 fn quick_connect_local_manifest() {
@@ -140,7 +186,7 @@ fn quick_connect_local_manifest() {
     local_tab.invoke_accessible_default_action();
     pump_ticks(1);
 
-    assert_eq!(h.ui.get_qc_kind(), 2);
+    assert_eq!(h.ui.get_qc_kind(), 3);
     find_by_id(&h.ui, "QuickConnectForm::qc-local-program-field");
     find_by_id(&h.ui, "QuickConnectForm::qc-local-args-field");
     find_by_id(&h.ui, "QuickConnectForm::qc-local-cwd-field");
@@ -213,6 +259,99 @@ fn profile_editor_kind_switch_updates_port_and_manifest() {
     find_by_id(&h.ui, "ProfileEditor::profile-rdp-resolution-field");
     find_by_id(&h.ui, "ProfileEditor::profile-host-field");
     find_by_id(&h.ui, "ProfileEditor::profile-username-field");
+}
+
+fn profile_editor_telnet_clears_credentials_and_saves_prompt() {
+    let (h, repo, _provider) = harness();
+    h.ui.invoke_new_connection(0);
+    pump_ticks(1);
+
+    // Seed stale SSH credential form state, then drive the real kind selector.
+    let mut form = h.ui.get_profile_form();
+    form.name = "Lab Telnet".into();
+    form.host = "lab-switch".into();
+    form.selected_cred_idx = 7;
+    form.effective_cred_name = "stale credential".into();
+    form.effective_cred_username = "stale-user".into();
+    form.effective_inherited = true;
+    form.cred_mode = 1;
+    form.inline_password = "stale-secret".into();
+    form.inline_has_secret = true;
+    h.ui.set_profile_form(form);
+
+    let editor = find_singleton(&h.ui, "ProfileEditor");
+    find_descendant_by_label(&editor, "Telnet").invoke_accessible_default_action();
+    pump_ticks(1);
+
+    let form = h.ui.get_profile_form();
+    assert_eq!(form.kind, 2);
+    assert_eq!(form.port.as_str(), "23");
+    assert_eq!(form.cred_mode, 2, "Telnet must force Prompt");
+    assert_eq!(form.selected_cred_idx, 0);
+    assert_eq!(form.effective_cred_name.as_str(), "");
+    assert_eq!(form.effective_cred_username.as_str(), "");
+    assert!(!form.effective_inherited);
+    assert_eq!(form.inline_password.as_str(), "");
+    assert!(!form.inline_has_secret);
+    assert_eq!(form.username.as_str(), "");
+
+    find_by_id(&h.ui, "ProfileEditor::profile-host-field");
+    find_by_id(&h.ui, "ProfileEditor::profile-port-field");
+    let warning = find_by_id(&h.ui, "ProfileEditor::profile-telnet-warning");
+    assert_eq!(
+        warning.accessible_label().as_deref(),
+        Some("Telnet is unencrypted. Credentials and session data are sent in clear text.")
+    );
+    for absent in [
+        "ProfileEditor::profile-username-field",
+        "ProfileEditor::profile-username-readonly-field",
+        "ProfileEditor::profile-cred-combo",
+        "ProfileEditor::profile-inline-password-field",
+        "ProfileEditor::profile-rdp-domain-field",
+        "ProfileEditor::profile-rdp-resolution-field",
+    ] {
+        assert!(
+            find_by_id_opt(&h.ui, absent).is_none(),
+            "{absent} must not exist for Telnet"
+        );
+    }
+
+    // Leaving Telnet starts from SSH's normal credential/default-port state.
+    find_descendant_by_label(&editor, "SSH").invoke_accessible_default_action();
+    pump_ticks(1);
+    let away = h.ui.get_profile_form();
+    assert_eq!(away.port.as_str(), "22");
+    assert_eq!(away.cred_mode, 0);
+    assert_eq!(away.selected_cred_idx, 0);
+
+    // Return to Telnet, prove a typed non-default port is preserved, and save.
+    h.ui.set_profile_form({
+        let mut f = h.ui.get_profile_form();
+        f.port = "2323".into();
+        f
+    });
+    find_descendant_by_label(&editor, "Telnet").invoke_accessible_default_action();
+    pump_ticks(1);
+    assert_eq!(h.ui.get_profile_form().port.as_str(), "2323");
+    find_by_id(&h.ui, "ProfileEditor::profile-save-btn").invoke_accessible_default_action();
+
+    let saved = repo.list_connections().expect("list_connections");
+    let conn = saved
+        .iter()
+        .find(|c| c.name == "Lab Telnet")
+        .expect("saved Telnet profile");
+    assert!(matches!(conn.kind, cm_core::ConnectionKind::Telnet));
+    assert!(matches!(
+        conn.credential_source,
+        Some(cm_core::CredentialSource::Prompt)
+    ));
+    match &conn.settings {
+        cm_core::ConnectionSettings::Telnet(s) => {
+            assert_eq!(s.host, "lab-switch");
+            assert_eq!(s.port, 2323);
+        }
+        other => panic!("expected Telnet settings, got {other:?}"),
+    }
 }
 
 /// P9.6-A Phase C (P9.5 #7): a brand-new connection has no credential

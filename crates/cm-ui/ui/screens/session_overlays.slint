@@ -21,7 +21,7 @@ import { LineEdit } from "std-widgets.slint";
 // Failed/Disconnected/Exited) with no auth-stage sub-events to drive real
 // per-step transitions, and inventing a new session-layer event protocol is
 // out of scope here (see the task spec's "Out" section). So this overlay now
-// shows exactly what is true: we are waiting on a `kind` (SSH/RDP) handshake
+// shows exactly what is true: we are waiting on a remote protocol handshake
 // for `identity`, nothing more specific.
 //
 // Spinner note: rotation-angle is only valid on Image in Slint 1.17; we use an

@@ -5,7 +5,7 @@ use std::rc::Rc;
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionSettings, CredentialId, CredentialPurpose,
     CredentialRef, CredentialSource, Group, GroupId, LocalSettings, RdpSettings, Secret,
-    SshAuthMethod, SshSettings,
+    SshAuthMethod, SshSettings, TelnetSettings,
 };
 use cm_session::{PaneLayout, SessionStatus};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
@@ -443,7 +443,7 @@ fn wire_duplicate_conn_row(ctx: &Ctx) {
 // tree-level menu route here). Defaults to a horizontal (side-by-side) split
 // — the same default a user reaches via Ctrl+Shift+\ / the "Split
 // horizontal" palette action. See `panes::connect_in_split` for the
-// per-connection-kind dispatch — Local/SSH/RDP all wired since P6.11 lifted
+// per-connection-kind dispatch — Local/SSH/RDP/Telnet are all wired
 // the RDP-in-pane deferral (`ExtraPaneState` now carries the
 // `last_frame`/`rdp_w`/`rdp_h` fields a `Surface::Framebuffer` pane needs).
 fn wire_connect_in_split_row(ctx: &Ctx) {
@@ -592,6 +592,17 @@ fn wire_profile_save(ctx: &Ctx) {
             };
             let settings = settings_from_form(&form);
             let kind = kind_from_form_int(form.kind);
+            if kind == ConnectionKind::Telnet {
+                form.selected_cred_idx = 0;
+                form.effective_cred_name = SharedString::from("");
+                form.effective_cred_username = SharedString::from("");
+                form.effective_inherited = false;
+                form.cred_mode = 2;
+                form.inline_password = SharedString::from("");
+                form.inline_has_secret = false;
+                form.username = SharedString::from("");
+                form.rdp_domain = SharedString::from("");
+            }
             let now = crate::tree::now_secs();
             let created_at = {
                 let st = state.borrow();
@@ -609,8 +620,16 @@ fn wire_profile_save(ctx: &Ctx) {
                 })
             };
             let typed_password = form.inline_password.to_string();
+            // Telnet profiles always use server-driven interactive login.
+            // Enforce Prompt even if a caller bypasses the selector's UI
+            // clearing hook and writes the raw form properties directly.
+            let effective_cred_mode = if kind == ConnectionKind::Telnet {
+                2
+            } else {
+                form.cred_mode
+            };
             let credential_source = credential_source_from_form(
-                form.cred_mode,
+                effective_cred_mode,
                 cred_id,
                 form.username.as_str(),
                 form.rdp_domain.as_str(),
@@ -650,14 +669,14 @@ fn wire_profile_save(ctx: &Ctx) {
             };
             // A newly typed Inline password overwrites the stored secret
             // (keyed to the connection, never the SQLite row -- Decision 2).
-            if form.cred_mode == 1 && !typed_password.is_empty() {
+            if effective_cred_mode == 1 && !typed_password.is_empty() {
                 let key_ref = CredentialRef::for_connection(saved_id, CredentialPurpose::Password);
                 if let Err(e) = secrets_ps.store(&key_ref, &Secret::from_string(typed_password)) {
                     tracing::warn!("inline keychain store failed: {e}");
                 }
             }
             // Item (d): switching AWAY from Inline deletes its keychain entry.
-            if should_delete_inline_secret(old_was_inline, form.cred_mode) {
+            if should_delete_inline_secret(old_was_inline, effective_cred_mode) {
                 let key_ref = CredentialRef::for_connection(saved_id, CredentialPurpose::Password);
                 if let Err(e) = secrets_ps.delete(&key_ref) {
                     tracing::warn!("inline keychain delete-on-switch failed: {e}");
@@ -1163,7 +1182,15 @@ pub(super) fn settings_from_form(form: &ConnProfile) -> ConnectionSettings {
                 color_depth: RdpSettings::default().color_depth,
             })
         }
-        2 => ConnectionSettings::Local(LocalSettings::default()),
+        2 => ConnectionSettings::Telnet(TelnetSettings {
+            host: form.host.trim().to_owned(),
+            port: form
+                .port
+                .as_str()
+                .parse::<u16>()
+                .unwrap_or(TelnetSettings::DEFAULT_PORT),
+        }),
+        3 => ConnectionSettings::Local(LocalSettings::default()),
         _ => ConnectionSettings::Ssh(SshSettings {
             host: form.host.to_string(),
             port: form
@@ -1186,7 +1213,8 @@ pub(super) fn settings_from_form(form: &ConnProfile) -> ConnectionSettings {
 pub(super) fn kind_from_form_int(n: i32) -> ConnectionKind {
     match n {
         1 => ConnectionKind::Rdp,
-        2 => ConnectionKind::LocalTerminal,
+        2 => ConnectionKind::Telnet,
+        3 => ConnectionKind::LocalTerminal,
         _ => ConnectionKind::Ssh,
     }
 }
@@ -1576,7 +1604,8 @@ mod tests {
     fn kind_from_form_int_all_variants() {
         assert_eq!(kind_from_form_int(0), ConnectionKind::Ssh);
         assert_eq!(kind_from_form_int(1), ConnectionKind::Rdp);
-        assert_eq!(kind_from_form_int(2), ConnectionKind::LocalTerminal);
+        assert_eq!(kind_from_form_int(2), ConnectionKind::Telnet);
+        assert_eq!(kind_from_form_int(3), ConnectionKind::LocalTerminal);
         assert_eq!(kind_from_form_int(99), ConnectionKind::Ssh);
     }
 
@@ -1616,6 +1645,21 @@ mod tests {
             ),
             "SSH settings port should be 2222"
         );
+    }
+
+    #[test]
+    fn telnet_form_mapping_uses_default_port_and_no_auth_fields() {
+        let mut form = base_profile_form();
+        form.kind = 2;
+        form.host = " telnet-host ".into();
+        form.port = "bad".into();
+        match settings_from_form(&form) {
+            ConnectionSettings::Telnet(settings) => {
+                assert_eq!(settings.host, "telnet-host");
+                assert_eq!(settings.port, TelnetSettings::DEFAULT_PORT);
+            }
+            other => panic!("expected Telnet settings, got {other:?}"),
+        }
     }
 
     #[test]

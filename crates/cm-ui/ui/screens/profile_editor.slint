@@ -1,6 +1,6 @@
 // P1.4 — Connection profile editor + group settings modal.
 //
-// ProfileEditor: per-kind form (SSH / RDP / Local) with name, host/port/user,
+// ProfileEditor: per-kind form (SSH / RDP / Telnet / Local) with name, host/port/user,
 // auth method, and credential assignment (with inherited/effective display).
 // GroupEditor:   sets the group name and its default_credential.
 //
@@ -18,7 +18,7 @@ import { ComboBox, ScrollView } from "std-widgets.slint";
 // Data bag for the connection profile editor. All fields are in-out so Rust
 // can pre-populate them before opening and read them back after save.
 //
-// `kind`  0 = SSH · 1 = RDP · 2 = Local
+// `kind`  0 = SSH · 1 = RDP · 2 = Telnet · 3 = Local
 // `auth-method`  0 = Public key · 1 = Password · 2 = Agent  (SSH only)
 // `selected-cred-idx`  index into AppWindow.cred-name-list; 0 = "Inherit"
 // `effective-cred-name`  resolved credential name (may come from a group)
@@ -176,7 +176,7 @@ export component ProfileEditor inherits Rectangle {
                         font-weight: 600;
                     }
                     SegmentedControl {
-                        options: ["SSH", "RDP", "Local"];
+                        options: ["SSH", "RDP", "Telnet", "Local"];
                         selected <=> root.form.kind;
                         // A saved RDP connection almost never wants port 22
                         // and vice versa -- keep the pre-filled default in
@@ -184,24 +184,48 @@ export component ProfileEditor inherits Rectangle {
                         // saves the right value (mirrors QuickConnectForm's
                         // `changed kind` handler, screens/dialogs.slint).
                         changed(new-kind) => {
-                            if (new-kind == 1 && root.form.port == "22") {
+                            if (new-kind == 1 && (root.form.port == "22" || root.form.port == "23")) {
                                 root.form.port = "3389";
-                            } else if (new-kind != 1 && root.form.port == "3389") {
+                            } else if (new-kind == 2 && (root.form.port == "22" || root.form.port == "3389")) {
+                                root.form.port = "23";
+                            } else if (new-kind == 0 && (root.form.port == "23" || root.form.port == "3389")) {
                                 root.form.port = "22";
+                            }
+                            // Telnet performs server-driven interactive login.
+                            // Never retain an SSH/RDP credential selection or
+                            // transient Inline secret while switching kinds.
+                            if (new-kind == 2) {
+                                root.form.selected-cred-idx = 0;
+                                root.form.effective-cred-name = "";
+                                root.form.effective-cred-username = "";
+                                root.form.effective-inherited = false;
+                                root.form.cred-mode = 2;
+                                root.form.inline-password = "";
+                                root.form.inline-has-secret = false;
+                                root.form.username = "";
+                                root.form.rdp-domain = "";
+                            } else if (root.form.cred-mode == 2) {
+                                root.form.selected-cred-idx = 0;
+                                root.form.effective-cred-name = "";
+                                root.form.effective-cred-username = "";
+                                root.form.effective-inherited = false;
+                                root.form.cred-mode = 0;
+                                root.form.inline-password = "";
+                                root.form.inline-has-secret = false;
                             }
                         }
                     }
                 }
 
                 // ── Host / Port (SSH + RDP) ───────────────────────────
-                if root.form.kind != 2 : profile-host-field := FormField {
+                if root.form.kind != 3 : profile-host-field := FormField {
                     label: "Host";
                     placeholder: "hostname or IP address";
                     text <=> root.form.host;
                 }
-                if root.form.kind != 2 : profile-port-field := FormField {
+                if root.form.kind != 3 : profile-port-field := FormField {
                     label: "Port";
-                    placeholder: root.form.kind == 0 ? "22" : "3389";
+                    placeholder: root.form.kind == 0 ? "22" : root.form.kind == 1 ? "3389" : "23";
                     text <=> root.form.port;
                 }
 
@@ -218,7 +242,7 @@ export component ProfileEditor inherits Rectangle {
                 // `if`-gated instances (not one field with a conditional
                 // `text:`) so each gets a fresh two-way `<=>` alias -- no
                 // stale-binding risk across mode switches.
-                if root.form.kind != 2 : VerticalLayout {
+                if root.form.kind == 0 || root.form.kind == 1 : VerticalLayout {
                     if root.form.cred-mode == 0 && root.form.effective-cred-username != ""
                     : profile-username-readonly-field := FormField {
                         label: "Username";
@@ -267,6 +291,16 @@ export component ProfileEditor inherits Rectangle {
                     text <=> root.form.rdp-resolution;
                 }
 
+                if root.form.kind == 2 : profile-telnet-warning := Text {
+                    text: "Telnet is unencrypted. Credentials and session data are sent in clear text.";
+                    color: Theme.color-connecting;
+                    font-size: Theme.font-sm;
+                    font-family: Theme.font-family;
+                    wrap: word-wrap;
+                    accessible-role: text;
+                    accessible-label: "Telnet is unencrypted. Credentials and session data are sent in clear text.";
+                }
+
                 // ── Credential ─────────────────────────────────────────
                 // P9.6-A Phase C: the mode selector -- "Reference" (today's
                 // credential-object picker, unchanged, incl. "Inherit from
@@ -283,7 +317,7 @@ export component ProfileEditor inherits Rectangle {
                 // controller/tree_ctl.rs) still handle it correctly -- it's
                 // just unreachable from this selector until the connect-time
                 // prompt UX lands as its own P9.6 follow-up.
-                VerticalLayout {
+                if root.form.kind != 2 : VerticalLayout {
                     spacing: Theme.space-2;
                     Text {
                         text: "Credential";

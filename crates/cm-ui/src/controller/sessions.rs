@@ -10,7 +10,7 @@ use std::time::Instant;
 use cm_core::terminal::GridSnapshot;
 use cm_core::{
     Connection, ConnectionSettings, CredentialPurpose, Group, LocalSettings, RdpSettings, Secret,
-    SshAuthMethod, SshSettings,
+    SshAuthMethod, SshSettings, TelnetSettings,
 };
 use cm_session::{
     CertDecision, CertInfo, CertVerifier, FailedSession, FocusDir, FrameUpdate, HostKeyDecision,
@@ -659,6 +659,7 @@ fn wire_quick_connect(ctx: &Ctx) {
 enum QcKind {
     Ssh,
     Rdp,
+    Telnet,
     Local,
 }
 
@@ -666,7 +667,8 @@ impl From<i32> for QcKind {
     fn from(v: i32) -> Self {
         match v {
             1 => QcKind::Rdp,
-            2 => QcKind::Local,
+            2 => QcKind::Telnet,
+            3 => QcKind::Local,
             _ => QcKind::Ssh,
         }
     }
@@ -687,6 +689,7 @@ fn wire_qc_connect(ctx: &Ctx) {
                     qc_connect_ssh(&state, &tab_model, &ui, &weak, &hk_pending, &kbd_pending)
                 }
                 QcKind::Rdp => qc_connect_rdp(&state, &tab_model, &ui, &weak, &cert_pending),
+                QcKind::Telnet => qc_connect_telnet(&state, &tab_model, &ui),
                 QcKind::Local => qc_connect_local(&state, &tab_model, &ui),
             }
         }
@@ -694,7 +697,7 @@ fn wire_qc_connect(ctx: &Ctx) {
 }
 
 /// Closes the quick-connect dialog and clears every secret-bearing field.
-/// Shared by all three per-kind dispatchers (P6.12) so a typed password/
+/// Shared by the per-kind dispatchers so a typed password/
 /// passphrase never lingers in the dialog's in-memory Slint properties past
 /// the connect attempt that used it -- the pre-P6.12 SSH-only behavior,
 /// generalized.
@@ -869,6 +872,37 @@ fn qc_connect_rdp(
         verifier,
         None,
     );
+}
+
+/// Builds a Telnet quick-connect target. Login is performed interactively by
+/// the remote application, so host and port are the entire connection input.
+fn qc_telnet_settings(host: &str, port: &str) -> Option<TelnetSettings> {
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    Some(TelnetSettings {
+        host: host.to_owned(),
+        port: port.trim().parse().unwrap_or(TelnetSettings::DEFAULT_PORT),
+    })
+}
+
+fn qc_connect_telnet(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+) {
+    let host = ui.get_qc_host().to_string();
+    let port = ui.get_qc_port().to_string();
+    let Some(settings) = qc_telnet_settings(&host, &port) else {
+        return;
+    };
+    // A prior SSH/RDP form visit may have populated these shared fields.
+    // Telnet never consumes them; clear them before opening the session.
+    close_and_clear_qc_secrets(ui);
+    ui.set_qc_username(Default::default());
+    ui.set_qc_rdp_domain(Default::default());
+    open_telnet_tab(state, tab_model, ui, settings, None);
 }
 
 /// Pure builder behind the Local arm of quick-connect (P6.12, gap 20): a
@@ -1230,15 +1264,16 @@ pub(super) fn launch_saved_connection(
     let origin_connection_id = Some(conn.id.get() as i32);
     match &conn.settings {
         ConnectionSettings::Local(_) => tabs::open_local_tab(state, tab_model, ui),
-        ConnectionSettings::Telnet(s) => push_auth_failed_tab(
-            state,
-            tab_model,
-            ui,
-            format!("TELNET {}", s.host),
-            format!("{}:{}", s.host, s.port),
-            "Telnet session integration is not implemented yet".to_string(),
-            origin_connection_id,
-        ),
+        ConnectionSettings::Telnet(s) => {
+            tracing::info!(
+                conn = %conn.name,
+                kind = "telnet",
+                host = %s.host,
+                port = s.port,
+                "launching connection"
+            );
+            open_telnet_tab(state, tab_model, ui, s.clone(), origin_connection_id);
+        }
         ConnectionSettings::Ssh(s) => {
             let resolved = {
                 let st = state.borrow();
@@ -1376,6 +1411,7 @@ enum ReconnectPlan {
         AuthProvenance,
         Result<RdpAuthInput, AuthResolveError>,
     ),
+    Telnet(TelnetSettings),
 }
 
 /// Resolves the provenance + auth material for reconnecting an SSH tab
@@ -1525,6 +1561,7 @@ pub(super) fn reconnect_tab(
                     );
                     ReconnectPlan::Rdp(rdp_ci.settings.clone(), provenance, auth_result)
                 }
+                ConnectInfo::Telnet(settings) => ReconnectPlan::Telnet(settings.clone()),
             })
     };
     let Some(plan) = plan else { return };
@@ -1570,6 +1607,9 @@ pub(super) fn reconnect_tab(
                 fail_reconnect_in_place(state, tab_model, ui, tab_idx, e.to_string());
             }
         },
+        ReconnectPlan::Telnet(settings) => {
+            reconnect_telnet_tab(state, tab_model, ui, tab_idx, settings);
+        }
     }
 }
 
@@ -2143,6 +2183,31 @@ fn push_auth_failed_tab(
     reason: String,
     origin_connection_id: Option<i32>,
 ) {
+    push_failed_remote_tab(
+        state,
+        tab_model,
+        ui,
+        title,
+        identity,
+        reason,
+        origin_connection_id,
+        String::new(),
+        false,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_failed_remote_tab(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    title: String,
+    identity: String,
+    reason: String,
+    origin_connection_id: Option<i32>,
+    kind: String,
+    insecure_transport: bool,
+) {
     tabs::push_tab(
         state,
         tab_model,
@@ -2157,10 +2222,13 @@ fn push_auth_failed_tab(
             origin_connection_id,
             is_empty: false,
             identity: identity.clone(),
-            kind: String::new(),
+            kind: kind.clone(),
+            insecure_transport,
         },
     );
     ui.set_session_identity(SharedString::from(identity));
+    ui.set_connecting_kind(SharedString::from(kind));
+    ui.set_session_insecure(insecure_transport);
     ui.set_rdp_active(false);
     set_error_overlay(ui, &reason);
 }
@@ -2280,6 +2348,7 @@ pub(super) fn open_ssh_tab(
                     is_empty: false,
                     identity: identity.clone(),
                     kind: "SSH".to_owned(),
+                    insecure_transport: false,
                 },
             );
             ui.set_session_identity(SharedString::from(identity));
@@ -2315,6 +2384,81 @@ pub(super) fn open_ssh_tab(
                 origin_connection_id,
             );
         }
+    }
+}
+
+pub(super) fn open_telnet_tab(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    settings: TelnetSettings,
+    origin_connection_id: Option<i32>,
+) {
+    let size = state.borrow().current_grid();
+    let identity = format!("{}:{}", settings.host, settings.port);
+    let title = format!("TELNET {}", settings.host);
+    if agent_mode_execute_blocked(&state.borrow().agent_mode) {
+        tracing::warn!(
+            conn = %identity,
+            "agent mode: Telnet launch blocked while automation is active without execute scope"
+        );
+        push_failed_remote_tab(
+            state,
+            tab_model,
+            ui,
+            title,
+            identity,
+            "agent mode: execute scope not granted".to_owned(),
+            origin_connection_id,
+            "TELNET".to_owned(),
+            true,
+        );
+        return;
+    }
+
+    let provider = state.borrow().session_provider.clone();
+    match provider.connect_telnet(&settings, size) {
+        Ok(session) => {
+            tabs::push_tab(
+                state,
+                tab_model,
+                ui,
+                tabs::PushTabArgs {
+                    session,
+                    connect_info: Some(ConnectInfo::Telnet(settings)),
+                    is_remote: true,
+                    rdp_clipboard: None,
+                    title,
+                    initial_status: "connecting",
+                    origin_connection_id,
+                    is_empty: false,
+                    identity: identity.clone(),
+                    kind: "TELNET".to_owned(),
+                    insecure_transport: true,
+                },
+            );
+            ui.set_session_identity(SharedString::from(identity));
+            ui.set_overlay_connecting(true);
+            ui.set_overlay_error(false);
+            ui.set_launchpad_open(false);
+            ui.set_connecting_kind(SharedString::from("TELNET"));
+            ui.set_session_insecure(true);
+            ui.set_rdp_active(false);
+            // The terminal frame is shared across tabs. Blank it until this
+            // Telnet session produces its first GridSnapshot.
+            ui.set_frame(Image::default());
+        }
+        Err(e) => push_failed_remote_tab(
+            state,
+            tab_model,
+            ui,
+            title,
+            identity,
+            e.to_string(),
+            origin_connection_id,
+            "TELNET".to_owned(),
+            true,
+        ),
     }
 }
 
@@ -2435,6 +2579,7 @@ pub(super) fn open_rdp_tab(
             is_empty: false,
             identity: identity.clone(),
             kind: "RDP".to_owned(),
+            insecure_transport: false,
         },
     );
     ui.set_session_identity(SharedString::from(identity));
@@ -2517,6 +2662,7 @@ pub(super) fn reconnect_rdp_tab(
                     // reconnect, same as the fresh-connect path.
                     tab.identity = identity.clone();
                     tab.kind = "RDP".to_owned();
+                    tab.insecure_transport = false;
                     // P9.8 I2: this reconnect's own connecting -> connected
                     // transition needs its own start time, not the tab's
                     // original one (that would report a stale, way-too-long
@@ -2532,6 +2678,7 @@ pub(super) fn reconnect_rdp_tab(
             ui.set_overlay_connecting(true);
             ui.set_overlay_error(false);
             ui.set_connecting_kind(SharedString::from("RDP"));
+            ui.set_session_insecure(false);
             ui.set_rdp_active(true);
             // .99 GPU verify Bug B: `root.rdp-frame` is a single AppWindow-
             // level property (app.slint's RdpSurface reads `root.rdp-frame`
@@ -2606,6 +2753,7 @@ pub(super) fn reconnect_ssh_tab(
                     // (reconnect_rdp_tab, above).
                     tab.identity = identity.clone();
                     tab.kind = "SSH".to_owned();
+                    tab.insecure_transport = false;
                     // P9.8 I2: see the RDP counterpart's identical comment
                     // (reconnect_rdp_tab, above).
                     tab.connect_started = std::time::Instant::now();
@@ -2619,6 +2767,7 @@ pub(super) fn reconnect_ssh_tab(
             ui.set_overlay_connecting(true);
             ui.set_overlay_error(false);
             ui.set_connecting_kind(SharedString::from("SSH"));
+            ui.set_session_insecure(false);
             // .99 GPU verify Bug B: same stale-frame class as
             // `reconnect_rdp_tab`'s identical comment -- `root.frame` is the
             // same kind of single AppWindow-level property (`render_frame`'s
@@ -2630,6 +2779,64 @@ pub(super) fn reconnect_ssh_tab(
         Err(e) => {
             tracing::warn!("SSH reconnect error: {e}");
             ui.set_error_reason(SharedString::from(e.to_string()));
+        }
+    }
+}
+
+pub(super) fn reconnect_telnet_tab(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    tab_idx: usize,
+    settings: TelnetSettings,
+) {
+    let size = state.borrow().current_grid();
+    let identity = format!("{}:{}", settings.host, settings.port);
+    if agent_mode_execute_blocked(&state.borrow().agent_mode) {
+        tracing::warn!(
+            conn = %identity,
+            "agent mode: Telnet reconnect blocked while automation is active without execute scope"
+        );
+        fail_reconnect_in_place(
+            state,
+            tab_model,
+            ui,
+            tab_idx,
+            "agent mode: execute scope not granted".to_owned(),
+        );
+        return;
+    }
+
+    let provider = state.borrow().session_provider.clone();
+    match provider.connect_telnet(&settings, size) {
+        Ok(new_session) => {
+            {
+                let mut st = state.borrow_mut();
+                if let Some(tab) = st.tabs.get_mut(tab_idx) {
+                    tab.session = new_session;
+                    tab.connect_info = Some(ConnectInfo::Telnet(settings));
+                    tab.last = None;
+                    tab.identity = identity.clone();
+                    tab.kind = "TELNET".to_owned();
+                    tab.insecure_transport = true;
+                    tab.connect_started = std::time::Instant::now();
+                }
+            }
+            if let Some(mut item) = tab_model.row_data(tab_idx) {
+                item.status = SharedString::from("connecting");
+                tab_model.set_row_data(tab_idx, item);
+            }
+            ui.set_session_identity(SharedString::from(identity));
+            ui.set_overlay_connecting(true);
+            ui.set_overlay_error(false);
+            ui.set_connecting_kind(SharedString::from("TELNET"));
+            ui.set_session_insecure(true);
+            ui.set_rdp_active(false);
+            ui.set_frame(Image::default());
+        }
+        Err(e) => {
+            tracing::warn!("Telnet reconnect error: {e}");
+            fail_reconnect_in_place(state, tab_model, ui, tab_idx, e.to_string());
         }
     }
 }
@@ -2795,6 +3002,13 @@ fn tick_tab(
             let new_focused = st.tabs[i].pane_group.focused();
             ui.set_pane_layout(panes::layout_to_int(new_layout));
             ui.set_active_pane(new_focused as i32);
+            ui.set_session_insecure(
+                st.tabs[i].insecure_transport
+                    || st.tabs[i]
+                        .extra_panes
+                        .iter()
+                        .any(|ep| ep.insecure_transport),
+            );
         }
     }
 
@@ -3822,10 +4036,11 @@ mod tests {
     // ── P6.12 gap 20: quick-connect kind selector → settings mapping ────────
 
     #[test]
-    fn qc_kind_from_int_maps_the_three_kinds() {
+    fn qc_kind_from_int_maps_all_four_kinds() {
         assert_eq!(QcKind::from(0), QcKind::Ssh);
         assert_eq!(QcKind::from(1), QcKind::Rdp);
-        assert_eq!(QcKind::from(2), QcKind::Local);
+        assert_eq!(QcKind::from(2), QcKind::Telnet);
+        assert_eq!(QcKind::from(3), QcKind::Local);
     }
 
     #[test]
@@ -3904,6 +4119,18 @@ mod tests {
     fn qc_rdp_settings_falls_back_to_default_port_on_bad_input() {
         let s = qc_rdp_settings("win-01", "nope", "admin", "", "1280x720").expect("valid");
         assert_eq!(s.port, RdpSettings::DEFAULT_PORT);
+    }
+
+    #[test]
+    fn qc_telnet_settings_are_host_port_only() {
+        let settings = qc_telnet_settings(" telnet-host ", "2323").expect("valid Telnet");
+        assert_eq!(settings.host, "telnet-host");
+        assert_eq!(settings.port, 2323);
+        assert!(qc_telnet_settings("  ", "23").is_none());
+        assert_eq!(
+            qc_telnet_settings("host", "bad").unwrap().port,
+            TelnetSettings::DEFAULT_PORT
+        );
     }
 
     #[test]

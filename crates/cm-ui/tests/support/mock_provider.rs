@@ -1,6 +1,6 @@
 //! A `SessionProvider` double for the P8.2 element-test harness.
 //!
-//! No real PTY, no real SSH/RDP transport, no threads, no sleeping -- every
+//! No real PTY or remote transport, no threads, no sleeping -- every
 //! session this hands out is a [`ScriptedSession`] whose entire lifecycle is
 //! a shared `SessionStatus` cell the *test* mutates directly. This is what
 //! makes `suite_overlays.rs`'s "connecting overlay holds indefinitely" and
@@ -15,7 +15,7 @@ use cm_core::rdp::{CertVerifier, RdpAuthInput};
 use cm_core::ssh::{HostKeyVerifier, SshAuthInput};
 use cm_core::{
     LocalSettings, RdpSettings, Session, SessionProvider, SessionSetupError, SessionStatus,
-    SshSettings, Surface, TerminalSize,
+    SshSettings, Surface, TelnetSettings, TerminalSize,
 };
 
 /// A [`Session`] whose lifecycle is entirely driven by a shared status cell
@@ -62,7 +62,7 @@ impl Session for ScriptedSession {
 /// - `spawn_local` always returns an immediately-`Connected` [`ScriptedSession`]
 ///   (own private status cell, never shared) -- satisfies the startup local
 ///   shell / Launchpad-fronted empty tab without any real PTY.
-/// - `connect_ssh`/`connect_rdp` hand out a [`ScriptedSession`] sharing
+/// - remote connect methods hand out a [`ScriptedSession`] sharing
 ///   whatever cell [`Self::script_next_remote`] last installed (defaulting to
 ///   an already-`Connected` cell if a test never calls it) -- install a fresh
 ///   `Arc<Mutex<SessionStatus::Connecting>>` before driving Connect through
@@ -77,6 +77,7 @@ pub(crate) struct MockSessionProvider {
     // the individual call's arguments.
     ssh_connect_calls: AtomicUsize,
     rdp_connect_calls: AtomicUsize,
+    telnet_connect_calls: AtomicUsize,
 }
 
 impl MockSessionProvider {
@@ -85,6 +86,7 @@ impl MockSessionProvider {
             next_remote_status: Mutex::new(Arc::new(Mutex::new(SessionStatus::Connected))),
             ssh_connect_calls: AtomicUsize::new(0),
             rdp_connect_calls: AtomicUsize::new(0),
+            telnet_connect_calls: AtomicUsize::new(0),
         })
     }
 
@@ -108,6 +110,10 @@ impl MockSessionProvider {
     /// RDP counterpart to [`Self::ssh_connect_count`].
     pub(crate) fn rdp_connect_count(&self) -> usize {
         self.rdp_connect_calls.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn telnet_connect_count(&self) -> usize {
+        self.telnet_connect_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -140,9 +146,10 @@ impl SessionProvider for MockSessionProvider {
 
     fn connect_telnet(
         &self,
-        _settings: &cm_core::TelnetSettings,
+        _settings: &TelnetSettings,
         _size: TerminalSize,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
+        self.telnet_connect_calls.fetch_add(1, Ordering::SeqCst);
         let cell = self
             .next_remote_status
             .lock()

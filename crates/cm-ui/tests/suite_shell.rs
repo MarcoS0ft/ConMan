@@ -12,7 +12,12 @@ mod support;
 
 use std::sync::{Arc, Mutex};
 
-use cm_core::SessionStatus;
+use cm_core::{
+    Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings,
+    CredentialSource, SessionStatus, SessionTabEntry, SessionTabSnapshot, SettingsService,
+    TelnetSettings,
+};
+use cm_storage::SqliteRepository;
 use i_slint_backend_testing::ElementHandle;
 use slint::Model;
 
@@ -33,6 +38,10 @@ fn shell_suite() {
     home_tab_is_flagged_is_home_and_a_new_local_tab_is_not();
     tab_duplicate_is_available_for_a_saved_connection_but_not_for_quick_connect();
     tab_disconnect_keeps_the_tab_open_and_tab_reconnect_dials_again();
+    telnet_quick_connect_reconnect_and_insecure_tab_state();
+    telnet_saved_launch_dispatches_provider();
+    telnet_session_restore_dispatches_provider();
+    telnet_reconnect_respects_execute_gate();
 }
 
 fn tab_count(ui: &cm_ui::AppWindow) -> usize {
@@ -370,4 +379,180 @@ fn tab_disconnect_keeps_the_tab_open_and_tab_reconnect_dials_again() {
         "Reconnect must show the connecting overlay again"
     );
     assert!(!h.ui.get_overlay_error(), "the error overlay must clear");
+}
+
+fn telnet_quick_connect_reconnect_and_insecure_tab_state() {
+    let (h, _repo, provider) = harness();
+    h.ui.set_frame(slint::Image::from_rgba8(slint::SharedPixelBuffer::<
+        slint::Rgba8Pixel,
+    >::new(2, 2)));
+    h.ui.invoke_quick_connect();
+    h.ui.set_qc_kind(2);
+    h.ui.set_qc_host("mock-telnet-host".into());
+    h.ui.set_qc_port("2323".into());
+    h.ui.set_qc_username("must-be-cleared".into());
+    h.ui.set_qc_secret("must-be-cleared".into());
+    h.ui.invoke_qc_connect();
+    pump_ticks(1);
+
+    assert_eq!(provider.telnet_connect_count(), 1);
+    assert_eq!(
+        h.ui.get_session_identity().as_str(),
+        "mock-telnet-host:2323"
+    );
+    assert_eq!(h.ui.get_connecting_kind().as_str(), "TELNET");
+    assert!(h.ui.get_session_insecure());
+    let cleared_size = h.ui.get_frame().size();
+    assert_eq!(
+        (cleared_size.width, cleared_size.height),
+        (0, 0),
+        "fresh Telnet launch must clear the shared terminal frame"
+    );
+    assert_eq!(h.ui.get_qc_username().as_str(), "");
+    assert_eq!(h.ui.get_qc_secret().as_str(), "");
+    find_by_id(&h.ui, "AppWindow::insecure-transport-label");
+    let telnet_idx = h.ui.get_active_tab();
+    assert_eq!(
+        h.ui.get_tabs()
+            .row_data(telnet_idx as usize)
+            .unwrap()
+            .title
+            .as_str(),
+        "TELNET mock-telnet-host"
+    );
+
+    h.ui.invoke_tab_disconnect(telnet_idx);
+    h.ui.invoke_tab_reconnect(telnet_idx);
+    pump_ticks(1);
+    assert_eq!(provider.telnet_connect_count(), 2);
+    assert!(
+        h.ui.get_session_insecure(),
+        "reconnect must preserve INSECURE"
+    );
+
+    nth_by_id(&h.ui, "AppWindow::tab-item", 0).invoke_accessible_default_action();
+    pump_ticks(1);
+    assert!(
+        !h.ui.get_session_insecure(),
+        "local tab must clear INSECURE"
+    );
+    assert_eq!(h.ui.get_connecting_kind().as_str(), "");
+
+    nth_by_id(&h.ui, "AppWindow::tab-item", telnet_idx as usize).invoke_accessible_default_action();
+    pump_ticks(1);
+    assert!(
+        h.ui.get_session_insecure(),
+        "switching back must restore INSECURE"
+    );
+}
+
+fn telnet_saved_launch_dispatches_provider() {
+    let (h, repo, provider) = harness();
+    h.ui.invoke_new_connection(0);
+    let mut form = h.ui.get_profile_form();
+    form.name = "Saved Telnet".into();
+    form.kind = 2;
+    form.host = "saved-telnet".into();
+    form.port = "23".into();
+    h.ui.set_profile_form(form);
+    h.ui.invoke_profile_save();
+
+    let saved = repo.list_connections().expect("list connections");
+    let idx = saved.iter().position(|c| c.name == "Saved Telnet").unwrap();
+    h.ui.invoke_row_activated(idx as i32);
+    pump_ticks(1);
+    assert_eq!(provider.telnet_connect_count(), 1);
+    assert!(h.ui.get_session_insecure());
+    assert_eq!(h.ui.get_connecting_kind().as_str(), "TELNET");
+}
+
+fn telnet_session_restore_dispatches_provider() {
+    let repo: Arc<dyn ConnectionRepository> =
+        Arc::new(SqliteRepository::open_in_memory().expect("open repo"));
+    let conn = Connection::new(
+        ConnectionId::UNSAVED,
+        None,
+        "Restored Telnet".to_owned(),
+        ConnectionKind::Telnet,
+        ConnectionSettings::Telnet(TelnetSettings {
+            host: "restored-telnet".to_owned(),
+            port: 23,
+        }),
+        Some(CredentialSource::Prompt),
+        0,
+        1,
+        1,
+    )
+    .expect("valid Telnet connection");
+    let id = repo.upsert_connection(&conn).expect("save connection");
+    let settings = SettingsService::new(repo.as_ref());
+    settings
+        .save_startup_behavior(1)
+        .expect("save startup setting");
+    settings
+        .save_session_tabs(&SessionTabSnapshot {
+            tabs: vec![SessionTabEntry::Connection(id)],
+            active: 0,
+        })
+        .expect("save session snapshot");
+
+    let provider = support::MockSessionProvider::new();
+    let h = cm_ui::build_for_test(cm_ui::AppConfig {
+        repo,
+        secrets: Arc::new(support::NullCredentialStore),
+        session_provider: provider.clone(),
+        activation_rx: None,
+        first_launch: false,
+        agent_mode: None,
+    });
+    pump_ticks(1);
+    assert_eq!(provider.telnet_connect_count(), 1);
+    assert_eq!(h.ui.get_session_identity().as_str(), "restored-telnet:23");
+    assert!(h.ui.get_session_insecure());
+}
+
+fn telnet_reconnect_respects_execute_gate() {
+    let agent_mode = support::agent_mode_fixture(0, true, true, false);
+    let interaction_count = agent_mode.mcp_interaction_count.clone();
+    let (h, _repo, provider) = support::harness_with_agent_mode(true, Some(agent_mode));
+    h.ui.invoke_quick_connect();
+    h.ui.set_qc_kind(2);
+    h.ui.set_qc_host("gated-telnet".into());
+    h.ui.invoke_qc_connect();
+    pump_ticks(1);
+    assert_eq!(provider.telnet_connect_count(), 1);
+
+    interaction_count.store(1, std::sync::atomic::Ordering::SeqCst);
+    let idx = h.ui.get_active_tab();
+    h.ui.invoke_tab_reconnect(idx);
+    pump_ticks(1);
+    assert_eq!(
+        provider.telnet_connect_count(),
+        1,
+        "blocked Telnet reconnect must not dial the provider"
+    );
+    assert!(
+        h.ui.get_error_reason()
+            .contains("execute scope not granted")
+    );
+
+    let blocked_mode = support::agent_mode_fixture(1, true, true, false);
+    let (blocked, _repo, blocked_provider) =
+        support::harness_with_agent_mode(true, Some(blocked_mode));
+    blocked.ui.invoke_quick_connect();
+    blocked.ui.set_qc_kind(2);
+    blocked.ui.set_qc_host("blocked-launch".into());
+    blocked.ui.invoke_qc_connect();
+    pump_ticks(1);
+    assert_eq!(
+        blocked_provider.telnet_connect_count(),
+        0,
+        "blocked Telnet launch must not dial the provider"
+    );
+    assert!(
+        blocked
+            .ui
+            .get_error_reason()
+            .contains("execute scope not granted")
+    );
 }

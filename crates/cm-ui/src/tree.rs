@@ -522,7 +522,7 @@ pub fn cred_name_idx(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cm_core::{ConnectionSettings, LocalSettings, SshSettings};
+    use cm_core::{ConnectionSettings, LocalSettings, SshSettings, TelnetSettings};
 
     fn make_group(id: i64, parent_id: Option<i64>, name: &str, sort: i64) -> Group {
         Group {
@@ -575,6 +575,16 @@ mod tests {
     fn flat_empty_tree() {
         let tree = ConnectionTree::new(vec![], vec![]);
         assert_eq!(tree.flat().len(), 0);
+    }
+
+    #[test]
+    fn telnet_host_and_badge_have_no_empty_username_prefix() {
+        let (host, kind) = conn_host_kind(&ConnectionSettings::Telnet(TelnetSettings {
+            host: "lab-router".to_owned(),
+            port: 2323,
+        }));
+        assert_eq!(host, "lab-router:2323");
+        assert_eq!(kind, "TELNET");
     }
 
     #[test]

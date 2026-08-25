@@ -36,7 +36,7 @@ export component Modal inherits Rectangle {
 }
 
 // ── QuickConnectForm ──────────────────────────────────────────────────────────
-// Kind selector (P6.12, gap 20): 0 SSH · 1 RDP · 2 Local — swaps the fields below
+// Kind selector: 0 SSH · 1 RDP · 2 Telnet · 3 Local — swaps the fields below
 // to the per-kind set and dispatches to the matching open-*-tab in Rust
 // (`sessions::wire_qc_connect`). Secrets are held in memory only and never logged;
 // a local quick-connect has no secret at all, it just spawns a shell.
@@ -65,7 +65,8 @@ export component QuickConnectForm inherits Rectangle {
     // per kind, so the label follows it.
     accessible-role: groupbox;
     accessible-label: (root.kind == 0 ? "New SSH connection"
-        : root.kind == 1 ? "New RDP connection" : "New local shell") + " dialog";
+        : root.kind == 1 ? "New RDP connection"
+        : root.kind == 2 ? "New Telnet connection" : "New local shell") + " dialog";
 
     width: 520px;
     background: Theme.color-overlay;
@@ -76,13 +77,14 @@ export component QuickConnectForm inherits Rectangle {
     // Absorb clicks so the Modal scrim behind doesn't dismiss on inner clicks.
     TouchArea {}
 
-    // A quick-connect for RDP almost never wants port 22, and vice versa —
-    // keep the pre-filled default in step with the kind so leaving the field
-    // untouched still connects to the right port.
+    // Keep a protocol default in step with the selected kind. Arbitrary
+    // user-entered ports are deliberately left alone.
     changed kind => {
-        if (root.kind == 1 && root.port == "22") {
+        if (root.kind == 1 && (root.port == "22" || root.port == "23")) {
             root.port = "3389";
-        } else if (root.kind != 1 && root.port == "3389") {
+        } else if (root.kind == 2 && (root.port == "22" || root.port == "3389")) {
+            root.port = "23";
+        } else if (root.kind == 0 && (root.port == "23" || root.port == "3389")) {
             root.port = "22";
         }
     }
@@ -96,6 +98,7 @@ export component QuickConnectForm inherits Rectangle {
             Text {
                 text: root.kind == 0 ? "New SSH connection"
                     : root.kind == 1 ? "New RDP connection"
+                    : root.kind == 2 ? "New Telnet connection"
                     : "New local shell";
                 color: Theme.color-text;
                 font-size: Theme.font-lg;
@@ -111,24 +114,28 @@ export component QuickConnectForm inherits Rectangle {
             Text { text: "TYPE"; color: Theme.color-text-secondary;
                 font-size: Theme.font-sm; font-family: Theme.font-family; font-weight: 600; }
             SegmentedControl {
-                options: ["SSH", "RDP", "Local"];
+                options: ["SSH", "RDP", "Telnet", "Local"];
                 selected <=> root.kind;
             }
         }
 
         // ── Host + port (SSH + RDP) ────────────────────────────────────
-        if root.kind != 2 : HorizontalLayout {
+        if root.kind != 3 : HorizontalLayout {
             spacing: Theme.space-3;
             VerticalLayout { horizontal-stretch: 1;
                 qc-host-field := FormField { label: "HOST"; placeholder: "web-prod-01.lab"; text <=> root.host; }
             }
             Rectangle { width: 100px;
-                qc-port-field := FormField { label: "PORT"; placeholder: root.kind == 0 ? "22" : "3389"; text <=> root.port; }
+                qc-port-field := FormField {
+                    label: "PORT";
+                    placeholder: root.kind == 0 ? "22" : root.kind == 1 ? "3389" : "23";
+                    text <=> root.port;
+                }
             }
         }
 
         // ── Username (SSH + RDP) ────────────────────────────────────────
-        if root.kind != 2 : qc-username-field := FormField {
+        if root.kind == 0 || root.kind == 1 : qc-username-field := FormField {
             label: "USERNAME";
             placeholder: root.kind == 0 ? "ops" : "administrator";
             text <=> root.username;
@@ -166,10 +173,20 @@ export component QuickConnectForm inherits Rectangle {
         if root.kind == 1 : qc-rdp-resolution-field := FormField { label: "RESOLUTION"; placeholder: "1280x720"; text <=> root.rdp-resolution; }
         if root.kind == 1 : qc-rdp-password-field := FormField { label: "PASSWORD"; placeholder: ""; password: true; text <=> root.secret; }
 
+        if root.kind == 2 : qc-telnet-warning := Text {
+            text: "Telnet is unencrypted. Credentials and session data are sent in clear text.";
+            color: Theme.color-connecting;
+            font-size: Theme.font-sm;
+            font-family: Theme.font-family;
+            wrap: word-wrap;
+            accessible-role: text;
+            accessible-label: "Telnet is unencrypted. Credentials and session data are sent in clear text.";
+        }
+
         // ── Local-only fields ────────────────────────────────────────────
-        if root.kind == 2 : qc-local-program-field := FormField { label: "PROGRAM"; placeholder: "(default shell)"; text <=> root.local-program; }
-        if root.kind == 2 : qc-local-args-field := FormField { label: "ARGUMENTS"; placeholder: "(space-separated)"; text <=> root.local-args; }
-        if root.kind == 2 : qc-local-cwd-field := FormField { label: "WORKING DIRECTORY"; placeholder: "(default)"; text <=> root.local-cwd; }
+        if root.kind == 3 : qc-local-program-field := FormField { label: "PROGRAM"; placeholder: "(default shell)"; text <=> root.local-program; }
+        if root.kind == 3 : qc-local-args-field := FormField { label: "ARGUMENTS"; placeholder: "(space-separated)"; text <=> root.local-args; }
+        if root.kind == 3 : qc-local-cwd-field := FormField { label: "WORKING DIRECTORY"; placeholder: "(default)"; text <=> root.local-cwd; }
 
         // Footer.
         HorizontalLayout {

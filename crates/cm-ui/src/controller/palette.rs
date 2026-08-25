@@ -249,6 +249,33 @@ pub(super) fn dispatch_palette_action(
             ui.set_profile_form(form);
             ui.set_profile_editor_open(true);
         }
+        "New Telnet connection" => {
+            let st = state.borrow();
+            let selected_group_idx = tree_ctl::group_name_idx(None, st.conn_tree.groups());
+            drop(st);
+            let form = ConnProfile {
+                id: 0,
+                name: SharedString::from(""),
+                group_id: 0,
+                kind: 2,
+                host: SharedString::from(""),
+                port: SharedString::from("23"),
+                username: SharedString::from(""),
+                auth_method: 1,
+                selected_cred_idx: 0,
+                effective_cred_name: SharedString::from(""),
+                effective_cred_username: SharedString::from(""),
+                effective_inherited: false,
+                selected_group_idx,
+                rdp_domain: SharedString::from(""),
+                rdp_resolution: SharedString::from(tree_ctl::default_rdp_resolution().as_str()),
+                cred_mode: 2,
+                inline_password: SharedString::from(""),
+                inline_has_secret: false,
+            };
+            ui.set_profile_form(form);
+            ui.set_profile_editor_open(true);
+        }
         "Close current tab" => {
             let active = state.borrow().active;
             tabs::close_tab(state, tab_model, ui, active);
@@ -322,7 +349,7 @@ pub(super) fn initial_palette_actions() -> Vec<PaletteAction> {
             category: SharedString::from("ACTIONS"),
             first_in_group: true,
             label: SharedString::from("Quick connect\u{2026}"),
-            detail: SharedString::from("SSH quick-connect form"),
+            detail: SharedString::from("SSH, RDP, Telnet, or local"),
             shortcut: SharedString::from(""),
             glyph: SharedString::from("\u{EB2D}"), // cod-plug
             status: SharedString::from(""),
@@ -355,6 +382,16 @@ pub(super) fn initial_palette_actions() -> Vec<PaletteAction> {
             detail: SharedString::from("Save a new RDP profile"),
             shortcut: SharedString::from(""),
             glyph: SharedString::from("\u{EA7A}"), // cod-vm
+            status: SharedString::from(""),
+            selected: false,
+        },
+        PaletteAction {
+            category: SharedString::from("ACTIONS"),
+            first_in_group: false,
+            label: SharedString::from("New Telnet connection"),
+            detail: SharedString::from("Save a new TELNET profile"),
+            shortcut: SharedString::from(""),
+            glyph: SharedString::from("\u{F0317}"),
             status: SharedString::from(""),
             selected: false,
         },
@@ -576,6 +613,15 @@ mod tests {
     fn palette_contains_new_rdp_connection() {
         let all = initial_palette_actions();
         assert!(all.iter().any(|a| a.label.as_str() == "New RDP connection"));
+    }
+
+    #[test]
+    fn palette_contains_new_telnet_connection() {
+        let all = initial_palette_actions();
+        assert!(
+            all.iter()
+                .any(|a| a.label.as_str() == "New Telnet connection")
+        );
     }
 
     #[test]

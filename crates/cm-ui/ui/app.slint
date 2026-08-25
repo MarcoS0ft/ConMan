@@ -1176,6 +1176,9 @@ export component AppWindow inherits Window {
     // that used to sit stuck on a literal "Authenticating · ed25519" string.
     // See docs/devel/tasks/P6.9-shell-truth-ergonomics.md ("Out" scope note).
     in property <string>     connecting-kind: "";
+    // Explicit security property for plain Telnet. It is refreshed from the
+    // active tab, never inferred from titles or failure state.
+    in property <bool>       session-insecure: false;
     in property <string>     error-reason: "";
     in property <string>     error-detail: "";
     // P9.12 #3: `ErrorOverlay` used to show the same "Connection failed"
@@ -1201,7 +1204,7 @@ export component AppWindow inherits Window {
 
     // ── Quick-connect form (P3.2; P6.12 gap 20 adds the kind selector) ──
     in-out property <bool>   quick-connect-open: false;
-    // 0 = SSH · 1 = RDP · 2 = Local.
+    // 0 = SSH · 1 = RDP · 2 = Telnet · 3 = Local.
     in-out property <int>    qc-kind: 0;
     in-out property <string> qc-host: "";
     in-out property <string> qc-port: "22";
@@ -2227,6 +2230,35 @@ export component AppWindow inherits Window {
                                     : session-status == "connected" ? "Connected · "
                                     : session-status == "error" ? "Failed · "
                                     : "Disconnected · ") + session-identity;
+                        }
+                    }
+                    if connecting-kind != "" : Text {
+                        text: connecting-kind;
+                        color: Theme.color-text-secondary;
+                        font-size: Theme.font-xs;
+                        font-family: Theme.font-family;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    if session-insecure : insecure-transport-label := Rectangle {
+                        height: 18px;
+                        border-radius: Theme.radius-xs;
+                        background: Theme.color-connecting.with-alpha(0.16);
+                        border-width: 1px;
+                        border-color: Theme.color-connecting.with-alpha(0.55);
+                        accessible-role: text;
+                        accessible-label: "INSECURE transport";
+                        HorizontalLayout {
+                            padding-left: Theme.space-2;
+                            padding-right: Theme.space-2;
+                            Text {
+                                text: "INSECURE";
+                                color: Theme.color-connecting;
+                                font-size: Theme.font-xs;
+                                font-family: Theme.font-family;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                     Rectangle { horizontal-stretch: 1; }
