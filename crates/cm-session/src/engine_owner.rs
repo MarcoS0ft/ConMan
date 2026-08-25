@@ -6,7 +6,7 @@
 //! difference between transports is *where* encoded input/response bytes go and
 //! how a resize is applied to the transport; that is captured by [`Transport`].
 
-use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 
 use cm_core::terminal::{GridSnapshot, Key, KeyEvent, MouseEvent, TerminalEngine, TerminalSize};
@@ -127,9 +127,7 @@ pub(crate) trait Transport: Send {
 }
 
 /// Transport-neutral snapshot delivery. Local and SSH retain their existing
-/// unbounded `Sender` behavior. TELNET uses `SyncSender`, where a full queue
-/// drops an intermediate snapshot rather than allowing hostile remote output
-/// to grow memory without bound or blocking the engine owner during shutdown.
+/// unbounded `Sender` behavior. TELNET supplies a bounded, cancellable sink.
 pub(crate) trait SnapshotSink {
     /// Returns `false` only when the consumer has disconnected.
     fn send_snapshot(&self, snapshot: GridSnapshot) -> bool;
@@ -141,22 +139,26 @@ impl SnapshotSink for Sender<GridSnapshot> {
     }
 }
 
-impl SnapshotSink for SyncSender<GridSnapshot> {
-    fn send_snapshot(&self, snapshot: GridSnapshot) -> bool {
-        match self.try_send(snapshot) {
-            Ok(()) | Err(TrySendError::Full(_)) => true,
-            Err(TrySendError::Disconnected(_)) => false,
-        }
+/// Transport-neutral source of engine control messages. Existing local and
+/// SSH sessions retain the exact blocking `Receiver::recv` behavior; TELNET
+/// supplies a prioritized source backed by separate bounded queues.
+pub(crate) trait ControlSource {
+    fn recv_msg(&self) -> Result<Msg, ()>;
+}
+
+impl ControlSource for Receiver<Msg> {
+    fn recv_msg(&self) -> Result<Msg, ()> {
+        self.recv().map_err(|_| ())
     }
 }
 
 /// Engine-owner loop: construct the engine, report readiness, then process
 /// control messages until `Shutdown` / channel close. Identical for every
 /// transport; the `transport` parameter is the only variation point.
-pub(crate) fn run_engine_owner<T: Transport, S: SnapshotSink>(
+pub(crate) fn run_engine_owner<T: Transport, S: SnapshotSink, C: ControlSource>(
     size: TerminalSize,
     mut transport: T,
-    control_rx: &Receiver<Msg>,
+    control_rx: &C,
     snapshot_tx: &S,
     ready_tx: &Sender<Result<(), EngineError>>,
     start: Instant,
@@ -179,7 +181,7 @@ pub(crate) fn run_engine_owner<T: Transport, S: SnapshotSink>(
     // cheaply knows `scrollback_len()` at the moment new bytes are fed.
     let mut scroll = ScrollState::Tail;
 
-    while let Ok(msg) = control_rx.recv() {
+    while let Ok(msg) = control_rx.recv_msg() {
         match msg {
             Msg::Bytes(bytes) => {
                 if !logged_feed {
@@ -373,29 +375,6 @@ mod tests {
             mods: Default::default(),
         })]);
         assert_eq!(out, b"\r");
-    }
-
-    #[test]
-    fn bounded_snapshot_sink_drops_intermediate_frames_without_blocking_owner() {
-        let (control_tx, control_rx) = std::sync::mpsc::channel();
-        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::sync_channel(1);
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-
-        for byte in b"hostile-output" {
-            control_tx.send(Msg::Bytes(vec![*byte])).unwrap();
-        }
-        control_tx.send(Msg::Shutdown).unwrap();
-
-        run_engine_owner(
-            TerminalSize { rows: 24, cols: 80 },
-            RecordingTransport::default(),
-            &control_rx,
-            &snapshot_tx,
-            &ready_tx,
-            Instant::now(),
-        );
-        ready_rx.try_recv().unwrap().expect("engine init");
-        assert_eq!(snapshot_rx.try_iter().count(), 1);
     }
 
     // ── P6.7: Msg::SetScroll / Msg::QueryBuffer via a fresh engine-owner ────

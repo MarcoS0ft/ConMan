@@ -300,11 +300,15 @@ fn shutdown_interrupts_blocked_socket_write() {
         .expect("server read startup");
     session.paste(vec![b'x'; 16 * 1024 * 1024]);
     // Saturate both bounded bridges behind the pending socket write. Calls
-    // remain nonblocking and excess UI events are deliberately load-shed.
+    // remain nonblocking; overflow fails and cancels the session explicitly.
     for _ in 0..4096 {
         session.paste(b"queued".to_vec());
     }
     thread::sleep(Duration::from_millis(100));
+    assert!(
+        matches!(session.status(), SessionStatus::Failed(reason) if reason.contains("control queue overloaded")),
+        "UI overflow must fail closed instead of silently dropping input"
+    );
 
     let started = Instant::now();
     session.shutdown();
@@ -314,5 +318,91 @@ fn shutdown_interrupts_blocked_socket_write() {
         started.elapsed()
     );
     close_tx.send(()).expect("close server");
+    server.join().expect("TELNET server thread");
+}
+
+#[test]
+fn hostile_vt_query_saturation_makes_progress_and_delivers_final_snapshot() {
+    const QUERY_COUNT: usize = 32;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind TELNET loopback");
+    let port = listener.local_addr().expect("listener address").port();
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept TELNET client");
+        let mut startup = [0_u8; 21];
+        stream.read_exact(&mut startup).expect("read startup");
+        for _ in 0..QUERY_COUNT {
+            let mut chunk = vec![b'.'; 4096];
+            chunk[..4].copy_from_slice(b"\x1b[6n");
+            stream.write_all(&chunk).expect("write hostile VT query");
+        }
+        stream
+            .write_all(b"\r\nFINAL_LIVENESS_MARKER\r\n")
+            .expect("write final marker");
+
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("set response timeout");
+        let mut responses = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        while responses.iter().filter(|&&byte| byte == b'R').count() < QUERY_COUNT {
+            let count = stream.read(&mut buffer).expect("read VT query responses");
+            assert_ne!(count, 0, "client closed before answering VT queries");
+            responses.extend_from_slice(&buffer[..count]);
+        }
+        reply_tx.send(responses).expect("send VT responses");
+    });
+
+    let session = TelnetTerminalSession::connect(&settings(port), size()).expect("start session");
+    wait_for_connected(&session);
+    wait_for_text(&session, "FINAL_LIVENESS_MARKER");
+    let responses = reply_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("driver drained VT replies while inbound was backpressured");
+    assert!(
+        responses.iter().filter(|&&byte| byte == b'R').count() >= QUERY_COUNT,
+        "all VT queries must receive replies"
+    );
+    server.join().expect("TELNET server thread");
+    assert!(matches!(
+        wait_for_terminal_status(&session),
+        SessionStatus::Disconnected
+    ));
+    session.shutdown();
+}
+
+#[test]
+fn hostile_vt_query_saturation_shutdown_remains_prompt() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind TELNET loopback");
+    let port = listener.local_addr().expect("listener address").port();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (close_tx, close_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept TELNET client");
+        let mut startup = [0_u8; 21];
+        stream.read_exact(&mut startup).expect("read startup");
+        for _ in 0..32 {
+            let mut chunk = vec![b'.'; 4096];
+            chunk[..4].copy_from_slice(b"\x1b[6n");
+            stream.write_all(&chunk).expect("write hostile VT query");
+        }
+        ready_tx.send(()).expect("announce saturation transcript");
+        close_rx.recv().expect("keep peer open through shutdown");
+    });
+
+    let session = TelnetTerminalSession::connect(&settings(port), size()).expect("start session");
+    wait_for_connected(&session);
+    ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("server wrote saturation transcript");
+    thread::sleep(Duration::from_millis(100));
+    let started = Instant::now();
+    session.shutdown();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "saturated VT query shutdown took {:?}",
+        started.elapsed()
+    );
+    close_tx.send(()).expect("release server");
     server.join().expect("TELNET server thread");
 }
