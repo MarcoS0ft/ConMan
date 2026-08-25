@@ -8,7 +8,7 @@
 mod codec;
 
 use std::future::Future;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ use cm_core::TelnetSettings;
 use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalSize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{Receiver as TokioReceiver, Sender as TokioSender};
 use tokio::sync::watch;
 
 use self::codec::TelnetCodec;
@@ -27,6 +27,20 @@ use crate::session::{Session, SessionInput, SessionStatus, Surface, TerminalSess
 
 /// Maximum time allowed for opening the TCP connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bounds user/UI events waiting for the engine owner. On saturation, new
+/// UI events are dropped so an input producer cannot block the UI or grow
+/// memory. Decoded remote bytes instead await capacity with cancellation.
+const CONTROL_QUEUE_CAPACITY: usize = 256;
+const CONTROL_RETRY_INTERVAL: Duration = Duration::from_millis(1);
+/// Bounds rendered snapshots waiting for the UI. Intermediate snapshots may
+/// be dropped; subsequent output or resize supplies a fresh complete snapshot.
+const SNAPSHOT_QUEUE_CAPACITY: usize = 8;
+/// Bounds encoded terminal records waiting for the socket driver. The engine
+/// owner backpressures here until the driver consumes or shutdown drops it.
+const OUTBOUND_QUEUE_CAPACITY: usize = 64;
+/// Tokio may not be able to cancel an OS resolver's blocking worker. Explicit
+/// runtime shutdown bounds the driver join even when such work remains stuck.
+const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Typed TELNET session errors. Variants never carry terminal payload.
 #[derive(Debug, thiserror::Error)]
@@ -61,33 +75,33 @@ enum Outbound {
 /// TELNET-backed engine transport. Encoding remains in the socket driver so
 /// one task owns all parser, negotiation, NVT, and resize state.
 struct TelnetTransport {
-    out_tx: UnboundedSender<Outbound>,
+    out_tx: TokioSender<Outbound>,
 }
 
 impl Transport for TelnetTransport {
     fn write(&mut self, bytes: &[u8]) {
         if !bytes.is_empty() {
-            let _ = self.out_tx.send(Outbound::Data(bytes.to_vec()));
+            let _ = self.out_tx.blocking_send(Outbound::Data(bytes.to_vec()));
         }
     }
 
     fn write_key(&mut self, bytes: &[u8], newline_intent: bool) {
         if newline_intent {
-            let _ = self.out_tx.send(Outbound::Newline);
+            let _ = self.out_tx.blocking_send(Outbound::Newline);
         } else {
             self.write(bytes);
         }
     }
 
     fn resize(&mut self, size: TerminalSize) {
-        let _ = self.out_tx.send(Outbound::Resize(size));
+        let _ = self.out_tx.blocking_send(Outbound::Resize(size));
     }
 }
 
 /// A live interactive TELNET terminal session.
 #[derive(Debug)]
 pub struct TelnetTerminalSession {
-    control_tx: Sender<Msg>,
+    control_tx: SyncSender<Msg>,
     surface: Surface,
     status: Arc<Mutex<SessionStatus>>,
     shutdown_tx: watch::Sender<bool>,
@@ -103,10 +117,11 @@ impl TelnetTerminalSession {
     /// # Errors
     /// Returns an error only when synchronous engine or thread setup fails.
     pub fn connect(cfg: &TelnetSettings, size: TerminalSize) -> Result<Self, TelnetError> {
-        let (control_tx, control_rx) = mpsc::channel::<Msg>();
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<GridSnapshot>();
+        let (control_tx, control_rx) = mpsc::sync_channel::<Msg>(CONTROL_QUEUE_CAPACITY);
+        let (snapshot_tx, snapshot_rx) =
+            mpsc::sync_channel::<GridSnapshot>(SNAPSHOT_QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), EngineError>>();
-        let (out_tx, out_rx) = unbounded_channel::<Outbound>();
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel::<Outbound>(OUTBOUND_QUEUE_CAPACITY);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let status = Arc::new(Mutex::new(SessionStatus::Connecting));
         let start = Instant::now();
@@ -163,6 +178,7 @@ impl TelnetTerminalSession {
                     &driver_status,
                     start,
                 ));
+                shutdown_runtime(runtime);
             })
             .map_err(TelnetError::Thread)?;
 
@@ -186,23 +202,23 @@ impl TerminalSession for TelnetTerminalSession {
     }
 
     fn send_key(&self, event: KeyEvent) {
-        let _ = self.control_tx.send(Msg::Key(event));
+        enqueue_control(&self.control_tx, Msg::Key(event));
     }
 
     fn send_mouse(&self, event: MouseEvent) {
-        let _ = self.control_tx.send(Msg::Mouse(event));
+        enqueue_control(&self.control_tx, Msg::Mouse(event));
     }
 
     fn paste(&self, bytes: Vec<u8>) {
-        let _ = self.control_tx.send(Msg::Paste(bytes));
+        enqueue_control(&self.control_tx, Msg::Paste(bytes));
     }
 
     fn resize(&self, size: TerminalSize) {
-        let _ = self.control_tx.send(Msg::Resize(size));
+        enqueue_control(&self.control_tx, Msg::Resize(size));
     }
 
     fn set_scroll(&self, offset: u32) {
-        let _ = self.control_tx.send(Msg::SetScroll(offset));
+        enqueue_control(&self.control_tx, Msg::SetScroll(offset));
     }
 
     fn status(&self) -> SessionStatus {
@@ -213,17 +229,19 @@ impl TerminalSession for TelnetTerminalSession {
 
     fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
-        let _ = self.control_tx.send(Msg::Shutdown);
         if let Some(handle) = self
-            .owner_handle
+            .driver_handle
             .lock()
             .ok()
             .and_then(|mut guard| guard.take())
         {
             let _ = handle.join();
         }
+        // The driver receiver is now dropped, so an engine owner backpressured
+        // on the bounded outbound queue is released before this blocking send.
+        let _ = self.control_tx.send(Msg::Shutdown);
         if let Some(handle) = self
-            .driver_handle
+            .owner_handle
             .lock()
             .ok()
             .and_then(|mut guard| guard.take())
@@ -241,7 +259,7 @@ impl TerminalSession for TelnetTerminalSession {
 impl Drop for TelnetTerminalSession {
     fn drop(&mut self) {
         let _ = self.shutdown_tx.send(true);
-        let _ = self.control_tx.send(Msg::Shutdown);
+        let _ = self.control_tx.try_send(Msg::Shutdown);
     }
 }
 
@@ -279,7 +297,14 @@ impl Session for TelnetTerminalSession {
     }
 
     fn request_search_text(&self, reply: Sender<Vec<String>>) {
-        let _ = self.control_tx.send(Msg::QueryBuffer(reply));
+        match self.control_tx.try_send(Msg::QueryBuffer(reply)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(Msg::QueryBuffer(reply)))
+            | Err(TrySendError::Disconnected(Msg::QueryBuffer(reply))) => {
+                let _ = reply.send(Vec::new());
+            }
+            Err(_) => unreachable!("try_send returns the submitted message"),
+        }
     }
 }
 
@@ -289,11 +314,21 @@ fn set_status(status: &Arc<Mutex<SessionStatus>>, new_status: SessionStatus) {
     }
 }
 
+/// Nonblocking load shedding at the UI boundary. The terminal input trait has
+/// no error return, so saturation is intentionally fail-soft and bounded.
+fn enqueue_control(control_tx: &SyncSender<Msg>, message: Msg) {
+    let _ = control_tx.try_send(message);
+}
+
+fn shutdown_runtime(runtime: tokio::runtime::Runtime) {
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+}
+
 async fn drive(
     cfg: TelnetSettings,
     size: TerminalSize,
-    control_tx: &Sender<Msg>,
-    out_rx: UnboundedReceiver<Outbound>,
+    control_tx: &SyncSender<Msg>,
+    out_rx: TokioReceiver<Outbound>,
     shutdown_rx: watch::Receiver<bool>,
     status: &Arc<Mutex<SessionStatus>>,
     start: Instant,
@@ -316,8 +351,8 @@ async fn drive(
 async fn drive_inner(
     cfg: &TelnetSettings,
     size: TerminalSize,
-    control_tx: &Sender<Msg>,
-    mut out_rx: UnboundedReceiver<Outbound>,
+    control_tx: &SyncSender<Msg>,
+    mut out_rx: TokioReceiver<Outbound>,
     mut shutdown_rx: watch::Receiver<bool>,
     status: &Arc<Mutex<SessionStatus>>,
     start: Instant,
@@ -408,8 +443,8 @@ async fn pump(
     reader: &mut tokio::net::tcp::OwnedReadHalf,
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     codec: &mut TelnetCodec,
-    control_tx: &Sender<Msg>,
-    out_rx: &mut UnboundedReceiver<Outbound>,
+    control_tx: &SyncSender<Msg>,
+    out_rx: &mut TokioReceiver<Outbound>,
     shutdown_rx: &mut watch::Receiver<bool>,
     host: &str,
     port: u16,
@@ -421,8 +456,15 @@ async fn pump(
                 let count = read.map_err(|error| TelnetError::Io(error.to_string()))?;
                 if count == 0 {
                     let finished = codec.finish();
-                    if !finished.application_data.is_empty() {
-                        let _ = control_tx.send(Msg::Bytes(finished.application_data));
+                    if !finished.application_data.is_empty()
+                        && !enqueue_remote_bytes(
+                            control_tx,
+                            finished.application_data,
+                            shutdown_rx,
+                        )
+                        .await
+                    {
+                        return Ok(());
                     }
                     tracing::info!(host, port, "telnet: peer closed session");
                     return Ok(());
@@ -443,7 +485,7 @@ async fn pump(
                     return Ok(());
                 }
                 if !output.application_data.is_empty()
-                    && control_tx.send(Msg::Bytes(output.application_data)).is_err()
+                    && !enqueue_remote_bytes(control_tx, output.application_data, shutdown_rx).await
                 {
                     return Ok(());
                 }
@@ -479,6 +521,33 @@ async fn pump(
                 tracing::info!(host, port, "telnet: session shut down");
                 return Ok(());
             }
+        }
+    }
+}
+
+/// Hostile remote output shares the fixed control queue with UI events, but is
+/// lossless: retain and retry the same complete decoded chunk while the queue
+/// is full. Pausing this future backpressures socket reads. Shutdown cancels the
+/// wait so a saturated owner can never hold the driver join indefinitely.
+async fn enqueue_remote_bytes(
+    control_tx: &SyncSender<Msg>,
+    bytes: Vec<u8>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> bool {
+    let mut message = Msg::Bytes(bytes);
+    loop {
+        match control_tx.try_send(message) {
+            Ok(()) => return true,
+            Err(TrySendError::Disconnected(_)) => return false,
+            Err(TrySendError::Full(returned)) => message = returned,
+        }
+        tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                let _ = changed;
+                return false;
+            }
+            () = tokio::time::sleep(CONTROL_RETRY_INTERVAL) => {}
         }
     }
 }
@@ -527,5 +596,115 @@ mod tests {
         assert!(result.is_none());
         assert!(started.elapsed() < Duration::from_secs(1));
         sender.await.expect("shutdown sender task");
+    }
+
+    #[test]
+    fn control_queue_is_bounded_and_load_sheds() {
+        let (control_tx, control_rx) = mpsc::sync_channel(CONTROL_QUEUE_CAPACITY);
+        for offset in 0..CONTROL_QUEUE_CAPACITY + 32 {
+            enqueue_control(
+                &control_tx,
+                Msg::SetScroll(u32::try_from(offset).expect("test offset")),
+            );
+        }
+        assert_eq!(control_rx.try_iter().count(), CONTROL_QUEUE_CAPACITY);
+    }
+
+    #[tokio::test]
+    async fn remote_output_backpressures_without_losing_the_chunk() {
+        let (control_tx, control_rx) = mpsc::sync_channel(1);
+        control_tx
+            .send(Msg::SetScroll(7))
+            .expect("fill control queue");
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let marker = b"lossless-remote-marker".to_vec();
+        let enqueue = enqueue_remote_bytes(&control_tx, marker.clone(), &mut shutdown_rx);
+        tokio::pin!(enqueue);
+
+        tokio::select! {
+            result = &mut enqueue => panic!("remote enqueue did not backpressure: {result}"),
+            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        assert!(matches!(control_rx.try_recv(), Ok(Msg::SetScroll(7))));
+        assert!(enqueue.await);
+        match control_rx.try_recv().expect("retained remote chunk") {
+            Msg::Bytes(bytes) => assert_eq!(bytes, marker),
+            _ => panic!("unexpected control message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn saturated_remote_enqueue_is_shutdown_cancellable() {
+        let (control_tx, _control_rx) = mpsc::sync_channel(1);
+        control_tx
+            .send(Msg::SetScroll(7))
+            .expect("fill control queue");
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let sender = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            shutdown_tx.send(true).expect("signal shutdown");
+        });
+
+        let started = Instant::now();
+        assert!(
+            !enqueue_remote_bytes(&control_tx, vec![b'x'; 8192], &mut shutdown_rx).await,
+            "shutdown must cancel the saturated enqueue"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        sender.await.expect("shutdown sender task");
+    }
+
+    #[test]
+    fn outbound_queue_backpressures_and_receiver_drop_cancels_sender() {
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut transport = TelnetTransport { out_tx };
+            for _ in 0..OUTBOUND_QUEUE_CAPACITY + 1 {
+                transport.write(b"x");
+                progress_tx.send(()).expect("record completed send");
+            }
+        });
+
+        for _ in 0..OUTBOUND_QUEUE_CAPACITY {
+            progress_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("queue capacity should be available");
+        }
+        assert!(
+            progress_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "the send beyond capacity must backpressure"
+        );
+        drop(out_rx);
+        progress_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("receiver drop must release the blocked sender");
+        worker.join().expect("outbound producer thread");
+    }
+
+    #[test]
+    fn runtime_shutdown_is_bounded_with_stuck_blocking_work() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        runtime.spawn_blocking(move || {
+            started_tx.send(()).expect("announce blocking task");
+            let _ = release_rx.recv();
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocking task started");
+
+        let started = Instant::now();
+        shutdown_runtime(runtime);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "runtime shutdown exceeded its explicit bound: {:?}",
+            started.elapsed()
+        );
+        release_tx.send(()).expect("release detached blocking task");
     }
 }

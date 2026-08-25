@@ -299,6 +299,11 @@ fn shutdown_interrupts_blocked_socket_write() {
         .recv_timeout(Duration::from_secs(1))
         .expect("server read startup");
     session.paste(vec![b'x'; 16 * 1024 * 1024]);
+    // Saturate both bounded bridges behind the pending socket write. Calls
+    // remain nonblocking and excess UI events are deliberately load-shed.
+    for _ in 0..4096 {
+        session.paste(b"queued".to_vec());
+    }
     thread::sleep(Duration::from_millis(100));
 
     let started = Instant::now();

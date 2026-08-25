@@ -6,7 +6,7 @@
 //! difference between transports is *where* encoded input/response bytes go and
 //! how a resize is applied to the transport; that is captured by [`Transport`].
 
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
 use std::time::Instant;
 
 use cm_core::terminal::{GridSnapshot, Key, KeyEvent, MouseEvent, TerminalEngine, TerminalSize};
@@ -126,14 +126,38 @@ pub(crate) trait Transport: Send {
     fn resize(&mut self, size: TerminalSize);
 }
 
+/// Transport-neutral snapshot delivery. Local and SSH retain their existing
+/// unbounded `Sender` behavior. TELNET uses `SyncSender`, where a full queue
+/// drops an intermediate snapshot rather than allowing hostile remote output
+/// to grow memory without bound or blocking the engine owner during shutdown.
+pub(crate) trait SnapshotSink {
+    /// Returns `false` only when the consumer has disconnected.
+    fn send_snapshot(&self, snapshot: GridSnapshot) -> bool;
+}
+
+impl SnapshotSink for Sender<GridSnapshot> {
+    fn send_snapshot(&self, snapshot: GridSnapshot) -> bool {
+        self.send(snapshot).is_ok()
+    }
+}
+
+impl SnapshotSink for SyncSender<GridSnapshot> {
+    fn send_snapshot(&self, snapshot: GridSnapshot) -> bool {
+        match self.try_send(snapshot) {
+            Ok(()) | Err(TrySendError::Full(_)) => true,
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+}
+
 /// Engine-owner loop: construct the engine, report readiness, then process
 /// control messages until `Shutdown` / channel close. Identical for every
 /// transport; the `transport` parameter is the only variation point.
-pub(crate) fn run_engine_owner<T: Transport>(
+pub(crate) fn run_engine_owner<T: Transport, S: SnapshotSink>(
     size: TerminalSize,
     mut transport: T,
     control_rx: &Receiver<Msg>,
-    snapshot_tx: &Sender<GridSnapshot>,
+    snapshot_tx: &S,
     ready_tx: &Sender<Result<(), EngineError>>,
     start: Instant,
 ) {
@@ -187,7 +211,7 @@ pub(crate) fn run_engine_owner<T: Transport>(
                     );
                     logged_nonempty = true;
                 }
-                if snapshot_tx.send(snap).is_err() {
+                if !snapshot_tx.send_snapshot(snap) {
                     break; // consumer gone
                 }
             }
@@ -210,12 +234,12 @@ pub(crate) fn run_engine_owner<T: Transport>(
                 // meaning against a reflowed grid (same rationale cm-ui uses
                 // to clear a selection on resize) — snap back to the tail.
                 scroll = ScrollState::Tail;
-                let _ = snapshot_tx.send(engine.snapshot(0));
+                let _ = snapshot_tx.send_snapshot(engine.snapshot(0));
             }
             Msg::SetScroll(requested) => {
                 scroll = ScrollState::set(engine.scrollback_len(), requested);
                 let offset = scroll.effective_offset(engine.scrollback_len());
-                let _ = snapshot_tx.send(engine.snapshot(offset));
+                let _ = snapshot_tx.send_snapshot(engine.snapshot(offset));
             }
             Msg::QueryBuffer(reply) => {
                 let _ = reply.send(engine.buffer_text());
@@ -349,6 +373,29 @@ mod tests {
             mods: Default::default(),
         })]);
         assert_eq!(out, b"\r");
+    }
+
+    #[test]
+    fn bounded_snapshot_sink_drops_intermediate_frames_without_blocking_owner() {
+        let (control_tx, control_rx) = std::sync::mpsc::channel();
+        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::sync_channel(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+
+        for byte in b"hostile-output" {
+            control_tx.send(Msg::Bytes(vec![*byte])).unwrap();
+        }
+        control_tx.send(Msg::Shutdown).unwrap();
+
+        run_engine_owner(
+            TerminalSize { rows: 24, cols: 80 },
+            RecordingTransport::default(),
+            &control_rx,
+            &snapshot_tx,
+            &ready_tx,
+            Instant::now(),
+        );
+        ready_rx.try_recv().unwrap().expect("engine init");
+        assert_eq!(snapshot_rx.try_iter().count(), 1);
     }
 
     // ── P6.7: Msg::SetScroll / Msg::QueryBuffer via a fresh engine-owner ────
