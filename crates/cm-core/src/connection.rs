@@ -133,8 +133,9 @@ impl Connection {
         Ok(conn)
     }
 
-    /// Checks the kind/settings invariant. Use this to defensively validate
-    /// connections rehydrated from untrusted input (e.g. imported JSON).
+    /// Checks kind/settings and protocol-specific invariants. Use this to
+    /// defensively validate connections rehydrated from untrusted input (for
+    /// example, imported JSON).
     pub fn validate(&self) -> Result<(), DomainError> {
         let found = self.settings.kind();
         if found != self.kind {
@@ -142,6 +143,14 @@ impl Connection {
                 expected: self.kind,
                 found,
             });
+        }
+        if let ConnectionSettings::Telnet(settings) = &self.settings {
+            if settings.host.trim().is_empty() {
+                return Err(DomainError::TelnetHostEmpty);
+            }
+            if self.credential_source != Some(CredentialSource::Prompt) {
+                return Err(DomainError::TelnetCredentialSourceMustPrompt);
+            }
         }
         Ok(())
     }

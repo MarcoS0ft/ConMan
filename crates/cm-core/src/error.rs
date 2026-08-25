@@ -37,4 +37,8 @@ pub enum DomainError {
         expected: ConnectionKind,
         found: ConnectionKind,
     },
+    #[error("Telnet host must not be empty or whitespace")]
+    TelnetHostEmpty,
+    #[error("Telnet connections must use CredentialSource::Prompt")]
+    TelnetCredentialSourceMustPrompt,
 }

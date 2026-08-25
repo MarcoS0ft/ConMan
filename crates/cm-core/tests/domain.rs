@@ -390,6 +390,57 @@ fn validate_catches_tampered_deserialized_connection() {
 }
 
 #[test]
+fn telnet_connection_requires_a_non_empty_host() {
+    for host in ["", "   \t\n"] {
+        let err = Connection::new(
+            ConnectionId::UNSAVED,
+            None,
+            "invalid Telnet".to_string(),
+            ConnectionKind::Telnet,
+            ConnectionSettings::Telnet(TelnetSettings {
+                host: host.to_string(),
+                port: TelnetSettings::DEFAULT_PORT,
+            }),
+            Some(CredentialSource::Prompt),
+            0,
+            0,
+            0,
+        )
+        .expect_err("empty and whitespace-only Telnet hosts must be rejected");
+        assert!(matches!(err, DomainError::TelnetHostEmpty));
+    }
+}
+
+#[test]
+fn telnet_connection_requires_prompt_credential_source() {
+    let invalid_sources = [
+        None,
+        Some(CredentialSource::Object(CredentialId::new(7))),
+        Some(CredentialSource::Inline {
+            username: "admin".to_string(),
+            domain: None,
+            has_secret: true,
+        }),
+    ];
+
+    for source in invalid_sources {
+        let err = Connection::new(
+            ConnectionId::UNSAVED,
+            None,
+            "invalid Telnet".to_string(),
+            ConnectionKind::Telnet,
+            telnet_settings(),
+            source,
+            0,
+            0,
+            0,
+        )
+        .expect_err("every non-Prompt Telnet credential source must be rejected");
+        assert!(matches!(err, DomainError::TelnetCredentialSourceMustPrompt));
+    }
+}
+
+#[test]
 fn connection_round_trips_through_json() {
     // Connection with an explicit credential id and SSH PublicKey method.
     let original = Connection::new(

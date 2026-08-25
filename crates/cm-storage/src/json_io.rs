@@ -40,7 +40,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cm_core::{
-    Connection, ConnectionId, ConnectionRepository, Credential, CredentialFolder,
+    Connection, ConnectionId, ConnectionKind, ConnectionRepository, Credential, CredentialFolder,
     CredentialFolderId, CredentialId, CredentialKind, CredentialPurpose, CredentialRef,
     CredentialSource, CredentialStore, Group, GroupId, KEY_AUTOMATION_ENABLED,
     KEY_AUTOMATION_SCOPES, KEY_FIRST_RUN_SEEDED, KEY_RENDERER_BACKEND, KEY_SESSION_TABS, Secret,
@@ -336,6 +336,18 @@ pub fn import(
         });
     }
 
+    // Validate all untrusted connections before performing any repository
+    // mutation. In particular, malformed Telnet profiles must be rejected,
+    // not normalized into the interactive-login contract during import.
+    for conn in &envelope.connections {
+        conn.validate().map_err(|e| {
+            ImportExportError::Malformed(format!(
+                "connection '{}' failed domain validation: {e}",
+                conn.name
+            ))
+        })?;
+    }
+
     let mut stats = ImportStats::default();
 
     // Insertion order matters: each step depends on the maps built by the
@@ -352,7 +364,7 @@ pub fn import(
     let group_id_map = import_groups(&envelope.groups, &cred_id_map, repo, &mut stats)?;
 
     // 4. Connections (reference groups and credentials).
-    let conn_id_map = import_connections(
+    let (conn_id_map, connection_secret_ids) = import_connections(
         &envelope.connections,
         &group_id_map,
         &cred_id_map,
@@ -366,7 +378,13 @@ pub fn import(
             import_secrets(&envelope.credential_secrets, &cred_id_map, s, &mut stats);
         }
         if !envelope.connection_secrets.is_empty() {
-            import_connection_secrets(&envelope.connection_secrets, &conn_id_map, s, &mut stats);
+            import_connection_secrets(
+                &envelope.connection_secrets,
+                &conn_id_map,
+                &connection_secret_ids,
+                s,
+                &mut stats,
+            );
         }
     }
 
@@ -526,8 +544,9 @@ fn import_connections(
     cred_id_map: &HashMap<CredentialId, CredentialId>,
     repo: &dyn ConnectionRepository,
     stats: &mut ImportStats,
-) -> Result<HashMap<ConnectionId, ConnectionId>, ImportExportError> {
+) -> Result<(HashMap<ConnectionId, ConnectionId>, HashSet<ConnectionId>), ImportExportError> {
     let mut id_map: HashMap<ConnectionId, ConnectionId> = HashMap::new();
+    let mut connection_secret_ids = HashSet::new();
 
     for conn in connections {
         let new_group = conn
@@ -556,10 +575,19 @@ fn import_connections(
         })?;
 
         let new_id = repo.upsert_connection(&to_insert)?;
+        if matches!(
+            to_insert.credential_source,
+            Some(CredentialSource::Inline {
+                has_secret: true,
+                ..
+            })
+        ) {
+            connection_secret_ids.insert(new_id);
+        }
         id_map.insert(conn.id, new_id);
         stats.connections_imported += 1;
     }
-    Ok(id_map)
+    Ok((id_map, connection_secret_ids))
 }
 
 /// Write imported secrets to the keychain under the *new* credential IDs.
@@ -622,6 +650,7 @@ fn import_secrets(
 fn import_connection_secrets(
     secrets: &[ExportedConnectionSecret],
     conn_id_map: &HashMap<ConnectionId, ConnectionId>,
+    eligible_connection_ids: &HashSet<ConnectionId>,
     store: &dyn CredentialStore,
     stats: &mut ImportStats,
 ) {
@@ -633,6 +662,13 @@ fn import_connection_secrets(
             );
             continue;
         };
+        if !eligible_connection_ids.contains(&new_conn_id) {
+            tracing::warn!(
+                connection_id = new_conn_id.get(),
+                "skipping imported connection secret: connection does not use inline credentials"
+            );
+            continue;
+        }
 
         let Some(purpose) = parse_purpose(&entry.purpose) else {
             tracing::warn!(
@@ -716,6 +752,12 @@ fn collect_connection_secrets(
 ) -> Vec<ExportedConnectionSecret> {
     let mut out = Vec::new();
     for conn in connections {
+        // A valid Telnet profile can only use Prompt. Keep this explicit so
+        // even a malformed repository row cannot make a Telnet secret leave
+        // the machine during a secrets-inclusive export.
+        if conn.kind == ConnectionKind::Telnet {
+            continue;
+        }
         let Some(CredentialSource::Inline {
             has_secret: true, ..
         }) = &conn.credential_source

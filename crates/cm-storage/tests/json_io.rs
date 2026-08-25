@@ -169,6 +169,23 @@ impl MockStore {
             .get(&(key.service().to_string(), key.account().to_string()))
             .cloned()
     }
+
+    fn seed_connection(
+        &self,
+        connection_id: ConnectionId,
+        purpose: CredentialPurpose,
+        secret: &[u8],
+    ) {
+        let key = CredentialRef::for_connection(connection_id, purpose);
+        self.data.lock().expect("lock").insert(
+            (key.service().to_string(), key.account().to_string()),
+            secret.to_vec(),
+        );
+    }
+
+    fn entry_count(&self) -> usize {
+        self.data.lock().expect("lock").len()
+    }
 }
 
 impl CredentialStore for MockStore {
@@ -362,6 +379,156 @@ fn telnet_round_trips_via_native_json() {
             port: 23,
         })
     );
+}
+
+#[test]
+fn native_json_rejects_telnet_profiles_with_non_prompt_credentials_before_mutation() {
+    let invalid_sources = [
+        serde_json::Value::Null,
+        serde_json::json!({ "kind": "object", "value": 41 }),
+        serde_json::json!({
+            "kind": "inline",
+            "value": { "username": "admin", "domain": null, "has_secret": true }
+        }),
+    ];
+
+    for credential_source in invalid_sources {
+        let json = serde_json::json!({
+            "conman_export_version": ENVELOPE_VERSION,
+            "exported_at": 0,
+            "credential_folders": [],
+            "credentials": [{
+                "id": 41,
+                "name": "must-not-be-inserted",
+                "kind": "password",
+                "folder_id": null,
+                "username": "admin"
+            }],
+            "groups": [],
+            "connections": [{
+                "id": 7,
+                "group_id": null,
+                "name": "malicious Telnet",
+                "kind": "telnet",
+                "settings": { "telnet": { "host": "console.example", "port": 23 } },
+                "credential_source": credential_source,
+                "sort": 0,
+                "created_at": 0,
+                "updated_at": 0
+            }]
+        })
+        .to_string();
+
+        let dst = repo();
+        let result = import_from_json(&json, &dst, None);
+        assert!(
+            matches!(result, Err(ImportExportError::Malformed(_))),
+            "non-Prompt Telnet credential source must be rejected: {result:?}"
+        );
+        assert!(dst.list_connections().expect("list connections").is_empty());
+        assert!(
+            dst.list_credentials().expect("list credentials").is_empty(),
+            "validation must occur before any envelope records are inserted"
+        );
+    }
+}
+
+#[test]
+fn native_json_rejects_empty_and_whitespace_telnet_hosts() {
+    for host in ["", "  \t\n"] {
+        let json = serde_json::json!({
+            "conman_export_version": ENVELOPE_VERSION,
+            "exported_at": 0,
+            "credential_folders": [],
+            "credentials": [],
+            "groups": [],
+            "connections": [{
+                "id": 7,
+                "group_id": null,
+                "name": "hostless Telnet",
+                "kind": "telnet",
+                "settings": { "telnet": { "host": host, "port": 23 } },
+                "credential_source": { "kind": "prompt" },
+                "sort": 0,
+                "created_at": 0,
+                "updated_at": 0
+            }]
+        })
+        .to_string();
+
+        let dst = repo();
+        let result = import_from_json(&json, &dst, None);
+        assert!(
+            matches!(result, Err(ImportExportError::Malformed(_))),
+            "empty/whitespace Telnet host must be rejected: {result:?}"
+        );
+        assert!(dst.list_connections().expect("list connections").is_empty());
+    }
+}
+
+#[test]
+fn native_json_ignores_connection_scoped_secrets_for_valid_telnet_profiles() {
+    let json = serde_json::json!({
+        "conman_export_version": ENVELOPE_VERSION,
+        "exported_at": 0,
+        "credential_folders": [],
+        "credentials": [],
+        "groups": [],
+        "connections": [{
+            "id": 7,
+            "group_id": null,
+            "name": "valid Telnet",
+            "kind": "telnet",
+            "settings": { "telnet": { "host": "console.example", "port": 23 } },
+            "credential_source": { "kind": "prompt" },
+            "sort": 0,
+            "created_at": 0,
+            "updated_at": 0
+        }],
+        "connection_secrets": [{
+            "connection_id": 7,
+            "purpose": "password",
+            "secret_hex": "6d616c6963696f75732d736563726574"
+        }]
+    })
+    .to_string();
+
+    let dst = repo();
+    let store = MockStore::new();
+    let stats = import_from_json(&json, &dst, Some(&store)).expect("valid Telnet import");
+    assert_eq!(stats.connections_imported, 1);
+    assert_eq!(
+        stats.secrets_imported, 0,
+        "Prompt-only Telnet profiles cannot accept connection-scoped secrets"
+    );
+    assert_eq!(store.entry_count(), 0, "secret must not reach the store");
+}
+
+#[test]
+fn secrets_inclusive_export_never_collects_telnet_connection_secrets() {
+    let src = repo();
+    let connection_id = src
+        .upsert_connection(&mk_telnet_conn("console", None))
+        .expect("insert Telnet connection");
+    let store = MockStore::new();
+    store.seed_connection(
+        connection_id,
+        CredentialPurpose::Password,
+        b"must-not-be-exported",
+    );
+
+    let envelope = export(
+        &src,
+        &ExportOptions {
+            include_secrets: true,
+        },
+        Some(&store),
+    )
+    .expect("export Telnet");
+    assert!(envelope.connection_secrets.is_empty());
+    let serialized = serde_json::to_string(&envelope).expect("serialize envelope");
+    assert!(!serialized.contains("must-not-be-exported"));
+    assert!(!serialized.contains("connection_secrets"));
 }
 
 #[test]
