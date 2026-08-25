@@ -20,7 +20,7 @@ mod support;
 
 use i_slint_backend_testing::ElementRoot;
 use slint::Model;
-use support::{find_by_id, find_descendant_by_label, harness, pump_ticks};
+use support::{find_by_id, find_descendant_by_label, harness, pump_ticks, pump_until};
 
 #[test]
 fn panes_suite() {
@@ -31,6 +31,8 @@ fn panes_suite() {
     broadcast_toggle_and_target_menu();
     connect_in_split_is_refused_when_agent_mode_lacks_execute_scope();
     telnet_connect_in_split_dispatches_and_marks_insecure();
+    promoted_telnet_split_keeps_identity_origin_and_reconnect_dispatch();
+    asynchronous_telnet_split_failure_is_visible_before_collapse();
     pane_disconnect_closes_the_targeted_pane_and_collapses_the_split();
 }
 
@@ -274,5 +276,130 @@ fn telnet_connect_in_split_dispatches_and_marks_insecure() {
     assert!(
         !h.ui.get_session_insecure(),
         "closing the only Telnet pane must clear the tab-level warning"
+    );
+}
+
+/// Adversarial split-promotion regression: a saved SSH primary and saved
+/// Telnet extra pane carry different protocol, security, identity, origin,
+/// and reconnect metadata. Closing pane 0 promotes Telnet and must update all
+/// of those fields together; reconnect must dispatch Telnet, not stale SSH.
+fn promoted_telnet_split_keeps_identity_origin_and_reconnect_dispatch() {
+    let (h, repo, provider) = harness();
+
+    h.ui.invoke_new_connection(0);
+    let mut ssh_form = h.ui.get_profile_form();
+    ssh_form.name = "SSH Primary".into();
+    ssh_form.host = "primary-ssh".into();
+    ssh_form.username = "operator".into();
+    ssh_form.auth_method = 2; // Agent: no stored secret is needed.
+    h.ui.set_profile_form(ssh_form);
+    h.ui.invoke_profile_save();
+    let ssh_row = repo
+        .list_connections()
+        .expect("list SSH connection")
+        .iter()
+        .position(|conn| conn.name == "SSH Primary")
+        .expect("saved SSH row");
+    h.ui.invoke_row_activated(ssh_row as i32);
+    pump_ticks(1);
+    assert_eq!(provider.ssh_connect_count(), 1);
+    assert_eq!(h.ui.get_connecting_kind().as_str(), "SSH");
+
+    h.ui.invoke_new_connection(0);
+    let mut telnet_form = h.ui.get_profile_form();
+    telnet_form.name = "Telnet Extra".into();
+    telnet_form.kind = 2;
+    telnet_form.host = "promoted-telnet".into();
+    telnet_form.port = "2323".into();
+    h.ui.set_profile_form(telnet_form);
+    h.ui.invoke_profile_save();
+    let telnet_id = repo
+        .list_connections()
+        .expect("list Telnet connection")
+        .into_iter()
+        .find(|conn| conn.name == "Telnet Extra")
+        .expect("saved Telnet connection")
+        .id
+        .get();
+
+    h.ui.invoke_connect_in_split_row(telnet_id as i32);
+    pump_ticks(1);
+    assert_eq!(provider.telnet_connect_count(), 1);
+    assert_eq!(active_tab_pane_count(&h), 2);
+
+    h.ui.invoke_pane_disconnect(0);
+    pump_ticks(1);
+
+    assert_eq!(active_tab_pane_count(&h), 1);
+    assert_eq!(h.ui.get_connecting_kind().as_str(), "TELNET");
+    assert_eq!(h.ui.get_session_identity().as_str(), "promoted-telnet:2323");
+    assert!(h.ui.get_session_insecure());
+    let active = h.ui.get_active_tab();
+    assert_eq!(
+        h.ui.get_tabs()
+            .row_data(active as usize)
+            .expect("promoted tab row")
+            .title
+            .as_str(),
+        "TELNET promoted-telnet"
+    );
+
+    h.ui.invoke_tab_reconnect(active);
+    pump_ticks(1);
+    assert_eq!(
+        provider.telnet_connect_count(),
+        2,
+        "promoted pane reconnect must dispatch Telnet"
+    );
+    assert_eq!(
+        provider.ssh_connect_count(),
+        1,
+        "stale primary SSH reconnect metadata must be gone"
+    );
+    assert_eq!(h.ui.get_connecting_kind().as_str(), "TELNET");
+    assert!(h.ui.get_session_insecure());
+}
+
+/// An asynchronously failed extra pane is collapsed by the tick loop, but
+/// its failure reason must remain visible through a toast.
+fn asynchronous_telnet_split_failure_is_visible_before_collapse() {
+    let (h, repo, provider) = harness();
+    h.ui.invoke_new_connection(0);
+    let mut form = h.ui.get_profile_form();
+    form.name = "Failing Telnet Split".into();
+    form.kind = 2;
+    form.host = "failing-telnet".into();
+    form.port = "23".into();
+    h.ui.set_profile_form(form);
+    h.ui.invoke_profile_save();
+    let conn_id = repo
+        .list_connections()
+        .expect("list connections")
+        .into_iter()
+        .find(|conn| conn.name == "Failing Telnet Split")
+        .expect("saved Telnet connection")
+        .id
+        .get();
+
+    let status = std::sync::Arc::new(std::sync::Mutex::new(cm_core::SessionStatus::Connecting));
+    provider.script_next_remote(status.clone());
+    h.ui.invoke_connect_in_split_row(conn_id as i32);
+    pump_ticks(1);
+    assert_eq!(active_tab_pane_count(&h), 2);
+
+    *status.lock().expect("status cell poisoned") =
+        cm_core::SessionStatus::Failed("split negotiation rejected".into());
+    assert!(
+        pump_until(50, || active_tab_pane_count(&h) == 1),
+        "failed split pane must auto-collapse"
+    );
+    let toasts = h.ui.get_toasts();
+    assert!(
+        (0..toasts.row_count()).any(|idx| {
+            toasts
+                .row_data(idx)
+                .is_some_and(|toast| toast.message.contains("split negotiation rejected"))
+        }),
+        "the asynchronous failure reason must remain visible after collapse"
     );
 }

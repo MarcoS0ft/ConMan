@@ -2964,13 +2964,29 @@ fn tick_tab(
                 }
             }
         }
-        // Auto-collapse extra pane when its local shell exits/fails (fix f).
+        // Auto-collapse extra pane when its session exits/fails (fix f).
+        // A split pane has no ErrorOverlay of its own, so surface an
+        // asynchronous failure before removing the pane; otherwise the
+        // reason disappears with the session in this same tick.
         let ep_status = st.tabs[i].extra_panes[ep_idx].session.status();
-        if matches!(
-            ep_status,
-            SessionStatus::Exited(_) | SessionStatus::Failed(_)
-        ) {
-            extra_panes_to_close.push(ep_idx);
+        match ep_status {
+            SessionStatus::Failed(reason) => {
+                let title = &st.tabs[i].extra_panes[ep_idx].title;
+                let id = {
+                    let mut n = toast_next_id.borrow_mut();
+                    let id = *n;
+                    *n += 1;
+                    id
+                };
+                toast_model.push(ToastEntry {
+                    id,
+                    message: SharedString::from(format!("{title}: connection failed – {reason}")),
+                    kind: 3,
+                });
+                extra_panes_to_close.push(ep_idx);
+            }
+            SessionStatus::Exited(_) => extra_panes_to_close.push(ep_idx),
+            _ => {}
         }
     }
     // Collapse exited extra panes (process in reverse order to keep indices valid).

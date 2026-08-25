@@ -142,9 +142,20 @@ struct ExtraPaneState {
     last_frame: Option<Image>,
     rdp_w: u16,
     rdp_h: u16,
+    /// RDP-only remote clipboard slot. This belongs to the session, so it
+    /// must follow an extra pane when that pane is promoted to primary.
+    rdp_clipboard: Option<Arc<Mutex<Option<String>>>>,
+    /// Reconnect metadata for this pane. Connect-in-split only opens saved
+    /// profiles, so SSH/RDP variants always retain a credential id and never
+    /// resolved authentication material.
+    connect_info: Option<ConnectInfo>,
     is_remote: bool,
+    origin_connection_id: Option<i32>,
+    identity: String,
+    title: String,
     insecure_transport: bool,
     kind: String,
+    connect_started: std::time::Instant,
 }
 
 /// A session that has been detached from its tab but is still running.

@@ -410,7 +410,15 @@ fn telnet_quick_connect_reconnect_and_insecure_tab_state() {
     );
     assert_eq!(h.ui.get_qc_username().as_str(), "");
     assert_eq!(h.ui.get_qc_secret().as_str(), "");
-    find_by_id(&h.ui, "AppWindow::insecure-transport-label");
+    // Element-level theme contract: protocol/security presentation remains
+    // present in both palettes (no pixel/screenshot machinery needed).
+    for dark_mode in [false, true] {
+        h.ui.set_dark_mode(dark_mode);
+        pump_ticks(1);
+        find_by_id(&h.ui, "AppWindow::insecure-transport-label");
+        assert_eq!(h.ui.get_connecting_kind().as_str(), "TELNET");
+        assert!(h.ui.get_session_insecure());
+    }
     let telnet_idx = h.ui.get_active_tab();
     assert_eq!(
         h.ui.get_tabs()

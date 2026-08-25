@@ -583,6 +583,21 @@ struct SplitSlot {
     local_settings: LocalSettings,
 }
 
+/// Session-owned metadata that must follow a split pane if it is later
+/// promoted into the tab's primary slot. Saved SSH/RDP panes retain only the
+/// profile id used to re-resolve credentials; resolved secrets are never
+/// stored here.
+struct SplitPaneMetadata {
+    connect_info: Option<ConnectInfo>,
+    rdp_clipboard: Option<Arc<Mutex<Option<String>>>>,
+    is_remote: bool,
+    origin_connection_id: Option<i32>,
+    identity: String,
+    title: String,
+    insecure_transport: bool,
+    kind: String,
+}
+
 /// Reserve a pane slot in the active tab's `PaneGroup` (P6.11: any focused
 /// pane, N-way). Shared by [`do_split`] and [`connect_in_split`] (P6.10 fix
 /// round 2) — the pane-slot bookkeeping is identical regardless of what kind
@@ -652,9 +667,7 @@ fn commit_split_pane(
     pane_w: f32,
     pane_h: f32,
     scale: f32,
-    is_remote: bool,
-    insecure_transport: bool,
-    kind: &'static str,
+    metadata: SplitPaneMetadata,
 ) {
     {
         let mut st = state.borrow_mut();
@@ -673,9 +686,15 @@ fn commit_split_pane(
                 last_frame: None,
                 rdp_w: 0,
                 rdp_h: 0,
-                is_remote,
-                insecure_transport,
-                kind: kind.to_owned(),
+                rdp_clipboard: metadata.rdp_clipboard,
+                connect_info: metadata.connect_info,
+                is_remote: metadata.is_remote,
+                origin_connection_id: metadata.origin_connection_id,
+                identity: metadata.identity,
+                title: metadata.title,
+                insecure_transport: metadata.insecure_transport,
+                kind: metadata.kind,
+                connect_started: std::time::Instant::now(),
             };
             // New pane ids are always appended (`PaneGroup::split` returns
             // `count() - 1` after the split, i.e. the previous `count()`),
@@ -762,9 +781,16 @@ pub(super) fn do_split(
         pane_w,
         pane_h,
         slot.scale,
-        false,
-        false,
-        "",
+        SplitPaneMetadata {
+            connect_info: None,
+            rdp_clipboard: None,
+            is_remote: false,
+            origin_connection_id: None,
+            identity: "local shell".to_owned(),
+            title: "Local shell".to_owned(),
+            insecure_transport: false,
+            kind: String::new(),
+        },
     );
 }
 
@@ -860,9 +886,16 @@ pub(super) fn connect_in_split(
                 pane_w,
                 pane_h,
                 slot.scale,
-                true,
-                true,
-                "TELNET",
+                SplitPaneMetadata {
+                    connect_info: Some(ConnectInfo::Telnet(settings.clone())),
+                    rdp_clipboard: None,
+                    is_remote: true,
+                    origin_connection_id: Some(conn.id.get() as i32),
+                    identity: format!("{}:{}", settings.host, settings.port),
+                    title: format!("TELNET {}", settings.host),
+                    insecure_transport: true,
+                    kind: "TELNET".to_owned(),
+                },
             );
         }
         cm_core::ConnectionSettings::Ssh(s) => {
@@ -975,9 +1008,27 @@ pub(super) fn connect_in_split(
                 pane_w,
                 pane_h,
                 slot.scale,
-                true,
-                false,
-                "SSH",
+                SplitPaneMetadata {
+                    connect_info: Some(ConnectInfo::Ssh(SshConnectInfo {
+                        settings: effective_settings.clone(),
+                        // Connect-in-split only accepts saved profiles. Keep
+                        // the id so reconnect re-resolves auth; never retain
+                        // the resolved `auth` value used above.
+                        auth_source: SshAuthSource::Credential(conn.id),
+                    })),
+                    rdp_clipboard: None,
+                    is_remote: true,
+                    origin_connection_id: Some(conn.id.get() as i32),
+                    identity: format!(
+                        "{}@{}:{}",
+                        effective_settings.username,
+                        effective_settings.host,
+                        effective_settings.port
+                    ),
+                    title: format!("SSH {}", effective_settings.host),
+                    insecure_transport: false,
+                    kind: "SSH".to_owned(),
+                },
             );
         }
         cm_core::ConnectionSettings::Rdp(s) => {
@@ -1067,6 +1118,7 @@ pub(super) fn connect_in_split(
             }
 
             let provider = state.borrow().session_provider.clone();
+            let identity = format!("{}@{}:{}", auth.username, s.host, s.port);
             let session = match provider.connect_rdp(&s, auth, verifier) {
                 Ok(sess) => sess,
                 Err(e) => {
@@ -1076,6 +1128,7 @@ pub(super) fn connect_in_split(
                     return;
                 }
             };
+            let rdp_clipboard = session.remote_clipboard();
 
             commit_split_pane(
                 state,
@@ -1089,9 +1142,21 @@ pub(super) fn connect_in_split(
                 pane_w,
                 pane_h,
                 slot.scale,
-                true,
-                false,
-                "RDP",
+                SplitPaneMetadata {
+                    connect_info: Some(ConnectInfo::Rdp(RdpConnectInfo {
+                        settings: s.clone(),
+                        // As with SSH above, only the profile id persists;
+                        // the resolved password moved into `connect_rdp`.
+                        auth_source: RdpAuthSource::Credential(conn.id),
+                    })),
+                    rdp_clipboard,
+                    is_remote: true,
+                    origin_connection_id: Some(conn.id.get() as i32),
+                    identity,
+                    title: format!("RDP {}", s.host),
+                    insecure_transport: false,
+                    kind: "RDP".to_owned(),
+                },
             );
         }
     }
@@ -1125,16 +1190,11 @@ fn push_toast(
 /// `extra_panes`, closing it requires moving another pane's state into those
 /// fields first (there is nothing else that visually "is" pane 0 otherwise).
 ///
-/// `connect_info`/`is_remote`/`origin_connection_id` deliberately do NOT
-/// move — they describe the tab's originating launch profile (reconnect /
-/// ErrorOverlay "Edit…" target), which stays meaningful only for that
-/// specific session. Once a different pane is promoted to primary, those
-/// affordances go stale (referring to a profile that's no longer visually
-/// primary) until that pane's own session also exits — an accepted
-/// limitation given there is no per-pane error overlay today (same
-/// limitation already noted for `connect_in_split` failures, which only
-/// have a toast to surface through).
-fn promote_extra_to_primary(tab: &mut Tab, ep_idx: usize) {
+/// Session origin/presentation/reconnect fields move with the promoted
+/// session. In particular, a saved SSH/RDP pane retains only its credential
+/// id, so promotion never turns resolved authentication material into
+/// long-lived pane metadata.
+fn promote_extra_to_primary(tab: &mut Tab, ep_idx: usize, primary_title: &mut String) {
     let ep = &mut tab.extra_panes[ep_idx];
     std::mem::swap(&mut tab.session, &mut ep.session);
     std::mem::swap(&mut tab.renderer, &mut ep.renderer);
@@ -1146,8 +1206,20 @@ fn promote_extra_to_primary(tab: &mut Tab, ep_idx: usize) {
     std::mem::swap(&mut tab.last_frame, &mut ep.last_frame);
     std::mem::swap(&mut tab.rdp_w, &mut ep.rdp_w);
     std::mem::swap(&mut tab.rdp_h, &mut ep.rdp_h);
+    // The old primary is being closed immediately, so drop its reconnect
+    // payload instead of parking a possible quick-connect secret in the
+    // outgoing ExtraPaneState. The promoted split pane only ever contains a
+    // saved-profile id for SSH/RDP authentication re-resolution.
+    tab.rdp_clipboard = ep.rdp_clipboard.take();
+    tab.connect_info = ep.connect_info.take();
+    std::mem::swap(&mut tab.is_remote, &mut ep.is_remote);
+    std::mem::swap(&mut tab.origin_connection_id, &mut ep.origin_connection_id);
+    std::mem::swap(&mut tab.identity, &mut ep.identity);
+    std::mem::swap(primary_title, &mut ep.title);
     std::mem::swap(&mut tab.insecure_transport, &mut ep.insecure_transport);
     std::mem::swap(&mut tab.kind, &mut ep.kind);
+    std::mem::swap(&mut tab.connect_started, &mut ep.connect_started);
+    tab.is_empty = false;
 }
 
 /// Close a specific pane (by id) in the active tab (P6.11: any pane,
@@ -1184,7 +1256,7 @@ pub(super) fn do_close_pane(
         }
         tab.pane_group.set_focused(pane_id);
         let focused_id = tab.pane_group.focused();
-        let label = tab_model
+        let mut label = tab_model
             .row_data(active)
             .map(|t| t.title.to_string())
             .unwrap_or_else(|| format!("tab {}", tab.num));
@@ -1199,7 +1271,7 @@ pub(super) fn do_close_pane(
         // slot when that id is 0, so there is always something coherent left
         // in `Tab`'s primary fields afterward.
         let closed_session = if focused_id == 0 {
-            promote_extra_to_primary(tab, 0);
+            promote_extra_to_primary(tab, 0, &mut label);
             // The (former) primary session now sits in extra_panes[0] --
             // that's the one being closed.
             Some(tab.extra_panes.remove(0))
@@ -1216,15 +1288,12 @@ pub(super) fn do_close_pane(
         debug_assert_eq!(closed, Some(focused_id));
         let new_layout = tab.pane_group.layout();
         let new_focused = tab.pane_group.focused();
-        (
-            closed_session,
-            format!("{label} [pane {}]", focused_id + 1),
-            new_layout,
-            new_focused,
-            label,
-        )
+        let closed_label = closed_session
+            .as_ref()
+            .map(|ep| format!("{} [pane {}]", ep.title, focused_id + 1))
+            .unwrap_or_else(|| format!("{label} [pane {}]", focused_id + 1));
+        (closed_session, closed_label, new_layout, new_focused, label)
     };
-    let _ = tab_label;
 
     if let Some(ep) = closed_session {
         let mut st = state.borrow_mut();
@@ -1257,6 +1326,11 @@ pub(super) fn do_close_pane(
                 .get(active)
                 .map(|t| t.pane_group.count() as i32)
                 .unwrap_or(1);
+            item.title = SharedString::from(tab_label.as_str());
+            if let Some(tab) = st.tabs.get(active) {
+                item.can_duplicate = tab.origin_connection_id.is_some() || !tab.is_remote;
+                item.is_home = tab.is_empty;
+            }
             tab_model.set_row_data(active, item);
         }
     }
@@ -1266,6 +1340,7 @@ pub(super) fn do_close_pane(
     {
         let st = state.borrow();
         if let Some(tab) = st.tabs.get(st.active) {
+            ui.set_session_identity(SharedString::from(tab.identity.as_str()));
             ui.set_connecting_kind(SharedString::from(tab.kind.as_str()));
             ui.set_session_insecure(
                 tab.insecure_transport || tab.extra_panes.iter().any(|ep| ep.insecure_transport),
@@ -1479,9 +1554,15 @@ mod tests {
                 last_frame: None,
                 rdp_w: 0,
                 rdp_h: 0,
+                rdp_clipboard: None,
+                connect_info: None,
                 is_remote: false,
+                origin_connection_id: None,
+                identity: String::new(),
+                title: "Local shell".to_owned(),
                 insecure_transport: false,
                 kind: String::new(),
+                connect_started: std::time::Instant::now(),
             });
         }
 
