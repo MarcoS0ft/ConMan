@@ -118,8 +118,10 @@ impl Selection {
         }
     }
 
-    /// True when the selection spans zero cells (anchor == cursor) — a single
-    /// click that hasn't been dragged, nothing to highlight or copy.
+    /// True when both endpoints occupy the same cell. This may be a legitimate
+    /// one-cell selection after a same-cell drag or a double-click on a
+    /// one-character word; plain clicks are filtered by the selection state
+    /// machine before they reach the renderer.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.anchor == self.cursor

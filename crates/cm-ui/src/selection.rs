@@ -45,6 +45,10 @@ impl ClickTracker {
         self.last_time = Some(now);
         self.count
     }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// A character that participates in "word" selection (double-click). Matches
@@ -166,7 +170,7 @@ pub(crate) fn extract_text(snap: &GridSnapshot, sel: &Selection) -> String {
 
 /// Per-pane mouse-selection state the controller updates from pointer events
 /// and drains on tick: the live [`Selection`] (if any), the multi-click
-/// tracker, whether a drag is in progress, and the lifecycle bookkeeping used
+/// tracker, a pending drag anchor, and the lifecycle bookkeeping used
 /// to implement the pinned rule "selection clears on new output that scrolls
 /// the region [or] on resize" (`docs/devel/tasks/
 /// P6.5-terminal-selection-copy-paste.md`) — see [`invalidate_if_stale`].
@@ -183,7 +187,10 @@ pub(crate) struct PaneSelectionState {
     /// which cells even exist at that row/col).
     baseline: Vec<Cell>,
     click: ClickTracker,
-    dragging: bool,
+    /// Mouse-down position before the first drag motion. Keeping this separate
+    /// from `selection` prevents a plain click from becoming a visible,
+    /// copyable one-cell selection.
+    pending_anchor: Option<SelectionPoint>,
 }
 
 /// Pointer button/kind discriminants shared with `crate::input`'s Slint
@@ -206,6 +213,7 @@ impl PaneSelectionState {
     pub(crate) fn clear(&mut self) {
         self.selection = None;
         self.baseline.clear();
+        self.pending_anchor = None;
     }
 
     /// Handle a terminal-surface pointer event for selection purposes:
@@ -243,11 +251,11 @@ impl PaneSelectionState {
         match (button, kind) {
             (BTN_LEFT, KIND_PRESS) => {
                 let n = self.click.register(cell, now);
-                let sel = match (n, snap) {
+                match (n, snap) {
                     (2, Some(snap)) => {
                         let (from, to) = word_bounds(snap, cell.0, cell.1);
-                        self.dragging = false;
-                        Selection::new(
+                        self.pending_anchor = None;
+                        self.selection = Some(Selection::new(
                             SelectionPoint {
                                 row: abs_row,
                                 col: from,
@@ -256,12 +264,14 @@ impl PaneSelectionState {
                                 row: abs_row,
                                 col: to,
                             },
-                        )
+                        ));
+                        self.rebaseline(snap);
+                        true
                     }
                     (n, Some(snap)) if n >= 3 => {
                         let (from, to) = line_bounds(snap.size.cols);
-                        self.dragging = false;
-                        Selection::new(
+                        self.pending_anchor = None;
+                        self.selection = Some(Selection::new(
                             SelectionPoint {
                                 row: abs_row,
                                 col: from,
@@ -270,47 +280,39 @@ impl PaneSelectionState {
                                 row: abs_row,
                                 col: to,
                             },
-                        )
+                        ));
+                        self.rebaseline(snap);
+                        true
                     }
                     _ => {
-                        self.dragging = true;
-                        Selection::new(
-                            SelectionPoint {
-                                row: abs_row,
-                                col: cell.1,
-                            },
-                            SelectionPoint {
-                                row: abs_row,
-                                col: cell.1,
-                            },
-                        )
+                        let changed = self.selection.take().is_some();
+                        self.baseline.clear();
+                        self.pending_anchor = Some(SelectionPoint {
+                            row: abs_row,
+                            col: cell.1,
+                        });
+                        changed
                     }
-                };
-                self.selection = Some(sel);
-                if let Some(snap) = snap {
-                    self.rebaseline(snap);
                 }
-                true
             }
-            (BTN_LEFT, KIND_MOVE) if self.dragging => {
+            (BTN_LEFT, KIND_MOVE) if self.pending_anchor.is_some() => {
+                let anchor = self.pending_anchor.expect("checked above");
                 let new_cursor = SelectionPoint {
                     row: abs_row,
                     col: cell.1,
                 };
-                let changed = match &mut self.selection {
-                    Some(sel) if sel.cursor != new_cursor => {
-                        sel.cursor = new_cursor;
-                        true
-                    }
-                    _ => false,
-                };
+                let next = Selection::new(anchor, new_cursor);
+                let changed = self.selection.as_ref() != Some(&next);
+                self.selection = Some(next);
+                // A drag is not the first half of a later double-click.
+                self.click.reset();
                 if changed && let Some(snap) = snap {
                     self.rebaseline(snap);
                 }
                 changed
             }
             (_, KIND_RELEASE) => {
-                self.dragging = false;
+                self.pending_anchor = None;
                 false
             }
             _ => false,
@@ -516,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn double_click_selects_word_and_stops_dragging() {
+    fn double_click_selects_word_without_starting_a_drag() {
         let snap = row_snap(&["hello world"], 11);
         let mut s = PaneSelectionState::default();
         let t0 = Instant::now();
@@ -530,7 +532,8 @@ mod tests {
         );
         let (start, end) = s.selection().unwrap().normalized();
         assert_eq!((start.col, end.col), (6, 10)); // "world"
-        // A stray move after a word-click must not extend it (dragging=false).
+        // A stray move after a word-click must not extend it because there is
+        // no pending drag anchor.
         s.on_pointer(
             BTN_LEFT,
             KIND_MOVE,
@@ -561,17 +564,13 @@ mod tests {
     }
 
     #[test]
-    fn release_without_drag_leaves_a_single_cell_selection_but_stops_dragging() {
-        // Matches the pinned model: creating the Selection happens on press;
-        // whether a *visible/copyable* highlight is desirable for a pure
-        // click-no-drag is a product nicety left to the renderer/UX, but the
-        // state machine itself must not keep "dragging" true after release.
+    fn release_without_drag_leaves_no_selection() {
         let snap = row_snap(&["x"], 1);
         let mut s = PaneSelectionState::default();
         let t0 = Instant::now();
         s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0);
         s.on_pointer(BTN_LEFT, KIND_RELEASE, (0, 0), Some(&snap), t0);
-        assert!(!s.dragging);
+        assert!(s.selection().is_none());
     }
 
     #[test]
@@ -643,11 +642,12 @@ mod tests {
     // touch the selection -- these assert that signal is correct.
 
     #[test]
-    fn press_reports_changed() {
+    fn press_without_an_existing_selection_reports_unchanged() {
         let snap = row_snap(&["abc"], 3);
         let mut s = PaneSelectionState::default();
         let t0 = Instant::now();
-        assert!(s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0));
+        assert!(!s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0));
+        assert!(s.selection().is_none());
     }
 
     #[test]
@@ -660,15 +660,15 @@ mod tests {
     }
 
     #[test]
-    fn dragging_move_to_the_same_cell_reports_unchanged() {
-        // The drag cursor didn't actually move to a new cell -- e.g. two
-        // motion events land in the same cell -- there is nothing new to
-        // paint, so this must report `false` (a real-world analogue of a
-        // hover-only move, at the drag layer).
+    fn first_same_cell_drag_move_creates_a_one_cell_selection() {
         let snap = row_snap(&["abcdef"], 6);
         let mut s = PaneSelectionState::default();
         let t0 = Instant::now();
         s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 2), Some(&snap), t0);
+        assert!(s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 2), Some(&snap), t0));
+        let sel = s.selection().expect("selection after same-cell drag");
+        assert_eq!(sel.anchor, SelectionPoint { row: 0, col: 2 });
+        assert_eq!(sel.cursor, SelectionPoint { row: 0, col: 2 });
         assert!(!s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 2), Some(&snap), t0));
     }
 
@@ -690,6 +690,27 @@ mod tests {
         let t0 = Instant::now();
         s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0);
         assert!(!s.on_pointer(BTN_LEFT, KIND_RELEASE, (0, 0), Some(&snap), t0));
+    }
+
+    #[test]
+    fn click_after_drag_clears_selection_and_starts_a_fresh_click_run() {
+        let snap = row_snap(&["hello world"], 11);
+        let mut s = PaneSelectionState::default();
+        let t0 = Instant::now();
+
+        s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0);
+        s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 4), Some(&snap), t0);
+        s.on_pointer(BTN_LEFT, KIND_RELEASE, (0, 4), Some(&snap), t0);
+        assert!(s.selection().is_some());
+
+        assert!(s.on_pointer(
+            BTN_LEFT,
+            KIND_PRESS,
+            (0, 0),
+            Some(&snap),
+            t0 + Duration::from_millis(50),
+        ));
+        assert!(s.selection().is_none());
     }
 
     // ── P6.7: selection survives scrollback (offset-aware) ──────────────────
