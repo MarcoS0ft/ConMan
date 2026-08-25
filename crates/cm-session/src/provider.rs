@@ -20,6 +20,7 @@ use cm_core::{LocalSettings, RdpSettings, SshSettings, TelnetSettings};
 use crate::local::LocalTerminalSession;
 use crate::rdp::{CertStore, RdpSession};
 use crate::ssh::{KnownHosts, SshTerminalSession};
+use crate::telnet::TelnetTerminalSession;
 
 /// Default `cm-session` [`SessionProvider`]. Stateless — every call resolves
 /// its own trust-store defaults, exactly as the pre-P6.15 `cm-ui` call sites
@@ -73,12 +74,12 @@ impl SessionProvider for SessionProviderImpl {
 
     fn connect_telnet(
         &self,
-        _settings: &TelnetSettings,
-        _size: TerminalSize,
+        settings: &TelnetSettings,
+        size: TerminalSize,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
-        Err(SessionSetupError::new(
-            "Telnet session adapter is not implemented yet",
-        ))
+        TelnetTerminalSession::connect(settings, size)
+            .map(|session| Box::new(session) as Box<dyn Session>)
+            .map_err(|error| SessionSetupError::new(error.to_string()))
     }
 
     fn connect_rdp(

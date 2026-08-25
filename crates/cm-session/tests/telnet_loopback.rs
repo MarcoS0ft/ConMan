@@ -1,0 +1,313 @@
+//! Default-on TELNET transport integration coverage using only loopback TCP.
+
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use cm_core::TelnetSettings;
+use cm_core::terminal::{GridSnapshot, Key, KeyEvent, KeyModifiers, TerminalSize};
+use cm_session::{SessionStatus, TelnetTerminalSession, TerminalSession};
+
+const IAC: u8 = 255;
+const DO: u8 = 253;
+const WILL: u8 = 251;
+const SB: u8 = 250;
+const SE: u8 = 240;
+
+fn settings(port: u16) -> TelnetSettings {
+    TelnetSettings {
+        host: "127.0.0.1".to_owned(),
+        port,
+    }
+}
+
+fn size() -> TerminalSize {
+    TerminalSize { cols: 80, rows: 24 }
+}
+
+fn wait_for_connected(session: &dyn TerminalSession) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match session.status() {
+            SessionStatus::Connected => return,
+            SessionStatus::Failed(reason) => panic!("TELNET connect failed: {reason}"),
+            status if Instant::now() >= deadline => {
+                panic!("TELNET did not connect before deadline: {status:?}")
+            }
+            _ => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+}
+
+fn wait_for_terminal_status(session: &dyn TerminalSession) -> SessionStatus {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let status = session.status();
+        if !matches!(status, SessionStatus::Connecting | SessionStatus::Connected) {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "TELNET remained active before deadline: {status:?}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn snapshot_contains(snapshot: &GridSnapshot, needle: &str) -> bool {
+    snapshot
+        .cells
+        .chunks(usize::from(snapshot.size.cols))
+        .any(|row| {
+            row.iter()
+                .map(|cell| {
+                    if cell.grapheme.is_empty() {
+                        " "
+                    } else {
+                        cell.grapheme.as_str()
+                    }
+                })
+                .collect::<String>()
+                .contains(needle)
+        })
+}
+
+fn wait_for_text(session: &dyn TerminalSession, needle: &str) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "terminal did not render {needle:?}");
+        match session.snapshots().recv_timeout(remaining) {
+            Ok(snapshot) if snapshot_contains(&snapshot, needle) => return,
+            Ok(_) => {}
+            Err(error) => panic!("snapshot stream closed before rendering {needle:?}: {error}"),
+        }
+    }
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+fn read_until(stream: &mut TcpStream, expected: &[&[u8]]) -> Vec<u8> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("set server read timeout");
+    let mut transcript = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    while !expected.iter().all(|needle| contains(&transcript, needle)) {
+        let count = stream.read(&mut buffer).unwrap_or_else(|error| {
+            panic!("read client bytes ({error}); transcript={transcript:?}")
+        });
+        assert_ne!(
+            count, 0,
+            "client closed before expected TELNET transcript: {transcript:?}"
+        );
+        transcript.extend_from_slice(&buffer[..count]);
+    }
+    transcript
+}
+
+#[test]
+fn negotiation_render_input_terminal_type_naws_and_eof() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind TELNET loopback");
+    let port = listener.local_addr().expect("listener address").port();
+    let (transcript_tx, transcript_rx) = mpsc::channel();
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept TELNET client");
+        stream.set_nodelay(true).expect("TCP_NODELAY on server");
+
+        // The seven startup requests are deterministic and sent as one setup
+        // record before the session becomes Connected.
+        let startup = [
+            IAC, WILL, 0, IAC, WILL, 3, IAC, WILL, 24, IAC, WILL, 31, IAC, DO, 0, IAC, DO, 1, IAC,
+            DO, 3,
+        ];
+        let mut received_startup = vec![0_u8; startup.len()];
+        stream
+            .read_exact(&mut received_startup)
+            .expect("read startup negotiation");
+        assert_eq!(received_startup, startup);
+
+        // Split every protocol byte into its own socket write. This exercises
+        // driver-to-codec integration with negotiation and SB boundaries.
+        let script = [
+            IAC, DO, 3, // local SGA
+            IAC, DO, 24, // local terminal type
+            IAC, DO, 31, // local NAWS (triggers initial dimensions)
+            IAC, WILL, 1, // remote ECHO
+            IAC, WILL, 3, // remote SGA
+            IAC, WILL, 42, // unknown remote option (must be refused)
+            IAC, SB, 24, 1, IAC, SE, // TERMINAL-TYPE SEND
+        ];
+        for byte in script {
+            stream.write_all(&[byte]).expect("write fragmented byte");
+            thread::yield_now();
+        }
+        stream
+            .write_all(b"LOOPBACK_OK\r\n")
+            .expect("write application data");
+
+        let initial_naws = [IAC, SB, 31, 0, 80, 0, 24, IAC, SE];
+        let resized_naws = [IAC, SB, 31, 0, 100, 0, 40, IAC, SE];
+        let terminal_type = [
+            IAC, SB, 24, 0, b'x', b't', b'e', b'r', b'm', b'-', b'2', b'5', b'6', b'c', b'o', b'l',
+            b'o', b'r', IAC, SE,
+        ];
+        let refused_unknown = [IAC, 254, 42];
+        // Paste mapping, doubled application IAC, semantic Enter (CR LF),
+        // literal pasted CR (CR NUL), then a marker from the next input record.
+        let encoded_user_input = [
+            b'A', b'\r', b'\n', b'B', b'\r', 0, b'C', IAC, IAC, b'\r', b'\n', b'\r', 0, b'Z',
+        ];
+
+        let mut transcript = received_startup;
+        transcript.extend_from_slice(&read_until(
+            &mut stream,
+            &[
+                &initial_naws,
+                &resized_naws,
+                &terminal_type,
+                &refused_unknown,
+                &encoded_user_input,
+            ],
+        ));
+        transcript_tx.send(transcript).expect("send transcript");
+        // Drop the socket: client must classify clean EOF as Disconnected.
+    });
+
+    let session = TelnetTerminalSession::connect(&settings(port), size()).expect("start session");
+    wait_for_connected(&session);
+    wait_for_text(&session, "LOOPBACK_OK");
+
+    session.paste(vec![b'A', b'\n', b'B', b'\r', b'C', IAC]);
+    session.send_key(KeyEvent {
+        key: Key::Enter,
+        mods: KeyModifiers::default(),
+    });
+    session.paste(b"\r".to_vec());
+    session.paste(b"Z".to_vec());
+    session.resize(TerminalSize {
+        cols: 100,
+        rows: 40,
+    });
+
+    let transcript = transcript_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("server observed full transcript");
+    assert!(
+        contains(&transcript, &[IAC, IAC, b'\r', b'\n', b'\r', 0, b'Z']),
+        "Enter must be CR LF while a literal CR remains CR NUL"
+    );
+    server.join().expect("TELNET server thread");
+    assert!(matches!(
+        wait_for_terminal_status(&session),
+        SessionStatus::Disconnected
+    ));
+    session.shutdown();
+}
+
+#[test]
+fn connection_refusal_surfaces_failed_status() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind unused port");
+    let port = listener.local_addr().expect("listener address").port();
+    drop(listener);
+
+    let session = TelnetTerminalSession::connect(&settings(port), size()).expect("start session");
+    match wait_for_terminal_status(&session) {
+        SessionStatus::Failed(reason) => assert!(reason.contains("connect failed")),
+        status => panic!("expected failed connection, got {status:?}"),
+    }
+    session.shutdown();
+}
+
+#[test]
+fn oversized_subnegotiation_fails_soft() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind TELNET loopback");
+    let port = listener.local_addr().expect("listener address").port();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept TELNET client");
+        let mut startup = [0_u8; 21];
+        stream.read_exact(&mut startup).expect("read startup");
+        stream
+            .write_all(&[IAC, SB, 42])
+            .expect("start oversized subnegotiation");
+        stream
+            .write_all(&vec![b'x'; 64 * 1024 + 1])
+            .expect("write oversized subnegotiation");
+    });
+
+    let session = TelnetTerminalSession::connect(&settings(port), size()).expect("start session");
+    match wait_for_terminal_status(&session) {
+        SessionStatus::Failed(reason) => assert!(reason.contains("protocol error")),
+        status => panic!("expected protocol failure, got {status:?}"),
+    }
+    server.join().expect("TELNET server thread");
+    session.shutdown();
+}
+
+#[test]
+fn shutdown_while_connected_joins_promptly() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind TELNET loopback");
+    let port = listener.local_addr().expect("listener address").port();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept TELNET client");
+        let mut startup = [0_u8; 21];
+        stream.read_exact(&mut startup).expect("read startup");
+        let mut byte = [0_u8; 1];
+        assert_eq!(stream.read(&mut byte).expect("wait for client close"), 0);
+    });
+
+    let session = TelnetTerminalSession::connect(&settings(port), size()).expect("start session");
+    wait_for_connected(&session);
+    let started = Instant::now();
+    session.shutdown();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "shutdown took {:?}",
+        started.elapsed()
+    );
+    server.join().expect("TELNET server thread");
+    assert!(matches!(session.status(), SessionStatus::Disconnected));
+}
+
+#[test]
+fn shutdown_interrupts_blocked_socket_write() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind TELNET loopback");
+    let port = listener.local_addr().expect("listener address").port();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (close_tx, close_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept TELNET client");
+        let mut startup = [0_u8; 21];
+        stream.read_exact(&mut startup).expect("read startup");
+        ready_tx.send(()).expect("announce server ready");
+        // Deliberately stop reading. A sufficiently large paste fills the TCP
+        // send buffer and leaves the driver's write pending until shutdown.
+        close_rx.recv().expect("wait to close server socket");
+        drop(stream);
+    });
+
+    let session = TelnetTerminalSession::connect(&settings(port), size()).expect("start session");
+    wait_for_connected(&session);
+    ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("server read startup");
+    session.paste(vec![b'x'; 16 * 1024 * 1024]);
+    thread::sleep(Duration::from_millis(100));
+
+    let started = Instant::now();
+    session.shutdown();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "shutdown did not cancel the pending socket write: {:?}",
+        started.elapsed()
+    );
+    close_tx.send(()).expect("close server");
+    server.join().expect("TELNET server thread");
+}

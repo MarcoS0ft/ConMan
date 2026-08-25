@@ -9,7 +9,7 @@
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 
-use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalEngine, TerminalSize};
+use cm_core::terminal::{GridSnapshot, Key, KeyEvent, MouseEvent, TerminalEngine, TerminalSize};
 
 use crate::libghostty::{EngineError, LibghosttyEngine};
 
@@ -115,6 +115,12 @@ impl ScrollState {
 pub(crate) trait Transport: Send {
     /// Write encoded input / engine response bytes to the transport.
     fn write(&mut self, bytes: &[u8]);
+    /// Write bytes generated from one key event. TELNET needs the semantic
+    /// distinction between Enter (NVT newline) and a literal CR such as
+    /// Ctrl+M; byte-stream transports retain the existing default behavior.
+    fn write_key(&mut self, bytes: &[u8], _newline_intent: bool) {
+        self.write(bytes);
+    }
     /// Propagate a grid resize to the transport (PTY `set_size` / SSH
     /// `window_change`). The engine itself is resized by the owner loop.
     fn resize(&mut self, size: TerminalSize);
@@ -185,7 +191,13 @@ pub(crate) fn run_engine_owner<T: Transport>(
                     break; // consumer gone
                 }
             }
-            Msg::Key(ev) => transport.write(&engine.encode_key(&ev)),
+            Msg::Key(ev) => {
+                let encoded = engine.encode_key(&ev);
+                // Modified Enter may have a transport-specific escape sequence;
+                // replace bytes with TELNET's newline only for the canonical CR.
+                let newline_intent = matches!(ev.key, Key::Enter) && encoded == b"\r";
+                transport.write_key(&encoded, newline_intent);
+            }
             Msg::Mouse(ev) => transport.write(&engine.encode_mouse(&ev)),
             Msg::Paste(bytes) => {
                 let wrapped = wrap_paste(&bytes, engine.bracketed_paste_enabled());
@@ -328,6 +340,15 @@ mod tests {
             Msg::Paste(b"two".to_vec()),
         ]);
         assert_eq!(out, b"\x1b[200~one\x1b[201~two".to_vec());
+    }
+
+    #[test]
+    fn transport_default_preserves_enter_bytes() {
+        let out = drive(vec![Msg::Key(KeyEvent {
+            key: Key::Enter,
+            mods: Default::default(),
+        })]);
+        assert_eq!(out, b"\r");
     }
 
     // ── P6.7: Msg::SetScroll / Msg::QueryBuffer via a fresh engine-owner ────

@@ -3,7 +3,8 @@
 //! Provides two session families:
 //!
 //! 1. **Terminal sessions** — local PTY shell ([`LocalTerminalSession`]) and
-//!    SSH shell ([`SshTerminalSession`]). Both implement [`TerminalSession`]
+//!    SSH/TELNET remote terminals ([`SshTerminalSession`],
+//!    [`TelnetTerminalSession`]). All implement [`TerminalSession`]
 //!    and [`Session`] (ARCHITECTURE §4, P3.x / P4.1). Gated on
 //!    `engine-libghostty`.
 //!
@@ -36,6 +37,8 @@ mod libghostty;
 mod local;
 #[cfg(feature = "engine-libghostty")]
 mod ssh;
+#[cfg(feature = "engine-libghostty")]
+mod telnet;
 
 #[cfg(feature = "engine-libghostty")]
 pub use libghostty::{EngineError, LibghosttyEngine};
@@ -47,6 +50,8 @@ pub use ssh::{
     KbdInteractiveHandler, KbdInteractivePrompt, KnownHostSource, KnownHosts, SshAuthInput,
     SshError, SshTerminalSession,
 };
+#[cfg(feature = "engine-libghostty")]
+pub use telnet::{TelnetError, TelnetTerminalSession};
 
 // P6.15: the `SessionProvider` port adapter needs `LocalTerminalSession`
 // (local.rs) and `SshTerminalSession` (ssh.rs), both gated on
