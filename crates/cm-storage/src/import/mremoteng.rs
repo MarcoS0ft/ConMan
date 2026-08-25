@@ -61,6 +61,7 @@
 //! ## Field + protocol mapping
 //! `Type="Container"` → [`Group`] (nested). `Protocol="RDP"` →
 //! [`ConnectionKind::Rdp`]; `"SSH1"`/`"SSH2"` → [`ConnectionKind::Ssh`];
+//! `"Telnet"` → [`ConnectionKind::Telnet`] with interactive login;
 //! anything else → skipped with a counted [`ImportWarning`]. A blank/absent
 //! effective `Hostname` also skips the connection (counted), mirroring CSV's
 //! missing-host handling. `Port` blank/unparsable → the kind's default.
@@ -78,7 +79,7 @@ use std::collections::HashMap;
 
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionSettings, CredentialPurpose,
-    CredentialSource, Group, GroupId, RdpSettings, SshAuthMethod, SshSettings,
+    CredentialSource, Group, GroupId, RdpSettings, SshAuthMethod, SshSettings, TelnetSettings,
 };
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -470,6 +471,7 @@ fn build_connection(
     let kind = match protocol.to_ascii_uppercase().as_str() {
         "RDP" => ConnectionKind::Rdp,
         "SSH1" | "SSH2" => ConnectionKind::Ssh,
+        "TELNET" => ConnectionKind::Telnet,
         other => {
             tracing::warn!(connection = %name, protocol = %other, "mremoteng: unsupported protocol skipped");
             ctx.warnings.push(ImportWarning::new(format!(
@@ -501,7 +503,13 @@ fn build_connection(
         .password
         .as_deref()
         .is_some_and(|p| !p.trim().is_empty());
-    let decrypted_password = if password_present {
+    let decrypted_password = if kind == ConnectionKind::Telnet {
+        // P10.1 Telnet login is driven entirely by the remote terminal. Do
+        // not even attempt to decrypt the node's password: aside from being
+        // unnecessary, doing so would make ignored credential material
+        // observable through password/decryption failures.
+        None
+    } else if password_present {
         ctx.decrypt(
             effective
                 .password
@@ -511,7 +519,15 @@ fn build_connection(
     } else {
         None
     };
-    if password_present && decrypted_password.is_none() {
+    if kind == ConnectionKind::Telnet && (username.is_some() || password_present) {
+        tracing::warn!(
+            connection = %name,
+            "mremoteng: Telnet credential fields ignored; login is interactive"
+        );
+        ctx.warnings.push(ImportWarning::new(format!(
+            "connection '{name}': Telnet credentials were ignored because Telnet login is interactive"
+        )));
+    } else if password_present && decrypted_password.is_none() {
         tracing::warn!(
             connection = %name,
             "mremoteng: password present but undecryptable, connection imported without a credential"
@@ -527,13 +543,17 @@ fn build_connection(
     // carried on the source itself (authoritative, per
     // `resolve_connection_auth`'s Inline arm) in addition to still landing on
     // the connection's settings below.
-    let credential_source = decrypted_password
-        .is_some()
-        .then(|| CredentialSource::Inline {
-            username: username.clone().unwrap_or_default(),
-            domain: domain.clone(),
-            has_secret: true,
-        });
+    let credential_source = if kind == ConnectionKind::Telnet {
+        Some(CredentialSource::Prompt)
+    } else {
+        decrypted_password
+            .is_some()
+            .then(|| CredentialSource::Inline {
+                username: username.clone().unwrap_or_default(),
+                domain: domain.clone(),
+                has_secret: true,
+            })
+    };
 
     let port_raw = effective.port;
     let settings = match kind {
@@ -561,11 +581,15 @@ fn build_connection(
             },
         }),
         ConnectionKind::LocalTerminal => {
-            unreachable!("mremoteng only ever classifies RDP/SSH1/SSH2 into this arm")
+            unreachable!("mremoteng does not classify local terminal nodes")
         }
-        ConnectionKind::Telnet => {
-            unreachable!("mremoteng does not classify Telnet until the P10.1 importer lane")
-        }
+        ConnectionKind::Telnet => ConnectionSettings::Telnet(TelnetSettings {
+            host,
+            port: port_raw
+                .as_deref()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(TelnetSettings::DEFAULT_PORT),
+        }),
     };
 
     push_connection(
@@ -908,5 +932,80 @@ mod tests {
                 .any(|w| w.message.contains("could not be decrypted")),
             "the corrupt field must be a counted warning: {warnings:?}"
         );
+    }
+
+    #[test]
+    fn telnet_inherits_transport_fields_but_never_decrypts_or_imports_credentials() {
+        let xml = r#"<?xml version="1.0"?>
+<mrng:Connections xmlns:mrng="http://mremoteng.org" Name="Connections"
+    EncryptionEngine="AES" BlockCipherMode="GCM" KdfIterations="1000"
+    FullFileEncryption="false" ConfVersion="2.6">
+  <Node Name="Inherited Telnet" Type="Container" Protocol="Telnet"
+      Hostname="inherited.example.test" Port="2323" Username="legacy-user"
+      Password="deliberately-not-valid-ciphertext">
+    <Node Name="inherited-console" Type="Connection"
+        InheritProtocol="true" InheritHostname="true" InheritPort="true"
+        InheritUsername="true" InheritPassword="true" />
+  </Node>
+  <Node Name="default-port-console" Type="Connection" Protocol="tELnEt"
+      Hostname="default.example.test" />
+</mrng:Connections>"#;
+
+        // There is no Protected canary and the inherited Password is invalid
+        // ciphertext. Success proves the Telnet node's ignored password was
+        // never passed to the decryptor.
+        let (envelope, warnings) =
+            parse(xml, "wrong-and-irrelevant").expect("Telnet password must not be decrypted");
+        assert_eq!(envelope.connections.len(), 2);
+
+        let inherited = envelope
+            .connections
+            .iter()
+            .find(|connection| connection.name == "inherited-console")
+            .expect("inherited Telnet connection present");
+        assert_eq!(inherited.kind, ConnectionKind::Telnet);
+        assert_eq!(inherited.credential_source, Some(CredentialSource::Prompt));
+        match &inherited.settings {
+            ConnectionSettings::Telnet(settings) => {
+                assert_eq!(settings.host, "inherited.example.test");
+                assert_eq!(settings.port, 2323);
+            }
+            other => panic!("expected Telnet settings, got {other:?}"),
+        }
+
+        let default_port = envelope
+            .connections
+            .iter()
+            .find(|connection| connection.name == "default-port-console")
+            .expect("default-port Telnet connection present");
+        match &default_port.settings {
+            ConnectionSettings::Telnet(settings) => {
+                assert_eq!(settings.host, "default.example.test");
+                assert_eq!(settings.port, TelnetSettings::DEFAULT_PORT);
+            }
+            other => panic!("expected Telnet settings, got {other:?}"),
+        }
+        assert_eq!(
+            default_port.credential_source,
+            Some(CredentialSource::Prompt)
+        );
+
+        assert!(envelope.credentials.is_empty());
+        assert!(envelope.credential_secrets.is_empty());
+        assert!(envelope.connection_secrets.is_empty());
+        let serialized = serde_json::to_string(&envelope).expect("serialize envelope");
+        assert!(!serialized.contains("legacy-user"));
+        assert!(!serialized.contains("deliberately-not-valid-ciphertext"));
+
+        let ignored_warnings = warnings
+            .iter()
+            .filter(|warning| warning.message.contains("Telnet credentials were ignored"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ignored_warnings.len(),
+            1,
+            "inherited username plus password produce one warning for their connection: {warnings:?}"
+        );
+        assert!(ignored_warnings[0].message.contains("inherited-console"));
     }
 }

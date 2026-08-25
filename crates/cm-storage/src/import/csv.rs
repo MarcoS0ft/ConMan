@@ -21,15 +21,16 @@
 //! password, ssh_private_key_pem, ssh_passphrase, width, height,
 //! color_depth, cred_name`
 //!
-//! - `kind` = `ssh` | `rdp` | `local` (case-insensitive). Anything else, or a
-//!   missing `name`/`kind`, or a missing `host` on an ssh/rdp row, skips the
+//! - `kind` = `ssh` | `rdp` | `telnet` | `local` (case-insensitive). Anything
+//!   else, or a missing `name`/`kind`, or a missing `host` on a remote row, skips the
 //!   row with a counted [`ImportWarning`] naming the row number and reason —
 //!   never silent.
 //! - `group_path` is `/`-separated (e.g. `Prod/Web`), creating nested groups
 //!   deduped by full path string (mirrors [`super::royalts`]'s per-document
 //!   dedupe philosophy, just keyed by path instead of a foreign object ID).
 //!   Blank → root level.
-//! - `port` blank or unparsable → the kind's default (22 ssh / 3389 rdp).
+//! - `port` blank or unparsable → the kind's default (22 ssh / 3389 rdp /
+//!   23 telnet).
 //!   `width`/`height`/`color_depth` (rdp only) blank or unparsable →
 //!   [`RdpSettings`]'s own defaults — these are never fatal to the row (a
 //!   malformed number just falls back rather than aborting an otherwise-good
@@ -45,7 +46,9 @@
 //!   (purpose `ssh-key` / `ssh-passphrase`). `agent` and `prompt` rows never
 //!   store secret material even if those columns are non-empty (explicit
 //!   "don't store" intent). `local` rows never get a credential attached
-//!   (no auth concept in [`LocalSettings`]).
+//!   (no auth concept in [`LocalSettings`]). Telnet rows always use
+//!   [`CredentialSource::Prompt`]; populated username/password/key fields are
+//!   ignored with one counted warning because login is interactive.
 //! - **Credential handling:** if `cred_name` is set, **dedupe** — one
 //!   [`Credential`] per unique `cred_name`, referenced by every row sharing
 //!   it, as a [`CredentialSource::Object`]. Two passes over the parsed rows
@@ -77,7 +80,7 @@ use std::collections::HashMap;
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionSettings, Credential, CredentialId,
     CredentialKind, CredentialPurpose, CredentialRef, CredentialSource, Group, GroupId,
-    LocalSettings, RdpSettings, SshAuthMethod, SshSettings,
+    LocalSettings, RdpSettings, SshAuthMethod, SshSettings, TelnetSettings,
 };
 
 use crate::json_io::{
@@ -305,6 +308,12 @@ fn push_secrets(
 
 fn collect_credentials(records: &[::csv::StringRecord], idx: &HeaderIndex, ctx: &mut ParseCtx) {
     for rec in records {
+        // Telnet's authentication is remote-prompt driven. In particular, a
+        // Telnet row carrying `cred_name` must not manufacture a credential
+        // object during this first pass before the row itself is translated.
+        if field(idx, rec, "kind").is_some_and(|kind| kind.eq_ignore_ascii_case("telnet")) {
+            continue;
+        }
         let Some(cred_name) = field(idx, rec, "cred_name") else {
             continue;
         };
@@ -402,7 +411,8 @@ enum RowCredential {
 /// row becomes [`RowCredential::InlinePassword`] (genuinely per-row, unshared
 /// — no dedupe concept applies). `None` when the row has no secret material
 /// at all. `local` rows never get a credential — [`LocalSettings`] has no
-/// auth concept.
+/// auth concept; Telnet always explicitly prompts and must not retain any
+/// imported secret material.
 #[allow(clippy::too_many_arguments)]
 fn resolve_row_credential(
     ctx: &mut ParseCtx,
@@ -415,7 +425,7 @@ fn resolve_row_credential(
     cred_name: Option<&str>,
     conn_name: &str,
 ) -> Option<RowCredential> {
-    if kind == ConnectionKind::LocalTerminal {
+    if matches!(kind, ConnectionKind::LocalTerminal | ConnectionKind::Telnet) {
         return None;
     }
     if let Some(name) = cred_name {
@@ -494,6 +504,7 @@ fn process_row(row_num: u64, rec: &::csv::StringRecord, idx: &HeaderIndex, ctx: 
     let kind = match kind_str.to_ascii_lowercase().as_str() {
         "ssh" => ConnectionKind::Ssh,
         "rdp" => ConnectionKind::Rdp,
+        "telnet" => ConnectionKind::Telnet,
         "local" => ConnectionKind::LocalTerminal,
         other => {
             tracing::warn!(row = row_num, kind = %other, "csv: row skipped, unrecognized kind");
@@ -522,6 +533,21 @@ fn process_row(row_num: u64, rec: &::csv::StringRecord, idx: &HeaderIndex, ctx: 
     let ssh_passphrase = field(idx, rec, "ssh_passphrase");
     let cred_name = field(idx, rec, "cred_name");
 
+    if kind == ConnectionKind::Telnet
+        && (username.is_some()
+            || password.is_some()
+            || ssh_key.is_some()
+            || ssh_passphrase.is_some())
+    {
+        tracing::warn!(
+            row = row_num,
+            "csv: Telnet credential fields ignored; login is interactive"
+        );
+        ctx.warnings.push(ImportWarning::new(format!(
+            "row {row_num}: Telnet credentials were ignored because Telnet login is interactive"
+        )));
+    }
+
     let credential_resolution = resolve_row_credential(
         ctx,
         kind,
@@ -537,14 +563,17 @@ fn process_row(row_num: u64, rec: &::csv::StringRecord, idx: &HeaderIndex, ctx: 
     // reference; a genuinely per-row password (no cred_name) becomes Inline,
     // carrying username/domain on the source itself (authoritative, per
     // `resolve_connection_auth`'s Inline arm).
-    let credential = match &credential_resolution {
-        Some(RowCredential::Object(id)) => Some(CredentialSource::Object(*id)),
-        Some(RowCredential::InlinePassword(_)) => Some(CredentialSource::Inline {
-            username: username.clone().unwrap_or_default(),
-            domain: domain.clone(),
-            has_secret: true,
-        }),
-        None => None,
+    let credential = match kind {
+        ConnectionKind::Telnet => Some(CredentialSource::Prompt),
+        _ => match &credential_resolution {
+            Some(RowCredential::Object(id)) => Some(CredentialSource::Object(*id)),
+            Some(RowCredential::InlinePassword(_)) => Some(CredentialSource::Inline {
+                username: username.clone().unwrap_or_default(),
+                domain: domain.clone(),
+                has_secret: true,
+            }),
+            None => None,
+        },
     };
 
     let settings = match kind {
@@ -576,9 +605,13 @@ fn process_row(row_num: u64, rec: &::csv::StringRecord, idx: &HeaderIndex, ctx: 
             color_depth: parse_or(field(idx, rec, "color_depth").as_deref(), 32),
         }),
         ConnectionKind::LocalTerminal => ConnectionSettings::Local(LocalSettings::default()),
-        ConnectionKind::Telnet => {
-            unreachable!("CSV kind parser does not classify Telnet until the P10.1 importer lane")
-        }
+        ConnectionKind::Telnet => ConnectionSettings::Telnet(TelnetSettings {
+            host: host.unwrap_or_default(),
+            port: parse_or(
+                field(idx, rec, "port").as_deref(),
+                TelnetSettings::DEFAULT_PORT,
+            ),
+        }),
     };
 
     let conn_id = ctx.fresh_conn_id();
@@ -820,5 +853,76 @@ mod tests {
     fn empty_input_is_a_malformed_error_not_a_panic() {
         let err = parse("").unwrap_err();
         assert!(matches!(err, ImportExportError::Malformed(_)));
+    }
+
+    #[test]
+    fn telnet_rows_use_interactive_login_and_never_create_secret_artifacts() {
+        let csv = r#"name,kind,host,port,username,cred_name,auth_method,password,ssh_private_key_pem,ssh_passphrase
+legacy-console,telnet,legacy.example.test,2323,legacy-user,legacy-cred,key,legacy-password,legacy-private-key,legacy-passphrase
+default-port,TeLnEt,default.example.test,,,,,,,
+"#;
+
+        let (envelope, warnings) = parse(csv).expect("Telnet rows should parse");
+        assert_eq!(envelope.connections.len(), 2);
+
+        let legacy = envelope
+            .connections
+            .iter()
+            .find(|connection| connection.name == "legacy-console")
+            .expect("custom-port Telnet connection present");
+        assert_eq!(legacy.kind, ConnectionKind::Telnet);
+        assert_eq!(legacy.credential_source, Some(CredentialSource::Prompt));
+        match &legacy.settings {
+            ConnectionSettings::Telnet(settings) => {
+                assert_eq!(settings.host, "legacy.example.test");
+                assert_eq!(settings.port, 2323);
+            }
+            other => panic!("expected Telnet settings, got {other:?}"),
+        }
+
+        let default_port = envelope
+            .connections
+            .iter()
+            .find(|connection| connection.name == "default-port")
+            .expect("default-port Telnet connection present");
+        match &default_port.settings {
+            ConnectionSettings::Telnet(settings) => {
+                assert_eq!(settings.host, "default.example.test");
+                assert_eq!(settings.port, TelnetSettings::DEFAULT_PORT);
+            }
+            other => panic!("expected Telnet settings, got {other:?}"),
+        }
+        assert_eq!(
+            default_port.credential_source,
+            Some(CredentialSource::Prompt)
+        );
+
+        assert!(envelope.credentials.is_empty());
+        assert!(envelope.credential_secrets.is_empty());
+        assert!(envelope.connection_secrets.is_empty());
+        let serialized = serde_json::to_string(&envelope).expect("serialize envelope");
+        for ignored in [
+            "legacy-user",
+            "legacy-cred",
+            "legacy-password",
+            "legacy-private-key",
+            "legacy-passphrase",
+        ] {
+            assert!(
+                !serialized.contains(ignored),
+                "ignored Telnet field leaked into the envelope: {ignored}"
+            );
+        }
+
+        let ignored_warnings = warnings
+            .iter()
+            .filter(|warning| warning.message.contains("Telnet credentials were ignored"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ignored_warnings.len(),
+            1,
+            "all populated credential/key fields on one row produce one warning: {warnings:?}"
+        );
+        assert!(ignored_warnings[0].message.starts_with("row 2:"));
     }
 }
