@@ -1108,8 +1108,17 @@ pub(super) fn profile_fields_from_conn(
             s.domain.clone().unwrap_or_default(),
             format!("{}x{}", s.width, s.height),
         ),
-        ConnectionSettings::Local(_) => (
+        ConnectionSettings::Telnet(s) => (
             2,
+            s.host.clone(),
+            s.port.to_string(),
+            String::new(),
+            1,
+            String::new(),
+            default_rdp_resolution(),
+        ),
+        ConnectionSettings::Local(_) => (
+            3,
             String::new(),
             String::new(),
             String::new(),

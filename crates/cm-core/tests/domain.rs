@@ -9,7 +9,8 @@ use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings, Credential,
     CredentialFolder, CredentialFolderId, CredentialId, CredentialKind, CredentialPurpose,
     CredentialRef, CredentialSource, DomainError, Group, GroupId, LocalSettings, RdpSettings,
-    RepositoryError, Secret, SshAuthMethod, SshSettings, resolve_effective_credential,
+    RepositoryError, Secret, SshAuthMethod, SshSettings, TelnetSettings,
+    resolve_effective_credential,
 };
 
 fn rdp_settings() -> ConnectionSettings {
@@ -28,6 +29,13 @@ fn ssh_settings(auth: SshAuthMethod) -> ConnectionSettings {
         port: SshSettings::DEFAULT_PORT,
         username: "bob".to_string(),
         auth_method: auth,
+    })
+}
+
+fn telnet_settings() -> ConnectionSettings {
+    ConnectionSettings::Telnet(TelnetSettings {
+        host: "console.example".to_string(),
+        port: TelnetSettings::DEFAULT_PORT,
     })
 }
 
@@ -257,6 +265,10 @@ fn connection_kind_tag_strings_are_pinned() {
         "\"ssh\""
     );
     assert_eq!(
+        serde_json::to_string(&ConnectionKind::Telnet).unwrap(),
+        "\"telnet\""
+    );
+    assert_eq!(
         serde_json::to_string(&ConnectionKind::LocalTerminal).unwrap(),
         "\"local\""
     );
@@ -264,6 +276,10 @@ fn connection_kind_tag_strings_are_pinned() {
     assert_eq!(
         serde_json::from_str::<ConnectionKind>("\"local\"").unwrap(),
         ConnectionKind::LocalTerminal
+    );
+    assert_eq!(
+        serde_json::from_str::<ConnectionKind>("\"telnet\"").unwrap(),
+        ConnectionKind::Telnet
     );
 }
 
@@ -298,6 +314,19 @@ fn connection_settings_external_tags_are_pinned() {
 
     let ssh = serde_json::to_value(ssh_settings(SshAuthMethod::Agent)).unwrap();
     assert!(ssh.get("ssh").is_some());
+
+    let telnet = serde_json::to_value(telnet_settings()).unwrap();
+    assert!(telnet.get("telnet").is_some());
+    assert_eq!(
+        serde_json::from_value::<ConnectionSettings>(telnet).unwrap(),
+        telnet_settings()
+    );
+}
+
+#[test]
+fn telnet_settings_kind_and_default_port_are_pinned() {
+    assert_eq!(TelnetSettings::DEFAULT_PORT, 23);
+    assert_eq!(telnet_settings().kind(), ConnectionKind::Telnet);
 }
 
 // ---------------------------------------------------------------------------

@@ -300,6 +300,7 @@ fn settings_username(conn: &Connection) -> &str {
     match &conn.settings {
         ConnectionSettings::Ssh(s) => s.username.as_str(),
         ConnectionSettings::Rdp(s) => s.username.as_deref().unwrap_or(""),
+        ConnectionSettings::Telnet(_) => "",
         ConnectionSettings::Local(_) => "",
     }
 }

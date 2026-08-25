@@ -576,6 +576,9 @@ fn process_row(row_num: u64, rec: &::csv::StringRecord, idx: &HeaderIndex, ctx: 
             color_depth: parse_or(field(idx, rec, "color_depth").as_deref(), 32),
         }),
         ConnectionKind::LocalTerminal => ConnectionSettings::Local(LocalSettings::default()),
+        ConnectionKind::Telnet => {
+            unreachable!("CSV kind parser does not classify Telnet until the P10.1 importer lane")
+        }
     };
 
     let conn_id = ctx.fresh_conn_id();

@@ -47,7 +47,9 @@ pub use session::{
     SessionStatus, Surface,
 };
 pub use session_ports::{SessionProvider, SessionSetupError};
-pub use settings::{ConnectionSettings, LocalSettings, RdpSettings, SshAuthMethod, SshSettings};
+pub use settings::{
+    ConnectionSettings, LocalSettings, RdpSettings, SshAuthMethod, SshSettings, TelnetSettings,
+};
 pub use terminal::{
     Cell, CellAttrs, Color, CursorShape, CursorState, GridSnapshot, Key, KeyEvent, KeyModifiers,
     MouseAction, MouseButton, MouseEvent, TerminalEngine, TerminalSize,

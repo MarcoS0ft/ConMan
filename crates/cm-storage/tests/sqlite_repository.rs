@@ -12,6 +12,7 @@ use cm_core::{
     CredentialError, CredentialFolder, CredentialFolderId, CredentialId, CredentialKind,
     CredentialPurpose, CredentialRef, CredentialSource, CredentialStore, Group, GroupId,
     LocalSettings, RdpSettings, RepositoryError, Secret, SshAuthMethod, SshSettings,
+    TelnetSettings,
 };
 use cm_storage::SqliteRepository;
 
@@ -121,6 +122,61 @@ fn mk_ssh_conn(name: &str, group_id: Option<GroupId>, cred: Option<CredentialId>
         0,
     )
     .unwrap()
+}
+
+fn mk_telnet_conn(name: &str, group_id: Option<GroupId>) -> Connection {
+    Connection::new(
+        ConnectionId::UNSAVED,
+        group_id,
+        name.to_string(),
+        ConnectionKind::Telnet,
+        ConnectionSettings::Telnet(TelnetSettings {
+            host: "console.example".to_string(),
+            port: TelnetSettings::DEFAULT_PORT,
+        }),
+        Some(CredentialSource::Prompt),
+        0,
+        0,
+        0,
+    )
+    .unwrap()
+}
+
+#[test]
+fn telnet_connection_round_trips_with_prompt_and_extracted_endpoint() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("telnet.sqlite");
+    let id = {
+        let db = SqliteRepository::open(&path).expect("open repository");
+        db.upsert_connection(&mk_telnet_conn("legacy console", None))
+            .expect("insert telnet connection")
+    };
+
+    let raw = rusqlite::Connection::open(&path).expect("open raw database");
+    let (kind, host, port): (String, Option<String>, Option<i64>) = raw
+        .query_row(
+            "SELECT kind, host, port FROM connections WHERE id = ?1",
+            [id.get()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("raw endpoint columns");
+    assert_eq!(
+        (kind.as_str(), host.as_deref(), port),
+        ("telnet", Some("console.example"), Some(23))
+    );
+    drop(raw);
+
+    let db = SqliteRepository::open(&path).expect("reopen repository");
+    let got = db.get_connection(id).expect("read").expect("present");
+    assert_eq!(got.kind, ConnectionKind::Telnet);
+    assert_eq!(got.credential_source, Some(CredentialSource::Prompt));
+    assert_eq!(
+        got.settings,
+        ConnectionSettings::Telnet(TelnetSettings {
+            host: "console.example".to_string(),
+            port: 23,
+        })
+    );
 }
 
 fn mk_cred(name: &str, folder: Option<CredentialFolderId>) -> Credential {

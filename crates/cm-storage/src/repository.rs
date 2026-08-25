@@ -926,6 +926,7 @@ fn connection_kind_str(kind: ConnectionKind) -> &'static str {
     match kind {
         ConnectionKind::Rdp => "rdp",
         ConnectionKind::Ssh => "ssh",
+        ConnectionKind::Telnet => "telnet",
         ConnectionKind::LocalTerminal => "local",
     }
 }
@@ -934,6 +935,7 @@ fn parse_connection_kind(s: &str) -> Result<ConnectionKind, RepositoryError> {
     match s {
         "rdp" => Ok(ConnectionKind::Rdp),
         "ssh" => Ok(ConnectionKind::Ssh),
+        "telnet" => Ok(ConnectionKind::Telnet),
         "local" => Ok(ConnectionKind::LocalTerminal),
         _ => Err(RepositoryError::Backend(format!(
             "unknown connection kind '{s}' in database"
@@ -972,6 +974,7 @@ fn extract_host_port(settings: &ConnectionSettings) -> (Option<String>, Option<i
     match settings {
         ConnectionSettings::Rdp(s) => (Some(s.host.clone()), Some(i64::from(s.port))),
         ConnectionSettings::Ssh(s) => (Some(s.host.clone()), Some(i64::from(s.port))),
+        ConnectionSettings::Telnet(s) => (Some(s.host.clone()), Some(i64::from(s.port))),
         ConnectionSettings::Local(_) => (None, None),
     }
 }

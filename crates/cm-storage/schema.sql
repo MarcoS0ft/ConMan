@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_groups_parent ON groups(parent_id, sort);
 CREATE TABLE IF NOT EXISTS connections (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     group_id      INTEGER REFERENCES groups(id)      ON DELETE RESTRICT,
-    kind          TEXT    NOT NULL,  -- 'rdp' | 'ssh' | 'local'
+    kind          TEXT    NOT NULL,  -- 'rdp' | 'ssh' | 'telnet' | 'local'
     name          TEXT    NOT NULL,
     host          TEXT,              -- extracted for quick access; NULL for local
     port          INTEGER,           -- extracted for quick access; NULL for local

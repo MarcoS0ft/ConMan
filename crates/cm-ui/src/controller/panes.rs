@@ -791,6 +791,14 @@ pub(super) fn connect_in_split(
 
     match &conn.settings {
         cm_core::ConnectionSettings::Local(_) => do_split(state, tab_model, ui, layout),
+        cm_core::ConnectionSettings::Telnet(_) => push_toast(
+            toast_model,
+            toast_next_id,
+            format!(
+                "{}: Telnet split integration is not implemented yet",
+                conn.name
+            ),
+        ),
         cm_core::ConnectionSettings::Ssh(s) => {
             let resolved = {
                 let st = state.borrow();

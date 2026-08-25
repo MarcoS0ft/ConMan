@@ -399,6 +399,7 @@ pub fn conn_host_kind(settings: &ConnectionSettings) -> (String, &'static str) {
             let user = s.username.as_deref().unwrap_or("");
             (format!("{}@{}:{}", user, s.host, s.port), "RDP")
         }
+        ConnectionSettings::Telnet(s) => (format!("{}:{}", s.host, s.port), "TELNET"),
         ConnectionSettings::Local(_) => (String::new(), "LOCAL"),
     }
 }

@@ -1230,6 +1230,15 @@ pub(super) fn launch_saved_connection(
     let origin_connection_id = Some(conn.id.get() as i32);
     match &conn.settings {
         ConnectionSettings::Local(_) => tabs::open_local_tab(state, tab_model, ui),
+        ConnectionSettings::Telnet(s) => push_auth_failed_tab(
+            state,
+            tab_model,
+            ui,
+            format!("TELNET {}", s.host),
+            format!("{}:{}", s.host, s.port),
+            "Telnet session integration is not implemented yet".to_string(),
+            origin_connection_id,
+        ),
         ConnectionSettings::Ssh(s) => {
             let resolved = {
                 let st = state.borrow();

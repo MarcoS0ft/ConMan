@@ -563,6 +563,9 @@ fn build_connection(
         ConnectionKind::LocalTerminal => {
             unreachable!("mremoteng only ever classifies RDP/SSH1/SSH2 into this arm")
         }
+        ConnectionKind::Telnet => {
+            unreachable!("mremoteng does not classify Telnet until the P10.1 importer lane")
+        }
     };
 
     push_connection(

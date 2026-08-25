@@ -15,7 +15,7 @@ use cm_core::session::Session;
 use cm_core::session_ports::{SessionProvider, SessionSetupError};
 use cm_core::ssh::{HostKeyVerifier, SshAuthInput};
 use cm_core::terminal::TerminalSize;
-use cm_core::{LocalSettings, RdpSettings, SshSettings};
+use cm_core::{LocalSettings, RdpSettings, SshSettings, TelnetSettings};
 
 use crate::local::LocalTerminalSession;
 use crate::rdp::{CertStore, RdpSession};
@@ -69,6 +69,16 @@ impl SessionProvider for SessionProviderImpl {
         SshTerminalSession::connect(settings, auth, verifier, KnownHosts::with_defaults(), size)
             .map(|s| Box::new(s) as Box<dyn Session>)
             .map_err(|e| SessionSetupError::new(e.to_string()))
+    }
+
+    fn connect_telnet(
+        &self,
+        _settings: &TelnetSettings,
+        _size: TerminalSize,
+    ) -> Result<Box<dyn Session>, SessionSetupError> {
+        Err(SessionSetupError::new(
+            "Telnet session adapter is not implemented yet",
+        ))
     }
 
     fn connect_rdp(

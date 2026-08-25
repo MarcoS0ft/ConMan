@@ -19,7 +19,7 @@ use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings, Credential,
     CredentialError, CredentialFolder, CredentialFolderId, CredentialId, CredentialKind,
     CredentialPurpose, CredentialRef, CredentialSource, CredentialStore, Group, GroupId,
-    LocalSettings, RdpSettings, Secret, SshAuthMethod, SshSettings,
+    LocalSettings, RdpSettings, Secret, SshAuthMethod, SshSettings, TelnetSettings,
 };
 use cm_storage::{
     ENVELOPE_VERSION, ExportOptions, ImportExportError, ImportStats, SqliteRepository, export,
@@ -117,6 +117,24 @@ fn mk_local_conn(name: &str, group_id: Option<GroupId>) -> Connection {
         0,
     )
     .expect("mk_local_conn")
+}
+
+fn mk_telnet_conn(name: &str, group_id: Option<GroupId>) -> Connection {
+    Connection::new(
+        ConnectionId::UNSAVED,
+        group_id,
+        name.to_string(),
+        ConnectionKind::Telnet,
+        ConnectionSettings::Telnet(TelnetSettings {
+            host: "serial-console.example".to_string(),
+            port: TelnetSettings::DEFAULT_PORT,
+        }),
+        Some(CredentialSource::Prompt),
+        0,
+        3_000,
+        3_000,
+    )
+    .expect("mk_telnet_conn")
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +334,34 @@ fn round_trip_via_json_string() {
 
     assert_eq!(stats.groups_imported, 1);
     assert_eq!(stats.connections_imported, 1);
+}
+
+#[test]
+fn telnet_round_trips_via_native_json() {
+    let src = repo();
+    src.upsert_connection(&mk_telnet_conn("console", None))
+        .expect("insert telnet connection");
+
+    let json = export_to_json(&src, &ExportOptions::default(), None).expect("export telnet");
+    assert!(json.contains("\"telnet\""));
+
+    let dst = repo();
+    let stats = import_from_json(&json, &dst, None).expect("import telnet");
+    assert_eq!(stats.connections_imported, 1);
+    let connections = dst.list_connections().expect("list connections");
+    assert_eq!(connections.len(), 1);
+    assert_eq!(connections[0].kind, ConnectionKind::Telnet);
+    assert_eq!(
+        connections[0].credential_source,
+        Some(CredentialSource::Prompt)
+    );
+    assert_eq!(
+        connections[0].settings,
+        ConnectionSettings::Telnet(TelnetSettings {
+            host: "serial-console.example".to_string(),
+            port: 23,
+        })
+    );
 }
 
 #[test]

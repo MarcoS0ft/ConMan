@@ -138,6 +138,19 @@ impl SessionProvider for MockSessionProvider {
         Ok(Box::new(ScriptedSession::new(cell)))
     }
 
+    fn connect_telnet(
+        &self,
+        _settings: &cm_core::TelnetSettings,
+        _size: TerminalSize,
+    ) -> Result<Box<dyn Session>, SessionSetupError> {
+        let cell = self
+            .next_remote_status
+            .lock()
+            .expect("MockSessionProvider.next_remote_status poisoned")
+            .clone();
+        Ok(Box::new(ScriptedSession::new(cell)))
+    }
+
     fn connect_rdp(
         &self,
         _settings: &RdpSettings,

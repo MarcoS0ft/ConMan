@@ -8,12 +8,13 @@ use crate::kind::ConnectionKind;
 /// kind (enforced by [`crate::Connection::new`] / [`crate::Connection::validate`]).
 ///
 /// Serialized externally tagged with stable lowercase tags (`"rdp"`, `"ssh"`,
-/// `"local"`) to mirror [`ConnectionKind`].
+/// `"telnet"`, `"local"`) to mirror [`ConnectionKind`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionSettings {
     Rdp(RdpSettings),
     Ssh(SshSettings),
+    Telnet(TelnetSettings),
     Local(LocalSettings),
 }
 
@@ -23,6 +24,7 @@ impl ConnectionSettings {
         match self {
             ConnectionSettings::Rdp(_) => ConnectionKind::Rdp,
             ConnectionSettings::Ssh(_) => ConnectionKind::Ssh,
+            ConnectionSettings::Telnet(_) => ConnectionKind::Telnet,
             ConnectionSettings::Local(_) => ConnectionKind::LocalTerminal,
         }
     }
@@ -97,6 +99,20 @@ pub struct SshSettings {
 impl SshSettings {
     /// Default SSH port.
     pub const DEFAULT_PORT: u16 = 22;
+}
+
+/// Telnet endpoint settings. Authentication is performed interactively by
+/// the remote application; credentials are deliberately not part of this
+/// transport configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelnetSettings {
+    pub host: String,
+    pub port: u16,
+}
+
+impl TelnetSettings {
+    /// Default Telnet port.
+    pub const DEFAULT_PORT: u16 = 23;
 }
 
 /// How an SSH session authenticates.

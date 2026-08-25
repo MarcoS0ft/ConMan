@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use crate::rdp::{CertVerifier, RdpAuthInput};
 use crate::session::Session;
-use crate::settings::{LocalSettings, RdpSettings, SshSettings};
+use crate::settings::{LocalSettings, RdpSettings, SshSettings, TelnetSettings};
 use crate::ssh::{HostKeyVerifier, SshAuthInput};
 use crate::terminal::TerminalSize;
 
@@ -72,6 +72,14 @@ pub trait SessionProvider: Send + Sync {
         settings: &SshSettings,
         auth: SshAuthInput,
         verifier: Arc<dyn HostKeyVerifier>,
+        size: TerminalSize,
+    ) -> Result<Box<dyn Session>, SessionSetupError>;
+
+    /// Connect a Telnet session. Login is performed interactively through
+    /// the terminal; there is no authentication or verifier parameter.
+    fn connect_telnet(
+        &self,
+        settings: &TelnetSettings,
         size: TerminalSize,
     ) -> Result<Box<dyn Session>, SessionSetupError>;
 
