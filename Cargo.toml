@@ -11,7 +11,7 @@ members = [
 ]
 # Throwaway spike crates live here, standalone (own Cargo.lock), excluded from the
 # workspace so an alpha/experimental dependency never touches the real lockfile.
-exclude = ["spikes/"]
+exclude = ["spikes/", "vendor/ironrdp-pdu"]
 
 [workspace.package]
 version = "0.0.0"
@@ -50,6 +50,7 @@ codegen-units = 1
 [patch.crates-io]
 ironrdp-connector = { path = "vendor/ironrdp-connector" }
 ironrdp-async = { path = "vendor/ironrdp-async" }
+ironrdp-pdu = { path = "vendor/ironrdp-pdu" }
 # Portable build: vendored libghostty-vt-sys whose build.rs passes
 # `-Dcpu=x86_64_v3` to zig by default (see its build.rs / the
 # ghostty-dll-cpu-portability note). A stock native build on a bleeding-edge CPU

@@ -3469,8 +3469,6 @@ dependencies = [
 [[package]]
 name = "ironrdp-pdu"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a27ab729591c84f992a408ba1b8b29fab354d85aa8d464f053a42fbb5f51e7b"
 dependencies = [
  "bit_field",
  "bitflags 2.13.0",

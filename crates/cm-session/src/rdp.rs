@@ -343,6 +343,11 @@ fn coalesce_latest_resize(sizes: impl Iterator<Item = (u32, u32)>) -> Option<(u3
     sizes.last()
 }
 
+/// Whether a settled resize differs from the most recently requested target.
+fn is_new_resize_target(last: (u32, u32), requested: (u32, u32)) -> bool {
+    last != requested
+}
+
 // ---------------------------------------------------------------------------
 // CLIPRDR text backend
 // ---------------------------------------------------------------------------
@@ -1419,6 +1424,9 @@ where
     let mut image_has_content = false;
     // P9.8 B9: fire-once guard so `ttff_ms` is logged exactly once.
     let mut first_frame_logged = false;
+    // Start with the server-confirmed desktop size, so the UI's first settled
+    // geometry callback does not send a no-op DisplayControl request.
+    let mut last_resize_target = (u32::from(image.width()), u32::from(image.height()));
 
     loop {
         tokio::select! {
@@ -1486,41 +1494,47 @@ where
                             }
                         }
                         if let Some((width, height)) = coalesce_latest_resize(sizes.into_iter()) {
-                            // P9.9-FIX: the three outcomes were previously
-                            // collapsed into one silent no-op via `if let
-                            // Some(Ok(data)) = ...` -- that pattern is
-                            // exactly what hid the missing-DVC bug (a `None`
-                            // here looked identical to "sent, server
-                            // ignored it"). Log all three distinctly.
-                            match active_stage.encode_resize(width, height, None, None) {
-                                Some(Ok(data)) => {
-                                    tracing::debug!(width, height, "rdp: resize PDU sent");
-                                    let _ = framed.write_all(&data).await;
+                            let requested = (width, height);
+                            if is_new_resize_target(last_resize_target, requested) {
+                                // P9.9-FIX: the three outcomes were previously
+                                // collapsed into one silent no-op via `if let
+                                // Some(Ok(data)) = ...` -- that pattern is
+                                // exactly what hid the missing-DVC bug (a `None`
+                                // here looked identical to "sent, server
+                                // ignored it"). Log all three distinctly.
+                                match active_stage.encode_resize(width, height, None, None) {
+                                    Some(Ok(data)) => {
+                                        tracing::debug!(width, height, "rdp: resize PDU sent");
+                                        let _ = framed.write_all(&data).await;
+                                        last_resize_target = requested;
+                                    }
+                                    Some(Err(e)) => {
+                                        tracing::warn!(
+                                            width,
+                                            height,
+                                            error = %e,
+                                            "rdp: resize PDU encode failed"
+                                        );
+                                    }
+                                    None => {
+                                        // The DisplayControl DVC isn't registered
+                                        // (shouldn't happen -- it's always
+                                        // registered at connect, see `drive_inner`)
+                                        // or the server hasn't opened it yet (the
+                                        // documented timing caveat: a resize fired
+                                        // in the sub-second window right after
+                                        // connect, before the DVC's capability
+                                        // exchange completes, still no-ops).
+                                        tracing::warn!(
+                                            width,
+                                            height,
+                                            "rdp: resize request dropped -- DisplayControl DVC not \
+                                             registered or not yet open"
+                                        );
+                                    }
                                 }
-                                Some(Err(e)) => {
-                                    tracing::warn!(
-                                        width,
-                                        height,
-                                        error = %e,
-                                        "rdp: resize PDU encode failed"
-                                    );
-                                }
-                                None => {
-                                    // The DisplayControl DVC isn't registered
-                                    // (shouldn't happen -- it's always
-                                    // registered at connect, see `drive_inner`)
-                                    // or the server hasn't opened it yet (the
-                                    // documented timing caveat: a resize fired
-                                    // in the sub-second window right after
-                                    // connect, before the DVC's capability
-                                    // exchange completes, still no-ops).
-                                    tracing::warn!(
-                                        width,
-                                        height,
-                                        "rdp: resize request dropped -- DisplayControl DVC not \
-                                         registered or not yet open"
-                                    );
-                                }
+                            } else {
+                                tracing::debug!(width, height, "rdp: duplicate resize request skipped");
                             }
                         }
                         for cmd in trailing {
@@ -2086,6 +2100,16 @@ mod tests {
     fn coalesce_latest_resize_run_keeps_the_last() {
         let burst = [(800, 600), (810, 605), (1024, 768), (1280, 720)];
         assert_eq!(coalesce_latest_resize(burst.into_iter()), Some((1280, 720)));
+    }
+
+    #[test]
+    fn identical_rdp_resize_target_is_not_new() {
+        assert!(!is_new_resize_target((1280, 720), (1280, 720)));
+    }
+
+    #[test]
+    fn changed_rdp_resize_target_is_new() {
+        assert!(is_new_resize_target((1280, 720), (1024, 768)));
     }
 
     // ---------------------------------------------------------------------------
