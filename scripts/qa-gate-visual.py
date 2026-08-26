@@ -211,11 +211,12 @@ def check_dialog_gutter(client, window_handle, out_dir: Path, report: Report, da
         report.record(check, "unverified", "screenshot unavailable")
         return
     pos = dialog["absolutePosition"]
-    # Sample a point just inside the dialog's own top-left corner -- close
-    # enough to guarantee it's dialog background (padding exists on every
-    # side per profile_editor.slint's `padding: Theme.space-6`), far enough
-    # from the edge to avoid anti-aliased border pixels.
-    x, y = pos.get("x", 0) + 6, pos.get("y", 0) + 6
+    # Sample the empty top-right padding, inset beyond the rounded corner.
+    # A 6px inset still lands outside the rounded rectangle and samples the
+    # dimmed scrim on Windows; 24px is safely inside the card while remaining
+    # clear of the title and controls.
+    x = pos.get("x", 0) + dialog["size"]["width"] - 24
+    y = pos.get("y", 0) + 24
     got = sample(img, x, y, scale)
     want = hex_to_rgb(TOKENS["color-overlay"][0 if dark else 1])
     if close_enough(got, want):

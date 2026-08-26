@@ -13,7 +13,7 @@
 //! a small demo dataset is seeded into an otherwise-empty DB on the very
 //! first launch. Never present in a shipped/release artifact — opt in with
 //! `cargo build -p conman --features demo-seed` (same posture as
-//! `qa-harness`/`automation`).
+//! `automation`).
 //!
 //! P6.16: before touching storage or the keyring, tries to become the single
 //! primary instance (`cm_platform::single_instance`). A second launch that

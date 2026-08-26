@@ -42,6 +42,8 @@ fn shell_suite() {
     telnet_saved_launch_dispatches_provider();
     telnet_session_restore_dispatches_provider();
     telnet_reconnect_respects_execute_gate();
+    tab_accessible_value_tracks_status_and_pane_count();
+    activity_bar_accessible_checked_tracks_active_panel_and_sidebar();
 }
 
 fn tab_count(ui: &cm_ui::AppWindow) -> usize {
@@ -204,6 +206,69 @@ fn first_tab_inset_and_divider_present() {
         first_tab_x_collapsed > activity_bar_right,
         "first tab must still start after the activity bar with the sidebar collapsed"
     );
+}
+
+fn tab_accessible_value_tracks_status_and_pane_count() {
+    let (h, _repo, provider) = harness();
+    assert_eq!(
+        nth_by_id(&h.ui, "AppWindow::tab-item", 0)
+            .accessible_value()
+            .as_deref(),
+        Some("connected")
+    );
+
+    h.ui.invoke_split_pane_h();
+    h.ui.invoke_split_pane_v();
+    pump_ticks(1);
+    assert_eq!(
+        nth_by_id(&h.ui, "AppWindow::tab-item", 0)
+            .accessible_value()
+            .as_deref(),
+        Some("connected · 3 panes")
+    );
+
+    let status = connect_ssh_via_quick_connect(&h, &provider, "status-parity-host");
+    assert_eq!(
+        nth_by_id(&h.ui, "AppWindow::tab-item", 1)
+            .accessible_value()
+            .as_deref(),
+        Some("connecting")
+    );
+    *status.lock().expect("status lock poisoned") =
+        SessionStatus::Failed("expected parity failure".into());
+    assert!(support::pump_until(50, || {
+        nth_by_id(&h.ui, "AppWindow::tab-item", 1)
+            .accessible_value()
+            .as_deref()
+            == Some("error")
+    }));
+}
+
+fn activity_bar_accessible_checked_tracks_active_panel_and_sidebar() {
+    let (h, _repo, _provider) = harness();
+    let checked = |id: &str| {
+        find_by_id(&h.ui, id)
+            .accessible_checked()
+            .unwrap_or_else(|| panic!("{id} must expose accessible-checked"))
+    };
+
+    assert!(checked("AppWindow::connections-panel-btn"));
+    assert!(!checked("AppWindow::keys-panel-btn"));
+    assert!(!checked("AppWindow::settings-panel-btn"));
+
+    find_by_id(&h.ui, "AppWindow::keys-panel-btn").invoke_accessible_default_action();
+    assert!(!checked("AppWindow::connections-panel-btn"));
+    assert!(checked("AppWindow::keys-panel-btn"));
+    assert!(!checked("AppWindow::settings-panel-btn"));
+
+    find_by_id(&h.ui, "AppWindow::settings-panel-btn").invoke_accessible_default_action();
+    assert!(!checked("AppWindow::keys-panel-btn"));
+    assert!(checked("AppWindow::settings-panel-btn"));
+
+    assert!(!checked("AppWindow::sidebar-toggle-btn"));
+    find_by_id(&h.ui, "AppWindow::sidebar-toggle-btn").invoke_accessible_default_action();
+    assert!(h.ui.get_sidebar_collapsed());
+    assert!(checked("AppWindow::sidebar-toggle-btn"));
 }
 
 // ── P9.10: tab context menu / Home pill (element-reachable pieces) ─────────

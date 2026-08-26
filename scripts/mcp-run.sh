@@ -171,7 +171,7 @@ cmd_start() {
 
     # The actual `conman` PID may differ from $launcher_pid under xvfb-run
     # (which forks a wrapper shell) — find it by matching the exact binary
-    # path, same technique as scripts/qa-scenario.sh's cleanup trap.
+    # path.
     local conman_pid=""
     for _ in $(seq 1 100); do
         conman_pid="$(pgrep -f -x "$BINARY" 2>/dev/null | head -1 || true)"

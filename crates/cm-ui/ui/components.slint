@@ -175,6 +175,9 @@ export component ActivityBarButton {
 
   accessible-role: button;
   accessible-label: root.tooltip;
+  // Expose which navigation target is active (and whether the sidebar toggle
+  // is pressed) through the same semantic element tree used by UI tests/MCP.
+  accessible-checked: root.active;
   accessible-action-default => { root.clicked(); }
 
   height: 40px;

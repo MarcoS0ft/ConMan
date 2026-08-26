@@ -204,8 +204,7 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 /// How long a read/write to either side of the proxy may block before the
 /// connection is dropped — protects against a stalled agent client or a
-/// wedged internal server (mirrors `qa_harness.rs`'s `WRITE_TIMEOUT`
-/// reasoning). Generous enough for `take_screenshot`.
+/// wedged internal server. Generous enough for `take_screenshot`.
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct ParsedRequest {
@@ -630,9 +629,8 @@ fn handle_client(
 }
 
 /// Accepts agent connections one at a time (each on its own thread) for the
-/// lifetime of the process. Never panics on an accept error — logs and
-/// keeps serving subsequent connections (mirrors `qa_harness.rs`'s
-/// `listen_loop`).
+/// lifetime of the process. Never panics on an accept error — logs and keeps
+/// serving subsequent connections.
 pub(crate) fn run(
     listener: TcpListener,
     internal_port: u16,

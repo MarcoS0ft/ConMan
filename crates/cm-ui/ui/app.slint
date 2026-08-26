@@ -337,6 +337,11 @@ component Tab inherits Rectangle {
     // P8.1: one tab per session; label is the (dynamic) tab title.
     accessible-role: tab;
     accessible-label: root.title;
+    // Status and pane count were the only useful fields exposed solely by the
+    // retired legacy socket. Keep them available to semantic automation.
+    accessible-value: root.pane-count > 1
+        ? root.status + " · " + root.pane-count + " panes"
+        : root.status;
     accessible-item-index: root.item-index;
     accessible-item-count: root.item-count;
     accessible-item-selected: root.active;

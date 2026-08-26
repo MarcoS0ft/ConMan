@@ -4,8 +4,8 @@
 Builds on P8.3's `scripts/mcp-scenario-driver.py` (same JSON-RPC-over-HTTP
 client, same element-tree-by-accessible-label pattern) to drive the REAL,
 running `conman` (or `conman.exe`) binary through the journeys the P6.17
-acceptance pass drove over the old qa-harness socket + Win32 injector, now
-addressed semantically instead of by screen coordinates:
+acceptance pass drove through legacy automation, now addressed semantically
+instead of by screen coordinates:
 
   1. quick-connect SSH (public-key auth) to a loopback/fixture host, reaching
      Connected (P6.17 Linux J4 / Windows SSH-probe).

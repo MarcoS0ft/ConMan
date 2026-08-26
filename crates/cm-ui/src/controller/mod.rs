@@ -45,8 +45,6 @@ mod launchpad;
 mod overlays;
 mod palette;
 mod panes;
-#[cfg(feature = "qa-harness")]
-mod qa_harness;
 mod search;
 mod sessions;
 mod settings_ctl;
@@ -438,8 +436,8 @@ pub(crate) fn terminal_selection_probe(ctx: &Ctx) -> Box<dyn Fn() -> bool> {
 /// hermetic element-test harness): model setup + every `wire_*()`
 /// registration, through wiring the redraw timer and (if applicable)
 /// restoring the last session's tabs. Stops **short** of: entering the event
-/// loop, the env-var debug hooks (`util::wire_env_hooks`), the `qa-harness`
-/// endpoint, the OS-accent live-watch thread, and the single-instance
+/// loop, the env-var debug hooks (`util::wire_env_hooks`), the OS-accent
+/// live-watch thread, and the single-instance
 /// activation listener -- [`run`] adds all of those; [`build_for_test`] adds
 /// none of them (irrelevant, or actively non-deterministic, for hermetic
 /// tests).
@@ -684,10 +682,6 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     let mut hooks: Vec<Timer> = Vec::new();
     util::wire_env_hooks(&ctx, &mut hooks);
 
-    // -- P6.2b: in-app QA endpoint (feature-gated, off by default) ------------
-    #[cfg(feature = "qa-harness")]
-    qa_harness::wire_qa_harness(&ctx);
-
     // P6.8 (gap 10): best-effort live OS accent-change watch. `watch_os_accent`
     // is a no-op (returns `false`, spawns nothing) on platforms/desktops with no
     // such signal (Windows in this pass, Linux without a portal) -- `os_accent()`
@@ -739,8 +733,8 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
 /// `wire_*()` registration (via the shared [`assemble`] helper) but does
 /// **not** enter the event loop, and skips the production-only bits that are
 /// irrelevant or actively non-deterministic for hermetic in-process tests
-/// (env-var debug hooks, the `qa-harness` endpoint, the OS-accent live-watch
-/// thread, the single-instance activation listener). Accepts already-built
+/// (env-var debug hooks, the OS-accent live-watch thread, the single-instance
+/// activation listener). Accepts already-built
 /// test doubles via the same [`AppConfig`] `run` takes (an in-memory
 /// `SqliteRepository`, a mock/loopback `SessionProvider`, `activation_rx:
 /// None`), so callers get a fully-wired `AppWindow` with no real I/O, no

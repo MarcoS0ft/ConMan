@@ -1070,7 +1070,6 @@ dependencies = [
  "cm-storage",
  "cosmic-text",
  "i-slint-backend-testing",
- "png",
  "rfd",
  "serde_json",
  "slint",

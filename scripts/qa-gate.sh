@@ -146,12 +146,6 @@ else
     [ "$MCP_STATUS" -eq 0 ] && line "OVERALL: PASS (report: $OUT_DIR/mcp-report.json)" \
         || line "OVERALL: FAIL (report: $OUT_DIR/mcp-report.json)"
 
-    if [ "$SKIP_LINUX_LAUNCH" -eq 0 ]; then
-        pkill -f -x "$BINARY" 2>/dev/null
-        sleep 0.3
-        pkill -KILL -f -x "$BINARY" 2>/dev/null
-        line "stopped conman ($BINARY)"
-    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -174,6 +168,17 @@ else
         [ "$VISUAL_STATUS" -eq 0 ] && line "OVERALL: PASS (report: $OUT_DIR/visual-report.json)" \
             || line "OVERALL: FAIL/advisory (report: $OUT_DIR/visual-report.json) -- re-read: hard-fail only if a functional/#1-class regression, agent-vision is always advisory"
     fi
+fi
+
+# Keep the locally launched process alive through both real-binary legs.  The
+# visual checks use the same MCP endpoint as the journey checks, so stopping it
+# at the end of section (b) made every combined Linux gate report a spurious
+# visual transport failure.
+if [ "$SKIP_LINUX_LAUNCH" -eq 0 ] && [ "$SKIP_MCP" -eq 0 ]; then
+    pkill -f -x "$BINARY" 2>/dev/null
+    sleep 0.3
+    pkill -KILL -f -x "$BINARY" 2>/dev/null
+    line "stopped conman ($BINARY)"
 fi
 
 section "Evidence"

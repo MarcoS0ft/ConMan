@@ -1,7 +1,7 @@
 //! P8.6-A — agent-mode startup wiring: settings-gated proxy + feature.
 //!
 //! Compiled in only behind the `agent-mode` Cargo feature (off by default,
-//! same posture as `qa-harness`/`automation`); even then, nothing listens
+//! same posture as `automation`); even then, nothing listens
 //! unless the user has turned the interface on via
 //! `cm_core::SettingsService::load_automation` (`automation.enabled`,
 //! off by default — the product's decided consent model, see

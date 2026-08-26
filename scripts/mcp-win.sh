@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # P8.3 — win11-dev wrapper for the Slint-native MCP automation surface.
 #
-# Mirrors scripts/qa-win.sh's proven shape (P6.2b/P6.17: durable launch via a
-# real Scheduled Task + an SSH local-forward — a foreground SSH command or
+# Uses the P6.17-proven durable launch shape: a real Scheduled Task plus an
+# SSH local-forward — a foreground SSH command or
 # `Start-Process` both lose the process on session disconnect, see
 # memos/win11-dev-vm-ops.md "ConMan QA runner"), but registers/triggers
-# **ConManMCP** instead of ConManQA, forwards `SLINT_MCP_PORT` instead of
-# `CONMAN_QA_PORT`, and drives the target over MCP (scripts/mcp-scenario-driver.py)
-# instead of the qa-harness JSON-lines protocol.
+# **ConManMCP**, forwards `SLINT_MCP_PORT`, and drives the target over MCP
+# (`scripts/mcp-scenario-driver.py`).
 #
 # The task's action runs a `run-mcp.ps1` deployed directly on the VM (NOT
-# tracked in this repo — same posture as the existing `run-qa.ps1`/
-# `qa-input.ps1`: host-specific infra scripts live only on the box, per the
+# tracked in this repo: host-specific infra scripts live only on the box, per the
 # P6.2b "no host details in tracked scripts" rule). `run-mcp.ps1` must, at
 # minimum:
 #   - write a sentinel as its literal first line (before any try/catch) —
@@ -87,9 +85,7 @@ open_tunnel_and_wait() {
     # -4 forces IPv4: a dual-stack `ssh -N -L` here failed outright with
     # "bind [::1]:<port>: Cannot assign requested address" on a host where
     # IPv6 loopback bind is unavailable — observed directly in this task's
-    # win11-dev verification pass; forcing IPv4 avoids it (the qa-harness
-    # equivalent in qa-win.sh predates this finding and should get the same
-    # fix next time it's touched).
+    # win11-dev verification pass; forcing IPv4 avoids it.
     ssh -4 -N -L "${LOCAL_FWD_PORT}:127.0.0.1:${WIN_MCP_PORT}" "$WIN_SSH_HOST" &
     TUNNEL_PID=$!
 

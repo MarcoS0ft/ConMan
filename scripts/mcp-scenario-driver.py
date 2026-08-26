@@ -223,8 +223,8 @@ def main() -> int:
     ap.add_argument("--wait-secs", type=float, default=30.0, help="bounded poll for the server to come up")
     args = ap.parse_args()
 
-    # Bounded poll for the server to accept connections (process startup race
-    # — mirrors scripts/qa-scenario.sh's pattern, not a fixed sleep).
+    # Bounded poll for the server to accept connections (process startup race,
+    # not a fixed sleep).
     deadline = time.monotonic() + args.wait_secs
     last_err: Exception | None = None
     while time.monotonic() < deadline:

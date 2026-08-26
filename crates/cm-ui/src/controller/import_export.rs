@@ -58,10 +58,8 @@ const TOAST_ERROR: i32 = 3;
 /// after a successful import.
 ///
 /// Cloned onto `State` (see `mod.rs`) rather than widening
-/// `dispatch_palette_action`'s / `handle_palette_key`'s signatures: those
-/// functions are also called from the QA harness's narrower handle set
-/// (`qa_harness.rs`) and from the keyboard-dispatch path in `sessions.rs`
-/// (both outside Lane D this wave) — this way neither call site changes.
+/// `dispatch_palette_action`'s / `handle_palette_key`'s signatures because
+/// the keyboard-dispatch path in `sessions.rs` also calls them.
 #[derive(Clone)]
 pub(super) struct ImportExportHandles {
     pub(super) repo: Arc<dyn ConnectionRepository>,

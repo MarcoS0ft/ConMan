@@ -37,15 +37,8 @@ tracing = "0.1"
 # serde_json: already a workspace dependency (cm-core, cm-storage, cm-session).
 # Made a direct, non-optional dep of cm-ui in P6.6: the import/export dialog
 # wiring (`controller/import_export.rs`) parses the export envelope directly
-# (to report a skipped-secrets count in the summary toast) in addition to the
-# `qa-harness` feature's JSON-lines protocol use. No new crate added to the
-# dependency graph — same resolved version either way.
+# to report a skipped-secrets count in the summary toast.
 serde_json = "1"
-# png: PNG encoder for the `qa-harness` feature's `screenshot` command (P6.2b). Already
-# resolved in the workspace lockfile transitively (via `image`/`tiny-skia`/`muda`, all
-# pulled in by Slint's own dependency graph) — adding it as a direct, feature-gated dep
-# of cm-ui adds no new crate version. See docs/devel/memos/P6.2b-png-encoder-new-dep.md.
-png = { version = "0.18", optional = true }
 # rfd: native file-open/save dialogs for the Import/Export palette actions (P6.6, new
 # dep — MIT, memo: docs/devel/memos/P6.6-rfd-dep.md). Default features (`xdg-portal` +
 # `wayland` on Linux) talk to the desktop portal via a bundled blocking mini-executor;
@@ -53,10 +46,6 @@ png = { version = "0.18", optional = true }
 rfd = "0.17"
 
 [features]
-# Off by default (dev-facing only): a loopback JSON-lines QA endpoint used by agents to
-# drive/inspect/screenshot the running app. Never present in a normal `--release` build
-# unless explicitly opted in. See docs/devel/tasks/P6.2b-remote-qa-harness.md.
-qa-harness = ["dep:png"]
 # P8.1: off by default, no dependency changes of its own. When enabled, build.rs compiles
 # ui/app.slint with Slint compiler debug info (element ids/roles/labels), which
 # i-slint-backend-testing's ElementHandle queries need to resolve anything at all. This is
@@ -68,8 +57,8 @@ ui-introspection = []
 # section, the persistent active indicator, and the execute-scope
 # session-launch gate compile behind this. Reserved by P8.6-A (storage-dev)
 # so `conman`'s `agent-mode` feature has a valid forward target; the actual
-# gated code is P8.6-B (ui-dev, after Phase C). Off by default, same posture
-# as `qa-harness`/`ui-introspection`. See docs/devel/tasks/P8.6-impl.md.
+# gated code is P8.6-B (ui-dev, after Phase C). Off by default, like
+# `ui-introspection`. See docs/devel/tasks/P8.6-impl.md.
 agent-mode = []
 
 [dev-dependencies]
