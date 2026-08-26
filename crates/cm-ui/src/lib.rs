@@ -50,7 +50,7 @@ pub use generated_ui::{
 
 pub use controller::run;
 pub use terminal_renderer::{
-    CellMetrics, FontSet, GlyphSource, Rgb, TerminalRenderer, TerminalTheme,
+    CellMetrics, Rgb, TerminalFontSystem, TerminalRenderer, TerminalTheme,
 };
 
 /// P8.6-B: what the `conman` composition root exposes to the Settings UI
@@ -194,6 +194,7 @@ pub struct TestHarness {
     /// `i_slint_backend_testing::ElementHandle`/`ElementRoot` the same way
     /// you would the real app's window.
     pub ui: AppWindow,
+    terminal_selection_probe: Box<dyn Fn() -> bool>,
     _keepalive: Box<dyn std::any::Any>,
 }
 
@@ -201,6 +202,17 @@ pub struct TestHarness {
 impl std::fmt::Debug for TestHarness {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TestHarness").finish_non_exhaustive()
+    }
+}
+
+#[cfg(any(test, feature = "ui-introspection"))]
+impl TestHarness {
+    /// Whether the active terminal pane currently owns a text selection.
+    /// Intended for pointer-boundary tests; production code consumes the
+    /// selection internally through rendering and clipboard actions.
+    #[must_use]
+    pub fn has_active_terminal_selection(&self) -> bool {
+        (self.terminal_selection_probe)()
     }
 }
 
@@ -224,8 +236,10 @@ impl std::fmt::Debug for TestHarness {
 #[cfg(any(test, feature = "ui-introspection"))]
 pub fn build_for_test(config: AppConfig) -> TestHarness {
     let (ui, ctx, redraw) = controller::build_for_test(config);
+    let terminal_selection_probe = controller::terminal_selection_probe(&ctx);
     TestHarness {
         ui,
+        terminal_selection_probe,
         _keepalive: Box::new((ctx, redraw)),
     }
 }

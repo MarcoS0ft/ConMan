@@ -1,5 +1,7 @@
 //! Connections tree panel: CRUD for connections/groups, reordering, and the
 //! profile/group-form <-> domain-object mapping helpers.
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use cm_core::{
@@ -476,31 +478,136 @@ fn wire_connect_in_split_row(ctx: &Ctx) {
 }
 
 fn wire_delete_conn_row(ctx: &Ctx) {
+    #[derive(Clone, Copy)]
+    enum PendingDelete {
+        Connection(ConnectionId),
+        Group(GroupId),
+    }
+
+    let pending = Rc::new(RefCell::new(None));
+
     ctx.ui.on_delete_conn_row({
+        let state = ctx.state.clone();
+        let pending = pending.clone();
+        let weak = ctx.ui.as_weak();
+        move |id, is_group| {
+            let Some(ui) = weak.upgrade() else { return };
+            let st = state.borrow();
+            let target = if is_group {
+                let group_id = GroupId::new(id as i64);
+                let Some(group) = st.conn_tree.group_by_id(group_id.get()) else {
+                    return;
+                };
+                let Some((group_count, connection_count)) = group_delete_impact(
+                    group_id,
+                    st.conn_tree.groups(),
+                    st.conn_tree.connections(),
+                ) else {
+                    return;
+                };
+                (
+                    PendingDelete::Group(group_id),
+                    group.name.clone(),
+                    group_count,
+                    connection_count,
+                )
+            } else {
+                let connection_id = ConnectionId::new(id as i64);
+                let Some(connection) = st.conn_tree.conn_by_id(connection_id.get()) else {
+                    return;
+                };
+                (
+                    PendingDelete::Connection(connection_id),
+                    connection.name.clone(),
+                    0,
+                    1,
+                )
+            };
+            drop(st);
+
+            *pending.borrow_mut() = Some(target.0);
+            ui.set_delete_confirm_target_name(target.1.into());
+            ui.set_delete_confirm_is_group(is_group);
+            ui.set_delete_confirm_group_count(target.2 as i32);
+            ui.set_delete_confirm_connection_count(target.3 as i32);
+            ui.set_delete_confirm_open(true);
+        }
+    });
+
+    ctx.ui.on_delete_confirm_cancel({
+        let pending = pending.clone();
+        let weak = ctx.ui.as_weak();
+        move || {
+            pending.borrow_mut().take();
+            if let Some(ui) = weak.upgrade() {
+                ui.set_delete_confirm_open(false);
+            }
+        }
+    });
+
+    ctx.ui.on_delete_confirm_accept({
         let state = ctx.state.clone();
         let conn_model = ctx.conn_model.clone();
         let cred_model = ctx.cred_model.clone();
         let repo_del = ctx.repo.clone();
-        move |id, is_group| {
-            let mut st = state.borrow_mut();
-            let result = if is_group {
-                repo_del.delete_group(GroupId::new(id as i64))
-            } else {
-                repo_del.delete_connection(ConnectionId::new(id as i64))
+        let weak = ctx.ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(target) = pending.borrow_mut().take() else {
+                ui.set_delete_confirm_open(false);
+                return;
+            };
+            ui.set_delete_confirm_open(false);
+            let result = match target {
+                PendingDelete::Group(id) => repo_del.delete_group(id),
+                PendingDelete::Connection(id) => repo_del.delete_connection(id),
             };
             if let Err(e) = result {
                 tracing::warn!("delete failed: {e}");
                 return;
             }
+            let mut st = state.borrow_mut();
             if let Err(e) = st.conn_tree.reload(repo_del.as_ref()) {
                 tracing::warn!("reload after delete failed: {e}");
             }
             refresh_conn_model(&st, &conn_model);
+            refresh_group_name_list(&st, &ui);
             // P9.5 #6: deleting a connection may drop a credential's "used by
             // N connections" count.
             keys_ctl::refresh_cred_model(&st, &cred_model);
         }
     });
+}
+
+fn group_delete_impact(
+    root: GroupId,
+    groups: &[Group],
+    connections: &[Connection],
+) -> Option<(usize, usize)> {
+    if !groups.iter().any(|group| group.id == root) {
+        return None;
+    }
+
+    let mut subtree = HashSet::from([root]);
+    loop {
+        let before = subtree.len();
+        for group in groups {
+            if group
+                .parent_id
+                .is_some_and(|parent| subtree.contains(&parent))
+            {
+                subtree.insert(group.id);
+            }
+        }
+        if subtree.len() == before {
+            break;
+        }
+    }
+    let connection_count = connections
+        .iter()
+        .filter(|connection| connection.group_id.is_some_and(|id| subtree.contains(&id)))
+        .count();
+    Some((subtree.len(), connection_count))
 }
 
 /// Item (d): after a save, should the connection's OLD Inline secret (if

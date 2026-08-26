@@ -488,8 +488,12 @@ fn wire_pointer(ctx: &Ctx) {
                     Surface::TerminalGrid(_) => {
                         let (row, col) = tab.renderer.cell_at(x * base_scale, y * base_scale);
                         let snap = tab.last.as_ref();
+                        let forward_event = tab.sel.mouse_event_for_forwarding(button, kind);
                         selection_changed = tab.sel.on_pointer(button, kind, (row, col), snap, now);
-                        if let Some(ev) = input::map_mouse(button, kind, row, col, mods) {
+                        if let Some((forward_button, forward_kind)) = forward_event
+                            && let Some(ev) =
+                                input::map_mouse(forward_button, forward_kind, row, col, mods)
+                        {
                             tab.session.send_input(SessionInput::Mouse(ev));
                         }
                     }
@@ -513,8 +517,12 @@ fn wire_pointer(ctx: &Ctx) {
                     Surface::TerminalGrid(_) => {
                         let (row, col) = ep.renderer.cell_at(x * ep.scale, y * ep.scale);
                         let snap = ep.last.as_ref();
+                        let forward_event = ep.sel.mouse_event_for_forwarding(button, kind);
                         selection_changed = ep.sel.on_pointer(button, kind, (row, col), snap, now);
-                        if let Some(ev) = input::map_mouse(button, kind, row, col, mods) {
+                        if let Some((forward_button, forward_kind)) = forward_event
+                            && let Some(ev) =
+                                input::map_mouse(forward_button, forward_kind, row, col, mods)
+                        {
                             ep.session.send_input(SessionInput::Mouse(ev));
                         }
                     }
@@ -2866,9 +2874,10 @@ fn tick_tab(
     // (Ctrl+Shift+arrow, or clicking a different pane) invalidates every
     // pane's selection in this tab — cheap and simple, and correct since a
     // selection is only ever meaningful while its pane is the one receiving
-    // input. Checked every tick rather than at each focus-changing call site
-    // so this stays entirely within this file (`sessions.rs`) regardless of
-    // which controller module actually calls `PaneGroup::set_focused`.
+    // input. Pointer focus changes clear synchronously in
+    // `panes::wire_pane_focused` so the same gesture's new selection survives;
+    // this tick check remains a defensive fallback for keyboard/programmatic
+    // focus-changing call sites.
     let focused_now = st.tabs[i].pane_group.focused();
     if st.tabs[i].last_focused_pane != focused_now {
         st.tabs[i].sel.clear();

@@ -22,6 +22,7 @@
             },
             {
               "Type": "TerminalConnection",
+              "TerminalConnectionType": "SSH",
               "ID": "conn-ssh-1",
               "Name": "app-server-ssh",
               "URI": "app01.internal.example",
@@ -38,10 +39,27 @@
             },
             {
               "Type": "TerminalConnection",
+              "TerminalConnectionType": "SSH",
               "ID": "conn-ssh-2",
               "Name": "no-port-ssh",
               "URI": "app02.internal.example",
               "UserName": "root"
+            },
+            {
+              "Type": "TerminalConnection",
+              "TerminalConnectionType": "tELNeT",
+              "ID": "conn-telnet-1",
+              "Name": "serial-console",
+              "ComputerName": "console.internal.example",
+              "Port": 23143,
+              "CredentialID": "cred-shared-1"
+            },
+            {
+              "Type": "TerminalConnection",
+              "TerminalConnectionType": "Telnet",
+              "ID": "conn-telnet-2",
+              "Name": "default-port-telnet",
+              "ComputerName": "console-default.internal.example"
             },
             {
               "Type": "RemoteDesktopConnection",

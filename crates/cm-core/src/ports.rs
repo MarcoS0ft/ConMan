@@ -9,9 +9,8 @@ use crate::ids::{ConnectionId, CredentialFolderId, CredentialId, GroupId};
 ///
 /// # Delete semantics (pinned)
 ///
-/// - **Group delete** is blocked if the group has child groups or connections
-///   (returns [`RepositoryError::Conflict`]). The caller must first move or
-///   delete all children.
+/// - **Group delete** recursively deletes the selected group, all descendant
+///   groups, and every connection contained in that subtree, atomically.
 /// - **Credential-folder delete** is blocked if the folder has sub-folders or
 ///   credentials (returns [`RepositoryError::Conflict`]).
 /// - **Credential delete** is allowed even when it is referenced by connections
@@ -53,7 +52,8 @@ pub trait ConnectionRepository: Send + Sync {
     /// existing group; returns the persisted id.
     fn upsert_group(&self, group: &Group) -> Result<GroupId, RepositoryError>;
 
-    /// Delete is blocked when the group has child groups or connections.
+    /// Atomically deletes the group, all descendant groups, and every
+    /// connection contained in that subtree.
     fn delete_group(&self, id: GroupId) -> Result<(), RepositoryError>;
 
     /// Moves a group to a new parent/sort position. Returns

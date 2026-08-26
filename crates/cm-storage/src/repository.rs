@@ -25,11 +25,9 @@ const MAX_TREE_DEPTH: usize = 1024;
 /// a [`Mutex`].  All structural mutations run inside an explicit transaction.
 pub struct SqliteRepository {
     conn: Mutex<rusqlite::Connection>,
-    /// Optional keychain handle (P9.6-A Decision 2) — when set,
-    /// [`delete_connection`][ConnectionRepository::delete_connection] also
-    /// deletes the connection-scoped inline-secret keychain entry. `None` by
-    /// default (existing `open`/`open_in_memory` callers and most tests are
-    /// unaffected); wire one in via [`Self::with_credential_store`].
+    /// Optional keychain handle (P9.6-A Decision 2) — when set, deleting a
+    /// connection directly or through recursive group deletion also deletes
+    /// its connection-scoped inline-secret keychain entry.
     credential_store: Option<Arc<dyn CredentialStore>>,
 }
 
@@ -101,6 +99,22 @@ impl SqliteRepository {
         self.conn
             .lock()
             .map_err(|e| RepositoryError::Backend(format!("mutex poisoned: {e}")))
+    }
+
+    fn cleanup_connection_secrets(&self, ids: impl IntoIterator<Item = ConnectionId>) {
+        let Some(store) = &self.credential_store else {
+            return;
+        };
+        for id in ids {
+            let key = CredentialRef::for_connection(id, CredentialPurpose::Password);
+            if let Err(e) = store.delete(&key) {
+                tracing::warn!(
+                    connection_id = id.get(),
+                    error = %e,
+                    "failed to delete inline-secret keychain entry for deleted connection"
+                );
+            }
+        }
     }
 }
 
@@ -224,21 +238,9 @@ impl ConnectionRepository for SqliteRepository {
             }
         } // release the SQLite lock before touching the (unrelated) keychain
 
-        // P9.6-A Decision 2: the DB's ON DELETE SET NULL only clears the
-        // credential-OBJECT foreign key; an inline secret lives entirely
-        // outside SQLite and must be deleted explicitly. Best-effort: a
-        // missing entry or backend failure here must not fail the (already
-        // successful) connection delete.
-        if let Some(store) = &self.credential_store {
-            let key = CredentialRef::for_connection(id, CredentialPurpose::Password);
-            if let Err(e) = store.delete(&key) {
-                tracing::warn!(
-                    connection_id = id.get(),
-                    error = %e,
-                    "failed to delete inline-secret keychain entry for deleted connection"
-                );
-            }
-        }
+        // P9.6-A Decision 2: inline secrets live outside SQLite. Cleanup is
+        // best-effort because the database deletion has already committed.
+        self.cleanup_connection_secrets([id]);
         Ok(())
     }
 
@@ -334,42 +336,69 @@ impl ConnectionRepository for SqliteRepository {
     }
 
     fn delete_group(&self, id: GroupId) -> Result<(), RepositoryError> {
-        let conn = self.lock()?;
+        let deleted_connection_ids = {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction().map_err(map_err)?;
 
-        // Block if there are child groups.
-        let child_groups: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM groups WHERE parent_id = ?1",
-                [id.get()],
-                |r| r.get(0),
-            )
-            .map_err(map_err)?;
-        if child_groups > 0 {
-            return Err(RepositoryError::Conflict(
-                "group has child groups; move or delete them first".into(),
-            ));
-        }
+            let groups = {
+                let mut stmt = tx
+                    .prepare(
+                        "WITH RECURSIVE subtree(id, depth) AS (\
+                             SELECT id, 0 FROM groups WHERE id = ?1 \
+                             UNION ALL \
+                             SELECT g.id, subtree.depth + 1 \
+                             FROM groups g JOIN subtree ON g.parent_id = subtree.id\
+                         ) \
+                         SELECT id FROM subtree ORDER BY depth DESC, id DESC",
+                    )
+                    .map_err(map_err)?;
+                stmt.query_map([id.get()], |row| row.get::<_, i64>(0))
+                    .map_err(map_err)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(map_err)?
+            };
+            if groups.is_empty() {
+                return Err(RepositoryError::NotFound);
+            }
 
-        // Block if there are connections in the group.
-        let child_conns: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM connections WHERE group_id = ?1",
-                [id.get()],
-                |r| r.get(0),
-            )
-            .map_err(map_err)?;
-        if child_conns > 0 {
-            return Err(RepositoryError::Conflict(
-                "group has connections; move or delete them first".into(),
-            ));
-        }
+            let connection_ids = {
+                let mut stmt = tx
+                    .prepare(
+                        "WITH RECURSIVE subtree(id) AS (\
+                             SELECT id FROM groups WHERE id = ?1 \
+                             UNION ALL \
+                             SELECT g.id FROM groups g \
+                             JOIN subtree ON g.parent_id = subtree.id\
+                         ) \
+                         SELECT c.id FROM connections c \
+                         JOIN subtree ON c.group_id = subtree.id \
+                         ORDER BY c.id",
+                    )
+                    .map_err(map_err)?;
+                stmt.query_map([id.get()], |row| row.get::<_, i64>(0))
+                    .map_err(map_err)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(map_err)?
+            };
 
-        let rows = conn
-            .execute("DELETE FROM groups WHERE id = ?1", [id.get()])
-            .map_err(map_err)?;
-        if rows == 0 {
-            return Err(RepositoryError::NotFound);
-        }
+            for connection_id in &connection_ids {
+                tx.execute("DELETE FROM connections WHERE id = ?1", [connection_id])
+                    .map_err(map_err)?;
+            }
+            // The schema intentionally uses ON DELETE RESTRICT. Delete from
+            // leaves toward the selected root to preserve that invariant.
+            for group_id in groups {
+                tx.execute("DELETE FROM groups WHERE id = ?1", [group_id])
+                    .map_err(map_err)?;
+            }
+            tx.commit().map_err(map_err)?;
+            connection_ids
+                .into_iter()
+                .map(ConnectionId::new)
+                .collect::<Vec<_>>()
+        }; // release SQLite before touching the unrelated keychain backend
+
+        self.cleanup_connection_secrets(deleted_connection_ids);
         Ok(())
     }
 

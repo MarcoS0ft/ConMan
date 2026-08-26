@@ -18,6 +18,8 @@
 
 mod support;
 
+use i_slint_backend_testing::ElementHandle;
+use slint::{ComponentHandle, Model};
 use support::{find_by_id, find_descendant_by_label, find_singleton, harness, pump_ticks};
 
 #[test]
@@ -28,9 +30,161 @@ fn settings_suite() {
     theme_dark_light_toggle_updates_dark_mode();
     density_compact_cosy_toggle();
     accent_preset_selection();
+    stale_font_family_uses_effective_default();
+    font_family_selection_persists();
+    settings_body_scrolls_beneath_fixed_header();
     render_backend_toggle_persists();
     #[cfg(feature = "agent-mode")]
     agent_mode_section_toggles_persist();
+}
+
+fn font_family_selection_persists() {
+    use cm_core::{DEFAULT_TERMINAL_FONT_FAMILY, SettingsService};
+
+    let (h, repo, _provider) = harness();
+    open_settings(&h);
+    let panel = find_singleton(&h.ui, "SettingsPanel");
+    let combo = find_descendant_by_label(&panel, "Terminal font family");
+    let families = h.ui.get_settings_font_families();
+
+    assert_eq!(
+        h.ui.get_settings_font_family().as_str(),
+        DEFAULT_TERMINAL_FONT_FAMILY,
+        "the selector must present the effective default family"
+    );
+    assert_eq!(
+        combo.accessible_value().as_deref(),
+        Some(DEFAULT_TERMINAL_FONT_FAMILY),
+        "the default family must be selected in the ComboBox"
+    );
+    assert!(
+        families.row_count() >= 1,
+        "the usable family list must not be empty"
+    );
+    assert_eq!(
+        families.row_data(0).as_deref(),
+        Some(DEFAULT_TERMINAL_FONT_FAMILY),
+        "the bundled default must be the first deterministic option"
+    );
+
+    let selected_index = usize::from(families.row_count() > 1);
+    let selected_family = families
+        .row_data(selected_index)
+        .expect("selected usable family must exist");
+
+    combo.invoke_accessible_expand_action();
+    pump_ticks(1);
+    ElementHandle::find_by_accessible_label(&h.ui, selected_family.as_str())
+        .next()
+        .expect("owner-enumerated family must be present in the expanded ComboBox");
+    // The testing backend exposes ComboBox expansion/options but no public
+    // semantic "select item" action. Drive the same Slint bridge values that
+    // ComboBox::selected writes and verify the real controller callback.
+    h.ui.set_settings_font_family_index(selected_index as i32);
+    h.ui.set_settings_font_family(selected_family.clone());
+    h.ui.invoke_settings_font_family_changed(selected_family.clone());
+    pump_ticks(1);
+
+    assert_eq!(h.ui.get_settings_font_family(), selected_family);
+    assert_eq!(
+        SettingsService::new(repo.as_ref())
+            .load()
+            .expect("load settings")
+            .font_family,
+        selected_family.as_str(),
+        "selecting a family must persist the backend-reported effective family"
+    );
+}
+
+fn stale_font_family_uses_effective_default() {
+    use std::sync::Arc;
+
+    use cm_core::{ConnectionRepository, DEFAULT_TERMINAL_FONT_FAMILY};
+    use cm_storage::SqliteRepository;
+    use support::{MockSessionProvider, NullCredentialStore};
+
+    let repo: Arc<dyn ConnectionRepository> =
+        Arc::new(SqliteRepository::open_in_memory().expect("open in-memory repository"));
+    repo.set_setting("terminal.font_family", "Definitely Missing Font")
+        .expect("seed stale family");
+    let provider = MockSessionProvider::new();
+    let h = cm_ui::build_for_test(cm_ui::AppConfig {
+        repo,
+        secrets: Arc::new(NullCredentialStore),
+        session_provider: provider,
+        activation_rx: None,
+        first_launch: true,
+        agent_mode: None,
+    });
+    h.ui.window()
+        .set_size(slint::LogicalSize::new(1600.0, 1200.0));
+
+    assert_eq!(
+        h.ui.get_settings_font_family().as_str(),
+        DEFAULT_TERMINAL_FONT_FAMILY,
+        "a stale stored family must present the backend's effective default"
+    );
+    assert_eq!(h.ui.get_settings_font_family_index(), 0);
+    assert_eq!(
+        h.ui.get_settings_font_families().row_data(0).as_deref(),
+        Some(DEFAULT_TERMINAL_FONT_FAMILY)
+    );
+}
+
+fn settings_body_scrolls_beneath_fixed_header() {
+    let (h, _repo, _provider) = harness();
+    h.ui.window()
+        .set_size(slint::LogicalSize::new(900.0, 420.0));
+    open_settings(&h);
+    pump_ticks(1);
+
+    let header = find_by_id(&h.ui, "SettingsPanel::settings-header");
+    let scroll = find_by_id(&h.ui, "SettingsPanel::settings-scroll");
+    let header_position = header.absolute_position();
+    assert!(
+        scroll.absolute_position().y >= header_position.y + header.size().height,
+        "the scrolling viewport must begin beneath the fixed header"
+    );
+    assert!(
+        scroll.size().height > 0.0 && scroll.size().height < 420.0,
+        "the settings body must receive a bounded viewport at constrained height"
+    );
+
+    // Reach the bottom with the real wheel route, then capture the specific
+    // final shortcut. A generic "some ShortcutRow exists" assertion can pass
+    // even when the bottom content never becomes reachable.
+    scroll.scroll(0.0, -10_000.0);
+    pump_ticks(1);
+    let bottom_row = find_by_id(&h.ui, "SettingsPanel::global-ctrl-k-shortcut");
+    let bottom_row_before = bottom_row.absolute_position();
+
+    // Move slightly back toward the top. The content must translate downward
+    // while Ctrl K remains inside the viewport (the bottom padding provides a
+    // stable margin for this constrained-height check).
+    scroll.scroll(0.0, 8.0);
+    pump_ticks(1);
+
+    let header_after = find_by_id(&h.ui, "SettingsPanel::settings-header");
+    assert_eq!(
+        header_after.absolute_position(),
+        header_position,
+        "scrolling settings content must not move the header"
+    );
+    let bottom_row_after = find_by_id(&h.ui, "SettingsPanel::global-ctrl-k-shortcut");
+    let bottom_row_after_position = bottom_row_after.absolute_position();
+    assert!(
+        bottom_row_after_position.y > bottom_row_before.y,
+        "scrolling toward the top must move the bottom shortcut downward"
+    );
+    let viewport_top = scroll.absolute_position().y;
+    let viewport_bottom = viewport_top + scroll.size().height;
+    let row_top = bottom_row_after_position.y;
+    let row_bottom = row_top + bottom_row_after.size().height;
+    assert!(
+        row_top >= viewport_top && row_bottom <= viewport_bottom,
+        "Ctrl K bounds ({row_top}..{row_bottom}) must fit the Settings viewport \
+         ({viewport_top}..{viewport_bottom}) after scrolling"
+    );
 }
 
 /// Opens Settings via the real command-palette flow (mirrors

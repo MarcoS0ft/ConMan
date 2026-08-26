@@ -42,6 +42,8 @@ fn connections_tree_suite() {
     select_does_not_launch_but_activate_does();
     tree_row_status_dot_tracks_its_connection_s_live_tab();
     connection_row_still_carries_its_context_menu_area();
+    delete_confirmation_preserves_on_cancel_and_recursively_deletes_on_accept();
+    connection_delete_also_requires_confirmation();
 }
 
 fn tab_count(ui: &cm_ui::AppWindow) -> usize {
@@ -106,6 +108,129 @@ fn select_does_not_launch_but_activate_does() {
         tab_count(&h.ui),
         tabs_before + 1,
         "row-activated (double click / Enter) must open a new tab (P9.5 #2)"
+    );
+}
+
+fn save_group(ui: &cm_ui::AppWindow, parent_id: i32, name: &str) {
+    ui.invoke_new_group(parent_id);
+    let mut form = ui.get_group_form();
+    form.name = name.into();
+    ui.set_group_form(form);
+    find_by_id(ui, "GroupEditor::group-save-btn").invoke_accessible_default_action();
+    assert!(!ui.get_group_editor_open(), "group save must close editor");
+}
+
+/// Destructive deletion is deliberately two-step. The request must not mutate
+/// storage, cancellation must preserve the complete subtree, and confirmation
+/// must remove the selected group, all descendants, and their connections.
+fn delete_confirmation_preserves_on_cancel_and_recursively_deletes_on_accept() {
+    let (h, repo, _provider) = harness();
+
+    save_group(&h.ui, 0, "Delete root");
+    let root_id = repo.list_groups().expect("list root")[0].id;
+    save_group(&h.ui, root_id.get() as i32, "Delete child");
+    let child_id = repo
+        .list_groups()
+        .expect("list child")
+        .into_iter()
+        .find(|group| group.parent_id == Some(root_id))
+        .expect("child group")
+        .id;
+
+    h.ui.invoke_new_connection(child_id.get() as i32);
+    {
+        let mut form = h.ui.get_profile_form();
+        form.name = "Nested connection".into();
+        form.kind = 3; // Local
+        h.ui.set_profile_form(form);
+    }
+    find_by_id(&h.ui, "ProfileEditor::profile-save-btn").invoke_accessible_default_action();
+    assert_eq!(repo.list_connections().expect("list connections").len(), 1);
+
+    h.ui.invoke_delete_conn_row(root_id.get() as i32, true);
+    assert!(h.ui.get_delete_confirm_open());
+    assert!(h.ui.get_delete_confirm_is_group());
+    assert_eq!(h.ui.get_delete_confirm_group_count(), 2);
+    assert_eq!(h.ui.get_delete_confirm_connection_count(), 1);
+    assert_eq!(
+        h.ui.get_delete_confirm_target_name().as_str(),
+        "Delete root"
+    );
+    assert_eq!(
+        repo.list_groups().expect("request preserves groups").len(),
+        2
+    );
+    assert_eq!(
+        repo.list_connections()
+            .expect("request preserves connections")
+            .len(),
+        1
+    );
+
+    find_by_id(&h.ui, "DeleteConfirmationDialog::delete-cancel-btn")
+        .invoke_accessible_default_action();
+    assert!(!h.ui.get_delete_confirm_open());
+    assert_eq!(
+        repo.list_groups().expect("cancel preserves groups").len(),
+        2
+    );
+    assert_eq!(
+        repo.list_connections()
+            .expect("cancel preserves connections")
+            .len(),
+        1
+    );
+
+    h.ui.invoke_delete_conn_row(root_id.get() as i32, true);
+    find_by_id(&h.ui, "DeleteConfirmationDialog::delete-confirm-btn")
+        .invoke_accessible_default_action();
+    assert!(!h.ui.get_delete_confirm_open());
+    assert!(repo.list_groups().expect("confirmed groups").is_empty());
+    assert!(
+        repo.list_connections()
+            .expect("confirmed connections")
+            .is_empty()
+    );
+    assert_eq!(
+        h.ui.get_group_name_list().row_count(),
+        1,
+        "group selector must refresh back to only the root sentinel"
+    );
+}
+
+fn connection_delete_also_requires_confirmation() {
+    let (h, repo, _provider) = harness();
+    h.ui.invoke_new_connection(0);
+    {
+        let mut form = h.ui.get_profile_form();
+        form.name = "Delete leaf".into();
+        form.kind = 3; // Local
+        h.ui.set_profile_form(form);
+    }
+    find_by_id(&h.ui, "ProfileEditor::profile-save-btn").invoke_accessible_default_action();
+    let id = repo.list_connections().expect("saved connection")[0].id;
+
+    h.ui.invoke_delete_conn_row(id.get() as i32, false);
+    assert!(h.ui.get_delete_confirm_open());
+    assert!(!h.ui.get_delete_confirm_is_group());
+    assert_eq!(h.ui.get_delete_confirm_group_count(), 0);
+    assert_eq!(h.ui.get_delete_confirm_connection_count(), 1);
+    find_by_id(&h.ui, "DeleteConfirmationDialog::delete-cancel-btn")
+        .invoke_accessible_default_action();
+    assert_eq!(
+        repo.list_connections()
+            .expect("cancel preserves leaf")
+            .len(),
+        1
+    );
+
+    h.ui.invoke_delete_conn_row(id.get() as i32, false);
+    find_by_id(&h.ui, "DeleteConfirmationDialog::delete-confirm-btn")
+        .invoke_accessible_default_action();
+    assert!(
+        repo.list_connections()
+            .expect("confirmed leaf delete")
+            .is_empty()
     );
 }
 

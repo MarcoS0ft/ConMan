@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 use cm_core::rdp::{CertVerifier, RdpAuthInput};
 use cm_core::ssh::{HostKeyVerifier, SshAuthInput};
 use cm_core::{
-    LocalSettings, RdpSettings, Session, SessionProvider, SessionSetupError, SessionStatus,
-    SshSettings, Surface, TelnetSettings, TerminalSize,
+    LocalSettings, MouseEvent, RdpSettings, Session, SessionInput, SessionProvider,
+    SessionSetupError, SessionStatus, SshSettings, Surface, TelnetSettings, TerminalSize,
 };
 
 /// A [`Session`] whose lifecycle is entirely driven by a shared status cell
@@ -29,14 +29,19 @@ use cm_core::{
 pub(crate) struct ScriptedSession {
     status: Arc<Mutex<SessionStatus>>,
     surface: Surface,
+    inputs: Arc<Mutex<Vec<SessionInput>>>,
 }
 
 impl ScriptedSession {
-    pub(crate) fn new(status: Arc<Mutex<SessionStatus>>) -> Self {
+    pub(crate) fn new(
+        status: Arc<Mutex<SessionStatus>>,
+        inputs: Arc<Mutex<Vec<SessionInput>>>,
+    ) -> Self {
         let (_tx, rx) = channel();
         Self {
             status,
             surface: Surface::TerminalGrid(rx),
+            inputs,
         }
     }
 }
@@ -55,6 +60,13 @@ impl Session for ScriptedSession {
 
     fn shutdown(&self) {}
     fn resize_px(&self, _width: u32, _height: u32) {}
+
+    fn send_input(&self, input: SessionInput) {
+        self.inputs
+            .lock()
+            .expect("ScriptedSession inputs mutex poisoned")
+            .push(input);
+    }
 }
 
 /// Hermetic `SessionProvider`:
@@ -78,6 +90,7 @@ pub(crate) struct MockSessionProvider {
     ssh_connect_calls: AtomicUsize,
     rdp_connect_calls: AtomicUsize,
     telnet_connect_calls: AtomicUsize,
+    inputs: Arc<Mutex<Vec<SessionInput>>>,
 }
 
 impl MockSessionProvider {
@@ -87,6 +100,7 @@ impl MockSessionProvider {
             ssh_connect_calls: AtomicUsize::new(0),
             rdp_connect_calls: AtomicUsize::new(0),
             telnet_connect_calls: AtomicUsize::new(0),
+            inputs: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -115,6 +129,19 @@ impl MockSessionProvider {
     pub(crate) fn telnet_connect_count(&self) -> usize {
         self.telnet_connect_calls.load(Ordering::SeqCst)
     }
+
+    /// Terminal mouse inputs delivered through the real controller wiring.
+    pub(crate) fn terminal_mouse_events(&self) -> Vec<MouseEvent> {
+        self.inputs
+            .lock()
+            .expect("MockSessionProvider inputs mutex poisoned")
+            .iter()
+            .filter_map(|input| match input {
+                SessionInput::Mouse(event) => Some(*event),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 impl SessionProvider for MockSessionProvider {
@@ -123,9 +150,10 @@ impl SessionProvider for MockSessionProvider {
         _settings: &LocalSettings,
         _size: TerminalSize,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
-        Ok(Box::new(ScriptedSession::new(Arc::new(Mutex::new(
-            SessionStatus::Connected,
-        )))))
+        Ok(Box::new(ScriptedSession::new(
+            Arc::new(Mutex::new(SessionStatus::Connected)),
+            self.inputs.clone(),
+        )))
     }
 
     fn connect_ssh(
@@ -141,7 +169,7 @@ impl SessionProvider for MockSessionProvider {
             .lock()
             .expect("MockSessionProvider.next_remote_status poisoned")
             .clone();
-        Ok(Box::new(ScriptedSession::new(cell)))
+        Ok(Box::new(ScriptedSession::new(cell, self.inputs.clone())))
     }
 
     fn connect_telnet(
@@ -155,7 +183,7 @@ impl SessionProvider for MockSessionProvider {
             .lock()
             .expect("MockSessionProvider.next_remote_status poisoned")
             .clone();
-        Ok(Box::new(ScriptedSession::new(cell)))
+        Ok(Box::new(ScriptedSession::new(cell, self.inputs.clone())))
     }
 
     fn connect_rdp(
@@ -170,6 +198,6 @@ impl SessionProvider for MockSessionProvider {
             .lock()
             .expect("MockSessionProvider.next_remote_status poisoned")
             .clone();
-        Ok(Box::new(ScriptedSession::new(cell)))
+        Ok(Box::new(ScriptedSession::new(cell, self.inputs.clone())))
     }
 }

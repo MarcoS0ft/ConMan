@@ -1,8 +1,10 @@
 //! Glyph-atlas terminal renderer (P2.3).
 //!
 //! Rasterizes a [`cm_core::GridSnapshot`] into an RGBA [`slint::SharedPixelBuffer`]
-//! using a software monospace glyph atlas — the approach benchmarked and recommended in
-//! the P0.3 spike. Pure CPU work, headless-testable, no windowing/GPU dependency.
+//! using a software grapheme atlas. `cosmic-text` shapes complete cell graphemes and
+//! resolves missing glyphs through bundled Symbols Nerd Font and installed system fonts;
+//! Swash supplies mask or intrinsic-color glyph pixels. Pure CPU work, headless-testable,
+//! with no windowing/GPU dependency.
 //!
 //! ## Threading (`!Send` boundary, ARCHITECTURE §4 / P0.3)
 //! [`TerminalRenderer::render`] returns a `SharedPixelBuffer`, which **is** `Send`. The
@@ -12,17 +14,23 @@
 //!
 //! ## Fonts (bundled, see `assets/fonts/`)
 //! Base: JetBrains Mono Nerd Font Mono (regular/bold/italic/bold-italic), SIL OFL-1.1.
-//! Fallback: Symbols Nerd Font Mono, MIT. Lookup is **base → symbols**, so even a
-//! non-patched base font would still get Nerd Font icon coverage (ARCHITECTURE §5). With
-//! the bundled, already-patched JetBrains Mono the base resolves Nerd glyphs directly; the
-//! fallback exists for the P2.4 user-font-picker case.
+//! Fallback: Symbols Nerd Font Mono, MIT, followed by best-effort installed system fonts.
+//! A selected family is preferred rather than exclusive; the primary regular face alone
+//! determines terminal geometry.
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-use cm_core::{CellAttrs, Color, CursorShape, GridSnapshot, TerminalSize};
-use fontdue::{Font, FontSettings};
+use cm_core::{
+    CellAttrs, Color, CursorShape, DEFAULT_TERMINAL_FONT_FAMILY, GridSnapshot, TerminalSize,
+};
 use slint::{Rgba8Pixel, SharedPixelBuffer};
+
+mod font_backend;
+pub use font_backend::TerminalFontSystem;
+use font_backend::{FontRequest, FontStyle, GlyphPixels, RasterizedCluster, RasterizedLayer};
+
+const GLYPH_ATLAS_ENTRY_CAP: usize = 2_048;
 
 // ── Bundled fonts ───────────────────────────────────────────────────────────────────
 static FONT_REGULAR: &[u8] =
@@ -35,17 +43,6 @@ static FONT_SYMBOLS: &[u8] = include_bytes!("../assets/fonts/SymbolsNerdFontMono
 
 /// An RGB color (no alpha; the buffer is composited opaque).
 pub type Rgb = (u8, u8, u8);
-
-/// Which font in the fallback chain resolves a given character.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GlyphSource {
-    /// The styled base font (JetBrains Mono Nerd Font) has the glyph.
-    Base,
-    /// The base lacks it; the Symbols Nerd Font Mono fallback has it.
-    Fallback,
-    /// Neither font has the glyph (renders as the font's `.notdef`, usually blank).
-    Missing,
-}
 
 /// Derived cell geometry, in **physical** pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -334,70 +331,17 @@ impl TerminalTheme {
     }
 }
 
-/// Parsed bundled font faces (regular/bold/italic/bold-italic + symbols fallback).
-///
-/// Parsing the ~12 MB of bundled TTFs is the dominant cost of building a renderer, so the
-/// faces are parsed **once** and shared across all tabs via an [`Arc`] (B4). The glyph
-/// *atlas* (rasterized bitmaps) stays per-renderer because it is keyed by physical pixel
-/// size, but the expensive face parse is amortized.
-pub struct FontSet {
-    // [regular, bold, italic, bold-italic]
-    base: [Font; 4],
-    symbols: Font,
-}
-
-impl std::fmt::Debug for FontSet {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FontSet").finish_non_exhaustive()
-    }
-}
-
-impl FontSet {
-    fn parse(faces: [&[u8]; 4], symbols: &[u8]) -> Self {
-        let load = |bytes: &[u8]| {
-            Font::from_bytes(bytes, FontSettings::default())
-                .expect("bundled font must parse (compile-time invariant)")
-        };
-        Self {
-            base: faces.map(load),
-            symbols: load(symbols),
-        }
-    }
-
-    /// The compiled-in bundled fonts, parsed once and shared process-wide. Cheap after the
-    /// first call (clones an `Arc`).
-    #[must_use]
-    pub fn bundled() -> Arc<FontSet> {
-        static BUNDLED: OnceLock<Arc<FontSet>> = OnceLock::new();
-        BUNDLED
-            .get_or_init(|| {
-                Arc::new(FontSet::parse(
-                    [FONT_REGULAR, FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC],
-                    FONT_SYMBOLS,
-                ))
-            })
-            .clone()
-    }
-}
-
-// A rasterized glyph: coverage bitmap plus its placement metrics.
-struct GlyphBitmap {
-    w: usize,
-    h: usize,
-    xmin: i32,
-    ymin: i32,
-    cov: Vec<u8>,
-}
-
 /// Software glyph-atlas terminal renderer. See module docs.
 pub struct TerminalRenderer {
-    fonts: Arc<FontSet>,
+    fonts: Arc<TerminalFontSystem>,
+    effective_family: String,
     font_size_px: f32,
     scale_factor: f32,
     metrics: CellMetrics,
     theme: TerminalTheme,
-    // (char, style index) -> rasterized glyph at the current physical size.
-    cache: HashMap<(char, u8), GlyphBitmap>,
+    // One complete-grapheme map per style at the current physical size/family. A borrowed
+    // `&str` warm lookup does not allocate; the owned key is created only on insertion.
+    cache: [HashMap<String, Arc<RasterizedCluster>>; 4],
     // Size of the most recently rendered snapshot, for `cell_at` clamping.
     last_size: TerminalSize,
 }
@@ -407,78 +351,73 @@ impl std::fmt::Debug for TerminalRenderer {
         f.debug_struct("TerminalRenderer")
             .field("font_size_px", &self.font_size_px)
             .field("scale_factor", &self.scale_factor)
+            .field("effective_family", &self.effective_family)
             .field("metrics", &self.metrics)
-            .field("cached_glyphs", &self.cache.len())
+            .field("cached_glyphs", &self.cache_len())
             .finish()
     }
 }
 
 #[inline]
-fn style_index(attrs: CellAttrs) -> u8 {
+fn font_style(attrs: CellAttrs) -> FontStyle {
     match (attrs.bold(), attrs.italic()) {
-        (false, false) => 0,
-        (true, false) => 1,
-        (false, true) => 2,
-        (true, true) => 3,
+        (false, false) => FontStyle::Regular,
+        (true, false) => FontStyle::Bold,
+        (false, true) => FontStyle::Italic,
+        (true, true) => FontStyle::BoldItalic,
+    }
+}
+
+const fn style_cache_index(style: FontStyle) -> usize {
+    match style {
+        FontStyle::Regular => 0,
+        FontStyle::Bold => 1,
+        FontStyle::Italic => 2,
+        FontStyle::BoldItalic => 3,
     }
 }
 
 impl TerminalRenderer {
-    /// Build a renderer from the (shared) bundled fonts at the given logical font size and
-    /// display scale factor. Rasterization happens at physical pixels = `font_size_px *
-    /// scale_factor`. Convenience wrapper over [`with_fonts`](Self::with_fonts) using the
-    /// shared bundled face set.
+    /// Build a renderer from the shared terminal font system and bundled default family.
     #[must_use]
     pub fn new(font_size_px: f32, scale_factor: f32, theme: TerminalTheme) -> Self {
-        Self::with_fonts(FontSet::bundled(), font_size_px, scale_factor, theme)
+        Self::with_font_system(
+            TerminalFontSystem::shared(),
+            DEFAULT_TERMINAL_FONT_FAMILY,
+            font_size_px,
+            scale_factor,
+            theme,
+        )
     }
 
-    /// Build a renderer over an explicit, shared [`FontSet`] (B4: lets every tab reuse the
-    /// same parsed faces instead of re-parsing ~12 MB of TTFs per tab).
+    /// Build a renderer over the shared process font system with a preferred primary family.
     #[must_use]
-    pub fn with_fonts(
-        fonts: Arc<FontSet>,
+    pub fn with_font_system(
+        fonts: Arc<TerminalFontSystem>,
+        preferred_family: &str,
         font_size_px: f32,
         scale_factor: f32,
         theme: TerminalTheme,
     ) -> Self {
-        let metrics = Self::compute_metrics(
-            &fonts.base[0],
+        let effective_family = fonts.resolve_family(preferred_family);
+        let metrics = fonts.primary_metrics(
+            &effective_family,
             Self::physical_px(font_size_px, scale_factor),
         );
         Self {
             fonts,
+            effective_family,
             font_size_px,
             scale_factor,
             metrics,
             theme,
-            cache: HashMap::new(),
+            cache: std::array::from_fn(|_| HashMap::new()),
             last_size: TerminalSize { rows: 0, cols: 0 },
         }
     }
 
     fn physical_px(font_size_px: f32, scale_factor: f32) -> f32 {
         (font_size_px * scale_factor).max(1.0)
-    }
-
-    fn compute_metrics(regular: &Font, px: f32) -> CellMetrics {
-        let line = regular
-            .horizontal_line_metrics(px)
-            .expect("monospace font has horizontal line metrics");
-        // Monospace advance: every glyph shares one advance; sample a representative.
-        let advance = regular.metrics('M', px).advance_width;
-        let cell_w = advance.ceil().max(1.0) as u32;
-        let ascent = line.ascent;
-        let descent = line.descent; // <= 0
-        let cell_h = (ascent - descent).ceil().max(1.0) as u32;
-        let baseline = ascent.round() as i32;
-        CellMetrics {
-            cell_w,
-            cell_h,
-            baseline,
-            ascent,
-            descent,
-        }
     }
 
     /// Current cell geometry (physical px).
@@ -526,52 +465,62 @@ impl TerminalRenderer {
     pub fn set_scale(&mut self, font_size_px: f32, scale_factor: f32) {
         self.font_size_px = font_size_px;
         self.scale_factor = scale_factor;
-        self.metrics = Self::compute_metrics(
-            &self.fonts.base[0],
+        self.metrics = self.fonts.primary_metrics(
+            &self.effective_family,
             Self::physical_px(font_size_px, scale_factor),
         );
-        self.cache.clear();
+        self.clear_cache();
     }
 
-    /// Which font in the chain resolves `ch` (base → symbols → missing). The base style
-    /// does not affect coverage, so this checks the regular base.
+    /// Switch the preferred primary family live. Missing/unusable requests resolve to the
+    /// bundled default. Returns the effective family after recomputing geometry and clearing
+    /// the per-renderer atlas.
+    pub fn set_preferred_family(&mut self, requested: &str) -> &str {
+        self.effective_family = self.fonts.resolve_family(requested);
+        self.metrics = self.fonts.primary_metrics(
+            &self.effective_family,
+            Self::physical_px(self.font_size_px, self.scale_factor),
+        );
+        self.clear_cache();
+        &self.effective_family
+    }
+
+    /// The canonical family actually used as this renderer's primary.
     #[must_use]
-    pub fn glyph_source(&self, ch: char) -> GlyphSource {
-        if self.fonts.base[0].lookup_glyph_index(ch) != 0 {
-            GlyphSource::Base
-        } else if self.fonts.symbols.lookup_glyph_index(ch) != 0 {
-            GlyphSource::Fallback
-        } else {
-            GlyphSource::Missing
-        }
+    pub fn effective_family(&self) -> &str {
+        &self.effective_family
     }
 
-    // Ensure `ch` at `style` is cached at the current physical size; return it.
-    fn glyph(&mut self, ch: char, style: u8) -> &GlyphBitmap {
-        let key = (ch, style);
-        if !self.cache.contains_key(&key) {
-            let px = Self::physical_px(self.font_size_px, self.scale_factor);
-            // Fallback chain: prefer the styled base; fall back to symbols for coverage.
-            let font = if self.fonts.base[style as usize].lookup_glyph_index(ch) != 0 {
-                &self.fonts.base[style as usize]
-            } else if self.fonts.symbols.lookup_glyph_index(ch) != 0 {
-                &self.fonts.symbols
-            } else {
-                &self.fonts.base[style as usize]
-            };
-            let (m, cov) = font.rasterize(ch, px);
-            self.cache.insert(
-                key,
-                GlyphBitmap {
-                    w: m.width,
-                    h: m.height,
-                    xmin: m.xmin,
-                    ymin: m.ymin,
-                    cov,
-                },
-            );
+    // Ensure a complete grapheme/style is cached at the current size/family; return it.
+    fn glyph(&mut self, grapheme: &str, style: FontStyle) -> Arc<RasterizedCluster> {
+        let style_index = style_cache_index(style);
+        if let Some(cluster) = self.cache[style_index].get(grapheme) {
+            return Arc::clone(cluster);
         }
-        &self.cache[&key]
+
+        if self.cache_len() >= GLYPH_ATLAS_ENTRY_CAP {
+            self.clear_cache();
+        }
+        let px = Self::physical_px(self.font_size_px, self.scale_factor);
+        let cluster = Arc::new(self.fonts.rasterize(FontRequest {
+            grapheme,
+            style,
+            physical_px: px,
+            preferred_family: &self.effective_family,
+        }));
+        tracing::trace!(grapheme = %grapheme, source = ?cluster.source, "cached terminal grapheme");
+        self.cache[style_index].insert(grapheme.to_owned(), Arc::clone(&cluster));
+        cluster
+    }
+
+    fn cache_len(&self) -> usize {
+        self.cache.iter().map(HashMap::len).sum()
+    }
+
+    fn clear_cache(&mut self) {
+        for cache in &mut self.cache {
+            cache.clear();
+        }
     }
 
     /// Rasterize a snapshot into a fresh RGBA pixel buffer of exactly
@@ -676,6 +625,9 @@ impl TerminalRenderer {
         // from "at the tail with no scrollback," which is the correct fallback).
         let abs_top = snap.scrollback_len.saturating_sub(snap.scroll_offset);
 
+        // Paint every cell background before any glyph. Glyphs are deliberately clipped only
+        // to the framebuffer, not their cell: a later spacer/neighbor background must not
+        // erase a wide glyph tail or italic overhang drawn into that neighbor.
         for row in 0..rows {
             let abs_row = u16::try_from(abs_top + row as u32).unwrap_or(u16::MAX);
             for col in 0..cols {
@@ -684,55 +636,56 @@ impl TerminalRenderer {
                     continue;
                 };
                 let col_u16 = col as u16;
-
-                // Resolve colors, applying reverse / dim / hidden.
-                let mut fg = self.theme.resolve(cell.fg, true);
-                let mut bg = self.theme.resolve(cell.bg, false);
-                if cell.attrs.reverse() {
-                    std::mem::swap(&mut fg, &mut bg);
-                }
-                if cell.attrs.dim() {
-                    fg = (
-                        (u16::from(fg.0) * 11 / 20) as u8,
-                        (u16::from(fg.1) * 11 / 20) as u8,
-                        (u16::from(fg.2) * 11 / 20) as u8,
-                    );
-                }
-                // P6.5: a selected cell's background is overridden with the
-                // theme's selection tint (fg — and any reverse/dim already
-                // applied above — is left as-is on top of it). P6.7: a search
-                // match tints similarly when there is no selection covering
-                // the cell (selection wins on overlap — the two are not
-                // expected to coexist in practice, but selection is the more
-                // deliberate user action).
-                if let Some(sel) = selection
-                    && sel.contains(abs_row, col_u16, snap.size.cols)
-                {
-                    bg = self.theme.selection_bg;
-                } else if let Some(m_idx) =
-                    matches.iter().position(|m| m.contains(abs_row, col_u16))
-                {
-                    bg = if current_match == Some(m_idx) {
-                        self.theme.search_current_bg
-                    } else {
-                        self.theme.search_bg
-                    };
-                }
-                let draw_glyph = !cell.attrs.hidden() && !cell.grapheme.is_empty();
-
+                let (_, bg) = self.resolved_cell_colors(
+                    cell,
+                    abs_row,
+                    col_u16,
+                    snap.size.cols,
+                    selection,
+                    matches,
+                    current_match,
+                );
                 let ox = col * cw;
                 let oy = row * ch_h;
                 fill_rect(bytes, stride, ox, oy, cw, ch_h, bg);
+            }
+        }
 
-                if draw_glyph {
-                    let style = style_index(cell.attrs);
-                    // First scalar of the grapheme cluster (combining marks are not shaped
-                    // at P2.3; documented limitation — full shaping is later UI work).
-                    if let Some(scalar) = cell.grapheme.chars().next() {
-                        let metrics = self.metrics;
-                        let g = self.glyph(scalar, style);
-                        blit_glyph(bytes, stride, w, h, ox, oy, metrics.baseline, g, fg);
-                    }
+        // Compose glyphs and decorations only after the complete background plane exists.
+        for row in 0..rows {
+            for col in 0..cols {
+                let idx = row * cols + col;
+                let Some(cell) = snap.cells.get(idx) else {
+                    continue;
+                };
+                // Selection/search affect only the already-painted background. Resolve the
+                // foreground directly here so the glyph pass does not repeat their linear
+                // match scan for every cell.
+                let fg = if cell.attrs.reverse() {
+                    self.theme.resolve(cell.bg, false)
+                } else {
+                    self.theme.resolve(cell.fg, true)
+                };
+                let ox = col * cw;
+                let oy = row * ch_h;
+
+                if !cell.attrs.hidden() && !cell.grapheme.is_empty() {
+                    let style = font_style(cell.attrs);
+                    let metrics = self.metrics;
+                    let opacity = if cell.attrs.dim() { 128 } else { 255 };
+                    let g = self.glyph(&cell.grapheme, style);
+                    blit_cluster(
+                        bytes,
+                        stride,
+                        w,
+                        h,
+                        ox,
+                        oy,
+                        metrics.baseline,
+                        &g,
+                        fg,
+                        opacity,
+                    );
                 }
 
                 if !cell.attrs.hidden() {
@@ -748,9 +701,39 @@ impl TerminalRenderer {
             }
         }
 
-        self.draw_cursor(bytes, stride, w, h, snap, cw, ch_h);
         self.draw_scrollbar(bytes, stride, w, h, snap);
+        self.draw_cursor(bytes, stride, w, h, snap, cw, ch_h);
         buf
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolved_cell_colors(
+        &self,
+        cell: &cm_core::Cell,
+        abs_row: u16,
+        col: u16,
+        cols: u16,
+        selection: Option<&Selection>,
+        matches: &[SearchMatch],
+        current_match: Option<usize>,
+    ) -> (Rgb, Rgb) {
+        let mut fg = self.theme.resolve(cell.fg, true);
+        let mut bg = self.theme.resolve(cell.bg, false);
+        if cell.attrs.reverse() {
+            std::mem::swap(&mut fg, &mut bg);
+        }
+        if let Some(sel) = selection
+            && sel.contains(abs_row, col, cols)
+        {
+            bg = self.theme.selection_bg;
+        } else if let Some(match_index) = matches.iter().position(|m| m.contains(abs_row, col)) {
+            bg = if current_match == Some(match_index) {
+                self.theme.search_current_bg
+            } else {
+                self.theme.search_bg
+            };
+        }
+        (fg, bg)
     }
 
     /// P6.7 scroll-position indicator: a thin vertical scrollbar on the right
@@ -825,13 +808,23 @@ impl TerminalRenderer {
                 fill_rect(bytes, stride, ox, oy, cw, ch_h, cursor_color);
                 if let Some(cell) = snap.cells.get(row * usize::from(snap.size.cols) + col) {
                     let cell_bg = self.theme.resolve(cell.bg, false);
-                    if !cell.grapheme.is_empty()
-                        && let Some(scalar) = cell.grapheme.chars().next()
-                    {
-                        let style = style_index(cell.attrs);
+                    if !cell.attrs.hidden() && !cell.grapheme.is_empty() {
+                        let style = font_style(cell.attrs);
                         let metrics = self.metrics;
-                        let g = self.glyph(scalar, style);
-                        blit_glyph(bytes, stride, w, h, ox, oy, metrics.baseline, g, cell_bg);
+                        let opacity = if cell.attrs.dim() { 128 } else { 255 };
+                        let g = self.glyph(&cell.grapheme, style);
+                        blit_cluster(
+                            bytes,
+                            stride,
+                            w,
+                            h,
+                            ox,
+                            oy,
+                            metrics.baseline,
+                            &g,
+                            cell_bg,
+                            opacity,
+                        );
                     }
                 }
             }
@@ -866,7 +859,7 @@ fn fill_rect(bytes: &mut [u8], stride: usize, x: usize, y: usize, w: usize, h: u
 }
 
 #[allow(clippy::too_many_arguments)]
-fn blit_glyph(
+fn blit_cluster(
     bytes: &mut [u8],
     stride: usize,
     w: u32,
@@ -874,36 +867,74 @@ fn blit_glyph(
     ox: usize,
     oy: usize,
     baseline: i32,
-    g: &GlyphBitmap,
+    cluster: &RasterizedCluster,
     fg: Rgb,
+    opacity: u8,
 ) {
-    // Glyph bitmap origin within the cell. Not clipped to the cell width, so a wide glyph
-    // overflows into its trailing spacer column (the desired behavior for wide cells).
-    let gx0 = ox as i32 + g.xmin;
-    let gy0 = oy as i32 + baseline - (g.ymin + g.h as i32);
-    for gy in 0..g.h {
+    for layer in &cluster.layers {
+        blit_layer(bytes, stride, w, h, ox, oy, baseline, layer, fg, opacity);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_layer(
+    bytes: &mut [u8],
+    stride: usize,
+    w: u32,
+    h: u32,
+    ox: usize,
+    oy: usize,
+    baseline: i32,
+    layer: &RasterizedLayer,
+    fg: Rgb,
+    opacity: u8,
+) {
+    // Not clipped to the cell: wide glyphs and italic overhang may occupy adjacent cells.
+    let gx0 = ox as i32 + layer.left;
+    let gy0 = oy as i32 + baseline - layer.top;
+    let layer_w = layer.width as usize;
+    let layer_h = layer.height as usize;
+    for gy in 0..layer_h {
         let py = gy0 + gy as i32;
         if py < 0 || py as u32 >= h {
             continue;
         }
         let row = py as usize * stride;
-        for gx in 0..g.w {
+        for gx in 0..layer_w {
             let px = gx0 + gx as i32;
             if px < 0 || px as u32 >= w {
                 continue;
             }
-            let cov = u32::from(g.cov[gy * g.w + gx]);
-            if cov == 0 {
+            let pixel = gy * layer_w + gx;
+            let (src, alpha) = match &layer.pixels {
+                GlyphPixels::Mask(mask) => {
+                    let Some(&coverage) = mask.get(pixel) else {
+                        continue;
+                    };
+                    (fg, u32::from(coverage) * u32::from(opacity) / 255)
+                }
+                GlyphPixels::Color(rgba) => {
+                    let i = pixel * 4;
+                    let Some(pixel) = rgba.get(i..i + 4) else {
+                        continue;
+                    };
+                    (
+                        (pixel[0], pixel[1], pixel[2]),
+                        u32::from(pixel[3]) * u32::from(opacity) / 255,
+                    )
+                }
+            };
+            if alpha == 0 {
                 continue;
             }
             let i = row + px as usize * 4;
             if i + 3 >= bytes.len() {
                 continue;
             }
-            let inv = 255 - cov;
-            bytes[i] = ((u32::from(fg.0) * cov + u32::from(bytes[i]) * inv) / 255) as u8;
-            bytes[i + 1] = ((u32::from(fg.1) * cov + u32::from(bytes[i + 1]) * inv) / 255) as u8;
-            bytes[i + 2] = ((u32::from(fg.2) * cov + u32::from(bytes[i + 2]) * inv) / 255) as u8;
+            let inv = 255 - alpha;
+            bytes[i] = ((u32::from(src.0) * alpha + u32::from(bytes[i]) * inv) / 255) as u8;
+            bytes[i + 1] = ((u32::from(src.1) * alpha + u32::from(bytes[i + 1]) * inv) / 255) as u8;
+            bytes[i + 2] = ((u32::from(src.2) * alpha + u32::from(bytes[i + 2]) * inv) / 255) as u8;
             bytes[i + 3] = 0xff;
         }
     }
@@ -913,6 +944,78 @@ fn blit_glyph(
 mod tests {
     use super::*;
     use cm_core::{Cell, CursorState, GridSnapshot, TerminalSize};
+    use std::sync::Mutex;
+
+    use super::font_backend::{FontBackend, GlyphSource};
+
+    type RasterCalls = Arc<Mutex<Vec<(String, FontStyle)>>>;
+
+    #[derive(Clone)]
+    struct FakeBackend {
+        calls: RasterCalls,
+    }
+
+    impl FontBackend for FakeBackend {
+        fn primary_metrics(
+            &mut self,
+            _preferred_family: &str,
+            physical_px: f32,
+        ) -> Result<CellMetrics, String> {
+            Ok(CellMetrics {
+                cell_w: physical_px.ceil() as u32,
+                cell_h: (physical_px * 2.0).ceil() as u32,
+                baseline: physical_px.round() as i32,
+                ascent: physical_px,
+                descent: -physical_px,
+            })
+        }
+
+        fn rasterize(&mut self, request: FontRequest<'_>) -> Result<RasterizedCluster, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((request.grapheme.to_owned(), request.style));
+            let (width, pixels) = if request.grapheme == "color" {
+                (1, GlyphPixels::Color(vec![240, 30, 80, 255]))
+            } else if request.grapheme == "overhang" {
+                (9, GlyphPixels::Mask(vec![255; 9]))
+            } else if request.grapheme == "empty" {
+                (1, GlyphPixels::Mask(vec![0]))
+            } else {
+                (1, GlyphPixels::Mask(vec![255]))
+            };
+            Ok(RasterizedCluster {
+                layers: vec![RasterizedLayer {
+                    width,
+                    height: 1,
+                    left: 0,
+                    top: 0,
+                    pixels,
+                }],
+                source: GlyphSource::BundledBase,
+            })
+        }
+    }
+
+    fn fake_renderer() -> (TerminalRenderer, RasterCalls) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fonts = TerminalFontSystem::with_test_backend(
+            FakeBackend {
+                calls: calls.clone(),
+            },
+            vec![DEFAULT_TERMINAL_FONT_FAMILY.to_owned()],
+        );
+        (
+            TerminalRenderer::with_font_system(
+                fonts,
+                DEFAULT_TERMINAL_FONT_FAMILY,
+                8.0,
+                1.0,
+                TerminalTheme::dark(),
+            ),
+            calls,
+        )
+    }
 
     fn mk(grapheme: &str, fg: Color, bg: Color, attrs: CellAttrs, width: u8) -> Cell {
         Cell {
@@ -998,6 +1101,101 @@ mod tests {
     }
 
     #[test]
+    fn complete_grapheme_is_one_backend_request_and_cache_key() {
+        let (mut renderer, calls) = fake_renderer();
+        let grapheme = "e\u{301}";
+        let cell = mk(
+            grapheme,
+            Color::Default,
+            Color::Default,
+            CellAttrs::empty(),
+            1,
+        );
+        let snapshot = snap(1, 1, vec![cell], blank_cursor());
+        let _ = renderer.render(&snapshot);
+        let _ = renderer.render(&snapshot);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(grapheme.to_owned(), FontStyle::Regular)]
+        );
+
+        renderer.set_scale(8.0, 2.0);
+        let _ = renderer.render(&snapshot);
+        assert_eq!(calls.lock().unwrap().len(), 2, "scale clears the atlas");
+    }
+
+    #[test]
+    fn atlas_warm_hit_does_not_call_the_backend_again() {
+        let (mut renderer, calls) = fake_renderer();
+        let first = renderer.glyph("warm", FontStyle::Italic);
+        let second = renderer.glyph("warm", FontStyle::Italic);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn atlas_clears_at_the_deterministic_entry_cap() {
+        let (mut renderer, calls) = fake_renderer();
+        for index in 0..=GLYPH_ATLAS_ENTRY_CAP {
+            let grapheme = format!("hostile-{index}");
+            let _ = renderer.glyph(&grapheme, FontStyle::Regular);
+        }
+        assert_eq!(renderer.cache_len(), 1);
+        assert_eq!(calls.lock().unwrap().len(), GLYPH_ATLAS_ENTRY_CAP + 1);
+    }
+
+    #[test]
+    fn cache_distinguishes_complete_graphemes_and_styles() {
+        let (mut renderer, calls) = fake_renderer();
+        let cells = vec![
+            mk("ab", Color::Default, Color::Default, CellAttrs::empty(), 1),
+            mk("a", Color::Default, Color::Default, CellAttrs::BOLD, 1),
+        ];
+        let _ = renderer.render(&snap(1, 2, cells, blank_cursor()));
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[
+                ("ab".to_owned(), FontStyle::Regular),
+                ("a".to_owned(), FontStyle::Bold),
+            ]
+        );
+    }
+
+    #[test]
+    fn intrinsic_color_is_not_tinted_by_reverse_and_dim_reduces_alpha() {
+        let (mut renderer, _) = fake_renderer();
+        let bg = Color::Rgb { r: 0, g: 0, b: 0 };
+        let fg = Color::Rgb { r: 0, g: 255, b: 0 };
+        let regular = renderer.render(&snap(
+            1,
+            1,
+            vec![mk("color", fg, bg, CellAttrs::REVERSE, 1)],
+            blank_cursor(),
+        ));
+        let baseline = renderer.cell_metrics().baseline as u32;
+        assert_eq!(px_at(&regular, 0, baseline), (240, 30, 80));
+
+        let dim = renderer.render(&snap(
+            1,
+            1,
+            vec![mk("color", fg, bg, CellAttrs::DIM, 1)],
+            blank_cursor(),
+        ));
+        let pixel = px_at(&dim, 0, baseline);
+        assert!(pixel.0 > pixel.1 && pixel.0 < 240);
+    }
+
+    #[test]
+    fn missing_requested_family_falls_back_to_bundled_default_live() {
+        let (mut renderer, _) = fake_renderer();
+        assert_eq!(
+            renderer.set_preferred_family("not installed"),
+            DEFAULT_TERMINAL_FONT_FAMILY
+        );
+        assert_eq!(renderer.effective_family(), DEFAULT_TERMINAL_FONT_FAMILY);
+    }
+
+    #[test]
     fn render_buffer_has_exact_pixel_size() {
         let mut r = TerminalRenderer::new(14.0, 1.0, TerminalTheme::dark());
         let size = TerminalSize { rows: 5, cols: 9 };
@@ -1046,8 +1244,6 @@ mod tests {
     #[test]
     fn nerd_font_glyph_renders_nonempty() {
         let mut r = TerminalRenderer::new(16.0, 1.0, TerminalTheme::dark());
-        // Powerline right-arrow; the bundled patched base resolves it directly.
-        assert_eq!(r.glyph_source('\u{E0B0}'), GlyphSource::Base);
         let bg = Color::Rgb { r: 0, g: 0, b: 0 };
         let fg = Color::Rgb {
             r: 255,
@@ -1064,41 +1260,8 @@ mod tests {
     }
 
     #[test]
-    fn fallback_chain_resolves_via_symbols() {
-        // Deterministically exercise the base->symbols fallback branch: build a FontSet
-        // whose base lacks ASCII (the symbols font) with the JBM regular as the "symbols"
-        // fallback. With the default fonts the patched base covers everything, so this is
-        // the only way to hit the fallback path in a unit test (documented finding).
-        let parse = |b: &[u8]| Font::from_bytes(b, FontSettings::default()).unwrap();
-        let fonts = Arc::new(FontSet {
-            base: [
-                parse(FONT_SYMBOLS),
-                parse(FONT_SYMBOLS),
-                parse(FONT_SYMBOLS),
-                parse(FONT_SYMBOLS),
-            ],
-            symbols: parse(FONT_REGULAR),
-        });
-        let mut r = TerminalRenderer::with_fonts(fonts, 16.0, 1.0, TerminalTheme::dark());
-        assert_eq!(r.glyph_source('A'), GlyphSource::Fallback);
-        let bg = Color::Rgb { r: 0, g: 0, b: 0 };
-        let fg = Color::Rgb {
-            r: 255,
-            g: 255,
-            b: 255,
-        };
-        let cell = mk("A", fg, bg, CellAttrs::empty(), 1);
-        let buf = r.render(&snap(1, 1, vec![cell], blank_cursor()));
-        let m = r.cell_metrics();
-        assert!(
-            count_non_bg(&buf, m, 0, 0, (0, 0, 0)) > 0,
-            "fallback glyph produced no ink"
-        );
-    }
-
-    #[test]
     fn wide_char_spacer_draws_no_glyph() {
-        let mut r = TerminalRenderer::new(16.0, 1.0, TerminalTheme::dark());
+        let (mut r, calls) = fake_renderer();
         let m = r.cell_metrics();
         let wide_bg = Color::Rgb {
             r: 10,
@@ -1135,6 +1298,43 @@ mod tests {
         assert_eq!(px_at(&buf, sx, sy), (70, 20, 90));
         // The trailing 'A' rendered.
         assert!(count_non_bg(&buf, m, 0, 2, (0, 0, 0)) > 0);
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(grapheme, _)| grapheme.as_str())
+                .collect::<Vec<_>>(),
+            ["世", "A"],
+            "the empty spacer cell must not request a glyph"
+        );
+    }
+
+    #[test]
+    fn later_cell_background_does_not_erase_a_glyph_overhang() {
+        let (mut renderer, _) = fake_renderer();
+        let fg = Color::Rgb {
+            r: 240,
+            g: 30,
+            b: 80,
+        };
+        let first_bg = Color::Rgb { r: 0, g: 0, b: 0 };
+        let neighbor_bg = Color::Rgb {
+            r: 10,
+            g: 40,
+            b: 90,
+        };
+        let cells = vec![
+            mk("overhang", fg, first_bg, CellAttrs::empty(), 2),
+            mk("", fg, neighbor_bg, CellAttrs::empty(), 1),
+        ];
+        let buf = renderer.render(&snap(1, 2, cells, blank_cursor()));
+        let metrics = renderer.cell_metrics();
+        assert_eq!(
+            px_at(&buf, metrics.cell_w, metrics.baseline as u32),
+            (240, 30, 80),
+            "the next cell's background must be behind the preceding glyph tail"
+        );
     }
 
     #[test]
@@ -1541,9 +1741,8 @@ mod tests {
 
     #[test]
     fn fonts_are_shared_across_renderers() {
-        // B4: the bundled face set is parsed once and shared (same Arc allocation).
-        let a = FontSet::bundled();
-        let b = FontSet::bundled();
+        let a = TerminalFontSystem::shared();
+        let b = TerminalFontSystem::shared();
         assert!(Arc::ptr_eq(&a, &b));
     }
 
@@ -1580,33 +1779,28 @@ mod tests {
         assert_eq!(px_at(&after, 0, 0), TerminalTheme::light().bg);
     }
 
-    /// B4 profiling aid (run with `--ignored --nocapture`): old per-tab cost was parsing
-    /// the 5 bundled faces from scratch; new per-tab cost is `with_fonts` over a shared Arc.
+    /// P10.2 profiling aid: a warm 80x24 ASCII grid should reuse the per-renderer atlas.
     #[test]
     #[ignore = "profiling aid; run explicitly with --ignored --nocapture"]
-    fn b4_profile_font_parse_vs_shared() {
+    fn profile_warm_ascii_render() {
         use std::time::Instant;
-        let n = 8;
-        let t = Instant::now();
-        for _ in 0..n {
-            let _ = FontSet::parse(
-                [FONT_REGULAR, FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC],
-                FONT_SYMBOLS,
-            );
-        }
-        let parse_each = t.elapsed() / n;
-
-        let shared = FontSet::bundled();
-        let m = 200;
-        let t2 = Instant::now();
-        for _ in 0..m {
-            let _ = TerminalRenderer::with_fonts(shared.clone(), 15.0, 1.0, TerminalTheme::dark());
-        }
-        let shared_each = t2.elapsed() / m;
-
-        eprintln!(
-            "B4 per-tab renderer cost: OLD (parse 5 faces) = {parse_each:?}; \
-             NEW (with_fonts, shared) = {shared_each:?}"
-        );
+        let mut renderer = TerminalRenderer::new(15.0, 1.0, TerminalTheme::dark());
+        let cells = (0..80 * 24)
+            .map(|index| {
+                let ch = char::from(b' ' + (index % 95) as u8);
+                mk(
+                    &ch.to_string(),
+                    Color::Default,
+                    Color::Default,
+                    CellAttrs::empty(),
+                    1,
+                )
+            })
+            .collect();
+        let snapshot = snap(24, 80, cells, blank_cursor());
+        let _ = renderer.render(&snapshot);
+        let started = Instant::now();
+        let _ = renderer.render(&snapshot);
+        eprintln!("warm 80x24 ASCII render: {:?}", started.elapsed());
     }
 }

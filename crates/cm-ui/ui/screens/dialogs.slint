@@ -5,8 +5,9 @@
 //   CertDialog           — RDP TOFU accept (unknown/self-signed) and the loud mismatch warning (P4.2).
 //   KbdInteractiveDialog — SSH keyboard-interactive challenge/response prompt (P6.13).
 //   ImportPasswordDialog — mRemoteNG import password prompt (P9.4).
+//   DeleteConfirmationDialog — destructive connection/group confirmation.
 //
-//   import { Modal, QuickConnectForm, HostKeyDialog, CertDialog, KbdInteractiveDialog, KbdPromptRow, ImportPasswordDialog } from "screens/dialogs.slint";
+//   import { Modal, QuickConnectForm, HostKeyDialog, CertDialog, KbdInteractiveDialog, KbdPromptRow, ImportPasswordDialog, DeleteConfirmationDialog } from "screens/dialogs.slint";
 
 import { Theme } from "../theme.slint";
 import { PrimaryButton, SecondaryButton, SegmentedControl, FormField, StatusDot } from "../components.slint";
@@ -562,6 +563,70 @@ export component ImportPasswordDialog inherits Rectangle {
             Rectangle { horizontal-stretch: 1; }
             import-password-cancel-btn := SecondaryButton { text: "Cancel"; clicked => { root.cancel(); } }
             import-password-submit-btn := PrimaryButton { text: "Import"; clicked => { root.submit(); } }
+        }
+    }
+}
+
+// ── DeleteConfirmationDialog ────────────────────────────────────────────────
+// Both leaf connections and whole group subtrees pass through this explicit
+// destructive confirmation. Group counts include the selected root group.
+export component DeleteConfirmationDialog inherits Rectangle {
+    in property <string> target-name: "";
+    in property <bool> is-group: false;
+    in property <int> group-count: 0;
+    in property <int> connection-count: 0;
+    callback confirm();
+    callback cancel();
+
+    accessible-role: groupbox;
+    accessible-label: "Delete confirmation dialog";
+
+    width: 480px;
+    background: Theme.color-base;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.color-error.with-alpha(0.4);
+
+    TouchArea {}
+
+    VerticalLayout {
+        padding: Theme.space-6;
+        spacing: Theme.space-4;
+
+        Text {
+            text: root.is-group
+                ? "Delete \"" + root.target-name + "\" and its contents?"
+                : "Delete \"" + root.target-name + "\"?";
+            color: Theme.color-text;
+            font-size: Theme.font-lg;
+            font-family: Theme.font-family;
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+
+        delete-confirm-body := Text {
+            text: root.is-group
+                ? "This will permanently delete " + root.group-count +
+                  (root.group-count == 1 ? " group and " : " groups and ") +
+                  root.connection-count +
+                  (root.connection-count == 1 ? " connection. " : " connections. ") +
+                  "This cannot be undone."
+                : "This will permanently delete this connection. This cannot be undone.";
+            color: Theme.color-text-secondary;
+            font-size: Theme.font-base;
+            font-family: Theme.font-family;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            Rectangle { horizontal-stretch: 1; }
+            delete-cancel-btn := SecondaryButton { text: "Cancel"; clicked => { root.cancel(); } }
+            delete-confirm-btn := PrimaryButton {
+                text: "Delete";
+                destructive: true;
+                clicked => { root.confirm(); }
+            }
         }
     }
 }

@@ -38,6 +38,11 @@ pub(crate) const KEY_ACCENT_INDEX: &str = "ui.accent_index";
 pub(crate) const KEY_DENSITY: &str = "ui.density";
 /// Terminal font size in pt (integer string).
 pub(crate) const KEY_FONT_SIZE: &str = "terminal.font_size";
+/// Terminal font family (exact family name from the platform font system).
+pub(crate) const KEY_FONT_FAMILY: &str = "terminal.font_family";
+/// Built-in terminal-family default. The renderer may resolve this to its
+/// effective fallback when the family is unavailable on the current host.
+pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 /// Default local shell executable path (may be empty).
 pub(crate) const KEY_SHELL_PATH: &str = "terminal.shell_path";
 /// Extra shell arguments (space-separated; may be empty).
@@ -119,6 +124,9 @@ pub struct AppSettings {
     pub density: i32,
     /// Terminal font size (pt).
     pub font_size: i32,
+    /// Terminal font family requested at startup. The renderer resolves stale
+    /// or unavailable values before the setting is presented to the user.
+    pub font_family: String,
     /// Default local shell path (empty = OS default).
     pub shell_path: String,
     /// Extra shell arguments.
@@ -147,6 +155,7 @@ impl Default for AppSettings {
             accent_index: 0, // cool blue
             density: 0,      // compact
             font_size: 13,
+            font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             shell_path: String::new(),
             shell_args: String::new(),
             shell_cwd: String::new(),
@@ -301,6 +310,7 @@ impl<'a> SettingsService<'a> {
         s.accent_index = self.read_i32(KEY_ACCENT_INDEX, s.accent_index)?;
         s.density = self.read_i32(KEY_DENSITY, s.density)?;
         s.font_size = self.read_i32(KEY_FONT_SIZE, s.font_size)?;
+        s.font_family = self.read_string(KEY_FONT_FAMILY, &s.font_family)?;
         s.shell_path = self.read_string(KEY_SHELL_PATH, &s.shell_path)?;
         s.shell_args = self.read_string(KEY_SHELL_ARGS, &s.shell_args)?;
         s.shell_cwd = self.read_string(KEY_SHELL_CWD, &s.shell_cwd)?;
@@ -333,6 +343,11 @@ impl<'a> SettingsService<'a> {
     /// Persist terminal `font_size`.
     pub fn save_font_size(&self, v: i32) -> Result<(), RepositoryError> {
         self.repo.set_setting(KEY_FONT_SIZE, &v.to_string())
+    }
+
+    /// Persist the effective terminal font family.
+    pub fn save_font_family(&self, v: &str) -> Result<(), RepositoryError> {
+        self.repo.set_setting(KEY_FONT_FAMILY, v)
     }
 
     /// Persist default `shell_path`.
@@ -631,6 +646,7 @@ mod tests {
         assert_eq!(s.theme_mode, 2);
         assert_eq!(s.density, 0);
         assert_eq!(s.font_size, 13);
+        assert_eq!(s.font_family, DEFAULT_TERMINAL_FONT_FAMILY);
         assert!(!s.sidebar_collapsed);
         assert_eq!(s.active_panel, 0);
         assert_eq!(s.side_panel_width, 252);
@@ -645,6 +661,7 @@ mod tests {
         svc.save_accent_index(3).unwrap();
         svc.save_density(1).unwrap();
         svc.save_font_size(16).unwrap();
+        svc.save_font_family("Cascadia Mono").unwrap();
         svc.save_shell_path("/usr/bin/zsh").unwrap();
         svc.save_shell_args("--login").unwrap();
         svc.save_shell_cwd("/home/user").unwrap();
@@ -658,6 +675,7 @@ mod tests {
         assert_eq!(s.accent_index, 3);
         assert_eq!(s.density, 1);
         assert_eq!(s.font_size, 16);
+        assert_eq!(s.font_family, "Cascadia Mono");
         assert_eq!(s.shell_path, "/usr/bin/zsh");
         assert_eq!(s.shell_args, "--login");
         assert_eq!(s.shell_cwd, "/home/user");

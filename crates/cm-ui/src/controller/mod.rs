@@ -33,7 +33,7 @@ use slint::{ComponentHandle, Image, ModelRc, SharedString, Timer, VecModel};
 use crate::clipboard::Clipboard;
 use crate::keys::KeysPanel;
 use crate::selection::PaneSelectionState;
-use crate::terminal_renderer::{FontSet, TerminalRenderer, TerminalTheme};
+use crate::terminal_renderer::{TerminalFontSystem, TerminalRenderer, TerminalTheme};
 use crate::tree::ConnectionTree;
 use crate::{AppConfig, AppWindow, ConnRow, CredRow, PaletteAction, TabItem, ToastEntry};
 
@@ -266,7 +266,9 @@ struct Tab {
 struct State {
     tabs: Vec<Tab>,
     active: usize,
-    fonts: Arc<FontSet>,
+    fonts: Arc<TerminalFontSystem>,
+    /// Canonical effective primary terminal family applied to every renderer.
+    font_family: String,
     scale: f32,
     surface_w: f32,
     surface_h: f32,
@@ -335,8 +337,9 @@ impl State {
         if self.surface_w <= 0.0 || self.surface_h <= 0.0 {
             return INITIAL_SIZE;
         }
-        let probe = TerminalRenderer::with_fonts(
+        let probe = TerminalRenderer::with_font_system(
             self.fonts.clone(),
+            &self.font_family,
             self.font_size_px,
             self.scale,
             TerminalTheme::dark(),
@@ -407,6 +410,28 @@ pub(crate) struct Ctx {
     bc_check_model: Rc<VecModel<bool>>,
     bc_group_model: Rc<VecModel<SharedString>>,
     bc_draft: Rc<RefCell<BTreeSet<usize>>>,
+}
+
+/// Test-only observation seam for real pointer-boundary tests. The returned
+/// closure reads the same active pane selection that rendering/copy consume;
+/// callers still have to create it through the wired Slint surface.
+#[cfg(any(test, feature = "ui-introspection"))]
+pub(crate) fn terminal_selection_probe(ctx: &Ctx) -> Box<dyn Fn() -> bool> {
+    let state = ctx.state.clone();
+    Box::new(move || {
+        let st = state.borrow();
+        let Some(tab) = st.tabs.get(st.active) else {
+            return false;
+        };
+        let focused = tab.pane_group.focused();
+        if focused == 0 {
+            tab.sel.selection().is_some()
+        } else {
+            tab.extra_panes
+                .get(focused - 1)
+                .is_some_and(|pane| pane.sel.selection().is_some())
+        }
+    })
 }
 
 /// Shared assembly behind [`run`] (production) and [`build_for_test`] (P8.2's
@@ -505,10 +530,13 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         }
     };
 
+    let fonts = TerminalFontSystem::shared();
+    let font_family = fonts.resolve_family(&stored_settings.font_family);
     let state = Rc::new(RefCell::new(State {
         tabs: Vec::new(),
         active: 0,
-        fonts: FontSet::bundled(),
+        fonts,
+        font_family,
         scale,
         surface_w: 0.0,
         surface_h: 0.0,
@@ -545,6 +573,8 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         // P8.6-B: see the field doc comment.
         agent_mode,
     }));
+
+    settings_ctl::apply_terminal_font_settings_to_ui(&state.borrow(), &ui);
 
     {
         let st = state.borrow();

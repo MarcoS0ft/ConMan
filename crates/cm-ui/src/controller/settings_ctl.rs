@@ -1,8 +1,9 @@
-//! Settings persistence: theme/density/accent/font-size/shell path-args-cwd/
-//! startup-behavior callbacks, plus the AppSettings <-> live-UI helpers.
+//! Settings persistence: theme/density/accent/font-family/font-size/shell
+//! path-args-cwd/startup-behavior callbacks, plus the AppSettings <-> live-UI
+//! helpers.
 
 use cm_core::{AppSettings, LocalSettings, SettingsService};
-use slint::ComponentHandle;
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::AppWindow;
 
@@ -12,6 +13,7 @@ pub(super) fn wire_settings_ctl(ctx: &Ctx) {
     wire_theme_changed(ctx);
     wire_density_changed(ctx);
     wire_accent_changed(ctx);
+    wire_settings_font_family_changed(ctx);
     wire_settings_font_size_changed(ctx);
     wire_settings_shell_path_changed(ctx);
     wire_settings_shell_args_changed(ctx);
@@ -241,6 +243,52 @@ fn wire_accent_changed(ctx: &Ctx) {
     });
 }
 
+fn wire_settings_font_family_changed(ctx: &Ctx) {
+    ctx.ui.on_settings_font_family_changed({
+        let repo_s = ctx.repo.clone();
+        let state_ff = ctx.state.clone();
+        let weak_ff = ctx.ui.as_weak();
+        move |family| {
+            let requested = family.to_string();
+            let (effective, selected_index) = {
+                let mut st = state_ff.borrow_mut();
+                // The ComboBox only offers owner-enumerated usable families,
+                // but every renderer still resolves defensively. Use the
+                // canonical result reported by the backend as UI/state truth.
+                let mut effective = st.fonts.resolve_family(&requested);
+                for tab in &mut st.tabs {
+                    effective = tab.renderer.set_preferred_family(&effective).to_owned();
+                    for pane in &mut tab.extra_panes {
+                        let pane_effective = pane.renderer.set_preferred_family(&effective);
+                        debug_assert_eq!(pane_effective, effective);
+                    }
+                }
+                st.font_family = effective.clone();
+                let selected_index = st
+                    .fonts
+                    .available_monospace_families()
+                    .iter()
+                    .position(|candidate| candidate == &effective)
+                    .unwrap_or(0) as i32;
+                (effective, selected_index)
+            };
+
+            if let Some(ui) = weak_ff.upgrade() {
+                ui.set_settings_font_family(effective.as_str().into());
+                ui.set_settings_font_family_index(selected_index);
+                // Family metrics may differ even though every offered family
+                // is monospaced, so recompute and commit every live grid.
+                tabs::apply_settled_resize(&state_ff, &ui);
+            }
+
+            let svc = SettingsService::new(repo_s.as_ref());
+            if let Err(e) = svc.save_font_family(&effective) {
+                tracing::warn!("save font_family: {e}");
+            }
+        }
+    });
+}
+
 fn wire_settings_font_size_changed(ctx: &Ctx) {
     ctx.ui.on_settings_font_size_changed({
         let repo_s = ctx.repo.clone();
@@ -403,4 +451,27 @@ pub(super) fn apply_settings_to_ui(s: &AppSettings, ui: &AppWindow) {
     // Slint as `Theme.accent = Theme.accent-presets[idx]`, so invoking it here
     // ensures the correct color is live immediately, not just the swatch index.
     ui.invoke_apply_accent_index(s.accent_index);
+}
+
+/// Push the renderer-owned family list and its effective startup selection to
+/// Settings. This is separate from [`apply_settings_to_ui`] because stale
+/// persisted family names can only be resolved after the shared font owner is
+/// constructed in controller state.
+pub(super) fn apply_terminal_font_settings_to_ui(state: &State, ui: &AppWindow) {
+    let families = state
+        .fonts
+        .available_monospace_families()
+        .iter()
+        .map(|family| SharedString::from(family.as_str()))
+        .collect::<Vec<_>>();
+    let selected_index = state
+        .fonts
+        .available_monospace_families()
+        .iter()
+        .position(|family| family == &state.font_family)
+        .unwrap_or(0) as i32;
+
+    ui.set_settings_font_families(ModelRc::new(VecModel::from(families)));
+    ui.set_settings_font_family(state.font_family.as_str().into());
+    ui.set_settings_font_family_index(selected_index);
 }

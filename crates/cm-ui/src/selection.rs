@@ -191,13 +191,22 @@ pub(crate) struct PaneSelectionState {
     /// from `selection` prevents a plain click from becoming a visible,
     /// copyable one-cell selection.
     pending_anchor: Option<SelectionPoint>,
+    /// Slint reports `PointerEventButton.other` on every move, including
+    /// moves made while its `TouchArea` owns a left-button grab. Retain that
+    /// capture state so terminal mouse-reporting receives a coherent
+    /// press/move/release sequence without misclassifying ordinary hover.
+    left_button_held: bool,
 }
 
 /// Pointer button/kind discriminants shared with `crate::input`'s Slint
-/// wire format (`1`=left, `1`=press, `2`=release, `3`=move) — duplicated here
-/// as named constants rather than importing `crate::input` (which is a
-/// leaf module with no reason to depend back on `selection`).
+/// wire format (`0`=no button/cancel, `1`=left, `1`=press, `2`=release,
+/// `3`=move) — duplicated here as named constants rather than importing
+/// `crate::input` (which is a leaf module with no reason to depend back on
+/// `selection`). Slint reports `PointerEventButton.other` (mapped to zero)
+/// for move events even while a `TouchArea` owns a left-button grab.
+const BTN_NONE: i32 = 0;
 const BTN_LEFT: i32 = 1;
+const KIND_CANCEL: i32 = 0;
 const KIND_PRESS: i32 = 1;
 const KIND_RELEASE: i32 = 2;
 const KIND_MOVE: i32 = 3;
@@ -206,6 +215,27 @@ impl PaneSelectionState {
     /// The live selection, if any (e.g. to pass into the renderer or to copy).
     pub(crate) fn selection(&self) -> Option<&Selection> {
         self.selection.as_ref()
+    }
+
+    /// Normalize a Slint pointer event before forwarding it to the terminal
+    /// engine. Captured moves recover the held left button, while cancellation
+    /// becomes the matching release that prevents mouse-reporting applications
+    /// from retaining a stuck press. An inactive cancellation forwards nothing.
+    ///
+    /// Call this before [`on_pointer`](Self::on_pointer), which clears capture
+    /// state on release/cancellation.
+    #[must_use]
+    pub(crate) fn mouse_event_for_forwarding(&self, button: i32, kind: i32) -> Option<(i32, i32)> {
+        if kind == KIND_CANCEL {
+            return self.left_button_held.then_some((BTN_LEFT, KIND_RELEASE));
+        }
+
+        let button = if button == BTN_NONE && kind == KIND_MOVE && self.left_button_held {
+            BTN_LEFT
+        } else {
+            button
+        };
+        Some((button, kind))
     }
 
     /// Drop the current selection (lifecycle: resize / new-output-scroll /
@@ -218,11 +248,12 @@ impl PaneSelectionState {
 
     /// Handle a terminal-surface pointer event for selection purposes:
     /// left-press classifies as single/double/triple click (char/word/line
-    /// selection); left-move while dragging extends the char selection;
-    /// any release ends the drag. `snap`/`cols` are the pane's most recent
-    /// grid snapshot (used to expand word/line bounds and to capture the
-    /// staleness baseline) — `None` degrades to a bare drag with no
-    /// word/line expansion (the pane has not produced a snapshot yet).
+    /// selection); a move while a left-press anchor is pending extends the
+    /// character selection; any release or cancellation ends the drag.
+    /// `snap`/`cols` are the pane's most recent grid snapshot (used to expand
+    /// word/line bounds and to capture the staleness baseline) — `None`
+    /// degrades to a bare drag with no word/line expansion (the pane has not
+    /// produced a snapshot yet).
     ///
     /// Returns `true` iff the visible [`Selection`] geometry actually changed
     /// (created, extended, or — implicitly, via [`clear`](Self::clear), which
@@ -250,6 +281,7 @@ impl PaneSelectionState {
         });
         match (button, kind) {
             (BTN_LEFT, KIND_PRESS) => {
+                self.left_button_held = true;
                 let n = self.click.register(cell, now);
                 match (n, snap) {
                     (2, Some(snap)) => {
@@ -295,7 +327,9 @@ impl PaneSelectionState {
                     }
                 }
             }
-            (BTN_LEFT, KIND_MOVE) if self.pending_anchor.is_some() => {
+            // Slint move events do not carry the held button. The pending
+            // anchor, which only a left press can create, is the drag proof.
+            (_, KIND_MOVE) if self.pending_anchor.is_some() => {
                 let anchor = self.pending_anchor.expect("checked above");
                 let new_cursor = SelectionPoint {
                     row: abs_row,
@@ -311,8 +345,16 @@ impl PaneSelectionState {
                 }
                 changed
             }
+            (_, KIND_CANCEL) => {
+                self.pending_anchor = None;
+                self.left_button_held = false;
+                false
+            }
             (_, KIND_RELEASE) => {
                 self.pending_anchor = None;
+                if button == BTN_LEFT {
+                    self.left_button_held = false;
+                }
                 false
             }
             _ => false,
@@ -495,12 +537,15 @@ mod tests {
     // ── PaneSelectionState ───────────────────────────────────────────────
 
     #[test]
-    fn plain_click_then_drag_creates_char_selection() {
+    fn slint_buttonless_drag_move_creates_char_selection() {
         let snap = row_snap(&["hello world"], 11);
         let mut s = PaneSelectionState::default();
         let t0 = Instant::now();
         s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0);
-        s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 4), Some(&snap), t0);
+        // A real Slint TouchArea move reports PointerEventButton.other even
+        // while its left-button grab is active.
+        s.on_pointer(BTN_NONE, KIND_MOVE, (0, 4), Some(&snap), t0);
+        s.on_pointer(BTN_LEFT, KIND_RELEASE, (0, 4), Some(&snap), t0);
         let sel = s.selection().expect("selection after drag");
         assert_eq!(sel.normalized().0, SelectionPoint { row: 0, col: 0 });
         assert_eq!(sel.normalized().1, SelectionPoint { row: 0, col: 4 });
@@ -512,7 +557,7 @@ mod tests {
         let mut s = PaneSelectionState::default();
         let t0 = Instant::now();
         s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 6), Some(&snap), t0);
-        s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 2), Some(&snap), t0);
+        s.on_pointer(BTN_NONE, KIND_MOVE, (0, 2), Some(&snap), t0);
         let (start, end) = s.selection().unwrap().normalized();
         assert_eq!((start.col, end.col), (2, 6));
     }
@@ -656,7 +701,7 @@ mod tests {
         let mut s = PaneSelectionState::default();
         let t0 = Instant::now();
         s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0);
-        assert!(s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 3), Some(&snap), t0));
+        assert!(s.on_pointer(BTN_NONE, KIND_MOVE, (0, 3), Some(&snap), t0));
     }
 
     #[test]
@@ -665,11 +710,11 @@ mod tests {
         let mut s = PaneSelectionState::default();
         let t0 = Instant::now();
         s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 2), Some(&snap), t0);
-        assert!(s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 2), Some(&snap), t0));
+        assert!(s.on_pointer(BTN_NONE, KIND_MOVE, (0, 2), Some(&snap), t0));
         let sel = s.selection().expect("selection after same-cell drag");
         assert_eq!(sel.anchor, SelectionPoint { row: 0, col: 2 });
         assert_eq!(sel.cursor, SelectionPoint { row: 0, col: 2 });
-        assert!(!s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 2), Some(&snap), t0));
+        assert!(!s.on_pointer(BTN_NONE, KIND_MOVE, (0, 2), Some(&snap), t0));
     }
 
     #[test]
@@ -680,7 +725,62 @@ mod tests {
         let snap = row_snap(&["abcdef"], 6);
         let mut s = PaneSelectionState::default();
         let t0 = Instant::now();
-        assert!(!s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 3), Some(&snap), t0));
+        assert!(!s.on_pointer(BTN_NONE, KIND_MOVE, (0, 3), Some(&snap), t0));
+        assert!(s.selection().is_none());
+    }
+
+    #[test]
+    fn mouse_forwarding_recovers_left_button_only_during_active_capture() {
+        let snap = row_snap(&["abcdef"], 6);
+        let mut s = PaneSelectionState::default();
+        let t0 = Instant::now();
+
+        assert_eq!(
+            s.mouse_event_for_forwarding(BTN_NONE, KIND_MOVE),
+            Some((BTN_NONE, KIND_MOVE)),
+            "plain hover must remain buttonless"
+        );
+
+        s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 1), Some(&snap), t0);
+        assert_eq!(
+            s.mouse_event_for_forwarding(BTN_NONE, KIND_MOVE),
+            Some((BTN_LEFT, KIND_MOVE)),
+            "Slint's buttonless captured move must be forwarded as a left drag"
+        );
+
+        s.on_pointer(BTN_LEFT, KIND_RELEASE, (0, 4), Some(&snap), t0);
+        assert_eq!(
+            s.mouse_event_for_forwarding(BTN_NONE, KIND_MOVE),
+            Some((BTN_NONE, KIND_MOVE)),
+            "hover after release must not remain a drag"
+        );
+    }
+
+    #[test]
+    fn cancel_discards_pending_anchor_before_later_hover_move() {
+        let snap = row_snap(&["abcdef"], 6);
+        let mut s = PaneSelectionState::default();
+        let t0 = Instant::now();
+
+        s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 1), Some(&snap), t0);
+        assert_eq!(
+            s.mouse_event_for_forwarding(BTN_NONE, KIND_CANCEL),
+            Some((BTN_LEFT, KIND_RELEASE)),
+            "active cancel must release terminal mouse capture"
+        );
+        assert!(!s.on_pointer(BTN_NONE, KIND_CANCEL, (0, 1), Some(&snap), t0));
+        assert_eq!(
+            s.mouse_event_for_forwarding(BTN_NONE, KIND_CANCEL),
+            None,
+            "inactive cancel must not fabricate another release"
+        );
+        assert_eq!(
+            s.mouse_event_for_forwarding(BTN_NONE, KIND_MOVE),
+            Some((BTN_NONE, KIND_MOVE)),
+            "cancel must also release terminal mouse capture"
+        );
+        assert!(!s.on_pointer(BTN_NONE, KIND_MOVE, (0, 4), Some(&snap), t0));
+        assert!(s.selection().is_none());
     }
 
     #[test]

@@ -461,33 +461,82 @@ fn nested_groups_create_and_list() {
 }
 
 #[test]
-fn delete_group_blocked_when_has_children() {
+fn delete_group_recursively_removes_descendants_and_connections_but_not_siblings() {
     let db = repo();
-    let parent = db
-        .upsert_group(&mk_group("parent", None, None))
-        .expect("parent");
-    let _child = db
-        .upsert_group(&mk_group("child", Some(parent.get_id()), None))
+    let root = db
+        .upsert_group(&mk_group("root", None, None))
+        .expect("root");
+    let child = db
+        .upsert_group(&mk_group("child", Some(root.get_id()), None))
         .expect("child");
+    let grandchild = db
+        .upsert_group(&mk_group("grandchild", Some(child.get_id()), None))
+        .expect("grandchild");
+    let sibling = db
+        .upsert_group(&mk_group("sibling", None, None))
+        .expect("sibling");
 
-    assert!(matches!(
-        db.delete_group(parent.get_id()),
-        Err(RepositoryError::Conflict(_))
-    ));
+    let root_conn = db
+        .upsert_connection(&mk_local_conn("root conn", Some(root.get_id())))
+        .expect("root conn");
+    let nested_conn = db
+        .upsert_connection(&mk_local_conn("nested conn", Some(grandchild.get_id())))
+        .expect("nested conn");
+    let sibling_conn = db
+        .upsert_connection(&mk_local_conn("sibling conn", Some(sibling.get_id())))
+        .expect("sibling conn");
+
+    db.delete_group(root.get_id()).expect("recursive delete");
+
+    for id in [root.get_id(), child.get_id(), grandchild.get_id()] {
+        assert_eq!(db.get_group(id).expect("get removed group"), None);
+    }
+    for id in [root_conn.get_id(), nested_conn.get_id()] {
+        assert_eq!(db.get_connection(id).expect("get removed connection"), None);
+    }
+    assert!(
+        db.get_group(sibling.get_id())
+            .expect("get sibling")
+            .is_some()
+    );
+    assert!(
+        db.get_connection(sibling_conn.get_id())
+            .expect("get sibling connection")
+            .is_some()
+    );
 }
 
 #[test]
-fn delete_group_blocked_when_has_connections() {
-    let db = repo();
-    let gid = db.upsert_group(&mk_group("g", None, None)).expect("g");
-    let _ = db
-        .upsert_connection(&mk_local_conn("c", Some(gid.get_id())))
-        .expect("conn");
+fn delete_group_recursively_cleans_connection_scoped_secrets() {
+    let store = Arc::new(MockStore::default());
+    let db = SqliteRepository::open_in_memory()
+        .expect("open in-memory DB")
+        .with_credential_store(store.clone() as Arc<dyn CredentialStore>);
+    let root = db
+        .upsert_group(&mk_group("root", None, None))
+        .expect("root");
+    let child = db
+        .upsert_group(&mk_group("child", Some(root.get_id()), None))
+        .expect("child");
+    let first = db
+        .upsert_connection(&mk_local_conn("first", Some(root.get_id())))
+        .expect("first");
+    let second = db
+        .upsert_connection(&mk_local_conn("second", Some(child.get_id())))
+        .expect("second");
+    let keys = [first.get_id(), second.get_id()]
+        .map(|id| CredentialRef::for_connection(id, CredentialPurpose::Password));
+    for (index, key) in keys.iter().enumerate() {
+        store
+            .store(key, &Secret::new(format!("secret-{index}").into_bytes()))
+            .expect("store secret");
+    }
 
-    assert!(matches!(
-        db.delete_group(gid.get_id()),
-        Err(RepositoryError::Conflict(_))
-    ));
+    db.delete_group(root.get_id()).expect("recursive delete");
+
+    for key in keys {
+        assert!(store.get(&key).expect("get deleted secret").is_none());
+    }
 }
 
 #[test]

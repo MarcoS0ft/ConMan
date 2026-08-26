@@ -128,6 +128,36 @@ fn royalts_fixture_round_trips_into_a_real_repo_and_keychain() {
         other => panic!("expected Ssh settings, got {other:?}"),
     }
 
+    let telnet = connections
+        .iter()
+        .find(|c| c.name == "serial-console")
+        .expect("Telnet connection persisted");
+    assert_eq!(telnet.kind, ConnectionKind::Telnet);
+    assert_eq!(telnet.credential_source, Some(CredentialSource::Prompt));
+    match &telnet.settings {
+        ConnectionSettings::Telnet(s) => {
+            assert_eq!(s.host, "console.internal.example");
+            assert_eq!(s.port, 23143);
+        }
+        other => panic!("expected Telnet settings, got {other:?}"),
+    }
+
+    let default_port_telnet = connections
+        .iter()
+        .find(|c| c.name == "default-port-telnet")
+        .expect("default-port Telnet connection persisted");
+    match &default_port_telnet.settings {
+        ConnectionSettings::Telnet(s) => assert_eq!(s.port, 23),
+        other => panic!("expected Telnet settings, got {other:?}"),
+    }
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|warning| warning.message.contains("serial-console")),
+        "ignored RoyalTS Telnet credentials must be visible to the user"
+    );
+
     let legacy = connections
         .iter()
         .find(|c| c.name == "legacy-family-rdp")

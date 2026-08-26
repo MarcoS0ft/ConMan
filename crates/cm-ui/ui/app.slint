@@ -18,7 +18,7 @@ import {
     PrimaryButton, SecondaryButton, EmptyState, Toast
 } from "components.slint";
 import { ListView, Palette, LineEdit } from "std-widgets.slint";
-import { Modal, QuickConnectForm, HostKeyDialog, CertDialog, KbdInteractiveDialog, KbdPromptRow, ImportPasswordDialog } from "screens/dialogs.slint";
+import { Modal, QuickConnectForm, HostKeyDialog, CertDialog, KbdInteractiveDialog, KbdPromptRow, ImportPasswordDialog, DeleteConfirmationDialog } from "screens/dialogs.slint";
 import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
 import { SettingsPanel } from "screens/settings_panel.slint";
 import { ConnectingOverlay, ErrorOverlay, SearchOverlay } from "screens/session_overlays.slint";
@@ -1258,6 +1258,15 @@ export component AppWindow inherits Window {
     callback import-password-submit();
     callback import-password-cancel();
 
+    // ── Destructive deletion confirmation ────────────────────────────
+    in-out property <bool> delete-confirm-open: false;
+    in property <string> delete-confirm-target-name: "";
+    in property <bool> delete-confirm-is-group: false;
+    in property <int> delete-confirm-group-count: 0;
+    in property <int> delete-confirm-connection-count: 0;
+    callback delete-confirm-accept();
+    callback delete-confirm-cancel();
+
     // ── Appearance (P5.2: full settings exposed here) ────────────────
     in-out property <int>   theme-mode: 2;
     in-out property <int>   density    <=> Theme.density;
@@ -1276,6 +1285,9 @@ export component AppWindow inherits Window {
         Palette.color-scheme = self.dark-mode ? ColorScheme.dark : ColorScheme.light;
     }
     // Terminal defaults
+    in property <[string]> settings-font-families;
+    in-out property <string> settings-font-family: "JetBrainsMono Nerd Font Mono";
+    in-out property <int> settings-font-family-index: 0;
     in-out property <int>    settings-font-size: 13;
     in-out property <string> settings-shell-path: "";
     in-out property <string> settings-shell-args: "";
@@ -1360,6 +1372,7 @@ export component AppWindow inherits Window {
         }
     }
     callback settings-font-size-changed(int);
+    callback settings-font-family-changed(string);
     callback settings-shell-path-changed(string);
     callback settings-shell-args-changed(string);
     callback settings-shell-cwd-changed(string);
@@ -1783,6 +1796,9 @@ export component AppWindow inherits Window {
                     theme-mode          <=> root.theme-mode;
                     density             <=> root.density;
                     accent-index        <=> root.accent-index;
+                    font-families       : root.settings-font-families;
+                    font-family         <=> root.settings-font-family;
+                    font-family-index   <=> root.settings-font-family-index;
                     font-size           <=> root.settings-font-size;
                     shell-path          <=> root.settings-shell-path;
                     shell-args          <=> root.settings-shell-args;
@@ -1800,6 +1816,7 @@ export component AppWindow inherits Window {
                     theme-changed(i)    => { root.theme-changed(i); }
                     density-changed(i)  => { root.density-changed(i); }
                     accent-changed(i)   => { root.accent-changed(i); }
+                    font-family-changed(v)       => { root.settings-font-family-changed(v); }
                     font-size-changed(v)         => { root.settings-font-size-changed(v); }
                     shell-path-changed(v)        => { root.settings-shell-path-changed(v); }
                     shell-args-changed(v)        => { root.settings-shell-args-changed(v); }
@@ -2429,6 +2446,20 @@ export component AppWindow inherits Window {
             password-edited(t) => { root.import-password-edited(t); }
             submit => { root.import-password-submit(); }
             cancel => { root.import-password-cancel(); }
+        }
+    }
+
+    // ── Destructive deletion confirmation ────────────────────────────────
+    Modal {
+        open: root.delete-confirm-open;
+        dismissed => { root.delete-confirm-cancel(); }
+        delete-confirm-dialog := DeleteConfirmationDialog {
+            target-name: root.delete-confirm-target-name;
+            is-group: root.delete-confirm-is-group;
+            group-count: root.delete-confirm-group-count;
+            connection-count: root.delete-confirm-connection-count;
+            confirm => { root.delete-confirm-accept(); }
+            cancel => { root.delete-confirm-cancel(); }
         }
     }
 

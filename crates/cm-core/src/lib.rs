@@ -27,9 +27,9 @@ pub mod ssh;
 pub mod terminal;
 
 pub use app_settings::{
-    AppSettings, AutomationSettings, KEY_AUTOMATION_ENABLED, KEY_AUTOMATION_SCOPES,
-    KEY_FIRST_RUN_SEEDED, KEY_RENDERER_BACKEND, KEY_SESSION_TABS, ScopeSet, SessionTabEntry,
-    SessionTabSnapshot, SettingsService,
+    AppSettings, AutomationSettings, DEFAULT_TERMINAL_FONT_FAMILY, KEY_AUTOMATION_ENABLED,
+    KEY_AUTOMATION_SCOPES, KEY_FIRST_RUN_SEEDED, KEY_RENDERER_BACKEND, KEY_SESSION_TABS, ScopeSet,
+    SessionTabEntry, SessionTabSnapshot, SettingsService,
 };
 pub use connection::{
     Connection, CredentialSource, Group, ResolvedAuth, resolve_connection_auth,

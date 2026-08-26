@@ -21,7 +21,7 @@ use cm_session::{CertDecision, PaneGroup, PaneLayout, SessionInput, SessionStatu
 use slint::{ComponentHandle, Image, Model, SharedString, TimerMode, VecModel};
 
 use crate::selection::PaneSelectionState;
-use crate::terminal_renderer::{FontSet, TerminalRenderer};
+use crate::terminal_renderer::{TerminalFontSystem, TerminalRenderer};
 use crate::{AppWindow, TabItem, ToastEntry};
 
 use super::HkQueue;
@@ -515,7 +515,20 @@ fn wire_pane_focused(ctx: &Ctx) {
             let mut st = state.borrow_mut();
             let active = st.active;
             if let Some(tab) = st.tabs.get_mut(active) {
+                let focused_before = tab.pane_group.focused();
                 tab.pane_group.set_focused(pane_idx as usize);
+                let focused_now = tab.pane_group.focused();
+                if focused_now != focused_before {
+                    // PaneSlot reports focus before forwarding the same
+                    // pointer press. Clear synchronously and acknowledge the
+                    // new focus now, so the following press/drag can create a
+                    // selection that tick_tab's defensive fallback preserves.
+                    tab.sel.clear();
+                    for ep in &mut tab.extra_panes {
+                        ep.sel.clear();
+                    }
+                    tab.last_focused_pane = focused_now;
+                }
             }
             if let Some(ui) = weak.upgrade() {
                 ui.set_active_pane(pane_idx);
@@ -578,7 +591,8 @@ struct SplitSlot {
     scale: f32,
     surface_w: f32,
     surface_h: f32,
-    fonts: Arc<FontSet>,
+    fonts: Arc<TerminalFontSystem>,
+    font_family: String,
     font_size_px: f32,
     local_settings: LocalSettings,
 }
@@ -613,6 +627,7 @@ fn reserve_split_slot(state: &Rc<RefCell<State>>, layout: PaneLayout) -> Option<
         surface_w: st.surface_w,
         surface_h: st.surface_h,
         fonts: st.fonts.clone(),
+        font_family: st.font_family.clone(),
         font_size_px: st.font_size_px,
         local_settings: st.local_settings.clone(),
     })
@@ -746,8 +761,9 @@ pub(super) fn do_split(
 
     // Spawn a new local terminal for the extra pane (half the width for H-split).
     // P6.8 (gap 9): follow the live app theme rather than hardcoding dark.
-    let renderer = TerminalRenderer::with_fonts(
+    let renderer = TerminalRenderer::with_font_system(
         slot.fonts,
+        &slot.font_family,
         slot.font_size_px,
         slot.scale,
         util::terminal_theme_for(ui),
@@ -837,8 +853,9 @@ pub(super) fn connect_in_split(
             let Some(slot) = reserve_split_slot(state, layout) else {
                 return;
             };
-            let renderer = TerminalRenderer::with_fonts(
+            let renderer = TerminalRenderer::with_font_system(
                 slot.fonts,
+                &slot.font_family,
                 slot.font_size_px,
                 slot.scale,
                 util::terminal_theme_for(ui),
@@ -944,8 +961,9 @@ pub(super) fn connect_in_split(
             };
 
             // P6.8 (gap 9): follow the live app theme rather than hardcoding dark.
-            let renderer = TerminalRenderer::with_fonts(
+            let renderer = TerminalRenderer::with_font_system(
                 slot.fonts,
+                &slot.font_family,
                 slot.font_size_px,
                 slot.scale,
                 util::terminal_theme_for(ui),
@@ -1066,8 +1084,9 @@ pub(super) fn connect_in_split(
             // Dead weight for an RDP pane (no glyph rendering happens), kept
             // only because `ExtraPaneState`/`commit_split_pane` always carry
             // one — mirrors `Tab`'s own primary-pane convention.
-            let renderer = TerminalRenderer::with_fonts(
+            let renderer = TerminalRenderer::with_font_system(
                 slot.fonts,
+                &slot.font_family,
                 slot.font_size_px,
                 slot.scale,
                 util::terminal_theme_for(ui),
@@ -1373,13 +1392,23 @@ pub(super) fn reattach_session(
         kind,
     } = entry;
     // Use a transient renderer; the session will re-render on first tick.
-    let (scale, fonts, font_size_px) = {
+    let (scale, fonts, font_family, font_size_px) = {
         let st = state.borrow();
-        (st.scale, st.fonts.clone(), st.font_size_px)
+        (
+            st.scale,
+            st.fonts.clone(),
+            st.font_family.clone(),
+            st.font_size_px,
+        )
     };
     // P6.8 (gap 9): follow the live app theme rather than hardcoding dark.
-    let renderer =
-        TerminalRenderer::with_fonts(fonts, font_size_px, scale, util::terminal_theme_for(ui));
+    let renderer = TerminalRenderer::with_font_system(
+        fonts,
+        &font_family,
+        font_size_px,
+        scale,
+        util::terminal_theme_for(ui),
+    );
     let status_dot = match session.status() {
         SessionStatus::Connected => "connected",
         SessionStatus::Connecting => "connecting",
@@ -1527,9 +1556,16 @@ mod tests {
     /// sent-input sink in pane-id order (`sinks[0]` is the primary).
     fn test_tab(count: usize) -> (Tab, Vec<Arc<Mutex<Vec<SessionInput>>>>) {
         assert!(count >= 1);
-        let fonts = FontSet::bundled();
-        let mk_renderer =
-            || TerminalRenderer::with_fonts(fonts.clone(), 15.0, 1.0, TerminalTheme::dark());
+        let fonts = TerminalFontSystem::shared();
+        let mk_renderer = || {
+            TerminalRenderer::with_font_system(
+                fonts.clone(),
+                cm_core::DEFAULT_TERMINAL_FONT_FAMILY,
+                15.0,
+                1.0,
+                TerminalTheme::dark(),
+            )
+        };
 
         let (primary, primary_sink) = RecordingSession::new();
         let mut pane_group = PaneGroup::single();

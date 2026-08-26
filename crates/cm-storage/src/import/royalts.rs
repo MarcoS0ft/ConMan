@@ -22,9 +22,10 @@
 //! kind is inferred with a case-insensitive substring match against the
 //! `"Type"` field, checked in this order (most-specific first): `credential`
 //! → Credential, `folder` → Folder, `web`/`vnc` → unsupported, `terminal` /
-//! `ssh` → SSH, `remotedesktop` or (`rds` and `connection`) → RDP, anything
-//! else → unsupported. This is robust to both families without hard-failing
-//! on the legacy names.
+//! `ssh` → Terminal, `remotedesktop` or (`rds` and `connection`) → RDP,
+//! anything else → unsupported. A terminal node is then dispatched by its
+//! explicit `"TerminalConnectionType"` (`SSH` or `Telnet`); missing or unknown
+//! values are skipped with a counted warning rather than guessed from port.
 //!
 //! ## Credential dedupe
 //! Credentials are separate objects, referenced by connections via
@@ -48,10 +49,15 @@
 //!   non-default). The many RoyalTS RDP tuning attributes (color profile,
 //!   gateway, redirection flags, etc.) have no home in [`RdpSettings`] and
 //!   are dropped — expected, per the task spec.
-//! - `TerminalConnection` (+ legacy) → an SSH [`Connection`]; same host/port
-//!   handling, port defaults to [`SshSettings::DEFAULT_PORT`].
-//!   `auth_method` is [`SshAuthMethod::Password`] when a `CredentialID`
-//!   resolves, else [`SshAuthMethod::Agent`] (no credential to attach).
+//! - `TerminalConnection` with `TerminalConnectionType = SSH` → an SSH
+//!   [`Connection`]; same host/port handling, port defaults to
+//!   [`SshSettings::DEFAULT_PORT`]. `auth_method` is
+//!   [`SshAuthMethod::Password`] when a `CredentialID` resolves, else
+//!   [`SshAuthMethod::Agent`] (no credential to attach).
+//! - `TerminalConnection` with `TerminalConnectionType = Telnet` → a Telnet
+//!   [`Connection`] with host/port only, default port 23, and
+//!   [`CredentialSource::Prompt`]. Any connection login fields/reference are
+//!   ignored with exactly one counted warning because login is interactive.
 //! - `Credential` → a ConMan [`Credential`] (kind
 //!   [`CredentialKind::Password`]) plus an [`ExportedSecret`]
 //!   (`purpose = "password"`) carrying the **plaintext** password RoyalTS
@@ -66,7 +72,7 @@ use std::collections::HashMap;
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionSettings, Credential, CredentialId,
     CredentialKind, CredentialPurpose, CredentialSource, Group, GroupId, RdpSettings,
-    SshAuthMethod, SshSettings,
+    SshAuthMethod, SshSettings, TelnetSettings,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -156,7 +162,7 @@ impl ParseCtx {
 enum NodeKind {
     Folder,
     Rdp,
-    Ssh,
+    Terminal,
     Credential,
     /// Carries the raw `Type` string for the warning message.
     Unsupported,
@@ -174,7 +180,7 @@ fn classify(type_str: &str) -> NodeKind {
     } else if t.contains("web") || t.contains("vnc") {
         NodeKind::Unsupported
     } else if t.contains("terminal") || t.contains("ssh") {
-        NodeKind::Ssh
+        NodeKind::Terminal
     } else if t.contains("remotedesktop") || (t.contains("rds") && t.contains("connection")) {
         NodeKind::Rdp
     } else {
@@ -289,7 +295,7 @@ fn walk_nodes(nodes: &[Value], parent_group: Option<GroupId>, ctx: &mut ParseCtx
                 walk_nodes(children(node), Some(group_id), ctx);
             }
             NodeKind::Rdp => build_rdp_connection(node, parent_group, ctx),
-            NodeKind::Ssh => build_ssh_connection(node, parent_group, ctx),
+            NodeKind::Terminal => build_terminal_connection(node, parent_group, ctx),
             NodeKind::Unsupported => {
                 tracing::warn!(node_type = %type_str, "royalts: unsupported node kind skipped");
                 ctx.warnings.push(ImportWarning::new(format!(
@@ -322,14 +328,45 @@ fn build_rdp_connection(node: &Value, group: Option<GroupId>, ctx: &mut ParseCtx
     });
 
     push_connection(
-        node,
         name,
         group,
         ConnectionKind::Rdp,
         settings,
-        credential,
+        credential.map(CredentialSource::Object),
         ctx,
     );
+}
+
+fn build_terminal_connection(node: &Value, group: Option<GroupId>, ctx: &mut ParseCtx) {
+    let name = get_str(node, &["Name"]).unwrap_or_else(|| "Imported connection".to_string());
+    let protocol = get_str(node, &["TerminalConnectionType"]);
+    match protocol.as_deref().map(str::trim) {
+        Some(protocol) if protocol.eq_ignore_ascii_case("ssh") => {
+            build_ssh_connection(node, group, ctx);
+        }
+        Some(protocol) if protocol.eq_ignore_ascii_case("telnet") => {
+            build_telnet_connection(node, group, ctx);
+        }
+        Some(protocol) if !protocol.is_empty() => {
+            tracing::warn!(
+                connection = %name,
+                terminal_protocol = %protocol,
+                "royalts: unsupported terminal protocol skipped"
+            );
+            ctx.warnings.push(ImportWarning::new(format!(
+                "connection '{name}' skipped: unsupported RoyalTS terminal protocol '{protocol}'"
+            )));
+        }
+        _ => {
+            tracing::warn!(
+                connection = %name,
+                "royalts: terminal connection missing TerminalConnectionType"
+            );
+            ctx.warnings.push(ImportWarning::new(format!(
+                "connection '{name}' skipped: missing 'TerminalConnectionType'"
+            )));
+        }
+    }
 }
 
 fn build_ssh_connection(node: &Value, group: Option<GroupId>, ctx: &mut ParseCtx) {
@@ -353,34 +390,61 @@ fn build_ssh_connection(node: &Value, group: Option<GroupId>, ctx: &mut ParseCtx
     });
 
     push_connection(
-        node,
         name,
         group,
         ConnectionKind::Ssh,
         settings,
-        credential,
+        credential.map(CredentialSource::Object),
         ctx,
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+fn build_telnet_connection(node: &Value, group: Option<GroupId>, ctx: &mut ParseCtx) {
+    let name = get_str(node, &["Name"]).unwrap_or_else(|| "Imported connection".to_string());
+    let host = get_str(node, &["URI", "ComputerName", "Host", "HostName"]).unwrap_or_default();
+    let port = get_u16(node, &["Port"]).unwrap_or(TelnetSettings::DEFAULT_PORT);
+
+    if [
+        "CredentialID",
+        "CredentialId",
+        "UserName",
+        "Username",
+        "Password",
+    ]
+    .iter()
+    .any(|key| {
+        node.get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    }) {
+        tracing::warn!(
+            connection = %name,
+            "royalts: Telnet credentials ignored because login is interactive"
+        );
+        ctx.warnings.push(ImportWarning::new(format!(
+            "connection '{name}': Telnet credentials were ignored because Telnet login is interactive"
+        )));
+    }
+
+    push_connection(
+        name,
+        group,
+        ConnectionKind::Telnet,
+        ConnectionSettings::Telnet(TelnetSettings { host, port }),
+        Some(CredentialSource::Prompt),
+        ctx,
+    );
+}
+
 fn push_connection(
-    node: &Value,
     name: String,
     group: Option<GroupId>,
     kind: ConnectionKind,
     settings: ConnectionSettings,
-    credential: Option<CredentialId>,
+    credential_source: Option<CredentialSource>,
     ctx: &mut ParseCtx,
 ) {
-    let _ = node; // reserved: node kept for future field mapping/diagnostics.
     let conn_id = ctx.fresh_conn_id();
-    // RoyalTS always dedupes to a shared credential OBJECT, never Inline —
-    // P9.6 decision 5's Inline mapping only applies to a genuinely per-row/
-    // per-node *unshared* password (mRemoteNG, CSV without cred_name);
-    // RoyalTS's CredentialID is shared-by-reference by construction (see the
-    // module doc's "Credential dedupe" section), so it stays Object here.
-    let credential_source = credential.map(CredentialSource::Object);
     match Connection::new(
         conn_id,
         group,
@@ -446,6 +510,108 @@ mod tests {
             .find(|c| c.name == "app-server-ssh")
             .expect("ssh connection present");
         assert_eq!(ssh.kind, ConnectionKind::Ssh);
+    }
+
+    #[test]
+    fn terminal_connection_type_maps_telnet_as_interactive_host_and_port() {
+        let (envelope, warnings) = parse(FIXTURE).expect("fixture should parse");
+        let telnet = envelope
+            .connections
+            .iter()
+            .find(|connection| connection.name == "serial-console")
+            .expect("Telnet connection present");
+
+        assert_eq!(telnet.kind, ConnectionKind::Telnet);
+        assert_eq!(telnet.credential_source, Some(CredentialSource::Prompt));
+        match &telnet.settings {
+            ConnectionSettings::Telnet(settings) => {
+                assert_eq!(settings.host, "console.internal.example");
+                assert_eq!(settings.port, 23143);
+            }
+            other => panic!("expected Telnet settings, got {other:?}"),
+        }
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|warning| warning.message.contains("serial-console"))
+                .count(),
+            1,
+            "one Telnet node with a CredentialID must emit exactly one warning"
+        );
+    }
+
+    #[test]
+    fn royalts_telnet_defaults_to_port_23() {
+        let (envelope, _warnings) = parse(FIXTURE).expect("fixture should parse");
+        let telnet = envelope
+            .connections
+            .iter()
+            .find(|connection| connection.name == "default-port-telnet")
+            .expect("default-port Telnet connection present");
+        match &telnet.settings {
+            ConnectionSettings::Telnet(settings) => assert_eq!(settings.port, 23),
+            other => panic!("expected Telnet settings, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_and_unknown_terminal_protocols_are_skipped_with_counted_warnings() {
+        let input = r#"{
+            "Objects": [
+                {
+                    "Type": "TerminalConnection",
+                    "Name": "missing-protocol",
+                    "ComputerName": "missing.example"
+                },
+                {
+                    "Type": "TerminalConnection",
+                    "TerminalConnectionType": "Mosh",
+                    "Name": "unknown-protocol",
+                    "ComputerName": "unknown.example"
+                }
+            ]
+        }"#;
+
+        let (envelope, warnings) = parse(input).expect("document should parse");
+        assert!(envelope.connections.is_empty());
+        assert_eq!(warnings.len(), 2);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.message.contains("missing-protocol"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.message.contains("unknown-protocol"))
+        );
+    }
+
+    #[test]
+    fn direct_telnet_login_fields_emit_one_warning_without_becoming_credentials() {
+        let input = r#"{
+            "Objects": [
+                {
+                    "Type": "TerminalConnection",
+                    "TerminalConnectionType": "Telnet",
+                    "Name": "interactive-login",
+                    "ComputerName": "console.example",
+                    "UserName": "ignored-user",
+                    "Password": "ignored-password"
+                }
+            ]
+        }"#;
+
+        let (envelope, warnings) = parse(input).expect("document should parse");
+        assert_eq!(envelope.connections.len(), 1);
+        assert_eq!(
+            envelope.connections[0].credential_source,
+            Some(CredentialSource::Prompt)
+        );
+        assert!(envelope.credentials.is_empty());
+        assert!(envelope.credential_secrets.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("interactive-login"));
     }
 
     #[test]

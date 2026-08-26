@@ -253,8 +253,9 @@ pub(super) fn push_tab(
     } = args;
     let mut st = state.borrow_mut();
     let scale = st.scale;
-    let renderer = TerminalRenderer::with_fonts(
+    let renderer = TerminalRenderer::with_font_system(
         st.fonts.clone(),
+        &st.font_family,
         st.font_size_px,
         scale,
         // P6.8 (gap 9): pick dark/light from the live app theme at spawn time

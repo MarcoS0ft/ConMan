@@ -645,8 +645,8 @@ mod tests {
 
     /// P9.2: `.rjson` (RoyalTS) dispatch — `import_from_path` routes to
     /// `cm_storage::import` instead of the native JSON path, and the
-    /// warning count (the Web/VNC node skipped by the shared fixture) flows
-    /// through to the returned [`ImportOutcome`].
+    /// warning count (the skipped Web/VNC node plus the intentionally ignored
+    /// Telnet credential reference) flows through to the returned outcome.
     #[test]
     fn import_from_path_dispatches_rjson_extension_to_the_royalts_importer() {
         // Shared with `cm-storage`'s own fixture-driven parser tests — a
@@ -662,7 +662,8 @@ mod tests {
             .expect("royalts import should succeed");
 
         // Folders -> groups, RDP + SSH connections, the deduped credential
-        // and its plaintext secret, and the skipped VNC node all resolved
+        // and its plaintext secret, the Telnet connection, and the skipped
+        // VNC node all resolved
         // via the shared cm-storage seam — see that crate's tests for the
         // detailed field-level assertions; here we only need to confirm the
         // *dispatch* wired the counts through to the UI-facing outcome.
@@ -670,10 +671,10 @@ mod tests {
         assert_eq!(outcome.stats.credentials_imported, 1); // deduped
         assert_eq!(outcome.stats.secrets_imported, 1);
         assert_eq!(outcome.skipped_secrets, 0);
-        assert_eq!(outcome.warnings, 1); // the skipped VNC node
+        assert_eq!(outcome.warnings, 2); // skipped VNC + ignored Telnet credential reference
 
         let msg = summary_message(&outcome);
-        assert!(msg.contains("1 warning(s)"));
+        assert!(msg.contains("2 warning(s)"));
     }
 
     /// P9.3: `.csv` (ConMan's own CSV interchange format) dispatch — mirrors

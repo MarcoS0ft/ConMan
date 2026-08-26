@@ -2,7 +2,7 @@
 //
 // Sections:
 //   • Appearance — Theme (dark/light/system), Accent, Density (Compact/Cosy)
-//   • Terminal   — Default font size, default local shell + args + cwd
+//   • Terminal   — Font family/size, default local shell + args + cwd
 //   • Startup    — Open last session on launch vs clean start
 //   • Shortcuts  — Reserved Ctrl⇧ map (display-only; remap is a later task)
 //
@@ -14,7 +14,7 @@
 
 import { Theme } from "../theme.slint";
 import { SegmentedControl } from "../components.slint";
-import { CheckBox, LineEdit, Palette } from "std-widgets.slint";
+import { CheckBox, ComboBox, LineEdit, Palette, ScrollView } from "std-widgets.slint";
 
 // ── SettingRow ───────────────────────────────────────────────────────────────
 // One labeled row: title + optional subtitle on the left; a control slot on the right.
@@ -108,6 +108,13 @@ export component SettingsPanel inherits Rectangle {
     in-out property <int>  accent-index: 0;
 
     // ── Terminal defaults ───────────────────────────────────────────────────
+    // Deterministic list supplied by the shared renderer font system.
+    in property <[string]> font-families;
+    // Effective family currently used by every terminal renderer.
+    in-out property <string> font-family: "JetBrainsMono Nerd Font Mono";
+    // Index of `font-family` in `font-families`; kept separately because the
+    // std ComboBox treats current-index as its selection source of truth.
+    in-out property <int> font-family-index: 0;
     // Terminal font size (pt). Default 13.
     in-out property <int>  font-size: 13;
     // Default local shell executable path (empty = OS default: $SHELL / cmd.exe).
@@ -149,6 +156,7 @@ export component SettingsPanel inherits Rectangle {
     callback theme-changed(int);           // 0 dark · 1 light · 2 system
     callback density-changed(int);         // 0 compact · 1 cosy
     callback accent-changed(int);          // idx into Theme.accent-presets
+    callback font-family-changed(string);
     callback font-size-changed(int);
     callback shell-path-changed(string);
     callback shell-args-changed(string);
@@ -170,7 +178,7 @@ export component SettingsPanel inherits Rectangle {
 
     VerticalLayout {
         // ── Panel header ────────────────────────────────────────────────
-        Rectangle {
+        settings-header := Rectangle {
             height: 56px;
             background: Theme.color-elevated;
             HorizontalLayout {
@@ -182,9 +190,14 @@ export component SettingsPanel inherits Rectangle {
         }
         Rectangle { height: 1px; background: Theme.color-stroke; }
 
-        VerticalLayout {
+        settings-scroll := ScrollView {
             vertical-stretch: 1;
-            padding-bottom: Theme.space-4;
+
+            VerticalLayout {
+                // Keep controls clear of the scrollbar rail, matching the
+                // profile editor's established scrolling treatment.
+                padding-right: Theme.scrollbar-gutter;
+                padding-bottom: Theme.space-4;
 
             // ════ APPEARANCE ════════════════════════════════════════════
             SectionHeader { label: "APPEARANCE"; }
@@ -328,6 +341,25 @@ export component SettingsPanel inherits Rectangle {
                 padding-left: Theme.space-6; padding-right: Theme.space-6;
                 padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
                 spacing: Theme.space-4;
+
+                // Global family selection. The controller supplies only
+                // usable monospaced families and resolves stale persisted
+                // values before they reach this control.
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    Text { text: "Font family"; color: Theme.color-text;
+                        font-size: Theme.font-base; font-family: Theme.font-family;
+                        font-weight: 600; }
+                    terminal-font-family-combo := ComboBox {
+                        model: root.font-families;
+                        current-index <=> root.font-family-index;
+                        accessible-label: "Terminal font family";
+                        selected(value) => {
+                            root.font-family = value;
+                            root.font-family-changed(value);
+                        }
+                    }
+                }
 
                 // Font size — stacked layout so the stepper fits the 252px panel.
                 VerticalLayout {
@@ -675,9 +707,10 @@ export component SettingsPanel inherits Rectangle {
                 }
             }
 
-            ShortcutRow { keys: "Ctrl K"; action: "Open command palette"; }
+            global-ctrl-k-shortcut := ShortcutRow { keys: "Ctrl K"; action: "Open command palette"; }
 
             Rectangle { vertical-stretch: 1; }
+            }
         }
     }
 }

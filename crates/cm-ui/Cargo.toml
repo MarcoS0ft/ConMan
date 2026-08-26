@@ -19,8 +19,15 @@ cm-session = { path = "../cm-session" }
 # requirement. `std` + `compat-1-2` are enough to compile the generated component code and
 # the renderer's `SharedPixelBuffer`/`Image` value types.
 slint = { version = "1.17", default-features = false, features = ["std", "compat-1-2"] }
-# Software glyph rasterizer carried forward from the P0.3 spike.
-fontdue = "0.9"
+# Terminal shaping, installed-font fallback, and mask/color glyph rasterization (P10.2).
+cosmic-text = { version = "=0.19.0", default-features = false, features = [
+    "std",
+    "swash",
+    "fontconfig",
+] }
+# Required by cosmic-text's public Fallback trait method signature. This is already
+# transitive through cosmic-text; no second version or additional implementation is added.
+unicode-script = "0.5"
 # arboard: cross-platform clipboard access for RDP CLIPRDR bidirectional sync (P4.2).
 # See docs/devel/memos/p4.2-clipboard-dep.md for the rationale.
 arboard = "3"
