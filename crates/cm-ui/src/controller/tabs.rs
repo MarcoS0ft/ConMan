@@ -6,7 +6,7 @@ use std::thread;
 
 use cm_core::LocalSettings;
 use cm_session::{PaneGroup, Session, SessionStatus, Surface};
-use slint::{ComponentHandle, Model, SharedString, TimerMode, VecModel};
+use slint::{ComponentHandle, SharedString, TimerMode, VecModel};
 
 use crate::selection::PaneSelectionState;
 use crate::terminal_renderer::TerminalRenderer;
@@ -468,9 +468,7 @@ pub(super) fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
 
 /// What to do with a tab's session when its tab is closed.
 enum Disposition {
-    /// Keep it running in the background pool (reattachable later).
-    Detach,
-    /// Already stopped (or stopping on its own); shut down synchronously.
+    /// Connected, disconnected, or already stopped; shut down synchronously.
     Shutdown,
     /// Still `Connecting`: hand teardown to a detached thread (see
     /// [`abort_connecting`]) instead of blocking the UI or parking it in the
@@ -481,8 +479,10 @@ enum Disposition {
 fn disposition(s: &dyn Session) -> Disposition {
     match s.status() {
         SessionStatus::Connecting => Disposition::AbortConnecting,
-        SessionStatus::Exited(_) | SessionStatus::Failed(_) => Disposition::Shutdown,
-        SessionStatus::Connected | SessionStatus::Disconnected => Disposition::Detach,
+        SessionStatus::Connected
+        | SessionStatus::Disconnected
+        | SessionStatus::Exited(_)
+        | SessionStatus::Failed(_) => Disposition::Shutdown,
     }
 }
 
@@ -512,37 +512,16 @@ pub(super) fn close_tab(
         return;
     }
     let tab = st.tabs.remove(idx);
-    let label = tab_model
-        .row_data(idx)
-        .map(|t| t.title.to_string())
-        .unwrap_or_else(|| format!("tab {}", tab.num));
-    // P5.1: Detach live/connected sessions in this tab (keep running in the
-    // background). Sessions that have already exited or failed are shut
-    // down immediately. P7.6 (fixes P7.3-b): a session still `Connecting`
-    // must NOT be detached -- the ConnectingOverlay's Cancel and the tab's
-    // own ✕ both route here, and detaching a dying connect strands it
-    // permanently in the detached pool with no way to kill it. Abort it
-    // instead (see `abort_connecting`).
+    // Closing a tab terminates every session in it. Keeping a session alive
+    // is an explicit action handled by the separate Detach command. A session
+    // still `Connecting` is torn down off the UI thread because its driver
+    // may be inside a blocking connect/handshake (see `abort_connecting`).
     match disposition(tab.session.as_ref()) {
-        Disposition::Detach => st.detached.push(DetachedEntry {
-            session: tab.session,
-            label: label.clone(),
-            is_remote: tab.is_remote,
-            insecure_transport: tab.insecure_transport,
-            kind: tab.kind.clone(),
-        }),
         Disposition::Shutdown => tab.session.shutdown(),
         Disposition::AbortConnecting => abort_connecting(tab.session),
     }
-    for (i, ep) in tab.extra_panes.into_iter().enumerate() {
+    for ep in tab.extra_panes {
         match disposition(ep.session.as_ref()) {
-            Disposition::Detach => st.detached.push(DetachedEntry {
-                session: ep.session,
-                label: format!("{} [pane {}]", label, i + 2),
-                is_remote: ep.is_remote,
-                insecure_transport: ep.insecure_transport,
-                kind: ep.kind,
-            }),
             Disposition::Shutdown => ep.session.shutdown(),
             Disposition::AbortConnecting => abort_connecting(ep.session),
         }
@@ -707,11 +686,11 @@ mod tests {
     }
 
     #[test]
-    fn disposition_detaches_connected_and_disconnected() {
+    fn disposition_shuts_down_connected_and_disconnected() {
         let connected = FakeSession::with_status(SessionStatus::Connected);
-        assert!(matches!(disposition(&connected), Disposition::Detach));
+        assert!(matches!(disposition(&connected), Disposition::Shutdown));
         let disconnected = FakeSession::with_status(SessionStatus::Disconnected);
-        assert!(matches!(disposition(&disconnected), Disposition::Detach));
+        assert!(matches!(disposition(&disconnected), Disposition::Shutdown));
     }
 
     #[test]

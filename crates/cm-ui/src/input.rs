@@ -253,10 +253,39 @@ pub(crate) fn char_to_ps2_scancode(text: &str, special: i32) -> Option<(u8, bool
     }
 }
 
-/// PS/2 scancode for the left modifier key variants.
+#[must_use]
+pub(crate) fn rdp_text_matches_ascii_letter(text: &str, expected: char) -> bool {
+    text.chars()
+        .next()
+        .is_some_and(|ch| ch.eq_ignore_ascii_case(&expected))
+}
+
+/// PS/2 scancodes for modifier key variants.
 const SC_LCTRL: u8 = 0x1D;
 const SC_LSHIFT: u8 = 0x2A;
 const SC_LALT: u8 = 0x38;
+const SC_RSHIFT: u8 = 0x36;
+const SC_LMETA: u8 = 0x5B;
+const SC_RMETA: u8 = 0x5C;
+
+/// Resolve the modifier-specific `special` values emitted by `RdpSurface`.
+///
+/// Slint represents these keys with U+0010..U+0018 strings. Those values
+/// overlap the ASCII control-character range, so they must be classified in
+/// Slint before entering the printable-character path.
+fn rdp_modifier_scancode(special: i32) -> Option<(u8, bool)> {
+    match special {
+        27 => Some((SC_LSHIFT, false)),
+        28 => Some((SC_RSHIFT, false)),
+        29 => Some((SC_LCTRL, false)),
+        30 => Some((SC_LCTRL, true)),
+        31 => Some((SC_LALT, false)),
+        32 => Some((SC_LALT, true)),
+        33 => Some((SC_LMETA, true)),
+        34 => Some((SC_RMETA, true)),
+        _ => None,
+    }
+}
 
 /// Produce the RDP `FastPathInputEvent` sequence for a **key-down** event.
 ///
@@ -271,6 +300,10 @@ const SC_LALT: u8 = 0x38;
 /// coalesces duplicate modifier presses correctly.
 #[must_use]
 pub(crate) fn map_rdp_key_down(text: &str, special: i32, mods_bits: i32) -> Vec<RdpInputEvent> {
+    if let Some((scancode, extended)) = rdp_modifier_scancode(special) {
+        return vec![RdpInputEvent::KeyDown { scancode, extended }];
+    }
+
     let mut events = Vec::with_capacity(4);
     if mods_bits & MOD_CTRL != 0 {
         events.push(RdpInputEvent::KeyDown {
@@ -301,15 +334,20 @@ pub(crate) fn map_rdp_key_down(text: &str, special: i32, mods_bits: i32) -> Vec<
 
 /// Produce the RDP `FastPathInputEvent` sequence for a **key-up** event.
 ///
-/// The returned vector contains, in order:
-/// 1. The character or special-key key-up.
-/// 2. Left Shift key-up (if `mods_bits & MOD_SHIFT`).
-/// 3. Left Alt key-up (if `mods_bits & MOD_ALT`).
-/// 4. Left Ctrl key-up (if `mods_bits & MOD_CTRL`).
+/// A physical modifier event produces only that modifier's exact key-up,
+/// including right-side/extended identity. Other keys are followed by
+/// idempotent releases for every modifier variant.
 ///
-/// Note: modifier ups follow the character up (the reverse of key-down order).
+/// Modifier releases are unconditional because some Windows and nested-RDP
+/// paths report the modifier snapshot *after* the released modifier has
+/// disappeared. Sending an idempotent key-up is preferable to leaving a
+/// synthetic modifier pressed on the remote desktop.
 #[must_use]
-pub(crate) fn map_rdp_key_up(text: &str, special: i32, mods_bits: i32) -> Vec<RdpInputEvent> {
+pub(crate) fn map_rdp_key_up(text: &str, special: i32, _mods_bits: i32) -> Vec<RdpInputEvent> {
+    if let Some((scancode, extended)) = rdp_modifier_scancode(special) {
+        return vec![RdpInputEvent::KeyUp { scancode, extended }];
+    }
+
     let mut events = Vec::with_capacity(4);
     if let Some((sc, ext)) = char_to_ps2_scancode(text, special) {
         events.push(RdpInputEvent::KeyUp {
@@ -317,25 +355,46 @@ pub(crate) fn map_rdp_key_up(text: &str, special: i32, mods_bits: i32) -> Vec<Rd
             extended: ext,
         });
     }
-    if mods_bits & MOD_SHIFT != 0 {
-        events.push(RdpInputEvent::KeyUp {
+    events.extend(rdp_modifier_key_ups());
+    events
+}
+
+#[must_use]
+pub(crate) fn rdp_modifier_key_ups() -> [RdpInputEvent; 8] {
+    [
+        RdpInputEvent::KeyUp {
             scancode: SC_LSHIFT,
             extended: false,
-        });
-    }
-    if mods_bits & MOD_ALT != 0 {
-        events.push(RdpInputEvent::KeyUp {
+        },
+        RdpInputEvent::KeyUp {
+            scancode: SC_RSHIFT,
+            extended: false,
+        },
+        RdpInputEvent::KeyUp {
             scancode: SC_LALT,
             extended: false,
-        });
-    }
-    if mods_bits & MOD_CTRL != 0 {
-        events.push(RdpInputEvent::KeyUp {
+        },
+        RdpInputEvent::KeyUp {
+            scancode: SC_LALT,
+            extended: true,
+        },
+        RdpInputEvent::KeyUp {
             scancode: SC_LCTRL,
             extended: false,
-        });
-    }
-    events
+        },
+        RdpInputEvent::KeyUp {
+            scancode: SC_LCTRL,
+            extended: true,
+        },
+        RdpInputEvent::KeyUp {
+            scancode: SC_LMETA,
+            extended: true,
+        },
+        RdpInputEvent::KeyUp {
+            scancode: SC_RMETA,
+            extended: true,
+        },
+    ]
 }
 
 /// Coordinate-mapping context for RDP pointer events.
@@ -510,6 +569,70 @@ mod tests {
             MouseButton::ScrollDown
         );
         assert!(map_scroll(0.0, 0, 0, 0).is_none());
+    }
+
+    #[test]
+    fn rdp_clipboard_letter_matching_accepts_only_literal_ascii() {
+        assert!(rdp_text_matches_ascii_letter("v", 'v'));
+        assert!(rdp_text_matches_ascii_letter("V", 'v'));
+        assert!(!rdp_text_matches_ascii_letter("\u{16}", 'v'));
+    }
+
+    #[test]
+    fn rdp_slint_modifier_tokens_are_never_printable_characters() {
+        for token in '\u{10}'..='\u{18}' {
+            assert_eq!(
+                char_to_ps2_scancode(&token.to_string(), 0),
+                None,
+                "Slint modifier token U+{:04X} must not become a letter",
+                token as u32
+            );
+        }
+    }
+
+    #[test]
+    fn rdp_modifier_only_release_cannot_leave_remote_modifiers_pressed() {
+        let events = map_rdp_key_up("", 0, 0);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RdpInputEvent::KeyUp {
+                scancode: SC_LSHIFT,
+                extended: false
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RdpInputEvent::KeyUp {
+                scancode: SC_LCTRL,
+                extended: false
+            }
+        )));
+    }
+
+    #[test]
+    fn rdp_character_release_clears_synthetic_modifiers_despite_stale_snapshot() {
+        let events = map_rdp_key_up("v", 0, 0);
+        assert!(matches!(
+            events.first(),
+            Some(RdpInputEvent::KeyUp {
+                scancode: 0x2F,
+                extended: false
+            })
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RdpInputEvent::KeyUp {
+                scancode: SC_LSHIFT,
+                extended: false
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RdpInputEvent::KeyUp {
+                scancode: SC_LCTRL,
+                extended: false
+            }
+        )));
     }
 
     // ── RdpCoords::map ────────────────────────────────────────────────────────

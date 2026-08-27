@@ -41,6 +41,7 @@ pub(super) fn wire_sessions(ctx: &Ctx) {
     wire_kbd_cancel(ctx);
     wire_rdp_key_down(ctx);
     wire_rdp_key_up(ctx);
+    wire_rdp_release_keys(ctx);
     wire_row_activated(ctx);
     wire_reconnect(ctx);
 }
@@ -1151,7 +1152,9 @@ fn wire_rdp_key_down(ctx: &Ctx) {
         let state = ctx.state.clone();
         move |text, special, mods| {
             // Local→remote clipboard sync: intercept Ctrl+V, announce our clipboard.
-            if mods & input::MOD_CTRL != 0 && text.as_str().eq_ignore_ascii_case("v") {
+            if mods & input::MOD_CTRL != 0
+                && input::rdp_text_matches_ascii_letter(text.as_str(), 'v')
+            {
                 let paste_text = state.borrow_mut().sys_clipboard.get_text();
                 if let Some(text_to_paste) = paste_text {
                     let st = state.borrow();
@@ -1182,6 +1185,31 @@ fn wire_rdp_key_up(ctx: &Ctx) {
                 let events = input::map_rdp_key_up(text.as_str(), special, mods);
                 if !events.is_empty() {
                     send_to_focused_pane(tab, SessionInput::Rdp(events));
+                }
+            }
+        }
+    });
+}
+
+fn wire_rdp_release_keys(ctx: &Ctx) {
+    ctx.ui.on_rdp_release_keys({
+        let state = ctx.state.clone();
+        move || {
+            let st = state.borrow();
+            // Focus loss can be caused by a tab switch whose controller state
+            // has already advanced to the destination tab. Release every live
+            // RDP pane instead of guessing which tab used to own focus. These
+            // key-ups are idempotent.
+            for tab in &st.tabs {
+                if tab.kind == "RDP" {
+                    tab.session
+                        .send_input(SessionInput::Rdp(input::rdp_modifier_key_ups().into()));
+                }
+                for pane in &tab.extra_panes {
+                    if pane.kind == "RDP" {
+                        pane.session
+                            .send_input(SessionInput::Rdp(input::rdp_modifier_key_ups().into()));
+                    }
                 }
             }
         }
@@ -1255,6 +1283,7 @@ pub(super) fn launch_saved_connection(
     conn: &Connection,
 ) {
     let conn_id = conn.id;
+    let tab_count_before = state.borrow().tabs.len();
     // P6.14: record this as a recently-opened connection for the Launchpad
     // (recency only; best-effort -- a failure here never blocks or fails the
     // connect attempt itself). This is the single shared entry point for
@@ -1402,6 +1431,57 @@ pub(super) fn launch_saved_connection(
             }
         }
     }
+
+    // VQ-7: every saved-profile launch above ultimately pushes one tab, but
+    // the protocol-specific open paths deliberately derive labels for their
+    // other callers (Quick Connect / debug hooks). Apply the saved profile's
+    // user-facing name at this shared saved-only boundary instead. `Tab::
+    // identity` is already the canonical active-session label cached across
+    // tab switches, while `TabItem::title` is the tab-strip label, so no
+    // second title representation is introduced.
+    apply_saved_profile_label(
+        state,
+        tab_model,
+        ui,
+        tab_count_before,
+        origin_connection_id,
+        &conn.name,
+    );
+}
+
+/// Applies a saved profile's name to the single tab produced by
+/// [`launch_saved_connection`]. The before-count guard matters for Local:
+/// unlike remote setup errors (which become Failed tabs), a local spawn error
+/// opens no tab and must never rename whichever tab happened to be active.
+fn apply_saved_profile_label(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    tab_count_before: usize,
+    origin_connection_id: Option<i32>,
+    label: &str,
+) {
+    let tab_idx = {
+        let mut st = state.borrow_mut();
+        if st.tabs.len() != tab_count_before + 1 || st.active != tab_count_before {
+            return;
+        }
+        let tab = &mut st.tabs[tab_count_before];
+        // Remote paths already carry this id. Local saved profiles previously
+        // went through the generic shell helper, so attach their real origin
+        // here as well; this is the existing canonical provenance field used
+        // by duplicate/session persistence, not compatibility title state.
+        tab.origin_connection_id = origin_connection_id;
+        tab.identity = label.to_owned();
+        tab_count_before
+    };
+
+    if let Some(mut item) = tab_model.row_data(tab_idx) {
+        item.title = SharedString::from(label);
+        item.can_duplicate = true;
+        tab_model.set_row_data(tab_idx, item);
+    }
+    ui.set_session_identity(SharedString::from(label));
 }
 
 /// What [`wire_reconnect`] resolved for the active tab, before the old
@@ -1420,6 +1500,24 @@ enum ReconnectPlan {
         Result<RdpAuthInput, AuthResolveError>,
     ),
     Telnet(TelnetSettings),
+}
+
+/// Reconnect replaces transport/auth state in place; it must not replace a
+/// saved session's user-selected display label with a regenerated endpoint.
+/// Quick Connect tabs have no origin and continue to use the freshly derived
+/// endpoint label. The existing cached `identity` is the one canonical active
+/// session label, so retaining it does not add parallel title state.
+fn reconnect_display_label(
+    state: &Rc<RefCell<State>>,
+    tab_idx: usize,
+    generated: String,
+) -> String {
+    let st = state.borrow();
+    st.tabs
+        .get(tab_idx)
+        .filter(|tab| tab.origin_connection_id.is_some())
+        .map(|tab| tab.identity.clone())
+        .unwrap_or(generated)
 }
 
 /// Resolves the provenance + auth material for reconnecting an SSH tab
@@ -2623,7 +2721,8 @@ pub(super) fn reconnect_rdp_tab(
     // the new size rather than replaying whatever resolution the original
     // connect stored in `RdpConnectInfo`.
     apply_pane_resolution(state, &mut settings);
-    let identity = format!("{}@{}:{}", auth.username, settings.host, settings.port);
+    let endpoint_identity = format!("{}@{}:{}", auth.username, settings.host, settings.port);
+    let display_label = reconnect_display_label(state, tab_idx, endpoint_identity.clone());
     // P8.6-B (Fable review fixup): Reconnect is an execute-scope action too --
     // an agent driving the ErrorOverlay's "Reconnect" button re-establishes a
     // live session with stored credentials, same as a fresh launch. See
@@ -2634,7 +2733,7 @@ pub(super) fn reconnect_rdp_tab(
     // never a silent no-op.
     if agent_mode_execute_blocked(&state.borrow().agent_mode) {
         tracing::warn!(
-            conn = %identity,
+            conn = %endpoint_identity,
             "agent mode: reconnect blocked while automation is active without execute scope"
         );
         fail_reconnect_in_place(
@@ -2668,7 +2767,7 @@ pub(super) fn reconnect_rdp_tab(
                     // P9.5 #3: keep the cached identity/kind (select_tab
                     // re-pushes these on every switch) in step with a
                     // reconnect, same as the fresh-connect path.
-                    tab.identity = identity.clone();
+                    tab.identity = display_label.clone();
                     tab.kind = "RDP".to_owned();
                     tab.insecure_transport = false;
                     // P9.8 I2: this reconnect's own connecting -> connected
@@ -2682,7 +2781,7 @@ pub(super) fn reconnect_rdp_tab(
                 item.status = SharedString::from("connecting");
                 tab_model.set_row_data(tab_idx, item);
             }
-            ui.set_session_identity(SharedString::from(identity));
+            ui.set_session_identity(SharedString::from(display_label));
             ui.set_overlay_connecting(true);
             ui.set_overlay_error(false);
             ui.set_connecting_kind(SharedString::from("RDP"));
@@ -2723,12 +2822,13 @@ pub(super) fn reconnect_ssh_tab(
     verifier: Arc<dyn HostKeyVerifier>,
 ) {
     let size = state.borrow().current_grid();
-    let identity = format!("{}@{}:{}", settings.username, settings.host, settings.port);
+    let endpoint_identity = format!("{}@{}:{}", settings.username, settings.host, settings.port);
+    let display_label = reconnect_display_label(state, tab_idx, endpoint_identity.clone());
     // P8.6-B (Fable review fixup): see `reconnect_rdp_tab`'s identical
     // comment -- Reconnect is an execute-scope action, gated the same way.
     if agent_mode_execute_blocked(&state.borrow().agent_mode) {
         tracing::warn!(
-            conn = %identity,
+            conn = %endpoint_identity,
             "agent mode: reconnect blocked while automation is active without execute scope"
         );
         fail_reconnect_in_place(
@@ -2759,7 +2859,7 @@ pub(super) fn reconnect_ssh_tab(
                     tab.last = None;
                     // P9.5 #3: see the RDP counterpart's identical comment
                     // (reconnect_rdp_tab, above).
-                    tab.identity = identity.clone();
+                    tab.identity = display_label.clone();
                     tab.kind = "SSH".to_owned();
                     tab.insecure_transport = false;
                     // P9.8 I2: see the RDP counterpart's identical comment
@@ -2771,7 +2871,7 @@ pub(super) fn reconnect_ssh_tab(
                 item.status = SharedString::from("connecting");
                 tab_model.set_row_data(tab_idx, item);
             }
-            ui.set_session_identity(SharedString::from(identity));
+            ui.set_session_identity(SharedString::from(display_label));
             ui.set_overlay_connecting(true);
             ui.set_overlay_error(false);
             ui.set_connecting_kind(SharedString::from("SSH"));
@@ -2799,10 +2899,11 @@ pub(super) fn reconnect_telnet_tab(
     settings: TelnetSettings,
 ) {
     let size = state.borrow().current_grid();
-    let identity = format!("{}:{}", settings.host, settings.port);
+    let endpoint_identity = format!("{}:{}", settings.host, settings.port);
+    let display_label = reconnect_display_label(state, tab_idx, endpoint_identity.clone());
     if agent_mode_execute_blocked(&state.borrow().agent_mode) {
         tracing::warn!(
-            conn = %identity,
+            conn = %endpoint_identity,
             "agent mode: Telnet reconnect blocked while automation is active without execute scope"
         );
         fail_reconnect_in_place(
@@ -2824,7 +2925,7 @@ pub(super) fn reconnect_telnet_tab(
                     tab.session = new_session;
                     tab.connect_info = Some(ConnectInfo::Telnet(settings));
                     tab.last = None;
-                    tab.identity = identity.clone();
+                    tab.identity = display_label.clone();
                     tab.kind = "TELNET".to_owned();
                     tab.insecure_transport = true;
                     tab.connect_started = std::time::Instant::now();
@@ -2834,7 +2935,7 @@ pub(super) fn reconnect_telnet_tab(
                 item.status = SharedString::from("connecting");
                 tab_model.set_row_data(tab_idx, item);
             }
-            ui.set_session_identity(SharedString::from(identity));
+            ui.set_session_identity(SharedString::from(display_label));
             ui.set_overlay_connecting(true);
             ui.set_overlay_error(false);
             ui.set_connecting_kind(SharedString::from("TELNET"));

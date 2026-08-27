@@ -16,28 +16,6 @@ import { Theme } from "../theme.slint";
 import { SegmentedControl } from "../components.slint";
 import { CheckBox, ComboBox, LineEdit, Palette, ScrollView } from "std-widgets.slint";
 
-// ── SettingRow ───────────────────────────────────────────────────────────────
-// One labeled row: title + optional subtitle on the left; a control slot on the right.
-component SettingRow {
-    in property <string> title;
-    in property <string> subtitle;
-    min-height: Theme.control-height + Theme.space-4;
-    HorizontalLayout {
-        spacing: Theme.space-4;
-        VerticalLayout {
-            alignment: center;
-            horizontal-stretch: 1;
-            Text { text: title; color: Theme.color-text; font-size: Theme.font-base;
-                font-family: Theme.font-family; font-weight: 600; }
-            if subtitle != "" : Text {
-                text: subtitle; color: Theme.color-text-secondary;
-                font-size: Theme.font-sm; font-family: Theme.font-family;
-            }
-        }
-        @children
-    }
-}
-
 // ── SectionHeader ────────────────────────────────────────────────────────────
 component SectionHeader inherits Rectangle {
     in property <string> label;
@@ -51,6 +29,9 @@ component SectionHeader inherits Rectangle {
             font-size: Theme.font-xs; font-family: Theme.font-family;
             font-weight: 700; letter-spacing: 0.7px;
             vertical-alignment: center;
+            horizontal-stretch: 1;
+            min-width: 0px;
+            overflow: elide;
         }
     }
 }
@@ -60,12 +41,14 @@ component SectionHeader inherits Rectangle {
 component ShortcutRow {
     in property <string> keys;
     in property <string> action;
-    height: Theme.tree-row-height + 2px;
-    HorizontalLayout {
+    property <bool> narrow: self.width < 220px;
+    height: narrow ? 48px : Theme.tree-row-height + 2px;
+
+    if !narrow : HorizontalLayout {
         padding-left: Theme.space-6; padding-right: Theme.space-6;
-        spacing: Theme.space-4;
+        spacing: Theme.space-3;
         // Key badge
-        Rectangle {
+        shortcut-key-badge-wide := Rectangle {
             width: Theme.settings-shortcut-label-width;
             VerticalLayout {
                 alignment: center;
@@ -87,7 +70,7 @@ component ShortcutRow {
                 }
             }
         }
-        Text {
+        shortcut-action-wide := Text {
             text: action;
             color: Theme.color-text-secondary;
             font-size: Theme.font-base; font-family: Theme.font-family;
@@ -95,10 +78,49 @@ component ShortcutRow {
             overflow: elide;
         }
     }
+
+    if narrow : VerticalLayout {
+        padding-left: Theme.space-4; padding-right: Theme.space-4;
+        padding-top: Theme.space-1; padding-bottom: Theme.space-1;
+        spacing: Theme.space-1;
+        shortcut-key-badge-narrow := Rectangle {
+            width: Theme.settings-shortcut-label-width;
+            height: 17px;
+            border-radius: Theme.radius-xs;
+            background: Theme.color-elevated;
+            border-width: 1px; border-color: Theme.color-stroke;
+            HorizontalLayout {
+                padding-left: Theme.space-2; padding-right: Theme.space-2;
+                Text {
+                    text: keys;
+                    color: Theme.color-text-secondary;
+                    font-size: Theme.font-xs;
+                    font-family: Theme.font-family-mono;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+        shortcut-action-narrow := Text {
+            text: action;
+            color: Theme.color-text-secondary;
+            font-size: Theme.font-sm;
+            font-family: Theme.font-family;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
 }
 
 // ── SettingsPanel ─────────────────────────────────────────────────────────────
 export component SettingsPanel inherits Rectangle {
+    // The side panel is user-resizable down to 180 px. At that width,
+    // controls with long option labels use compact selectors and dense rows stack.
+    property <bool> narrow-layout: self.width < 220px;
+    property <length> content-padding: narrow-layout ? Theme.space-4 : Theme.space-6;
+    property <length> accent-swatch-size: narrow-layout ? 20px : 24px;
+
     // ── Appearance ─────────────────────────────────────────────────────────
     // 0 dark · 1 light · 2 system (Palette.color-scheme driven)
     in-out property <int>  theme-mode: 2;
@@ -182,7 +204,7 @@ export component SettingsPanel inherits Rectangle {
             height: 56px;
             background: Theme.color-elevated;
             HorizontalLayout {
-                padding-left: Theme.space-6; padding-right: Theme.space-6;
+                padding-left: root.content-padding; padding-right: root.content-padding;
                 Text { text: "Settings"; color: Theme.color-text; font-size: Theme.font-lg;
                     font-family: Theme.font-family; font-weight: 700;
                     vertical-alignment: center; }
@@ -204,22 +226,19 @@ export component SettingsPanel inherits Rectangle {
             Rectangle { height: 1px; background: Theme.color-stroke; }
 
             VerticalLayout {
-                padding-left: Theme.space-6; padding-right: Theme.space-6;
+                padding-left: root.content-padding; padding-right: root.content-padding;
                 padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
                 spacing: Theme.space-4;
 
                 // Theme — stacked: label above, full-width segmented control below.
                 VerticalLayout {
                     spacing: Theme.space-2;
-                    HorizontalLayout {
-                        Text { text: "Theme"; color: Theme.color-text; font-size: Theme.font-base;
-                            font-family: Theme.font-family; font-weight: 600;
-                            horizontal-stretch: 1; }
-                        Text { text: "Follows OS by default"; color: Theme.color-text-secondary;
-                            font-size: Theme.font-sm; font-family: Theme.font-family;
-                            vertical-alignment: center; }
-                    }
-                    SegmentedControl {
+                    Text { text: "Theme"; color: Theme.color-text; font-size: Theme.font-base;
+                        font-family: Theme.font-family; font-weight: 600; }
+                    Text { text: "Follows OS by default"; color: Theme.color-text-secondary;
+                        font-size: Theme.font-sm; font-family: Theme.font-family;
+                        wrap: word-wrap; }
+                    if !root.narrow-layout : settings-theme-control-wide := SegmentedControl {
                         options: ["Dark", "Light", "System"];
                         selected <=> root.theme-mode;
                         changed(i) => {
@@ -236,16 +255,37 @@ export component SettingsPanel inherits Rectangle {
                             root.theme-changed(i);
                         }
                     }
+                    if root.narrow-layout : settings-theme-control-narrow := ComboBox {
+                        min-width: 0px;
+                        model: ["Dark", "Light", "System"];
+                        current-index <=> root.theme-mode;
+                        accessible-label: "Theme";
+                        selected(value) => {
+                            if (value == "Dark") { Theme.dark-mode = true; }
+                            else if (value == "Light") { Theme.dark-mode = false; }
+                            else { Theme.dark-mode = (Palette.color-scheme == ColorScheme.dark); }
+                            root.theme-changed(root.theme-mode);
+                        }
+                    }
                 }
 
-                // Accent swatches — label left, swatches right (compact enough).
-                SettingRow { title: "Accent color"; subtitle: "Presets, or the live OS accent";
-                    HorizontalLayout {
-                        spacing: Theme.space-1; alignment: end;
+                // Keep every option visible at minimum width by reducing only
+                // the decorative swatch diameter in the narrow layout.
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    Text { text: "Accent color"; color: Theme.color-text;
+                        font-size: Theme.font-base; font-family: Theme.font-family;
+                        font-weight: 600; }
+                    Text { text: "Presets, or the live OS accent";
+                        color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                        font-family: Theme.font-family; wrap: word-wrap; }
+                    settings-accent-picker := HorizontalLayout {
+                        spacing: Theme.space-1; alignment: start;
                         // Preset swatches come from Theme.accent-presets — no hardcoded hex here.
-                        // space-1 (4px) gap ensures all swatches fit within the 252px panel.
                         for c[idx] in Theme.accent-presets : accent-swatch := Rectangle {
-                            width: 24px; height: 24px; border-radius: 12px;
+                            width: root.accent-swatch-size;
+                            height: root.accent-swatch-size;
+                            border-radius: root.accent-swatch-size / 2;
                             background: c;
                             border-width: idx == root.accent-index ? 2px : 0px;
                             border-color: Theme.color-base;
@@ -264,7 +304,8 @@ export component SettingsPanel inherits Rectangle {
                             }
                             // Selected ring (inner outline in swatch color).
                             Rectangle {
-                                width: 100%; height: 100%; border-radius: 12px;
+                                width: 100%; height: 100%;
+                                border-radius: root.accent-swatch-size / 2;
                                 border-width: idx == root.accent-index ? 2px : 0px;
                                 border-color: c;
                             }
@@ -283,7 +324,9 @@ export component SettingsPanel inherits Rectangle {
                         // Always outlined (unlike the flat presets above) so it
                         // reads as "live/special" even when not selected.
                         os-accent-swatch := Rectangle {
-                            width: 24px; height: 24px; border-radius: 12px;
+                            width: root.accent-swatch-size;
+                            height: root.accent-swatch-size;
+                            border-radius: root.accent-swatch-size / 2;
                             background: Theme.os-accent-color;
                             border-width: root.accent-index == Theme.os-accent-index ? 2px : 1px;
                             border-color: root.accent-index == Theme.os-accent-index
@@ -297,7 +340,8 @@ export component SettingsPanel inherits Rectangle {
                                 root.accent-changed(Theme.os-accent-index);
                             }
                             Rectangle {
-                                width: 100%; height: 100%; border-radius: 12px;
+                                width: 100%; height: 100%;
+                                border-radius: root.accent-swatch-size / 2;
                                 border-width: root.accent-index == Theme.os-accent-index ? 2px : 0px;
                                 border-color: Theme.os-accent-color;
                             }
@@ -313,20 +357,28 @@ export component SettingsPanel inherits Rectangle {
                 // Density — stacked: label above, full-width segmented control below.
                 VerticalLayout {
                     spacing: Theme.space-2;
-                    HorizontalLayout {
-                        Text { text: "Density"; color: Theme.color-text; font-size: Theme.font-base;
-                            font-family: Theme.font-family; font-weight: 600;
-                            horizontal-stretch: 1; }
-                        Text { text: "Row height and padding"; color: Theme.color-text-secondary;
-                            font-size: Theme.font-sm; font-family: Theme.font-family;
-                            vertical-alignment: center; }
-                    }
-                    SegmentedControl {
+                    Text { text: "Density"; color: Theme.color-text; font-size: Theme.font-base;
+                        font-family: Theme.font-family; font-weight: 600; }
+                    Text { text: "Row height and padding"; color: Theme.color-text-secondary;
+                        font-size: Theme.font-sm; font-family: Theme.font-family;
+                        wrap: word-wrap; }
+                    if !root.narrow-layout : settings-density-control-wide := SegmentedControl {
                         options: ["Compact", "Cosy"];
                         selected <=> root.density;
                         changed(i) => {
                             Theme.density = i;
                             root.density-changed(i);
+                        }
+                    }
+                    if root.narrow-layout : settings-density-control-narrow := ComboBox {
+                        min-width: 0px;
+                        model: ["Compact", "Cosy"];
+                        current-index <=> root.density;
+                        accessible-label: "Density";
+                        selected(value) => {
+                            root.density = value == "Cosy" ? 1 : 0;
+                            Theme.density = root.density;
+                            root.density-changed(root.density);
                         }
                     }
                 }
@@ -338,7 +390,7 @@ export component SettingsPanel inherits Rectangle {
             Rectangle { height: 1px; background: Theme.color-stroke; }
 
             VerticalLayout {
-                padding-left: Theme.space-6; padding-right: Theme.space-6;
+                padding-left: root.content-padding; padding-right: root.content-padding;
                 padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
                 spacing: Theme.space-4;
 
@@ -351,6 +403,7 @@ export component SettingsPanel inherits Rectangle {
                         font-size: Theme.font-base; font-family: Theme.font-family;
                         font-weight: 600; }
                     terminal-font-family-combo := ComboBox {
+                        min-width: 0px;
                         model: root.font-families;
                         current-index <=> root.font-family-index;
                         accessible-label: "Terminal font family";
@@ -364,15 +417,12 @@ export component SettingsPanel inherits Rectangle {
                 // Font size — stacked layout so the stepper fits the 252px panel.
                 VerticalLayout {
                     spacing: Theme.space-2;
-                    HorizontalLayout {
-                        alignment: space-between;
-                        Text { text: "Font size"; color: Theme.color-text;
-                            font-size: Theme.font-base; font-family: Theme.font-family;
-                            font-weight: 600; vertical-alignment: center; }
-                        Text { text: "Terminal monospace size (pt)";
-                            color: Theme.color-text-secondary; font-size: Theme.font-sm;
-                            font-family: Theme.font-family; vertical-alignment: center; }
-                    }
+                    Text { text: "Font size"; color: Theme.color-text;
+                        font-size: Theme.font-base; font-family: Theme.font-family;
+                        font-weight: 600; }
+                    Text { text: "Terminal monospace size (pt)";
+                        color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                        font-family: Theme.font-family; wrap: word-wrap; }
                     // Simple − / value display / + stepper, bounded 6..72.
                     HorizontalLayout {
                         spacing: Theme.space-2; alignment: start;
@@ -455,8 +505,9 @@ export component SettingsPanel inherits Rectangle {
                         font-weight: 600; }
                     Text { text: "Executable path — empty uses $SHELL or cmd.exe";
                         color: Theme.color-text-secondary; font-size: Theme.font-sm;
-                        font-family: Theme.font-family; }
+                        font-family: Theme.font-family; wrap: word-wrap; }
                     settings-shell-path-field := LineEdit {
+                        min-width: 0px;
                         text <=> root.shell-path;
                         placeholder-text: "/bin/bash";
                         font-size: Theme.font-base;
@@ -472,6 +523,7 @@ export component SettingsPanel inherits Rectangle {
                         font-size: Theme.font-base; font-family: Theme.font-family;
                         font-weight: 600; }
                     settings-shell-args-field := LineEdit {
+                        min-width: 0px;
                         text <=> root.shell-args;
                         placeholder-text: "--login";
                         font-size: Theme.font-base;
@@ -488,8 +540,9 @@ export component SettingsPanel inherits Rectangle {
                         font-weight: 600; }
                     Text { text: "Empty defaults to the user home directory";
                         color: Theme.color-text-secondary; font-size: Theme.font-sm;
-                        font-family: Theme.font-family; }
+                        font-family: Theme.font-family; wrap: word-wrap; }
                     settings-shell-cwd-field := LineEdit {
+                        min-width: 0px;
                         text <=> root.shell-cwd;
                         placeholder-text: "~";
                         font-size: Theme.font-base;
@@ -506,25 +559,32 @@ export component SettingsPanel inherits Rectangle {
             Rectangle { height: 1px; background: Theme.color-stroke; }
 
             VerticalLayout {
-                padding-left: Theme.space-6; padding-right: Theme.space-6;
+                padding-left: root.content-padding; padding-right: root.content-padding;
                 padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
                 spacing: Theme.space-4;
 
                 // Startup — stacked: label above, full-width segmented control below.
                 VerticalLayout {
                     spacing: Theme.space-2;
-                    HorizontalLayout {
-                        Text { text: "On launch"; color: Theme.color-text; font-size: Theme.font-base;
-                            font-family: Theme.font-family; font-weight: 600;
-                            horizontal-stretch: 1; }
-                        Text { text: "What to do when ConMan opens"; color: Theme.color-text-secondary;
-                            font-size: Theme.font-sm; font-family: Theme.font-family;
-                            vertical-alignment: center; }
-                    }
-                    SegmentedControl {
+                    Text { text: "On launch"; color: Theme.color-text; font-size: Theme.font-base;
+                        font-family: Theme.font-family; font-weight: 600; }
+                    Text { text: "What to do when ConMan opens"; color: Theme.color-text-secondary;
+                        font-size: Theme.font-sm; font-family: Theme.font-family;
+                        wrap: word-wrap; }
+                    if !root.narrow-layout : settings-startup-control-wide := SegmentedControl {
                         options: ["Clean start", "Restore last"];
                         selected <=> root.startup-behavior;
                         changed(i) => { root.startup-behavior-changed(i); }
+                    }
+                    if root.narrow-layout : settings-startup-control-narrow := ComboBox {
+                        min-width: 0px;
+                        model: ["Clean start", "Restore last"];
+                        current-index <=> root.startup-behavior;
+                        accessible-label: "Startup behavior";
+                        selected(value) => {
+                            root.startup-behavior = value == "Restore last" ? 1 : 0;
+                            root.startup-behavior-changed(root.startup-behavior);
+                        }
                     }
                 }
             }
@@ -535,28 +595,36 @@ export component SettingsPanel inherits Rectangle {
             Rectangle { height: 1px; background: Theme.color-stroke; }
 
             VerticalLayout {
-                padding-left: Theme.space-6; padding-right: Theme.space-6;
+                padding-left: root.content-padding; padding-right: root.content-padding;
                 padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
                 spacing: Theme.space-4;
 
                 // Renderer — stacked: label above, full-width segmented control below.
                 VerticalLayout {
                     spacing: Theme.space-2;
-                    HorizontalLayout {
-                        Text { text: "Renderer"; color: Theme.color-text; font-size: Theme.font-base;
-                            font-family: Theme.font-family; font-weight: 600;
-                            horizontal-stretch: 1; }
-                        Text { text: "Applied on restart"; color: Theme.color-text-secondary;
-                            font-size: Theme.font-sm; font-family: Theme.font-family;
-                            vertical-alignment: center; }
-                    }
-                    SegmentedControl {
+                    Text { text: "Renderer"; color: Theme.color-text; font-size: Theme.font-base;
+                        font-family: Theme.font-family; font-weight: 600; }
+                    Text { text: "Applied on restart"; color: Theme.color-text-secondary;
+                        font-size: Theme.font-sm; font-family: Theme.font-family;
+                        wrap: word-wrap; }
+                    if !root.narrow-layout : settings-renderer-control-wide := SegmentedControl {
                         // 0 Auto · 1 Software · 2 Hardware — mirrors render.backend
                         // ("auto"/"software"/"accelerated") persisted by the Rust
                         // controller. Auto re-probes each launch; the others pin it.
                         options: ["Auto", "Software", "Hardware"];
                         selected <=> root.render-backend;
                         changed(i) => { root.render-backend-changed(i); }
+                    }
+                    if root.narrow-layout : settings-renderer-control-narrow := ComboBox {
+                        min-width: 0px;
+                        model: ["Auto", "Software", "Hardware"];
+                        current-index <=> root.render-backend;
+                        accessible-label: "Renderer";
+                        selected(value) => {
+                            root.render-backend = value == "Software" ? 1
+                                : value == "Hardware" ? 2 : 0;
+                            root.render-backend-changed(root.render-backend);
+                        }
                     }
                     Text {
                         text: "Auto detects a working GPU on each launch. Software is the safe fallback for machines without one.";
@@ -575,7 +643,7 @@ export component SettingsPanel inherits Rectangle {
                 Rectangle { height: 1px; background: Theme.color-stroke; }
 
                 VerticalLayout {
-                    padding-left: Theme.space-6; padding-right: Theme.space-6;
+                    padding-left: root.content-padding; padding-right: root.content-padding;
                     padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
                     spacing: Theme.space-4;
 
@@ -586,6 +654,7 @@ export component SettingsPanel inherits Rectangle {
                     VerticalLayout {
                         spacing: Theme.space-2;
                         agent-mode-enable-check := CheckBox {
+                            min-width: 0px;
                             text: "Enable agent mode";
                             checked <=> root.agent-mode-enabled;
                             toggled => { root.agent-mode-enabled-changed(self.checked); }
@@ -609,6 +678,7 @@ export component SettingsPanel inherits Rectangle {
                         HorizontalLayout {
                             spacing: Theme.space-3;
                             agent-mode-read-check := CheckBox {
+                                min-width: 0px;
                                 text: "Read";
                                 checked <=> root.agent-mode-scope-read;
                                 toggled => { root.agent-mode-scope-read-changed(self.checked); }
@@ -623,6 +693,7 @@ export component SettingsPanel inherits Rectangle {
                         HorizontalLayout {
                             spacing: Theme.space-3;
                             agent-mode-write-check := CheckBox {
+                                min-width: 0px;
                                 text: "Write";
                                 checked <=> root.agent-mode-scope-write;
                                 toggled => { root.agent-mode-scope-write-changed(self.checked); }
@@ -637,6 +708,7 @@ export component SettingsPanel inherits Rectangle {
                         HorizontalLayout {
                             spacing: Theme.space-3;
                             agent-mode-execute-check := CheckBox {
+                                min-width: 0px;
                                 text: "Execute";
                                 checked <=> root.agent-mode-scope-execute;
                                 toggled => { root.agent-mode-scope-execute-changed(self.checked); }
@@ -667,15 +739,18 @@ export component SettingsPanel inherits Rectangle {
             Rectangle { height: 1px; background: Theme.color-stroke; }
 
             // Sub-header: Ctrl⇧ reserved app layer
-            Rectangle {
+            settings-app-shortcuts-header := Rectangle {
                 height: 24px;
                 HorizontalLayout {
-                    padding-left: Theme.space-6;
+                    padding-left: root.content-padding;
+                    padding-right: root.content-padding;
                     Text {
                         text: "Ctrl ⇧  —  app layer (never forwarded to the terminal)";
                         color: Theme.color-text-disabled; font-size: Theme.font-xs;
                         font-family: Theme.font-family; font-weight: 600;
                         vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
                     }
                 }
             }
@@ -694,15 +769,18 @@ export component SettingsPanel inherits Rectangle {
             ShortcutRow { keys: "Ctrl ⇧ E";    action: "Toggle the side panel"; }
 
             // Sub-header: global shortcuts
-            Rectangle {
+            settings-global-shortcuts-header := Rectangle {
                 height: 24px;
                 HorizontalLayout {
-                    padding-left: Theme.space-6;
+                    padding-left: root.content-padding;
+                    padding-right: root.content-padding;
                     Text {
                         text: "Global  —  work from any focus";
                         color: Theme.color-text-disabled; font-size: Theme.font-xs;
                         font-family: Theme.font-family; font-weight: 600;
                         vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
                     }
                 }
             }

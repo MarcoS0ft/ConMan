@@ -33,6 +33,7 @@ fn settings_suite() {
     stale_font_family_uses_effective_default();
     font_family_selection_persists();
     settings_body_scrolls_beneath_fixed_header();
+    settings_content_does_not_scroll_horizontally();
     render_backend_toggle_persists();
     #[cfg(feature = "agent-mode")]
     agent_mode_section_toggles_persist();
@@ -132,58 +133,161 @@ fn stale_font_family_uses_effective_default() {
 }
 
 fn settings_body_scrolls_beneath_fixed_header() {
-    let (h, _repo, _provider) = harness();
-    h.ui.window()
-        .set_size(slint::LogicalSize::new(900.0, 420.0));
-    open_settings(&h);
-    pump_ticks(1);
+    for sidebar_width in [252, 180] {
+        let (h, _repo, _provider) = harness();
+        h.ui.window()
+            .set_size(slint::LogicalSize::new(900.0, 420.0));
+        h.ui.set_sidebar_width(sidebar_width);
+        open_settings(&h);
+        pump_ticks(1);
 
-    let header = find_by_id(&h.ui, "SettingsPanel::settings-header");
-    let scroll = find_by_id(&h.ui, "SettingsPanel::settings-scroll");
-    let header_position = header.absolute_position();
-    assert!(
-        scroll.absolute_position().y >= header_position.y + header.size().height,
-        "the scrolling viewport must begin beneath the fixed header"
-    );
-    assert!(
-        scroll.size().height > 0.0 && scroll.size().height < 420.0,
-        "the settings body must receive a bounded viewport at constrained height"
-    );
+        let header = find_by_id(&h.ui, "SettingsPanel::settings-header");
+        let scroll = find_by_id(&h.ui, "SettingsPanel::settings-scroll");
+        let header_position = header.absolute_position();
+        assert!(
+            scroll.absolute_position().y >= header_position.y + header.size().height,
+            "the scrolling viewport must begin beneath the fixed header at {sidebar_width}px"
+        );
+        assert!(
+            scroll.size().height > 0.0 && scroll.size().height < 420.0,
+            "the settings body must receive a bounded viewport at {sidebar_width}px"
+        );
 
-    // Reach the bottom with the real wheel route, then capture the specific
-    // final shortcut. A generic "some ShortcutRow exists" assertion can pass
-    // even when the bottom content never becomes reachable.
-    scroll.scroll(0.0, -10_000.0);
-    pump_ticks(1);
-    let bottom_row = find_by_id(&h.ui, "SettingsPanel::global-ctrl-k-shortcut");
-    let bottom_row_before = bottom_row.absolute_position();
+        // Reach the bottom with the real wheel route, then capture the specific
+        // final shortcut. A generic "some ShortcutRow exists" assertion can pass
+        // even when the bottom content never becomes reachable.
+        scroll.scroll(0.0, -10_000.0);
+        pump_ticks(1);
+        let bottom_row = find_by_id(&h.ui, "SettingsPanel::global-ctrl-k-shortcut");
+        let bottom_row_before = bottom_row.absolute_position();
 
-    // Move slightly back toward the top. The content must translate downward
-    // while Ctrl K remains inside the viewport (the bottom padding provides a
-    // stable margin for this constrained-height check).
-    scroll.scroll(0.0, 8.0);
-    pump_ticks(1);
+        // Move slightly back toward the top. The content must translate downward
+        // while Ctrl K remains inside the viewport (the bottom padding provides a
+        // stable margin for this constrained-height check).
+        scroll.scroll(0.0, 8.0);
+        pump_ticks(1);
 
-    let header_after = find_by_id(&h.ui, "SettingsPanel::settings-header");
-    assert_eq!(
-        header_after.absolute_position(),
-        header_position,
-        "scrolling settings content must not move the header"
-    );
-    let bottom_row_after = find_by_id(&h.ui, "SettingsPanel::global-ctrl-k-shortcut");
-    let bottom_row_after_position = bottom_row_after.absolute_position();
+        let header_after = find_by_id(&h.ui, "SettingsPanel::settings-header");
+        assert_eq!(
+            header_after.absolute_position(),
+            header_position,
+            "scrolling settings content must not move the header at {sidebar_width}px"
+        );
+        let bottom_row_after = find_by_id(&h.ui, "SettingsPanel::global-ctrl-k-shortcut");
+        let bottom_row_after_position = bottom_row_after.absolute_position();
+        assert!(
+            bottom_row_after_position.y > bottom_row_before.y,
+            "scrolling toward the top must move the bottom shortcut downward at \
+             {sidebar_width}px"
+        );
+        let viewport_top = scroll.absolute_position().y;
+        let viewport_bottom = viewport_top + scroll.size().height;
+        let row_top = bottom_row_after_position.y;
+        let row_bottom = row_top + bottom_row_after.size().height;
+        assert!(
+            row_top >= viewport_top && row_bottom <= viewport_bottom,
+            "Ctrl K bounds ({row_top}..{row_bottom}) must fit the Settings viewport \
+             ({viewport_top}..{viewport_bottom}) after scrolling at {sidebar_width}px"
+        );
+    }
+}
+
+/// P10.3 VQ-4: the Settings `ScrollView` is vertical-only in practice at both
+/// supported sidebar boundaries. This drives its real wheel route in both
+/// horizontal directions and checks the dense controls that previously set an
+/// oversized intrinsic content width.
+fn settings_content_does_not_scroll_horizontally() {
+    for sidebar_width in [252, 180] {
+        let (h, _repo, _provider) = harness();
+        h.ui.window()
+            .set_size(slint::LogicalSize::new(900.0, 600.0));
+        h.ui.set_sidebar_width(sidebar_width);
+        open_settings(&h);
+        pump_ticks(1);
+
+        let panel = find_singleton(&h.ui, "SettingsPanel");
+        let scroll = find_by_id(&h.ui, "SettingsPanel::settings-scroll");
+        assert!(
+            (panel.size().width - sidebar_width as f32).abs() <= 0.5,
+            "SettingsPanel width must follow the {sidebar_width}px sidebar boundary, got {}",
+            panel.size().width
+        );
+
+        let control_suffix = if sidebar_width < 220 {
+            "narrow"
+        } else {
+            "wide"
+        };
+        for id in [
+            format!("SettingsPanel::settings-theme-control-{control_suffix}"),
+            format!("SettingsPanel::settings-density-control-{control_suffix}"),
+            "SettingsPanel::settings-accent-picker".to_owned(),
+            "SettingsPanel::terminal-font-family-combo".to_owned(),
+        ] {
+            let element = find_by_id(&h.ui, &id);
+            assert_horizontally_contained(&element, &scroll, sidebar_width, &id);
+        }
+
+        let anchor = find_by_id(&h.ui, "SettingsPanel::settings-accent-picker");
+        let initial_x = anchor.absolute_position().x;
+        scroll.scroll(-10_000.0, 0.0);
+        pump_ticks(1);
+        let after_right = find_by_id(&h.ui, "SettingsPanel::settings-accent-picker")
+            .absolute_position()
+            .x;
+        scroll.scroll(20_000.0, 0.0);
+        pump_ticks(1);
+        let after_left = find_by_id(&h.ui, "SettingsPanel::settings-accent-picker")
+            .absolute_position()
+            .x;
+        assert_eq!(
+            [initial_x, after_right, after_left],
+            [initial_x; 3],
+            "real horizontal scrolling must not move Settings content at {sidebar_width}px"
+        );
+
+        // Exercise the stacked/elided shortcut rows at the other end of the
+        // same real scroll boundary. Only viewport-resident Slint elements are
+        // present in the testing tree, so geometry is checked after scrolling.
+        scroll.scroll(0.0, -10_000.0);
+        pump_ticks(1);
+        for id in [
+            "SettingsPanel::settings-global-shortcuts-header",
+            "SettingsPanel::global-ctrl-k-shortcut",
+        ] {
+            let element = find_by_id(&h.ui, id);
+            assert_horizontally_contained(&element, &scroll, sidebar_width, id);
+        }
+        for id in [
+            format!("ShortcutRow::shortcut-key-badge-{control_suffix}"),
+            format!("ShortcutRow::shortcut-action-{control_suffix}"),
+        ] {
+            let elements: Vec<_> = ElementHandle::find_by_element_id(&h.ui, &id).collect();
+            assert!(
+                !elements.is_empty(),
+                "at least one {id} must be viewport-resident at {sidebar_width}px"
+            );
+            for element in elements {
+                assert_horizontally_contained(&element, &scroll, sidebar_width, &id);
+            }
+        }
+    }
+}
+
+fn assert_horizontally_contained(
+    inner: &ElementHandle,
+    outer: &ElementHandle,
+    sidebar_width: i32,
+    description: &str,
+) {
+    let inner_left = inner.absolute_position().x;
+    let inner_right = inner_left + inner.size().width;
+    let outer_left = outer.absolute_position().x;
+    let outer_right = outer_left + outer.size().width;
     assert!(
-        bottom_row_after_position.y > bottom_row_before.y,
-        "scrolling toward the top must move the bottom shortcut downward"
-    );
-    let viewport_top = scroll.absolute_position().y;
-    let viewport_bottom = viewport_top + scroll.size().height;
-    let row_top = bottom_row_after_position.y;
-    let row_bottom = row_top + bottom_row_after.size().height;
-    assert!(
-        row_top >= viewport_top && row_bottom <= viewport_bottom,
-        "Ctrl K bounds ({row_top}..{row_bottom}) must fit the Settings viewport \
-         ({viewport_top}..{viewport_bottom}) after scrolling"
+        inner_left >= outer_left - 0.5 && inner_right <= outer_right + 0.5,
+        "{description} bounds ({inner_left}..{inner_right}) must fit the Settings viewport \
+         ({outer_left}..{outer_right}) at {sidebar_width}px"
     );
 }
 
@@ -358,6 +462,23 @@ fn agent_mode_section_toggles_persist() {
     open_settings(&h);
     let panel = find_singleton(&h.ui, "SettingsPanel");
 
+    // The responsive rows add honest vertical space, so reach the optional
+    // section through the same real scroll boundary a user traverses instead
+    // of assuming it is instantiated in the initial viewport.
+    let scroll = find_by_id(&h.ui, "SettingsPanel::settings-scroll");
+    let mut enable_check = None;
+    for _ in 0..6 {
+        enable_check =
+            ElementHandle::find_by_element_id(&h.ui, "SettingsPanel::agent-mode-enable-check")
+                .next();
+        if enable_check.is_some() {
+            break;
+        }
+        scroll.scroll(0.0, -240.0);
+        pump_ticks(1);
+    }
+    let enable_check = enable_check.expect("agent-mode section must be vertically reachable");
+
     assert!(!h.ui.get_agent_mode_enabled(), "agent mode defaults to off");
     assert!(
         !SettingsService::new(repo.as_ref())
@@ -367,7 +488,7 @@ fn agent_mode_section_toggles_persist() {
         "automation.enabled defaults to off"
     );
 
-    find_descendant_by_label(&panel, "Enable agent mode").invoke_accessible_default_action();
+    enable_check.invoke_accessible_default_action();
     pump_ticks(1);
     assert!(
         h.ui.get_agent_mode_enabled(),

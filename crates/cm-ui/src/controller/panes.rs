@@ -587,6 +587,8 @@ pub(super) fn layout_to_int(layout: PaneLayout) -> i32 {
 /// Everything a caller needs, once a pane slot has been reserved, to size and
 /// spawn whatever session goes into it.
 struct SplitSlot {
+    incumbent_pane_idx: usize,
+    incumbent_has_chrome: bool,
     new_pane_idx: usize,
     scale: f32,
     surface_w: f32,
@@ -619,13 +621,33 @@ struct SplitPaneMetadata {
 fn reserve_split_slot(state: &Rc<RefCell<State>>, layout: PaneLayout) -> Option<SplitSlot> {
     let mut st = state.borrow_mut();
     let active = st.active;
-    let tab = st.tabs.get_mut(active)?;
-    let new_pane_idx = tab.pane_group.split(layout)?; // None: already at MAX_PANES
+    let primary_surface = (st.surface_w, st.surface_h);
+    let (incumbent_pane_idx, incumbent_has_chrome, surface_w, surface_h, new_pane_idx) = {
+        let tab = st.tabs.get_mut(active)?;
+        let incumbent_pane_idx = tab.pane_group.focused();
+        let incumbent_has_chrome = tab.pane_group.count() > 1;
+        let (surface_w, surface_h) = if incumbent_pane_idx == 0 {
+            primary_surface
+        } else {
+            let incumbent = tab.extra_panes.get(incumbent_pane_idx - 1)?;
+            (incumbent.surface_w, incumbent.surface_h)
+        };
+        let new_pane_idx = tab.pane_group.split(layout)?; // None: already at MAX_PANES
+        (
+            incumbent_pane_idx,
+            incumbent_has_chrome,
+            surface_w,
+            surface_h,
+            new_pane_idx,
+        )
+    };
     Some(SplitSlot {
+        incumbent_pane_idx,
+        incumbent_has_chrome,
         new_pane_idx,
         scale: st.scale,
-        surface_w: st.surface_w,
-        surface_h: st.surface_h,
+        surface_w,
+        surface_h,
         fonts: st.fonts.clone(),
         font_family: st.font_family.clone(),
         font_size_px: st.font_size_px,
@@ -643,22 +665,95 @@ fn rollback_split_slot(state: &Rc<RefCell<State>>) {
     }
 }
 
-/// Pixel size (logical) estimate for a newly split-off pane, from the
-/// currently-known primary-pane size — a bootstrap value only: the debounced
-/// resize path (`tabs::apply_settled_resize`) corrects every pane's exact
-/// size moments later once Slint's layout settles and fires real
-/// `pane-resized` events (unchanged from the P5.1 2-pane heuristic).
-fn split_pane_dims(layout: PaneLayout, surface_w: f32, surface_h: f32) -> (f32, f32) {
-    let pane_w = match layout {
-        PaneLayout::HSplit => (surface_w / 2.0).max(1.0),
-        PaneLayout::VSplit => surface_w,
-        PaneLayout::Single => surface_w,
+/// Logical height reserved above every split pane's session content. Keep in
+/// sync with `PaneSlot::chrome-height` in `ui/app.slint`.
+const SPLIT_PANE_CHROME_HEIGHT: f32 = 28.0;
+
+/// Session-content size of each half produced by splitting the focused pane.
+/// `surface_h` is the incumbent terminal/RDP content height, not its outer
+/// `PaneSlot` height. Existing split panes already exclude the chrome row, so
+/// reconstruct their outer height before splitting; every resulting child
+/// then reserves its own chrome row.
+fn split_pane_dims(
+    layout: PaneLayout,
+    surface_w: f32,
+    surface_h: f32,
+    incumbent_has_chrome: bool,
+) -> (f32, f32) {
+    let outer_h = surface_h
+        + if incumbent_has_chrome {
+            SPLIT_PANE_CHROME_HEIGHT
+        } else {
+            0.0
+        };
+    let child_outer_w = match layout {
+        PaneLayout::HSplit => surface_w / 2.0,
+        PaneLayout::VSplit | PaneLayout::Single => surface_w,
     };
-    let pane_h = match layout {
-        PaneLayout::VSplit => (surface_h / 2.0).max(1.0),
-        _ => surface_h,
+    let child_outer_h = match layout {
+        PaneLayout::VSplit => outer_h / 2.0,
+        PaneLayout::HSplit | PaneLayout::Single => outer_h,
     };
-    (pane_w, pane_h)
+    (
+        child_outer_w.max(1.0),
+        (child_outer_h - SPLIT_PANE_CHROME_HEIGHT).max(1.0),
+    )
+}
+
+/// Apply the split's immediately-known dimensions to the incumbent pane and
+/// request the matching terminal grid or framebuffer size. Waiting for a
+/// later Slint `pane-resized` callback leaves the incumbent frame rendered at
+/// its old full-pane target on Windows, so the UI bitmap-scales it until the
+/// outer window happens to resize.
+fn settle_split_incumbent(
+    tab: &mut Tab,
+    incumbent_pane_idx: usize,
+    primary_surface: &mut (f32, f32),
+    pane_w: f32,
+    pane_h: f32,
+    scale: f32,
+) {
+    if incumbent_pane_idx == 0 {
+        *primary_surface = (pane_w, pane_h);
+        match tab.session.surface() {
+            Surface::TerminalGrid(_) => {
+                let size = util::grid_for(&tab.renderer, pane_w, pane_h, scale);
+                if size.cols != tab.cols || size.rows != tab.rows {
+                    tab.session.resize_cells(size.cols, size.rows);
+                    tab.cols = size.cols;
+                    tab.rows = size.rows;
+                }
+            }
+            Surface::Framebuffer(_) => {
+                let pw = (pane_w * scale).round().max(1.0) as u32;
+                let ph = (pane_h * scale).round().max(1.0) as u32;
+                tab.session.resize_px(pw, ph);
+            }
+        }
+        return;
+    }
+
+    let Some(ep) = tab.extra_panes.get_mut(incumbent_pane_idx - 1) else {
+        return;
+    };
+    ep.surface_w = pane_w;
+    ep.surface_h = pane_h;
+    ep.scale = scale;
+    match ep.session.surface() {
+        Surface::TerminalGrid(_) => {
+            let size = util::grid_for(&ep.renderer, pane_w, pane_h, scale);
+            if size.cols != ep.cols || size.rows != ep.rows {
+                ep.session.resize_cells(size.cols, size.rows);
+                ep.cols = size.cols;
+                ep.rows = size.rows;
+            }
+        }
+        Surface::Framebuffer(_) => {
+            let pw = (pane_w * scale).round().max(1.0) as u32;
+            let ph = (pane_h * scale).round().max(1.0) as u32;
+            ep.session.resize_px(pw, ph);
+        }
+    }
 }
 
 /// Commit a session into the pane slot reserved by `reserve_split_slot`:
@@ -675,6 +770,7 @@ fn commit_split_pane(
     tab_model: &Rc<VecModel<TabItem>>,
     ui: &AppWindow,
     layout: PaneLayout,
+    incumbent_pane_idx: usize,
     new_pane_idx: usize,
     session: Box<dyn Session>,
     renderer: TerminalRenderer,
@@ -687,7 +783,16 @@ fn commit_split_pane(
     {
         let mut st = state.borrow_mut();
         let active = st.active;
+        let mut primary_surface = (st.surface_w, st.surface_h);
         if let Some(tab) = st.tabs.get_mut(active) {
+            settle_split_incumbent(
+                tab,
+                incumbent_pane_idx,
+                &mut primary_surface,
+                pane_w,
+                pane_h,
+                scale,
+            );
             let ep = ExtraPaneState {
                 session,
                 renderer,
@@ -718,6 +823,7 @@ fn commit_split_pane(
                 tab.extra_panes.push(ep);
             }
         }
+        (st.surface_w, st.surface_h) = primary_surface;
     }
 
     // Update the tab-strip badge.
@@ -755,6 +861,16 @@ pub(super) fn do_split(
     ui: &AppWindow,
     layout: PaneLayout,
 ) {
+    do_local_split(state, tab_model, ui, layout, None);
+}
+
+fn do_local_split(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    layout: PaneLayout,
+    saved_name: Option<&str>,
+) {
     let Some(slot) = reserve_split_slot(state, layout) else {
         return;
     };
@@ -768,7 +884,12 @@ pub(super) fn do_split(
         slot.scale,
         util::terminal_theme_for(ui),
     );
-    let (pane_w, pane_h) = split_pane_dims(layout, slot.surface_w, slot.surface_h);
+    let (pane_w, pane_h) = split_pane_dims(
+        layout,
+        slot.surface_w,
+        slot.surface_h,
+        slot.incumbent_has_chrome,
+    );
     let size = if pane_w > 0.0 && pane_h > 0.0 {
         util::grid_for(&renderer, pane_w, pane_h, slot.scale)
     } else {
@@ -790,6 +911,7 @@ pub(super) fn do_split(
         tab_model,
         ui,
         layout,
+        slot.incumbent_pane_idx,
         slot.new_pane_idx,
         session,
         renderer,
@@ -802,8 +924,8 @@ pub(super) fn do_split(
             rdp_clipboard: None,
             is_remote: false,
             origin_connection_id: None,
-            identity: "local shell".to_owned(),
-            title: "Local shell".to_owned(),
+            identity: saved_name.unwrap_or("local shell").to_owned(),
+            title: saved_name.unwrap_or("Local shell").to_owned(),
             insecure_transport: false,
             kind: String::new(),
         },
@@ -848,7 +970,9 @@ pub(super) fn connect_in_split(
     let Some(conn) = conn else { return };
 
     match &conn.settings {
-        cm_core::ConnectionSettings::Local(_) => do_split(state, tab_model, ui, layout),
+        cm_core::ConnectionSettings::Local(_) => {
+            do_local_split(state, tab_model, ui, layout, Some(&conn.name));
+        }
         cm_core::ConnectionSettings::Telnet(settings) => {
             let Some(slot) = reserve_split_slot(state, layout) else {
                 return;
@@ -860,7 +984,12 @@ pub(super) fn connect_in_split(
                 slot.scale,
                 util::terminal_theme_for(ui),
             );
-            let (pane_w, pane_h) = split_pane_dims(layout, slot.surface_w, slot.surface_h);
+            let (pane_w, pane_h) = split_pane_dims(
+                layout,
+                slot.surface_w,
+                slot.surface_h,
+                slot.incumbent_has_chrome,
+            );
             let size = if pane_w > 0.0 && pane_h > 0.0 {
                 util::grid_for(&renderer, pane_w, pane_h, slot.scale)
             } else {
@@ -896,6 +1025,7 @@ pub(super) fn connect_in_split(
                 tab_model,
                 ui,
                 layout,
+                slot.incumbent_pane_idx,
                 slot.new_pane_idx,
                 session,
                 renderer,
@@ -908,8 +1038,8 @@ pub(super) fn connect_in_split(
                     rdp_clipboard: None,
                     is_remote: true,
                     origin_connection_id: Some(conn.id.get() as i32),
-                    identity: format!("{}:{}", settings.host, settings.port),
-                    title: format!("TELNET {}", settings.host),
+                    identity: conn.name.clone(),
+                    title: conn.name.clone(),
                     insecure_transport: true,
                     kind: "TELNET".to_owned(),
                 },
@@ -968,7 +1098,12 @@ pub(super) fn connect_in_split(
                 slot.scale,
                 util::terminal_theme_for(ui),
             );
-            let (pane_w, pane_h) = split_pane_dims(layout, slot.surface_w, slot.surface_h);
+            let (pane_w, pane_h) = split_pane_dims(
+                layout,
+                slot.surface_w,
+                slot.surface_h,
+                slot.incumbent_has_chrome,
+            );
             let size = if pane_w > 0.0 && pane_h > 0.0 {
                 util::grid_for(&renderer, pane_w, pane_h, slot.scale)
             } else {
@@ -1019,6 +1154,7 @@ pub(super) fn connect_in_split(
                 tab_model,
                 ui,
                 layout,
+                slot.incumbent_pane_idx,
                 slot.new_pane_idx,
                 session,
                 renderer,
@@ -1037,13 +1173,8 @@ pub(super) fn connect_in_split(
                     rdp_clipboard: None,
                     is_remote: true,
                     origin_connection_id: Some(conn.id.get() as i32),
-                    identity: format!(
-                        "{}@{}:{}",
-                        effective_settings.username,
-                        effective_settings.host,
-                        effective_settings.port
-                    ),
-                    title: format!("SSH {}", effective_settings.host),
+                    identity: conn.name.clone(),
+                    title: conn.name.clone(),
                     insecure_transport: false,
                     kind: "SSH".to_owned(),
                 },
@@ -1091,7 +1222,12 @@ pub(super) fn connect_in_split(
                 slot.scale,
                 util::terminal_theme_for(ui),
             );
-            let (pane_w, pane_h) = split_pane_dims(layout, slot.surface_w, slot.surface_h);
+            let (pane_w, pane_h) = split_pane_dims(
+                layout,
+                slot.surface_w,
+                slot.surface_h,
+                slot.incumbent_has_chrome,
+            );
 
             // P9.5 #10 (Fable review fixup): connect-into-a-split-pane
             // bypassed `open_rdp_tab`/`apply_pane_resolution` entirely, so it
@@ -1137,7 +1273,6 @@ pub(super) fn connect_in_split(
             }
 
             let provider = state.borrow().session_provider.clone();
-            let identity = format!("{}@{}:{}", auth.username, s.host, s.port);
             let session = match provider.connect_rdp(&s, auth, verifier) {
                 Ok(sess) => sess,
                 Err(e) => {
@@ -1154,6 +1289,7 @@ pub(super) fn connect_in_split(
                 tab_model,
                 ui,
                 layout,
+                slot.incumbent_pane_idx,
                 slot.new_pane_idx,
                 session,
                 renderer,
@@ -1171,8 +1307,8 @@ pub(super) fn connect_in_split(
                     rdp_clipboard,
                     is_remote: true,
                     origin_connection_id: Some(conn.id.get() as i32),
-                    identity,
-                    title: format!("RDP {}", s.host),
+                    identity: conn.name.clone(),
+                    title: conn.name.clone(),
                     insecure_transport: false,
                     kind: "RDP".to_owned(),
                 },
@@ -1509,18 +1645,33 @@ mod tests {
     struct RecordingSession {
         surface: Surface,
         sent: Arc<Mutex<Vec<SessionInput>>>,
+        resized: Arc<Mutex<Vec<TerminalSize>>>,
     }
+
+    type RecordingSessionParts = (
+        RecordingSession,
+        Arc<Mutex<Vec<SessionInput>>>,
+        Arc<Mutex<Vec<TerminalSize>>>,
+    );
 
     impl RecordingSession {
         fn new() -> (Self, Arc<Mutex<Vec<SessionInput>>>) {
+            let (session, sent, _resized) = Self::new_with_resize_sink();
+            (session, sent)
+        }
+
+        fn new_with_resize_sink() -> RecordingSessionParts {
             let (_tx, rx) = mpsc::channel::<GridSnapshot>();
             let sent = Arc::new(Mutex::new(Vec::new()));
+            let resized = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
                     surface: Surface::TerminalGrid(rx),
                     sent: sent.clone(),
+                    resized: resized.clone(),
                 },
                 sent,
+                resized,
             )
         }
 
@@ -1533,6 +1684,7 @@ mod tests {
             Self {
                 surface: Surface::Framebuffer(rx),
                 sent: Arc::new(Mutex::new(Vec::new())),
+                resized: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -1546,6 +1698,12 @@ mod tests {
         }
         fn shutdown(&self) {}
         fn resize_px(&self, _width: u32, _height: u32) {}
+        fn resize_cells(&self, cols: u16, rows: u16) {
+            self.resized
+                .lock()
+                .unwrap()
+                .push(TerminalSize { cols, rows });
+        }
         fn send_input(&self, input: SessionInput) {
             self.sent.lock().unwrap().push(input);
         }
@@ -1699,6 +1857,91 @@ mod tests {
             "extra pane with a Framebuffer surface must report is_rdp"
         );
         assert_eq!(rdp_cell.frame.size(), rdp_frame.size());
+    }
+
+    #[test]
+    fn first_horizontal_split_settles_content_target_below_chrome() {
+        let (mut tab, _sinks) = test_tab(1);
+        let (primary, _sent, resized) = RecordingSession::new_with_resize_sink();
+        tab.session = Box::new(primary);
+
+        let scale: f32 = 1.5;
+        let mut primary_surface: (f32, f32) = (1200.0, 800.0);
+        let old_target = (
+            (primary_surface.0 * scale).round() as u32,
+            (primary_surface.1 * scale).round() as u32,
+        );
+        let (pane_w, pane_h) = split_pane_dims(
+            PaneLayout::HSplit,
+            primary_surface.0,
+            primary_surface.1,
+            false,
+        );
+
+        // This is the synchronous operation performed by commit_split_pane;
+        // no Slint pane-resized callback is involved in the regression.
+        settle_split_incumbent(&mut tab, 0, &mut primary_surface, pane_w, pane_h, scale);
+
+        let committed_target = (
+            (primary_surface.0 * scale).round() as u32,
+            (primary_surface.1 * scale).round() as u32,
+        );
+        assert_eq!(old_target, (1800, 1200));
+        assert_eq!(committed_target, (900, 1158));
+        assert_ne!(committed_target, old_target);
+        assert_eq!(primary_surface, (600.0, 772.0));
+
+        let resize_calls = resized.lock().unwrap();
+        assert_eq!(
+            resize_calls.as_slice(),
+            &[TerminalSize {
+                cols: tab.cols,
+                rows: tab.rows,
+            }]
+        );
+    }
+
+    #[test]
+    fn first_vertical_split_targets_half_outer_height_below_each_chrome() {
+        let (pane_w, pane_h) = split_pane_dims(PaneLayout::VSplit, 1200.0, 800.0, false);
+        assert_eq!((pane_w, pane_h), (1200.0, 372.0));
+
+        let scale = 1.5;
+        let target = (
+            (pane_w * scale).round() as u32,
+            (pane_h * scale).round() as u32,
+        );
+        assert_eq!(target, (1800, 558));
+    }
+
+    #[test]
+    fn nested_vertical_split_reconstructs_outer_height_before_halving() {
+        // A pane with 772px of content is already inside an 800px PaneSlot:
+        // reconstruct that outer height, split it, then reserve 28px in each
+        // child. Subtracting chrome directly from 772 / 2 would be wrong.
+        let (pane_w, pane_h) = split_pane_dims(PaneLayout::VSplit, 600.0, 772.0, true);
+        assert_eq!((pane_w, pane_h), (600.0, 372.0));
+
+        let scale = 1.5;
+        let target = (
+            (pane_w * scale).round() as u32,
+            (pane_h * scale).round() as u32,
+        );
+        assert_eq!(target, (900, 558));
+    }
+
+    #[test]
+    fn saved_split_name_survives_promotion_to_primary() {
+        let (mut tab, _sinks) = test_tab(2);
+        tab.identity = "Original tab".to_owned();
+        tab.extra_panes[0].identity = "Saved lab console".to_owned();
+        tab.extra_panes[0].title = "Saved lab console".to_owned();
+        let mut tab_title = "Original tab".to_owned();
+
+        promote_extra_to_primary(&mut tab, 0, &mut tab_title);
+
+        assert_eq!(tab.identity, "Saved lab console");
+        assert_eq!(tab_title, "Saved lab console");
     }
 
     #[test]

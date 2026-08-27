@@ -332,7 +332,7 @@ fn promoted_telnet_split_keeps_identity_origin_and_reconnect_dispatch() {
 
     assert_eq!(active_tab_pane_count(&h), 1);
     assert_eq!(h.ui.get_connecting_kind().as_str(), "TELNET");
-    assert_eq!(h.ui.get_session_identity().as_str(), "promoted-telnet:2323");
+    assert_eq!(h.ui.get_session_identity().as_str(), "Telnet Extra");
     assert!(h.ui.get_session_insecure());
     let active = h.ui.get_active_tab();
     assert_eq!(
@@ -341,7 +341,7 @@ fn promoted_telnet_split_keeps_identity_origin_and_reconnect_dispatch() {
             .expect("promoted tab row")
             .title
             .as_str(),
-        "TELNET promoted-telnet"
+        "Telnet Extra"
     );
 
     h.ui.invoke_tab_reconnect(active);

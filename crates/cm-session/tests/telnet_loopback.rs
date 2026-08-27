@@ -502,3 +502,54 @@ fn telnet_live_authorized_smoke() {
         session.shutdown();
     }
 }
+
+/// Opt-in lifecycle regression for serial-console proxies: explicitly close
+/// one live session at the login prompt, then immediately connect again in
+/// the same process. Unlike `telnet_live_authorized_smoke`, this deliberately
+/// does not send a CLI `exit` before shutting down the first TCP session.
+#[test]
+#[ignore = "opt-in: set CONMAN_LIVE_TELNET_HOST/PORT for an authorized endpoint"]
+fn telnet_live_reconnects_after_explicit_shutdown() {
+    let (host, port) = match (
+        std::env::var("CONMAN_LIVE_TELNET_HOST"),
+        std::env::var("CONMAN_LIVE_TELNET_PORT"),
+    ) {
+        (Ok(host), Ok(port)) => (host, port.parse::<u16>().expect("valid live TELNET port")),
+        _ => {
+            eprintln!(
+                "telnet_live_reconnects_after_explicit_shutdown: skipping; live endpoint is incomplete"
+            );
+            return;
+        }
+    };
+    let timeout = Duration::from_secs(
+        std::env::var("CONMAN_LIVE_TELNET_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(15),
+    );
+    let cfg = TelnetSettings { host, port };
+
+    for _ in 0..2 {
+        let session = TelnetTerminalSession::connect(&cfg, size()).expect("start live TELNET");
+        wait_for_connected(&session);
+        session.send_key(KeyEvent {
+            key: Key::Enter,
+            mods: KeyModifiers::default(),
+        });
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "live TELNET login prompt was not rendered"
+            );
+            match session.snapshots().recv_timeout(remaining) {
+                Ok(snapshot) if snapshot_contains(&snapshot, "login:") => break,
+                Ok(_) => {}
+                Err(error) => panic!("live TELNET snapshot stream closed: {error}"),
+            }
+        }
+        session.shutdown();
+    }
+}

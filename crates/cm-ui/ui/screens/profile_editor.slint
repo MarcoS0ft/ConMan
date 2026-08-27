@@ -132,7 +132,7 @@ export component ProfileEditor inherits Rectangle {
         // ── Scrollable field column ──────────────────────────────────────
         // Bounded by the card's max-height above; Title and Actions stay
         // outside the scroll region so they're always visible.
-        ScrollView {
+        profile-fields-scroll := ScrollView {
             vertical-stretch: 1;
             VerticalLayout {
                 spacing: Theme.space-5;
@@ -140,6 +140,11 @@ export component ProfileEditor inherits Rectangle {
                 // the fields' right borders when the form scrolls (P7.6,
                 // fixes P7.2-a).
                 padding-right: Theme.scrollbar-gutter;
+                // The spare viewport height belongs to the trailing spacer,
+                // not to the form controls. This keeps short forms top-packed
+                // and leaves deliberate clearance after the last long-form
+                // field when scrolled all the way down.
+                padding-bottom: Theme.space-6;
 
                 // ── Name ──────────────────────────────────────────────
                 profile-name-field := FormField {
@@ -293,7 +298,7 @@ export component ProfileEditor inherits Rectangle {
 
                 if root.form.kind == 2 : profile-telnet-warning := Text {
                     text: "Telnet is unencrypted. Credentials and session data are sent in clear text.";
-                    color: Theme.color-connecting;
+                    color: Theme.color-connecting-foreground;
                     font-size: Theme.font-sm;
                     font-family: Theme.font-family;
                     wrap: word-wrap;
@@ -397,6 +402,8 @@ export component ProfileEditor inherits Rectangle {
                     // section doc comment above; the mode isn't selectable
                     // from this control yet.
                 }
+
+                Rectangle { vertical-stretch: 1; min-height: 0px; }
             }
         }
 

@@ -46,6 +46,9 @@ export component Modal inherits Rectangle {
 // (conditional field below; P6.13 adds option 3, no upfront secret — the challenge
 // is answered live via KbdInteractiveDialog once the server asks for it).
 export component QuickConnectForm inherits Rectangle {
+    // Resolved AppWindow width supplied at the mount. Keeping this explicit
+    // avoids feeding the modal's child layout back into its own width.
+    in property <length> available-width: 568px;
     in-out property <int>    kind: 0;
     in-out property <string> host;
     in-out property <string> port: "22";
@@ -69,7 +72,9 @@ export component QuickConnectForm inherits Rectangle {
         : root.kind == 1 ? "New RDP connection"
         : root.kind == 2 ? "New Telnet connection" : "New local shell") + " dialog";
 
-    width: 520px;
+    // 24px clear space at each side on narrow windows; desktop dialogs retain
+    // their established 520px width.
+    width: min(520px, max(0px, root.available-width - Theme.space-6 * 2));
     background: Theme.color-overlay;
     border-radius: Theme.radius-lg;
     border-width: 1px;
@@ -121,20 +126,42 @@ export component QuickConnectForm inherits Rectangle {
         }
 
         // ── Host + port (SSH + RDP) ────────────────────────────────────
-        if root.kind != 3 : HorizontalLayout {
+        if root.kind != 3 && root.width >= 440px : qc-host-port-row := HorizontalLayout {
             spacing: Theme.space-3;
-            VerticalLayout { horizontal-stretch: 1;
-                qc-host-field := FormField { label: "HOST"; placeholder: "web-prod-01.lab"; text <=> root.host; }
+            qc-host-field := FormField {
+                horizontal-stretch: 1;
+                label: "HOST";
+                placeholder: "web-prod-01.lab";
+                text <=> root.host;
             }
-            Rectangle { width: 100px;
-                qc-port-field := FormField {
+            qc-port-field := FormField {
+                min-width: 100px;
+                max-width: 100px;
+                horizontal-stretch: 0;
+                label: "PORT";
+                placeholder: root.kind == 0 ? "22" : root.kind == 1 ? "3389" : "23";
+                text <=> root.port;
+            }
+        }
+        if root.kind != 3 && root.width < 440px : qc-host-port-stack := VerticalLayout {
+            spacing: Theme.space-4;
+            qc-host-field-narrow := FormField {
+                label: "HOST";
+                placeholder: "web-prod-01.lab";
+                text <=> root.host;
+            }
+            HorizontalLayout {
+                qc-port-field-narrow := FormField {
+                    min-width: 120px;
+                    max-width: 120px;
+                    horizontal-stretch: 0;
                     label: "PORT";
                     placeholder: root.kind == 0 ? "22" : root.kind == 1 ? "3389" : "23";
                     text <=> root.port;
                 }
+                Rectangle { horizontal-stretch: 1; }
             }
         }
-
         // ── Username (SSH + RDP) ────────────────────────────────────────
         if root.kind == 0 || root.kind == 1 : qc-username-field := FormField {
             label: "USERNAME";
@@ -176,7 +203,7 @@ export component QuickConnectForm inherits Rectangle {
 
         if root.kind == 2 : qc-telnet-warning := Text {
             text: "Telnet is unencrypted. Credentials and session data are sent in clear text.";
-            color: Theme.color-connecting;
+            color: Theme.color-connecting-foreground;
             font-size: Theme.font-sm;
             font-family: Theme.font-family;
             wrap: word-wrap;
@@ -242,7 +269,7 @@ export component HostKeyDialog inherits Rectangle {
                     color: Theme.color-error; vertical-alignment: center; }   // Warning
                 Text {
                     text: "HOST KEY CHANGED — possible attack";
-                    color: Theme.color-error;
+                    color: Theme.color-error-foreground;
                     font-size: Theme.font-base;
                     font-family: Theme.font-family;
                     font-weight: 700;
@@ -291,7 +318,7 @@ export component HostKeyDialog inherits Rectangle {
                         font-family: mismatch ? Theme.font-family : Theme.font-family-mono;
                         font-weight: mismatch ? 600 : 400; }
                     Text { text: fingerprint;
-                        color: mismatch ? Theme.color-error : Theme.color-accent;
+                        color: mismatch ? Theme.color-error-foreground : Theme.color-accent;
                         font-size: Theme.font-mono; font-family: Theme.font-family-mono; }
                 }
             }
@@ -358,7 +385,7 @@ export component CertDialog inherits Rectangle {
                     color: Theme.color-error; vertical-alignment: center; }
                 Text {
                     text: "CERTIFICATE CHANGED — possible MITM attack";
-                    color: Theme.color-error;
+                    color: Theme.color-error-foreground;
                     font-size: Theme.font-base;
                     font-family: Theme.font-family;
                     font-weight: 700;
@@ -415,7 +442,7 @@ export component CertDialog inherits Rectangle {
                         color: Theme.color-text-secondary;
                         font-size: Theme.font-xs; font-family: Theme.font-family; font-weight: 600; }
                     Text { text: fingerprint;
-                        color: mismatch ? Theme.color-error : Theme.color-accent;
+                        color: mismatch ? Theme.color-error-foreground : Theme.color-accent;
                         font-size: Theme.font-mono; font-family: Theme.font-family-mono; }
                 }
             }

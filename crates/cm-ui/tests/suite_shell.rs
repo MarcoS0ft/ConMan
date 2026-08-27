@@ -10,6 +10,7 @@
 
 mod support;
 
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use cm_core::{
@@ -18,12 +19,13 @@ use cm_core::{
     TelnetSettings,
 };
 use cm_storage::SqliteRepository;
-use i_slint_backend_testing::ElementHandle;
-use slint::Model;
+use i_slint_backend_testing::{ElementHandle, ElementRoot};
+use slint::platform::WindowEvent;
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use support::{
-    find_by_id, find_descendant_by_label, find_singleton, harness, harness_with, nth_by_id,
-    pump_ticks,
+    find_by_id, find_by_id_opt, find_descendant_by_label, find_singleton, harness, harness_with,
+    nth_by_id, pump_ticks,
 };
 
 #[test]
@@ -32,9 +34,14 @@ fn shell_suite() {
 
     palette_open_filter_dispatch();
     tabs_open_select_close_via_elements();
+    closing_remote_tab_terminates_instead_of_detaching();
     sidebar_collapse_toggles();
     status_pill_tracks_session_status();
     first_tab_inset_and_divider_present();
+    overflowing_tabs_keep_active_and_new_tab_reachable();
+    tab_navigation_tracks_measured_overflow();
+    credential_rows_fit_default_and_minimum_sidebar_widths();
+    split_pane_chrome_never_overlays_session_content();
     home_tab_is_flagged_is_home_and_a_new_local_tab_is_not();
     tab_duplicate_is_available_for_a_saved_connection_but_not_for_quick_connect();
     tab_disconnect_keeps_the_tab_open_and_tab_reconnect_dials_again();
@@ -125,6 +132,28 @@ fn tabs_open_select_close_via_elements() {
     );
 }
 
+fn closing_remote_tab_terminates_instead_of_detaching() {
+    let (h, _repo, provider) = harness();
+    let cell = connect_ssh_via_quick_connect(&h, &provider, "close-me");
+    *cell.lock().expect("status lock poisoned") = SessionStatus::Connected;
+    h.ui.invoke_split_pane_h();
+    let remote_idx = h.ui.get_active_tab() as usize;
+    let shutdowns_before = provider.shutdown_count();
+
+    h.ui.invoke_close_tab(remote_idx as i32);
+
+    assert_eq!(
+        provider.shutdown_count(),
+        shutdowns_before + 2,
+        "closing a tab must terminate both its connected remote session and its split session"
+    );
+    assert_eq!(
+        h.ui.get_detached_count(),
+        0,
+        "closing a tab must not implicitly detach its session"
+    );
+}
+
 // ── Sidebar collapse ─────────────────────────────────────────────────────────
 
 fn sidebar_collapse_toggles() {
@@ -205,6 +234,232 @@ fn first_tab_inset_and_divider_present() {
     assert!(
         first_tab_x_collapsed > activity_bar_right,
         "first tab must still start after the activity bar with the sidebar collapsed"
+    );
+}
+
+/// P10.3 VQ-3: the tab viewport may overflow, but the selected tab is
+/// automatically revealed and the New Tab affordance is pinned outside the
+/// scrolling region.  This uses the real button repeatedly at the observed
+/// 900 px boundary rather than constructing a synthetic tab model.
+fn overflowing_tabs_keep_active_and_new_tab_reachable() {
+    let (h, _repo, _provider) = harness();
+    h.ui.window()
+        .set_size(slint::LogicalSize::new(900.0, 600.0));
+
+    for _ in 0..8 {
+        find_by_id(&h.ui, "AppWindow::new-tab-btn").invoke_accessible_default_action();
+    }
+    pump_ticks(1);
+
+    let viewport = find_by_id(&h.ui, "AppWindow::tabs-viewport");
+    let active_index = h.ui.get_active_tab() as usize;
+    let active = nth_by_id(&h.ui, "AppWindow::tab-item", active_index);
+    assert_horizontally_contained(&active, &viewport, "active overflow tab");
+
+    let new_tab = find_by_id(&h.ui, "AppWindow::new-tab-btn");
+    let window = h.ui.root_element();
+    assert_horizontally_contained(&new_tab, &window, "pinned New Tab action");
+
+    // Overflow navigation is itself a real, pinned action. Moving to the
+    // previous tab must select and reveal it rather than merely shifting
+    // pixels while leaving the active tab hidden.
+    let previous = find_by_id(&h.ui, "AppWindow::tab-scroll-left-btn");
+    previous.invoke_accessible_default_action();
+    pump_ticks(1);
+    assert_eq!(h.ui.get_active_tab() as usize, active_index - 1);
+    let previous_active = nth_by_id(&h.ui, "AppWindow::tab-item", active_index - 1);
+    assert_horizontally_contained(&previous_active, &viewport, "previous overflow tab");
+
+    // It remains a real, usable action after overflow and reveals the newly
+    // active tab without an outer-window resize.
+    let before = h.ui.get_tabs().row_count();
+    new_tab.invoke_accessible_default_action();
+    pump_ticks(1);
+    assert_eq!(h.ui.get_tabs().row_count(), before + 1);
+    let newest = nth_by_id(&h.ui, "AppWindow::tab-item", h.ui.get_active_tab() as usize);
+    assert_horizontally_contained(&newest, &viewport, "newly active overflow tab");
+}
+
+/// The navigation affordances are governed by actual available strip width,
+/// not an arbitrary tab count. Two tabs fit beside a minimum sidebar at this
+/// boundary, then overflow when the same sidebar is widened to its supported
+/// maximum. The active item and pinned New Tab action remain reachable in
+/// both states.
+fn tab_navigation_tracks_measured_overflow() {
+    let (h, _repo, _provider) = harness();
+    h.ui.window()
+        .set_size(slint::LogicalSize::new(900.0, 600.0));
+    h.ui.set_sidebar_width(180);
+    find_by_id(&h.ui, "AppWindow::new-tab-btn").invoke_accessible_default_action();
+    pump_ticks(1);
+
+    assert_eq!(h.ui.get_tabs().row_count(), 2);
+    assert!(
+        find_by_id_opt(&h.ui, "AppWindow::tab-scroll-left-btn").is_none()
+            && find_by_id_opt(&h.ui, "AppWindow::tab-scroll-right-btn").is_none(),
+        "tab navigation must stay absent while both tabs fit"
+    );
+    let viewport = find_by_id(&h.ui, "AppWindow::tabs-viewport");
+    let active = nth_by_id(&h.ui, "AppWindow::tab-item", 1);
+    assert_horizontally_contained(&active, &viewport, "fitting active tab");
+
+    h.ui.set_sidebar_width(480);
+    pump_ticks(1);
+    let previous = find_by_id(&h.ui, "AppWindow::tab-scroll-left-btn");
+    let next = find_by_id(&h.ui, "AppWindow::tab-scroll-right-btn");
+    let narrow_viewport = find_by_id(&h.ui, "AppWindow::tabs-viewport");
+    let narrow_active = nth_by_id(&h.ui, "AppWindow::tab-item", 1);
+    assert_horizontally_contained(
+        &narrow_active,
+        &narrow_viewport,
+        "active tab after measured overflow",
+    );
+    assert_horizontally_contained(
+        &find_by_id(&h.ui, "AppWindow::new-tab-btn"),
+        &h.ui.root_element(),
+        "pinned New Tab under measured overflow",
+    );
+
+    previous.invoke_accessible_default_action();
+    pump_ticks(1);
+    assert_eq!(h.ui.get_active_tab(), 0);
+    assert_horizontally_contained(
+        &nth_by_id(&h.ui, "AppWindow::tab-item", 0),
+        &narrow_viewport,
+        "previous tab reached through overflow navigation",
+    );
+
+    next.invoke_accessible_default_action();
+    pump_ticks(1);
+    assert_eq!(h.ui.get_active_tab(), 1);
+    assert_horizontally_contained(
+        &nth_by_id(&h.ui, "AppWindow::tab-item", 1),
+        &narrow_viewport,
+        "next tab reached through overflow navigation",
+    );
+}
+
+/// P10.3 VQ-4 (Credentials): long user data must yield to row actions and
+/// panel bounds.  Check both the normal 252 px panel and its supported 180 px
+/// minimum with the same intentionally oversized synthetic values.
+fn credential_rows_fit_default_and_minimum_sidebar_widths() {
+    let (h, _repo, _provider) = harness();
+    h.ui.window()
+        .set_size(slint::LogicalSize::new(900.0, 600.0));
+    find_by_id(&h.ui, "AppWindow::keys-panel-btn").invoke_accessible_default_action();
+    h.ui.set_credentials(ModelRc::from(Rc::new(VecModel::from(vec![
+        cm_ui::CredRow {
+            id: 1,
+            label: "A deliberately long synthetic credential label for geometry".into(),
+            kind: "SSH Key+PP".into(),
+            username: "synthetic-user-with-a-deliberately-long-name".into(),
+            is_folder: false,
+            expanded: false,
+            selected: false,
+            depth: 0,
+            used_by_label: "Used by 99 connections".into(),
+        },
+    ]))));
+
+    for sidebar_width in [252, 180] {
+        h.ui.set_sidebar_width(sidebar_width);
+        pump_ticks(1);
+
+        let panel = find_by_id(&h.ui, "AppWindow::credentials-panel");
+        let heading = find_by_id(&h.ui, "AppWindow::credentials-heading");
+        assert_eq!(
+            heading.accessible_label().as_deref(),
+            Some("CREDENTIALS"),
+            "credential panel must expose its user-facing name"
+        );
+
+        let row = nth_by_id(&h.ui, "AppWindow::cred-row", 0);
+        let name = find_by_id(&h.ui, "CredTreeRow::cred-name");
+        let username = find_by_id(&h.ui, "CredTreeRow::cred-username");
+        assert_horizontally_contained(&row, &panel, "credential row");
+        assert_horizontally_contained(&name, &row, "elided credential name");
+        assert_horizontally_contained(&username, &row, "elided credential username");
+
+        let row_position = row.absolute_position();
+        h.ui.window().dispatch_event(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(
+                row_position.x + 20.0,
+                row_position.y + row.size().height / 2.0,
+            ),
+        });
+        pump_ticks(1);
+        let edit = find_descendant_by_label(&row, "Edit");
+        let delete = find_descendant_by_label(&row, "Delete");
+        assert_horizontally_contained(&edit, &row, "credential Edit action");
+        assert_horizontally_contained(&delete, &row, "credential Delete action");
+        assert_horizontally_contained(&name, &row, "credential name beside actions");
+        assert_horizontally_contained(&username, &row, "credential username beside actions");
+
+        for id in [
+            "AppWindow::new-folder-btn",
+            "AppWindow::new-credential-btn",
+            "AppWindow::cred-filter-field",
+        ] {
+            assert_horizontally_contained(&find_by_id(&h.ui, id), &panel, id);
+        }
+    }
+}
+
+/// P10.3 VQ-6: each split reserves a real chrome row above its content.  At
+/// the 900 px window and minimum sidebar width, both terminal surfaces must
+/// begin below that row and the disconnect action must fit entirely within
+/// it, so neither painting nor hit-testing can overlap session pixels.
+fn split_pane_chrome_never_overlays_session_content() {
+    let (h, _repo, _provider) = harness();
+    h.ui.window()
+        .set_size(slint::LogicalSize::new(900.0, 600.0));
+    h.ui.set_sidebar_width(180);
+    h.ui.invoke_split_pane_h();
+    pump_ticks(1);
+
+    let panes: Vec<_> = ElementHandle::find_by_element_type_name(&h.ui, "PaneSlot").collect();
+    assert_eq!(
+        panes.len(),
+        2,
+        "a horizontal split must expose two PaneSlots"
+    );
+    for (index, pane) in panes.iter().enumerate() {
+        let content = pane
+            .query_descendants()
+            .match_id("PaneSlot::pane-content")
+            .find_first()
+            .unwrap_or_else(|| panic!("pane {index} has no reserved content area"));
+        let chrome = pane
+            .query_descendants()
+            .match_id("PaneSlot::pane-chrome")
+            .find_first()
+            .unwrap_or_else(|| panic!("pane {index} has no action chrome"));
+        let disconnect = find_descendant_by_label(pane, "Disconnect this pane");
+
+        let chrome_bottom = chrome.absolute_position().y + chrome.size().height;
+        let content_top = content.absolute_position().y;
+        assert!(
+            content_top >= chrome_bottom,
+            "pane {index} content starts at {content_top}, above chrome bottom {chrome_bottom}"
+        );
+        assert_horizontally_contained(&disconnect, &chrome, "pane disconnect action");
+        let action_bottom = disconnect.absolute_position().y + disconnect.size().height;
+        assert!(
+            action_bottom <= chrome_bottom,
+            "pane {index} disconnect action extends into session content"
+        );
+    }
+}
+
+fn assert_horizontally_contained(inner: &ElementHandle, outer: &ElementHandle, description: &str) {
+    let inner_left = inner.absolute_position().x;
+    let inner_right = inner_left + inner.size().width;
+    let outer_left = outer.absolute_position().x;
+    let outer_right = outer_left + outer.size().width;
+    const EPSILON: f32 = 0.5;
+    assert!(
+        inner_left + EPSILON >= outer_left && inner_right <= outer_right + EPSILON,
+        "{description} bounds {inner_left}..{inner_right} escape container {outer_left}..{outer_right}"
     );
 }
 
@@ -517,6 +772,27 @@ fn telnet_quick_connect_reconnect_and_insecure_tab_state() {
         h.ui.get_session_insecure(),
         "switching back must restore INSECURE"
     );
+
+    let shutdowns_before_close = provider.shutdown_count();
+    h.ui.invoke_close_tab(telnet_idx);
+    assert_eq!(
+        provider.shutdown_count(),
+        shutdowns_before_close + 1,
+        "closing the Telnet tab must terminate its session"
+    );
+    assert_eq!(h.ui.get_detached_count(), 0);
+
+    h.ui.invoke_quick_connect();
+    h.ui.set_qc_kind(2);
+    h.ui.set_qc_host("mock-telnet-host".into());
+    h.ui.set_qc_port("2323".into());
+    h.ui.invoke_qc_connect();
+    pump_ticks(1);
+    assert_eq!(
+        provider.telnet_connect_count(),
+        3,
+        "the same Telnet endpoint must be connectable again after closing its tab"
+    );
 }
 
 fn telnet_saved_launch_dispatches_provider() {
@@ -580,7 +856,7 @@ fn telnet_session_restore_dispatches_provider() {
     });
     pump_ticks(1);
     assert_eq!(provider.telnet_connect_count(), 1);
-    assert_eq!(h.ui.get_session_identity().as_str(), "restored-telnet:23");
+    assert_eq!(h.ui.get_session_identity().as_str(), "Restored Telnet");
     assert!(h.ui.get_session_insecure());
 }
 

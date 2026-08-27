@@ -191,7 +191,7 @@ export component ErrorOverlay inherits Rectangle {
             VerticalLayout {
                 width: min(680px, root.width - Theme.space-8 * 2);
                 spacing: Theme.space-1;
-                Text { text: reason; color: root.is-failure ? Theme.color-error : Theme.color-text-secondary;
+                Text { text: reason; color: root.is-failure ? Theme.color-error-foreground : Theme.color-text-secondary;
                     font-size: Theme.font-mono;
                     font-family: Theme.font-family-mono; horizontal-alignment: center;
                     wrap: word-wrap; }

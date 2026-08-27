@@ -9,7 +9,7 @@
 
 import { Theme } from "../theme.slint";
 import { StatusDot } from "../components.slint";
-import { LineEdit, ListView } from "std-widgets.slint";
+import { LineEdit, ScrollView } from "std-widgets.slint";
 
 // One row. `category` is a group header shown when it differs from the previous row's
 // (Rust sets `first-in-group` to avoid repeats). `glyph` is an optional icon;
@@ -83,18 +83,51 @@ export component CommandPalette inherits Rectangle {
         Rectangle { height: 1px; background: Theme.color-stroke; }
 
         // Results.
-        ListView {
+        results := ScrollView {
             height: 300px;
-            for act[idx] in actions: VerticalLayout {
-                // Group header (only on the first row of a group).
-                // font-size uses Theme.font-xs token (was 10px literal).
-                if act.first-in-group : Text {
-                    text: act.category;
-                    color: Theme.color-text-disabled;
-                    font-size: Theme.font-xs;
-                    font-family: Theme.font-family;
-                    font-weight: 700;
-                    letter-spacing: 0.6px;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            viewport-width: self.visible-width;
+            accessible-role: list;
+            accessible-orientation: Orientation.vertical;
+            accessible-item-count: root.actions.length;
+            VerticalLayout {
+                width: results.visible-width;
+                for act[idx] in actions: palette-item := VerticalLayout {
+                    width: parent.width;
+                    property <bool> is-selected: idx == root.selected-index;
+                    callback ensure-visible();
+                    // Selection changes and model reconstruction both use the
+                    // row's actual geometry; group headers make an index-only
+                    // scroll calculation needlessly brittle.
+                    ensure-visible => {
+                        if self.is-selected && self.height > 0px && results.visible-height > 0px {
+                            if self.y + results.viewport-y < 0px {
+                                results.viewport-y = -self.y;
+                            } else if self.y + self.height + results.viewport-y > results.visible-height {
+                                results.viewport-y = results.visible-height - self.y - self.height;
+                            }
+                        }
+                    }
+                    init => { self.ensure-visible(); }
+                    changed is-selected => { self.ensure-visible(); }
+                    changed y => { self.ensure-visible(); }
+                    changed height => { self.ensure-visible(); }
+
+                // Keep the header slot in layout so suppressing an orphan does
+                // not move the action row and create a visibility feedback loop.
+                if act.first-in-group : group-header-slot := Rectangle {
+                    height: 16px;
+                    if palette-item.y + action-row.y + action-row.height + results.viewport-y
+                            <= results.visible-height
+                        && palette-item.y + action-row.y + results.viewport-y >= 0px
+                    : group-label := Text {
+                        text: act.category;
+                        color: Theme.color-text-disabled;
+                        font-size: Theme.font-xs;
+                        font-family: Theme.font-family;
+                        font-weight: 700;
+                        letter-spacing: 0.6px;
+                    }
                 }
                 action-row := Rectangle {
                     height: 38px;
@@ -138,6 +171,7 @@ export component CommandPalette inherits Rectangle {
                                 font-weight: 700; } }
                     }
                     row-touch := TouchArea { clicked => { root.activated(idx); } }
+                }
                 }
             }
         }

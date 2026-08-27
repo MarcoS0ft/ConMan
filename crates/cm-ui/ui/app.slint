@@ -200,6 +200,7 @@ component RdpSurface inherits Rectangle {
     callback key-down(string /* text */, int /* special */, int /* mods */);
     // key-up: fired on key-released (key-up PDU to RDP).
     callback key-up(string /* text */, int /* special */, int /* mods */);
+    callback release-keys();
     callback pointer(int /* button */, int /* kind */, length /* x */, length /* y */, int /* mods */);
     // rdp-scroll: passes actual pointer position (carry-over fix c).
     callback rdp-scroll(length /* x */, length /* y */, length /* dx */, length /* dy */);
@@ -237,6 +238,14 @@ component RdpSurface inherits Rectangle {
         : (text == Key.F10)       ? 24
         : (text == Key.F11)       ? 25
         : (text == Key.F12)       ? 26
+        : (text == Key.Shift)     ? 27
+        : (text == Key.ShiftR)    ? 28
+        : (text == Key.Control)   ? 29
+        : (text == Key.ControlR)  ? 30
+        : (text == Key.Alt)       ? 31
+        : (text == Key.AltGr)     ? 32
+        : (text == Key.Meta)      ? 33
+        : (text == Key.MetaR)     ? 34
         : 0
     }
 
@@ -264,6 +273,8 @@ component RdpSurface inherits Rectangle {
             );
             accept
         }
+
+        focus-lost => { root.release-keys(); }
 
         Image {
             source: frame;
@@ -408,6 +419,8 @@ component Tab inherits Rectangle {
             font-size: Theme.font-base;
             font-family: Theme.font-family;
             vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
         }
         if root.pane-count > 1 : Rectangle {
             y: (parent.height - self.height) / 2;
@@ -753,6 +766,9 @@ component CredTreeRow inherits Rectangle {
     // credential/folder name (dynamic content).
     accessible-role: list-item;
     accessible-label: data.label;
+    accessible-value: data.username
+        + (data.kind == "" ? "" : " · " + data.kind)
+        + (data.used-by-label == "" ? "" : " · " + data.used-by-label);
     accessible-item-index: root.row-index;
     accessible-item-count: root.row-count;
     accessible-item-selected: data.selected;
@@ -800,6 +816,7 @@ component CredTreeRow inherits Rectangle {
         // cell entirely outside `touch`'s geometry.
         content := Rectangle {
             horizontal-stretch: 1;
+            min-width: 0px;
 
             touch := TouchArea {
                 clicked => {
@@ -826,7 +843,7 @@ component CredTreeRow inherits Rectangle {
                     }
                 }
 
-                Text {
+                cred-name := Text {
                     text: data.label;
                     color: data.is-folder ? Theme.color-text : Theme.color-text-secondary;
                     font-size: Theme.font-base;
@@ -834,21 +851,29 @@ component CredTreeRow inherits Rectangle {
                     font-weight: data.is-folder ? 600 : 500;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
+                    min-width: 20px;
                     overflow: elide;
                 }
 
                 if !data.is-folder && data.username != "" : VerticalLayout {
                     alignment: center;
-                    Text {
+                    max-width: root.width >= 230px ? 84px : 56px;
+                    min-width: 0px;
+                    cred-username := Text {
                         text: data.username;
                         color: Theme.color-text-disabled;
                         font-size: Theme.font-xxs;
                         font-family: Theme.font-family-mono;
                         vertical-alignment: center;
+                        overflow: elide;
                     }
                 }
 
-                if !data.is-folder && data.kind != "" : VerticalLayout {
+                // Keep dense metadata from forcing the row wider than the
+                // side panel.  The username remains visible (and elides) at
+                // minimum width; compact badges progressively appear when
+                // there is actual room for them.
+                if !root.action-hover && root.width >= 230px && !data.is-folder && data.kind != "" : VerticalLayout {
                     alignment: center;
                     Rectangle {
                         height: Theme.tag-height;
@@ -872,7 +897,7 @@ component CredTreeRow inherits Rectangle {
                 // `kind` tag immediately above; hidden (empty label) for
                 // folders and for a credential nothing currently references
                 // directly.
-                if !data.is-folder && data.used-by-label != "" : VerticalLayout {
+                if !root.action-hover && root.width >= 320px && !data.is-folder && data.used-by-label != "" : VerticalLayout {
                     alignment: center;
                     Rectangle {
                         height: Theme.tag-height;
@@ -970,6 +995,7 @@ component PaneSlot inherits Rectangle {
     callback key-input(string, int, int);   // terminal panes
     callback key-down(string, int, int);    // RDP panes
     callback key-up(string, int, int);      // RDP panes
+    callback rdp-release-keys();
     callback pointer(int, int, length, length, int);
     callback scroll(length, length);                        // terminal panes
     callback rdp-scroll(length, length, length, length);    // RDP panes
@@ -987,57 +1013,68 @@ component PaneSlot inherits Rectangle {
     border-color: root.is-focused ? Theme.color-accent : Theme.color-stroke;
     clip: true;
 
-    if !root.is-rdp : TerminalSurface {
-        width: 100%; height: 100%;
-        frame: root.frame;
-        key-input(t, s, m) => { root.key-input(t, s, m); }
-        pointer(b, k, x, y, m) => {
-            root.pane-focused(root.pane-index);
-            root.pointer(b, k, x, y, m);
+    // Split-pane actions live in an explicit chrome row.  Keeping this inset
+    // outside `pane-content` is important: an overlaid TouchArea steals real
+    // terminal/RDP pointer input, while a merely painted overlay hides cells.
+    property <length> chrome-height: root.show-disconnect ? 28px : 0px;
+
+    pane-content := Rectangle {
+        x: 0px;
+        y: root.chrome-height;
+        width: 100%;
+        height: max(0px, parent.height - root.chrome-height);
+        clip: true;
+
+        if !root.is-rdp : TerminalSurface {
+            width: 100%; height: 100%;
+            frame: root.frame;
+            key-input(t, s, m) => { root.key-input(t, s, m); }
+            pointer(b, k, x, y, m) => {
+                root.pane-focused(root.pane-index);
+                root.pointer(b, k, x, y, m);
+            }
+            scroll(dx, dy) => { root.scroll(dx, dy); }
+            resized(w, h)  => { root.resized(w, h); }
+            toggle-palette => { root.toggle-palette(); }
         }
-        scroll(dx, dy) => { root.scroll(dx, dy); }
-        resized(w, h)  => { root.resized(w, h); }
-        toggle-palette => { root.toggle-palette(); }
+
+        if root.is-rdp : RdpSurface {
+            width: 100%; height: 100%;
+            frame: root.frame;
+            key-down(t, s, m) => { root.key-down(t, s, m); }
+            key-up(t, s, m)   => { root.key-up(t, s, m); }
+            release-keys => { root.rdp-release-keys(); }
+            pointer(b, k, x, y, m) => {
+                root.pane-focused(root.pane-index);
+                root.pointer(b, k, x, y, m);
+            }
+            rdp-scroll(x, y, dx, dy) => { root.rdp-scroll(x, y, dx, dy); }
+            resized(w, h) => { root.resized(w, h); }
+        }
     }
 
-    if root.is-rdp : RdpSurface {
-        width: 100%; height: 100%;
-        frame: root.frame;
-        key-down(t, s, m) => { root.key-down(t, s, m); }
-        key-up(t, s, m)   => { root.key-up(t, s, m); }
-        pointer(b, k, x, y, m) => {
-            root.pane-focused(root.pane-index);
-            root.pointer(b, k, x, y, m);
+    // P9.10 #2: per-pane disconnect affordance. Always visible in a split,
+    // but now in reserved chrome rather than layered over session pixels.
+    if root.show-disconnect : pane-chrome := Rectangle {
+        x: 0px; y: 0px;
+        width: 100%; height: root.chrome-height;
+        background: Theme.color-strip;
+        HorizontalLayout {
+            padding-left: Theme.space-1;
+            padding-right: Theme.space-1;
+            Rectangle { horizontal-stretch: 1; }
+            IconButton {
+                glyph: "\u{EA76}"; // cod-close -- same glyph as the tab strip's close button
+                size: 24px;
+                glyph-size: Theme.icon-xs;
+                tooltip: "Disconnect this pane";
+                clicked => { root.pane-disconnect(root.pane-index); }
+            }
         }
-        rdp-scroll(x, y, dx, dy) => { root.rdp-scroll(x, y, dx, dy); }
-        resized(w, h) => { root.resized(w, h); }
-    }
-
-    // P9.10 #2: per-pane disconnect affordance. Declared LAST (renders on
-    // top of the terminal/RDP surface above), but deliberately a SMALL
-    // corner element rather than a pane-wide hover-tracking overlay: a
-    // full-area `TouchArea` layered over the surface to detect "is the
-    // pointer somewhere in this pane" would grab every press meant for the
-    // terminal/RDP content underneath it (Slint's `TouchArea` grabs
-    // unconditionally on Press regardless of which callbacks are wired --
-    // the exact mechanism Bug A's investigation traced through
-    // `i-slint-core`), breaking real terminal typing/RDP input entirely.
-    // Always visible (not hover-gated) when in a split, mirroring the tab
-    // strip's own always-visible `close-tab-btn` -- small, in its own
-    // corner, never overlapping the interactive surface below it.
-    if root.show-disconnect : Rectangle {
-        x: parent.width - self.width - 4px;
-        y: 4px;
-        width: 24px;
-        height: 24px;
-        border-radius: Theme.radius-sm;
-        background: Theme.color-overlay.with-alpha(0.65);
-        IconButton {
-            glyph: "\u{EA76}"; // cod-close -- same glyph as the tab strip's close button
-            size: 24px;
-            glyph-size: Theme.icon-xs;
-            tooltip: "Disconnect this pane";
-            clicked => { root.pane-disconnect(root.pane-index); }
+        Rectangle {
+            x: 0px; y: parent.height - 1px;
+            width: 100%; height: 1px;
+            background: Theme.color-stroke;
         }
     }
 }
@@ -1047,6 +1084,13 @@ export component AppWindow inherits Window {
     title: "ConMan";
     preferred-width: 1280px;
     preferred-height: 760px;
+    // Imperatively mirror the resolved window width for responsive modal
+    // sizing. A direct child binding to `root.width` feeds the modal's layout
+    // info back into the Window's preferred width and Slint rejects the loop.
+    property <int> resolved-window-width: 1280;
+    changed width => {
+        root.resolved-window-width = round(self.width / 1px);
+    }
     background: Theme.color-base;
     // Note: forward-focus is intentionally NOT set here because the active session
     // surface (terminal or RDP) is conditional. Each surface's FocusScope grabs focus
@@ -1056,6 +1100,18 @@ export component AppWindow inherits Window {
     in property <[TabItem]> tabs;
     in property <int>       active-tab;
     in property <image>     frame;
+    property <length> tab-strip-content-width: tabs.length * 180px
+        + max(0, tabs.length - 1) * Theme.space-1;
+    // Fixed-width tabs make the active-tab reveal a one-way calculation:
+    // right-align the active item only once its right edge exceeds the
+    // viewport, then clamp at the end of the strip.  No mutable layout
+    // feedback is involved, so model and window-size changes are immediate.
+    property <length> tab-strip-offset: min(
+        0px,
+        max(
+            tabs-viewport.width - root.tab-strip-content-width,
+            tabs-viewport.width - (root.active-tab + 1) * (180px + Theme.space-1)
+                + Theme.space-1));
     // ── RDP surface (P4.2) ────────────────────────────────────────────
     // rdp-frame: the decoded RGBA image from the active RDP session.
     // rdp-active: true while an RDP tab is the active tab.
@@ -1420,6 +1476,7 @@ export component AppWindow inherits Window {
     // both key-down and key-up PDUs (key-released fires key-up).
     callback rdp-key-down(string /* text */, int /* special */, int /* mods */);
     callback rdp-key-up(string /* text */, int /* special */, int /* mods */);
+    callback rdp-release-keys();
 
     // ── Main shell (P7.3) ───────────────────────────────────────────────
     // Two-column shell: a full-height NAV column (activity bar + side panel,
@@ -1427,8 +1484,31 @@ export component AppWindow inherits Window {
     // session + status bar, status bar scoped to this column only) — an
     // mRemoteNG-style split that replaces the P2.4-era "tab strip spans the
     // full window width above everything" layout. See GUI_DESIGN.md §2.
-    HorizontalLayout {
-        spacing: 0px;
+    global-shortcuts := FocusScope {
+        width: 100%;
+        height: 100%;
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        capture-key-pressed(e) => {
+            if (e.modifiers.control &&
+                (e.text == "k" || e.text == "K" || e.text == "\u{b}")) {
+                root.open-palette();
+                accept
+            } else {
+                reject
+            }
+        }
+        capture-key-released(e) => {
+            if (e.modifiers.control &&
+                (e.text == "k" || e.text == "K" || e.text == "\u{b}")) {
+                accept
+            } else {
+                reject
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 0px;
 
         // ── Left: full-height nav column ────────────────────────────
         // Activity bar.
@@ -1446,7 +1526,7 @@ export component AppWindow inherits Window {
                     }
                     keys-panel-btn := ActivityBarButton {
                         glyph: "\u{EB11}"; active: active-panel == 1;
-                        tooltip: "Keys";
+                        tooltip: "Credentials";
                         clicked => { root.select-panel(1); }
                     }
                     Rectangle { vertical-stretch: 1; }
@@ -1666,12 +1746,12 @@ export component AppWindow inherits Window {
                 }
 
                 // ── Keys panel ─────────────────────────────────────
-                if active-panel == 1 : VerticalLayout {
+                if active-panel == 1 : credentials-panel := VerticalLayout {
                     HorizontalLayout {
                         padding-left: Theme.space-4; padding-right: Theme.space-2;
                         padding-top: Theme.space-3; padding-bottom: Theme.space-2;
-                        Text {
-                            text: "KEYS";
+                        credentials-heading := Text {
+                            text: "CREDENTIALS";
                             color: Theme.color-text-disabled;
                             font-size: Theme.font-sm;
                             font-family: Theme.font-family;
@@ -1695,12 +1775,15 @@ export component AppWindow inherits Window {
                     }
                     // P5.3b: Search/filter box.
                     HorizontalLayout {
-                        padding-left: Theme.space-3; padding-right: Theme.space-3;
+                        padding-left: credentials-panel.width < 220px ? Theme.space-2 : Theme.space-3;
+                        padding-right: credentials-panel.width < 220px ? Theme.space-2 : Theme.space-3;
                         padding-bottom: Theme.space-2;
-                        spacing: Theme.space-2;
-                        Text { text: "\u{F0349}"; font-family: Theme.font-family-icons;
+                        spacing: credentials-panel.width < 220px ? 0px : Theme.space-2;
+                        if credentials-panel.width >= 220px : Text {
+                            text: "\u{F0349}"; font-family: Theme.font-family-icons;
                             font-size: Theme.icon-sm; color: Theme.color-text-secondary;
-                            vertical-alignment: center; }
+                            vertical-alignment: center;
+                        }
                         cred-filter-field := LineEdit {
                             placeholder-text: "Filter credentials…";
                             text <=> root.cred-filter;
@@ -1885,34 +1968,86 @@ export component AppWindow inherits Window {
             spacing: 0px;
 
             // Tab strip (spans only this column — NOT over the nav column).
-            Rectangle {
+            tab-strip := Rectangle {
                 height: 40px;
                 background: Theme.color-strip;
-                HorizontalLayout {
-                    padding: Theme.space-1;
-                    spacing: Theme.space-1;
-                    alignment: start;
-                    for tab[idx] in tabs: tab-item := Tab {
-                        title: tab.title;
-                        status: tab.status;
-                        pane-count: tab.pane-count;
-                        active: idx == active-tab;
-                        is-home: tab.is-home;
-                        can-duplicate: tab.can-duplicate;
-                        item-index: idx;
-                        item-count: tabs.length;
-                        clicked => { root.select-tab(idx); }
-                        closed => { root.close-tab(idx); }
-                        reconnect-clicked => { root.tab-reconnect(idx); }
-                        disconnect-clicked => { root.tab-disconnect(idx); }
-                        duplicate-clicked => { root.tab-duplicate(idx); }
+                // Compare against the stable no-navigation viewport.  Every
+                // child below is absolutely positioned, so showing the
+                // controls cannot feed back into this Rectangle's layout
+                // width (the loop produced by a conditional HorizontalLayout).
+                property <bool> has-overflow: root.tab-strip-content-width
+                    > self.width - Theme.control-height - Theme.space-1 * 3;
+
+                if tab-strip.has-overflow : tab-scroll-left-btn := IconButton {
+                    x: Theme.space-1;
+                    y: (parent.height - self.height) / 2;
+                    glyph: "\u{EAB5}";
+                    tooltip: "Previous tab";
+                    clicked => {
+                        root.select-tab(max(0, root.active-tab - 1));
                     }
-                    new-tab-btn := IconButton {
-                        glyph: "\u{EA60}";
-                        tooltip: "New tab";
-                        clicked => { root.new-tab(); }
+                }
+
+                tabs-viewport := Rectangle {
+                    x: tab-strip.has-overflow
+                        ? Theme.space-1 * 2 + Theme.control-height
+                        : Theme.space-1;
+                    y: Theme.space-1;
+                    width: max(
+                        0px,
+                        parent.width - self.x - Theme.control-height - Theme.space-1 * 2
+                            - (tab-strip.has-overflow
+                                ? Theme.control-height + Theme.space-1
+                                : 0px));
+                    height: parent.height - Theme.space-1 * 2;
+                    clip: true;
+
+                    tabs-row := Rectangle {
+                        x: root.tab-strip-offset;
+                        y: (parent.height - Theme.tab-height) / 2;
+                        width: root.tab-strip-content-width;
+                        height: Theme.tab-height;
+
+                        HorizontalLayout {
+                            width: 100%;
+                            height: 100%;
+                            spacing: Theme.space-1;
+                            for tab[idx] in tabs: tab-item := Tab {
+                                width: 180px;
+                                title: tab.title;
+                                status: tab.status;
+                                pane-count: tab.pane-count;
+                                active: idx == active-tab;
+                                is-home: tab.is-home;
+                                can-duplicate: tab.can-duplicate;
+                                item-index: idx;
+                                item-count: tabs.length;
+                                clicked => { root.select-tab(idx); }
+                                closed => { root.close-tab(idx); }
+                                reconnect-clicked => { root.tab-reconnect(idx); }
+                                disconnect-clicked => { root.tab-disconnect(idx); }
+                                duplicate-clicked => { root.tab-duplicate(idx); }
+                            }
+                        }
                     }
-                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                if tab-strip.has-overflow : tab-scroll-right-btn := IconButton {
+                    x: parent.width - Theme.control-height * 2 - Theme.space-1 * 2;
+                    y: (parent.height - self.height) / 2;
+                    glyph: "\u{EAB6}";
+                    tooltip: "Next tab";
+                    clicked => {
+                        root.select-tab(min(tabs.length - 1, root.active-tab + 1));
+                    }
+                }
+
+                new-tab-btn := IconButton {
+                    x: parent.width - Theme.space-1 - self.width;
+                    y: (parent.height - self.height) / 2;
+                    glyph: "\u{EA60}";
+                    tooltip: "New tab";
+                    clicked => { root.new-tab(); }
                 }
             }
 
@@ -1951,6 +2086,7 @@ export component AppWindow inherits Window {
                     frame: root.rdp-frame;
                     key-down(t, s, m) => { root.rdp-key-down(t, s, m); }
                     key-up(t, s, m)   => { root.rdp-key-up(t, s, m); }
+                    release-keys => { root.rdp-release-keys(); }
                     pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
                     rdp-scroll(x, y, dx, dy) => { root.rdp-scroll(x, y, dx, dy); }
                     resized(w, h)     => { root.surface-resized(w, h); }
@@ -1981,6 +2117,7 @@ export component AppWindow inherits Window {
                         key-input(t, s, m) => { root.key-input(t, s, m); }
                         key-down(t, s, m) => { root.rdp-key-down(t, s, m); }
                         key-up(t, s, m) => { root.rdp-key-up(t, s, m); }
+                        rdp-release-keys => { root.rdp-release-keys(); }
                         pointer(b, k, px, py, m) => { root.pointer(b, k, px, py, m); }
                         scroll(dx, dy) => { root.scroll(dx, dy); }
                         rdp-scroll(px, py, dx, dy) => { root.rdp-scroll(px, py, dx, dy); }
@@ -2192,7 +2329,7 @@ export component AppWindow inherits Window {
                 identity: session-identity;
                 kind: connecting-kind;
                 // P7.3: Cancel aborts the held connect via the same
-                // close-tab path the tab strip's ✕ uses (detaches the
+                // close-tab path the tab strip's ✕ uses (terminates the
                 // in-flight session, selects the next tab / falls back to
                 // the empty/launchpad tab).
                 cancel => { root.close-tab(root.active-tab); }
@@ -2275,7 +2412,7 @@ export component AppWindow inherits Window {
                             padding-right: Theme.space-2;
                             Text {
                                 text: "INSECURE";
-                                color: Theme.color-connecting;
+                                color: Theme.color-connecting-foreground;
                                 font-size: Theme.font-xs;
                                 font-family: Theme.font-family;
                                 font-weight: 700;
@@ -2341,7 +2478,7 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             padding-left: Theme.space-2; padding-right: Theme.space-2;
                             spacing: Theme.space-1;
-                            Text { text: "Agent mode"; color: Theme.color-connecting; font-size: Theme.font-xs;
+                            Text { text: "Agent mode"; color: Theme.color-connecting-foreground; font-size: Theme.font-xs;
                                 font-family: Theme.font-family-mono; font-weight: 700; vertical-alignment: center; }
                         }
                         agent-mode-badge-btn := TouchArea {
@@ -2374,6 +2511,7 @@ export component AppWindow inherits Window {
                 }
             }
         }
+        }
     }
 
     // ── Quick-connect modal ───────────────────────────────────────────────
@@ -2381,6 +2519,7 @@ export component AppWindow inherits Window {
         open: root.quick-connect-open;
         dismissed => { root.quick-connect-open = false; }
         quick-connect-dialog := QuickConnectForm {
+            available-width: root.resolved-window-width * 1px;
             kind <=> root.qc-kind;
             host <=> root.qc-host;
             port <=> root.qc-port;

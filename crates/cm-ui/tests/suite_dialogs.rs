@@ -22,6 +22,21 @@
 mod support;
 
 use i_slint_backend_testing::{ElementHandle, ElementRoot};
+use slint::ComponentHandle;
+
+slint::slint! {
+    import { Theme } from "../ui/theme.slint";
+
+    export component ThemeProbe inherits Window {
+        in-out property <bool> dark-mode <=> Theme.dark-mode;
+        out property <color> overlay: Theme.color-overlay;
+        out property <color> card: Theme.color-card;
+        out property <color> elevated: Theme.color-elevated;
+        out property <color> base: Theme.color-base;
+        out property <color> connecting-foreground: Theme.color-connecting-foreground;
+        out property <color> error-foreground: Theme.color-error-foreground;
+    }
+}
 
 use support::{
     find_by_id, find_by_id_opt, find_descendant_by_label, find_descendant_by_label_opt,
@@ -36,6 +51,7 @@ fn dialogs_suite() {
     quick_connect_rdp_manifest_and_kind_switch();
     quick_connect_telnet_manifest_warning_and_port_rules();
     quick_connect_local_manifest();
+    quick_connect_host_and_port_never_overlap();
     profile_editor_new_ssh_default_manifest();
     profile_editor_kind_switch_updates_port_and_manifest();
     profile_editor_telnet_clears_credentials_and_saves_prompt();
@@ -45,6 +61,8 @@ fn dialogs_suite() {
     profile_editor_reference_mode_with_named_credential_is_read_only();
     profile_editor_save_persists_and_cancel_discards();
     profile_editor_cancel_clears_the_transient_inline_password();
+    profile_editor_fields_stay_packed_and_scroll_clear_of_footer();
+    semantic_foregrounds_meet_normal_text_contrast();
     dialog_and_button_bounds();
     cred_row_activate_and_a11y_survive_the_content_cell_restructure();
 }
@@ -200,6 +218,84 @@ fn quick_connect_local_manifest() {
             find_by_id_opt(&h.ui, absent).is_none(),
             "{absent} must not exist for Local kind"
         );
+    }
+}
+
+/// VQ-2: exercise the real per-protocol form instances and nested inputs in
+/// both responsive branches. The narrow case is deliberately below the old
+/// fixed 520px dialog plus margins, so merely shrinking the outer window while
+/// leaving the form untouched cannot satisfy these assertions.
+fn quick_connect_host_and_port_never_overlap() {
+    for (window_width, narrow) in [(1600.0, false), (480.0, true)] {
+        for (kind, label) in [(0, "SSH"), (1, "RDP"), (2, "Telnet")] {
+            let (h, _repo, _provider) = harness();
+            h.ui.window()
+                .set_size(slint::LogicalSize::new(window_width, 900.0));
+            pump_ticks(1);
+            h.ui.invoke_quick_connect();
+            pump_ticks(1);
+
+            let qc = find_singleton(&h.ui, "QuickConnectForm");
+            find_descendant_by_label(&qc, label).invoke_accessible_default_action();
+            pump_ticks(1);
+            assert_eq!(h.ui.get_qc_kind(), kind);
+            assert_within(&qc, &h.ui.root_element(), "QuickConnectForm", "window");
+            assert!(
+                qc.size().width <= window_width - 48.0 + 0.5,
+                "{label} form must preserve 24px side margins at {window_width}px, got {:?}",
+                qc.size()
+            );
+            if narrow {
+                let form_left = qc.absolute_position().x;
+                let form_right = form_left + qc.size().width;
+                assert!(
+                    form_left >= 23.5 && form_right <= window_width - 23.5,
+                    "{label} narrow form margins are not centered/bounded: left={form_left}, right={form_right}"
+                );
+            }
+
+            let (host, port, expected_port_width) = if narrow {
+                assert!(find_by_id_opt(&h.ui, "QuickConnectForm::qc-host-port-row").is_none());
+                find_by_id(&h.ui, "QuickConnectForm::qc-host-port-stack");
+                (
+                    find_by_id(&h.ui, "QuickConnectForm::qc-host-field-narrow"),
+                    find_by_id(&h.ui, "QuickConnectForm::qc-port-field-narrow"),
+                    120.0,
+                )
+            } else {
+                assert!(find_by_id_opt(&h.ui, "QuickConnectForm::qc-host-port-stack").is_none());
+                find_by_id(&h.ui, "QuickConnectForm::qc-host-port-row");
+                (
+                    find_by_id(&h.ui, "QuickConnectForm::qc-host-field"),
+                    find_by_id(&h.ui, "QuickConnectForm::qc-port-field"),
+                    100.0,
+                )
+            };
+
+            let host_input = find_descendant_by_label(&host, "HOST");
+            let port_input = find_descendant_by_label(&port, "PORT");
+            assert_within(&host_input, &host, "Host input", "Host field");
+            assert_within(&port_input, &port, "Port input", "Port field");
+            assert!(
+                (port.size().width - expected_port_width).abs() <= 0.5,
+                "{label} Port width changed in narrow={narrow}: {:?}",
+                port.size()
+            );
+
+            if narrow {
+                let host_bottom = host.absolute_position().y + host.size().height;
+                assert!(
+                    host_bottom <= port.absolute_position().y + 0.5,
+                    "{label} narrow Host must stack above Port"
+                );
+            } else {
+                let host_right = host.absolute_position().x + host.size().width;
+                assert!(
+                    host_right <= port.absolute_position().x + 0.5,
+                    "{label} wide Host overlaps Port"
+                );
+            }
+        }
     }
 }
 
@@ -549,6 +645,123 @@ fn profile_editor_cancel_clears_the_transient_inline_password() {
 }
 
 // ── Geometry (P6.17 gap #1's sibling: dialog/button bounds) ─────────────────
+
+/// VQ-8: a short Telnet form must consume only its preferred height, while a
+/// long RDP form must be wheel-scrollable through its final control without
+/// the fixed action footer covering it.
+fn profile_editor_fields_stay_packed_and_scroll_clear_of_footer() {
+    let (h, _repo, _provider) = harness();
+    h.ui.window()
+        .set_size(slint::LogicalSize::new(900.0, 600.0));
+    h.ui.invoke_new_connection(0);
+    pump_ticks(1);
+
+    let editor = find_singleton(&h.ui, "ProfileEditor");
+    find_descendant_by_label(&editor, "Telnet").invoke_accessible_default_action();
+    pump_ticks(1);
+
+    let name = find_by_id(&h.ui, "ProfileEditor::profile-name-field");
+    let host = find_by_id(&h.ui, "ProfileEditor::profile-host-field");
+    let port = find_by_id(&h.ui, "ProfileEditor::profile-port-field");
+    for (label, field) in [("Name", name), ("Host", host), ("Port", port)] {
+        assert!(
+            field.size().height <= 64.0,
+            "Telnet {label} field stretched beyond the established control stack: {:?}",
+            field.size()
+        );
+    }
+
+    find_descendant_by_label(&editor, "RDP").invoke_accessible_default_action();
+    pump_ticks(1);
+
+    let scroll = find_by_id(&h.ui, "ProfileEditor::profile-fields-scroll");
+    let footer = find_by_id(&h.ui, "ProfileEditor::profile-cancel-btn");
+    let scroll_bottom = scroll.absolute_position().y + scroll.size().height;
+    assert!(
+        scroll_bottom <= footer.absolute_position().y + 0.5,
+        "the field viewport must end above the fixed footer"
+    );
+
+    let mut resolution = find_by_id_opt(&h.ui, "ProfileEditor::profile-rdp-resolution-field");
+    for _ in 0..12 {
+        let fully_visible = resolution.as_ref().is_some_and(|field| {
+            field.absolute_position().y >= scroll.absolute_position().y - 0.5
+                && field.absolute_position().y + field.size().height <= scroll_bottom + 0.5
+        });
+        if fully_visible {
+            break;
+        }
+        scroll.scroll(0.0, -80.0);
+        pump_ticks(1);
+        resolution = find_by_id_opt(&h.ui, "ProfileEditor::profile-rdp-resolution-field");
+    }
+    let resolution = resolution.expect("RDP Resolution must become visible by wheel-scrolling");
+    assert!(
+        resolution.size().height <= 64.0,
+        "RDP Resolution field stretched beyond the established control stack: {:?}",
+        resolution.size()
+    );
+    assert!(
+        resolution.absolute_position().y + resolution.size().height <= scroll_bottom + 0.5,
+        "RDP Resolution must scroll fully above the footer"
+    );
+
+    for _ in 0..12 {
+        scroll.scroll(0.0, -160.0);
+        pump_ticks(1);
+    }
+    let final_control = find_by_id(&h.ui, "ProfileEditor::profile-cred-combo");
+    let gap = scroll_bottom - (final_control.absolute_position().y + final_control.size().height);
+    assert!(
+        gap >= 20.0,
+        "long-form bottom padding must remain visible after the final control; gap={gap}"
+    );
+}
+
+/// VQ-5: deterministic WCAG contrast checks against the live Slint tokens.
+fn semantic_foregrounds_meet_normal_text_contrast() {
+    let probe = ThemeProbe::new().expect("construct ThemeProbe");
+    for dark_mode in [false, true] {
+        probe.set_dark_mode(dark_mode);
+        let surfaces = [
+            ("overlay", probe.get_overlay()),
+            ("card", probe.get_card()),
+            ("elevated", probe.get_elevated()),
+            ("base", probe.get_base()),
+        ];
+        for (semantic, foreground) in [
+            ("connecting", probe.get_connecting_foreground()),
+            ("error", probe.get_error_foreground()),
+        ] {
+            for (surface_name, surface) in surfaces {
+                let ratio = contrast_ratio(foreground, surface);
+                assert!(
+                    ratio >= 4.5,
+                    "{semantic} foreground has only {ratio:.2}:1 contrast on {surface_name} (dark_mode={dark_mode})"
+                );
+            }
+        }
+    }
+}
+
+fn contrast_ratio(a: slint::Color, b: slint::Color) -> f64 {
+    fn luminance(color: slint::Color) -> f64 {
+        let rgba = color.to_argb_u8();
+        let linear = |component: u8| {
+            let value = f64::from(component) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(rgba.red) + 0.7152 * linear(rgba.green) + 0.0722 * linear(rgba.blue)
+    }
+
+    let a = luminance(a);
+    let b = luminance(b);
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
 
 /// Save/Cancel sit within the dialog's own bounds, and the dialog sits
 /// within the window's bounds -- logical-pixel assertions on

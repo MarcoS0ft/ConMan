@@ -84,12 +84,16 @@ export global Theme {
   // Broadcast "armed" framing reuses the accent at a low alpha (see BroadcastBar).
   out property <color> color-broadcast-edge: color-accent.with-alpha(dark-mode ? 0.40 : 0.45);
 
-  // ── Semantic status colors (FIXED across schemes — never accent-derived) ───
-  // Drives the tab/tree status dot, status bar, and connecting/error overlays.
+  // ── Semantic status colors (never accent-derived) ───────────────────────
+  // The fixed colors drive dots, fills, borders, and other decorative accents.
+  // Normal-size semantic text uses the per-scheme `-foreground` variants: the
+  // fixed amber/red do not reach 4.5:1 on light surfaces.
   out property <color> color-connected:    #3fb950;   // green
   out property <color> color-connecting:   #d8a623;   // amber
   out property <color> color-disconnected: dark-mode ? #6e7681 : #9aa1ac;  // grey
   out property <color> color-error:        #f85149;   // red
+  out property <color> color-connecting-foreground: dark-mode ? #d8a623 : #765600;
+  out property <color> color-error-foreground:      dark-mode ? #f85149 : #a1261b;
 
   // ── Spacing scale (logical px, 4px base — multiples only) ──────────────────
   out property <length> space-1:   4px;

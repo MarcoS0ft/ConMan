@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use cm_core::rdp::{CertVerifier, RdpAuthInput};
 use cm_core::ssh::{HostKeyVerifier, SshAuthInput};
 use cm_core::{
-    LocalSettings, MouseEvent, RdpSettings, Session, SessionInput, SessionProvider,
+    LocalSettings, MouseEvent, RdpInputEvent, RdpSettings, Session, SessionInput, SessionProvider,
     SessionSetupError, SessionStatus, SshSettings, Surface, TelnetSettings, TerminalSize,
 };
 
@@ -30,18 +30,21 @@ pub(crate) struct ScriptedSession {
     status: Arc<Mutex<SessionStatus>>,
     surface: Surface,
     inputs: Arc<Mutex<Vec<SessionInput>>>,
+    shutdowns: Arc<AtomicUsize>,
 }
 
 impl ScriptedSession {
     pub(crate) fn new(
         status: Arc<Mutex<SessionStatus>>,
         inputs: Arc<Mutex<Vec<SessionInput>>>,
+        shutdowns: Arc<AtomicUsize>,
     ) -> Self {
         let (_tx, rx) = channel();
         Self {
             status,
             surface: Surface::TerminalGrid(rx),
             inputs,
+            shutdowns,
         }
     }
 }
@@ -58,7 +61,9 @@ impl Session for ScriptedSession {
             .clone()
     }
 
-    fn shutdown(&self) {}
+    fn shutdown(&self) {
+        self.shutdowns.fetch_add(1, Ordering::SeqCst);
+    }
     fn resize_px(&self, _width: u32, _height: u32) {}
 
     fn send_input(&self, input: SessionInput) {
@@ -91,6 +96,7 @@ pub(crate) struct MockSessionProvider {
     rdp_connect_calls: AtomicUsize,
     telnet_connect_calls: AtomicUsize,
     inputs: Arc<Mutex<Vec<SessionInput>>>,
+    shutdowns: Arc<AtomicUsize>,
 }
 
 impl MockSessionProvider {
@@ -101,6 +107,7 @@ impl MockSessionProvider {
             rdp_connect_calls: AtomicUsize::new(0),
             telnet_connect_calls: AtomicUsize::new(0),
             inputs: Arc::new(Mutex::new(Vec::new())),
+            shutdowns: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -130,6 +137,10 @@ impl MockSessionProvider {
         self.telnet_connect_calls.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn shutdown_count(&self) -> usize {
+        self.shutdowns.load(Ordering::SeqCst)
+    }
+
     /// Terminal mouse inputs delivered through the real controller wiring.
     pub(crate) fn terminal_mouse_events(&self) -> Vec<MouseEvent> {
         self.inputs
@@ -140,6 +151,26 @@ impl MockSessionProvider {
                 SessionInput::Mouse(event) => Some(*event),
                 _ => None,
             })
+            .collect()
+    }
+
+    pub(crate) fn rdp_keyboard_events(&self) -> Vec<RdpInputEvent> {
+        self.inputs
+            .lock()
+            .expect("MockSessionProvider inputs mutex poisoned")
+            .iter()
+            .filter_map(|input| match input {
+                SessionInput::Rdp(events) => Some(events.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|event| {
+                matches!(
+                    event,
+                    RdpInputEvent::KeyDown { .. } | RdpInputEvent::KeyUp { .. }
+                )
+            })
+            .cloned()
             .collect()
     }
 }
@@ -153,6 +184,7 @@ impl SessionProvider for MockSessionProvider {
         Ok(Box::new(ScriptedSession::new(
             Arc::new(Mutex::new(SessionStatus::Connected)),
             self.inputs.clone(),
+            self.shutdowns.clone(),
         )))
     }
 
@@ -169,7 +201,11 @@ impl SessionProvider for MockSessionProvider {
             .lock()
             .expect("MockSessionProvider.next_remote_status poisoned")
             .clone();
-        Ok(Box::new(ScriptedSession::new(cell, self.inputs.clone())))
+        Ok(Box::new(ScriptedSession::new(
+            cell,
+            self.inputs.clone(),
+            self.shutdowns.clone(),
+        )))
     }
 
     fn connect_telnet(
@@ -183,7 +219,11 @@ impl SessionProvider for MockSessionProvider {
             .lock()
             .expect("MockSessionProvider.next_remote_status poisoned")
             .clone();
-        Ok(Box::new(ScriptedSession::new(cell, self.inputs.clone())))
+        Ok(Box::new(ScriptedSession::new(
+            cell,
+            self.inputs.clone(),
+            self.shutdowns.clone(),
+        )))
     }
 
     fn connect_rdp(
@@ -198,6 +238,10 @@ impl SessionProvider for MockSessionProvider {
             .lock()
             .expect("MockSessionProvider.next_remote_status poisoned")
             .clone();
-        Ok(Box::new(ScriptedSession::new(cell, self.inputs.clone())))
+        Ok(Box::new(ScriptedSession::new(
+            cell,
+            self.inputs.clone(),
+            self.shutdowns.clone(),
+        )))
     }
 }
