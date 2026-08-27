@@ -1,0 +1,122 @@
+# Cross-platform build and test gate for ConMan.
+#
+# Keep action revisions pinned, matching the supply-chain posture used by the
+# sibling SafeTunnel project. Packaging, signing, and publishing are deliberately
+# outside this workflow; successful release binaries are retained as short-lived
+# CI artifacts for smoke testing.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            artifact: conman-linux-x86_64
+          - name: macOS arm64
+            os: macos-14
+            artifact: conman-macos-arm64
+          - name: Windows x86_64
+            os: windows-latest
+            artifact: conman-windows-x86_64
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libfontconfig1-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            openssh-client
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
+
+      - name: Bootstrap Zig 0.15.2 (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          eval "$(scripts/bootstrap-zig.sh --export)"
+          echo "$(dirname "$(command -v zig)")" >> "$GITHUB_PATH"
+          zig version
+
+      - name: Bootstrap Zig 0.15.2 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/bootstrap-zig.ps1
+          $zig = Get-ChildItem .zig -Filter zig.exe -Recurse | Select-Object -First 1
+          if (-not $zig) { throw "Zig bootstrap produced no zig.exe" }
+          $zig.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $zig.FullName version
+
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+
+      - name: Lint all targets and features
+        if: runner.os == 'Linux'
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test workspace
+        run: cargo test --locked --workspace
+
+      - name: Test UI accessibility and interaction boundary
+        run: cargo test --locked -p cm-ui --features ui-introspection
+
+      - name: Build release binary
+        run: cargo build --locked -p conman --release
+
+      - name: Stage release artifact (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/conman dist/conman
+
+      - name: Stage release artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/conman.exe dist/conman.exe
+          Copy-Item target/release/ghostty-vt.dll dist/ghostty-vt.dll
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
