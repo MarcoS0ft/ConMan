@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/cm-build-info",
+    "crates/cm-cli",
     "crates/cm-core",
     "crates/cm-storage",
     "crates/cm-secrets",
@@ -8,13 +10,14 @@ members = [
     "crates/cm-platform",
     "crates/cm-ui",
     "crates/conman",
+    "crates/conmanctl",
 ]
 # Throwaway spike crates live here, standalone (own Cargo.lock), excluded from the
 # workspace so an alpha/experimental dependency never touches the real lockfile.
 exclude = ["spikes/", "vendor/ironrdp-pdu"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
