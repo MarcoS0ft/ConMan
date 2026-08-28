@@ -602,6 +602,17 @@ pub(crate) fn terminal_selection_probe(ctx: &Ctx) -> Box<dyn Fn() -> bool> {
     })
 }
 
+#[cfg(any(test, feature = "ui-introspection"))]
+pub(crate) fn terminal_paste_request_probe(ctx: &Ctx) -> Box<dyn Fn() -> usize> {
+    let state = ctx.state.clone();
+    Box::new(move || {
+        state
+            .borrow()
+            .sys_clipboard
+            .pending_terminal_text_requests()
+    })
+}
+
 /// Shared assembly behind [`run`] (production) and [`build_for_test`] (P8.2's
 /// hermetic element-test harness): model setup + every `wire_*()`
 /// registration, through wiring the redraw timer and (if applicable)

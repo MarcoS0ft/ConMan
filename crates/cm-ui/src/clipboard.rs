@@ -221,6 +221,11 @@ impl PlatformClipboardHandle {
         Some(request_id)
     }
 
+    #[cfg(any(test, feature = "ui-introspection"))]
+    pub(crate) fn pending_terminal_text_requests(&self) -> usize {
+        self.terminal_outstanding
+    }
+
     pub(crate) fn drain_results(&mut self) -> ClipboardResults {
         let Ok(mut results) = self.results.lock() else {
             return ClipboardResults::default();

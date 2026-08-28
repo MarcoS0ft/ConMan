@@ -2202,6 +2202,96 @@ mod tests {
     // Only used to build `RdpAuthInput` values in these tests — the
     // production path never converts a `Secret` outside `connect()` itself.
     use cm_core::Secret;
+    use ironrdp_pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
+
+    #[test]
+    fn action_and_physical_secure_attention_encode_identically_at_fast_path_boundary() {
+        // Ctrl+Alt+End is a shortcut handled by clients such as mstsc. Once a
+        // client has chosen to send the secure-attention sequence, the server
+        // must receive Ctrl+Alt+Delete: Delete is extended scan code 0x53.
+        let action_events = vec![
+            RdpInputEvent::KeyDown {
+                scancode: 0x1d,
+                extended: false,
+            },
+            RdpInputEvent::KeyDown {
+                scancode: 0x38,
+                extended: false,
+            },
+            RdpInputEvent::KeyDown {
+                scancode: 0x53,
+                extended: true,
+            },
+            RdpInputEvent::KeyUp {
+                scancode: 0x53,
+                extended: true,
+            },
+            RdpInputEvent::KeyUp {
+                scancode: 0x38,
+                extended: false,
+            },
+            RdpInputEvent::KeyUp {
+                scancode: 0x1d,
+                extended: false,
+            },
+        ];
+        let physical_shortcut_events = vec![
+            RdpInputEvent::KeyDown {
+                scancode: 0x1d,
+                extended: false,
+            },
+            RdpInputEvent::KeyDown {
+                scancode: 0x38,
+                extended: false,
+            },
+            RdpInputEvent::KeyDown {
+                scancode: 0x53,
+                extended: true,
+            },
+            // The UI cannot assume Ctrl/Alt are still present in the key-up
+            // snapshot, so it releases both possible End interpretations.
+            // IronRDP's state database must discard this unmatched End-up.
+            RdpInputEvent::KeyUp {
+                scancode: 0x4f,
+                extended: true,
+            },
+            RdpInputEvent::KeyUp {
+                scancode: 0x53,
+                extended: true,
+            },
+            RdpInputEvent::KeyUp {
+                scancode: 0x38,
+                extended: false,
+            },
+            RdpInputEvent::KeyUp {
+                scancode: 0x1d,
+                extended: false,
+            },
+        ];
+        let expected = [
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x1d),
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x38),
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::EXTENDED, 0x53),
+            FastPathInputEvent::KeyboardEvent(
+                KeyboardFlags::RELEASE | KeyboardFlags::EXTENDED,
+                0x53,
+            ),
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, 0x38),
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, 0x1d),
+        ];
+
+        // Exercise the same neutral-event conversion and stateful IronRDP
+        // database used by `handle_rdp_cmd` immediately before writing the PDU.
+        for (case, neutral_events) in [
+            ("Session Action", action_events),
+            ("physical Ctrl+Alt+End", physical_shortcut_events),
+        ] {
+            let mut input_db = InputDatabase::new();
+            let fast_path_events =
+                input_db.apply(neutral_events.into_iter().map(rdp_event_to_operation));
+            assert_eq!(fast_path_events.as_slice(), expected, "{case}");
+        }
+    }
 
     // ---------------------------------------------------------------------------
     // P9.9 §5: coalesce_latest_resize (pure)

@@ -145,6 +145,14 @@ component TerminalSurface inherits Rectangle {
                         : (e.text == Key.PageDown) ? 12
                         : (e.text == Key.Insert) ? 13
                         : (e.text == Key.Delete) ? 14
+                        : (e.text == Key.Shift) ? 27
+                        : (e.text == Key.ShiftR) ? 28
+                        : (e.text == Key.Control) ? 29
+                        : (e.text == Key.ControlR) ? 30
+                        : (e.text == Key.Alt) ? 31
+                        : (e.text == Key.AltGr) ? 32
+                        : (e.text == Key.Meta) ? 33
+                        : (e.text == Key.MetaR) ? 34
                         : 0,
                     root.mods(e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta));
                 accept
@@ -515,7 +523,11 @@ component SessionActionsMenu inherits Rectangle {
 
     accessible-role: groupbox;
     accessible-label: "Session actions menu";
+    property <int> visible-action-count: (root.terminal ? 5 : 0) + (root.rdp ? 4 : 0);
     width: 270px;
+    height: Theme.space-2 * 2
+        + root.visible-action-count * 34px
+        + max(0, root.visible-action-count - 1) * 1px;
     background: Theme.color-overlay;
     border-radius: Theme.radius-md;
     border-width: 1px;
@@ -3004,8 +3016,11 @@ export component AppWindow inherits Window {
             clicked => { root.session-actions-open = false; }
         }
         session-actions-menu := SessionActionsMenu {
-            x: parent.width - self.width - Theme.space-3;
-            y: 40px + Theme.space-1;
+            width: min(270px, max(0px, parent.width - Theme.space-3 * 2));
+            x: max(Theme.space-3, parent.width - self.width - Theme.space-3);
+            y: min(
+                40px + Theme.space-1,
+                max(0px, parent.height - self.height - Theme.space-3));
             terminal: root.session-actions-terminal;
             rdp: root.session-actions-rdp;
             has-selection: root.session-actions-has-selection;

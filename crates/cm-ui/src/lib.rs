@@ -223,6 +223,7 @@ pub struct TestHarness {
     /// persistence without coupling preferences back to SQLite.
     pub config_store: Arc<dyn AppConfigStore>,
     terminal_selection_probe: Box<dyn Fn() -> bool>,
+    terminal_paste_request_probe: Box<dyn Fn() -> usize>,
     _keepalive: Box<dyn std::any::Any>,
 }
 
@@ -241,6 +242,15 @@ impl TestHarness {
     #[must_use]
     pub fn has_active_terminal_selection(&self) -> bool {
         (self.terminal_selection_probe)()
+    }
+
+    /// Number of terminal paste requests currently queued at the clipboard
+    /// worker. Intended for key-boundary tests that must distinguish a
+    /// modifier press from an actual paste shortcut without depending on a
+    /// machine's real clipboard contents.
+    #[must_use]
+    pub fn pending_terminal_paste_requests(&self) -> usize {
+        (self.terminal_paste_request_probe)()
     }
 }
 
@@ -266,10 +276,12 @@ pub fn build_for_test(config: AppConfig) -> TestHarness {
     let config_store = config.config_store.clone();
     let (ui, ctx, redraw) = controller::build_for_test(config);
     let terminal_selection_probe = controller::terminal_selection_probe(&ctx);
+    let terminal_paste_request_probe = controller::terminal_paste_request_probe(&ctx);
     TestHarness {
         ui,
         config_store,
         terminal_selection_probe,
+        terminal_paste_request_probe,
         _keepalive: Box::new((ctx, redraw)),
     }
 }

@@ -246,6 +246,19 @@ impl MockSessionProvider {
             .count()
     }
 
+    pub(crate) fn terminal_key_events_for(&self, session_id: usize) -> Vec<cm_core::KeyEvent> {
+        self.tagged_inputs
+            .lock()
+            .expect("MockSessionProvider tagged inputs mutex poisoned")
+            .iter()
+            .filter(|(id, _)| *id == session_id)
+            .filter_map(|(_, input)| match input {
+                SessionInput::Key(event) => Some(*event),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn terminal_mouse_events_for(&self, session_id: usize) -> Vec<MouseEvent> {
         self.tagged_inputs
             .lock()

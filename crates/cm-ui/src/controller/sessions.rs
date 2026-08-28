@@ -392,13 +392,14 @@ fn classify_terminal_clipboard_shortcut(
     mods: i32,
     plain_aliases_enabled: bool,
 ) -> TerminalClipboardAction {
+    if input::is_modifier_special(special) {
+        return TerminalClipboardAction::None;
+    }
     match (special, text, mods) {
         (0, "c" | "C" | "\u{3}", input::MOD_CTRL) if plain_aliases_enabled => {
             TerminalClipboardAction::CopyIfSelected
         }
-        (0, "v" | "V" | "\u{16}", input::MOD_CTRL) if plain_aliases_enabled => {
-            TerminalClipboardAction::Paste
-        }
+        (0, "v" | "V", input::MOD_CTRL) if plain_aliases_enabled => TerminalClipboardAction::Paste,
         (13, _, input::MOD_SHIFT) => TerminalClipboardAction::Paste,
         _ => TerminalClipboardAction::None,
     }
@@ -4922,9 +4923,25 @@ mod tests {
             classify_terminal_clipboard_shortcut(0, "V", input::MOD_CTRL, true),
             TerminalClipboardAction::Paste
         );
+    }
+
+    #[test]
+    fn physical_modifier_specials_are_never_clipboard_aliases() {
+        for special in 27..=34 {
+            assert_eq!(
+                classify_terminal_clipboard_shortcut(
+                    special,
+                    if special == 30 { "\u{16}" } else { "" },
+                    input::MOD_CTRL,
+                    true,
+                ),
+                TerminalClipboardAction::None
+            );
+        }
         assert_eq!(
             classify_terminal_clipboard_shortcut(0, "\u{16}", input::MOD_CTRL, true),
-            TerminalClipboardAction::Paste
+            TerminalClipboardAction::None,
+            "ambiguous U+0016 must not stand in for Ctrl+V"
         );
     }
 

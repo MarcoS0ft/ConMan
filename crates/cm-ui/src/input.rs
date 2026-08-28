@@ -22,6 +22,18 @@ pub(crate) const MOD_ALT: i32 = 2;
 pub(crate) const MOD_SHIFT: i32 = 4;
 pub(crate) const MOD_META: i32 = 8;
 
+const SPECIAL_MODIFIER_FIRST: i32 = 27;
+const SPECIAL_MODIFIER_LAST: i32 = 34;
+
+/// Whether `special` identifies a physical modifier key at the Slint
+/// boundary. Terminal sessions consume these standalone events: the modifier
+/// state is carried on the subsequent real key instead of encoding the
+/// platform's private control-character token as terminal input.
+#[must_use]
+pub(crate) fn is_modifier_special(special: i32) -> bool {
+    (SPECIAL_MODIFIER_FIRST..=SPECIAL_MODIFIER_LAST).contains(&special)
+}
+
 fn mods_from_bits(bits: i32) -> KeyModifiers {
     KeyModifiers {
         ctrl: bits & MOD_CTRL != 0,
@@ -40,6 +52,10 @@ fn mods_from_bits(bits: i32) -> KeyModifiers {
 #[must_use]
 pub(crate) fn map_key(text: &str, special: i32, mods_bits: i32) -> Vec<KeyEvent> {
     let mods = mods_from_bits(mods_bits);
+
+    if is_modifier_special(special) {
+        return Vec::new();
+    }
 
     if special != 0 {
         let key = match special {
@@ -261,7 +277,7 @@ const SC_RSHIFT: u8 = 0x36;
 const SC_LMETA: u8 = 0x5B;
 const SC_RMETA: u8 = 0x5C;
 const SC_TAB: u8 = 0x0F;
-const SC_END: u8 = 0x4F;
+const SC_DELETE: u8 = 0x53;
 
 /// Resolve the modifier-specific `special` values emitted by `RdpSurface`.
 ///
@@ -282,76 +298,62 @@ fn rdp_modifier_scancode(special: i32) -> Option<(u8, bool)> {
     }
 }
 
-/// Produce the RDP `FastPathInputEvent` sequence for a **key-down** event.
+/// Produce the RDP input sequence for a **key-down** event.
 ///
-/// The returned vector contains, in order:
-/// 1. Left Ctrl key-down (if `mods_bits & MOD_CTRL`).
-/// 2. Left Alt key-down (if `mods_bits & MOD_ALT`).
-/// 3. Left Shift key-down (if `mods_bits & MOD_SHIFT`).
-/// 4. The character or special-key key-down (if the key has a US-layout scancode).
+/// Physical modifiers arrive as their own callbacks and are forwarded exactly
+/// once. Replaying modifier bits from every non-modifier event is incorrect:
+/// `ironrdp_input::Database` deliberately encodes a repeated key-down as a
+/// release followed by another press, which can break the chord being entered.
 ///
-/// Modifiers that were already down on the server (e.g. from a previous event)
-/// are harmlessly repeated by this approach; IronRDP's input database
-/// coalesces duplicate modifier presses correctly.
+/// Ctrl+Alt+End is intercepted here as the conventional RDP client shortcut for
+/// Ctrl+Alt+Delete. The explicit Session Action uses the same wire-level Delete
+/// key, but supplies its own balanced modifier events.
 #[must_use]
 pub(crate) fn map_rdp_key_down(text: &str, special: i32, mods_bits: i32) -> Vec<RdpInputEvent> {
     if let Some((scancode, extended)) = rdp_modifier_scancode(special) {
         return vec![RdpInputEvent::KeyDown { scancode, extended }];
     }
 
-    let mut events = Vec::with_capacity(4);
-    if mods_bits & MOD_CTRL != 0 {
-        events.push(RdpInputEvent::KeyDown {
-            scancode: SC_LCTRL,
-            extended: false,
-        });
-    }
-    if mods_bits & MOD_ALT != 0 {
-        events.push(RdpInputEvent::KeyDown {
-            scancode: SC_LALT,
-            extended: false,
-        });
-    }
-    if mods_bits & MOD_SHIFT != 0 {
-        events.push(RdpInputEvent::KeyDown {
-            scancode: SC_LSHIFT,
-            extended: false,
-        });
-    }
-    if let Some((sc, ext)) = char_to_ps2_scancode(text, special) {
-        events.push(RdpInputEvent::KeyDown {
-            scancode: sc,
-            extended: ext,
-        });
-    }
-    events
+    let (scancode, extended) =
+        if special == 10 && mods_bits & (MOD_CTRL | MOD_ALT) == (MOD_CTRL | MOD_ALT) {
+            (SC_DELETE, true)
+        } else if let Some(key) = char_to_ps2_scancode(text, special) {
+            key
+        } else {
+            return Vec::new();
+        };
+
+    vec![RdpInputEvent::KeyDown { scancode, extended }]
 }
 
 /// Produce the RDP `FastPathInputEvent` sequence for a **key-up** event.
 ///
 /// A physical modifier event produces only that modifier's exact key-up,
-/// including right-side/extended identity. Other keys are followed by
-/// idempotent releases for every modifier variant.
+/// including right-side/extended identity. Non-modifier keys do not release
+/// modifiers: physical modifiers have their own key-up callbacks, while focus
+/// loss uses [`rdp_release_all_modifiers_sequence`] as the recovery boundary.
 ///
-/// Modifier releases are unconditional because some Windows and nested-RDP
-/// paths report the modifier snapshot *after* the released modifier has
-/// disappeared. Sending an idempotent key-up is preferable to leaving a
-/// synthetic modifier pressed on the remote desktop.
+/// End releases both End and Delete. The stateful IronRDP database drops the
+/// release for whichever key is not down, making Ctrl+Alt+End interception
+/// robust even when the modifier snapshot has changed by key-up time.
 #[must_use]
 pub(crate) fn map_rdp_key_up(text: &str, special: i32, _mods_bits: i32) -> Vec<RdpInputEvent> {
     if let Some((scancode, extended)) = rdp_modifier_scancode(special) {
         return vec![RdpInputEvent::KeyUp { scancode, extended }];
     }
 
-    let mut events = Vec::with_capacity(4);
+    if special == 10 {
+        return vec![key_up(0x4F, true), key_up(SC_DELETE, true)];
+    }
+
     if let Some((sc, ext)) = char_to_ps2_scancode(text, special) {
-        events.push(RdpInputEvent::KeyUp {
+        vec![RdpInputEvent::KeyUp {
             scancode: sc,
             extended: ext,
-        });
+        }]
+    } else {
+        Vec::new()
     }
-    events.extend(rdp_modifier_key_ups());
-    events
 }
 
 #[must_use]
@@ -394,17 +396,18 @@ pub(crate) fn rdp_modifier_key_ups() -> [RdpInputEvent; 8] {
 
 /// Build the RDP key sequence for the user-facing "Send Ctrl+Alt+Delete" action.
 ///
-/// RDP clients cannot forward the local secure-attention sequence directly. The
-/// established remote equivalent is Ctrl+Alt+End, with End sent as an extended
-/// key. Every key-down is paired with a reverse-order key-up so an interrupted
-/// host-side modifier snapshot cannot leave either synthetic modifier pressed.
+/// Ctrl+Alt+End is a host-side shortcut that clients such as mstsc intercept to
+/// synthesize Ctrl+Alt+Delete. This action is already that client-side synthesis
+/// boundary, so the RDP wire input must contain extended Delete itself. Every
+/// key-down is paired with a reverse-order key-up so an interrupted host-side
+/// modifier snapshot cannot leave either synthetic modifier pressed.
 #[must_use]
 pub(crate) fn rdp_ctrl_alt_delete_sequence() -> Vec<RdpInputEvent> {
     vec![
         key_down(SC_LCTRL, false),
         key_down(SC_LALT, false),
-        key_down(SC_END, true),
-        key_up(SC_END, true),
+        key_down(SC_DELETE, true),
+        key_up(SC_DELETE, true),
         key_up(SC_LALT, false),
         key_up(SC_LCTRL, false),
     ]
@@ -586,6 +589,17 @@ mod tests {
     }
 
     #[test]
+    fn standalone_terminal_modifiers_are_dropped() {
+        let windows_tokens = [
+            "\u{f}", "\u{10}", "\u{11}", "\u{16}", "\u{12}", "\u{13}", "\u{14}", "\u{15}",
+        ];
+        for (special, text) in (27..=34).zip(windows_tokens) {
+            assert!(is_modifier_special(special));
+            assert!(map_key(text, special, MOD_CTRL | MOD_SHIFT).is_empty());
+        }
+    }
+
+    #[test]
     fn ctrl_letter_keeps_base_and_modifier() {
         // Base letter delivered in text.
         let evs = map_key("c", 0, MOD_CTRL);
@@ -650,59 +664,52 @@ mod tests {
     }
 
     #[test]
-    fn rdp_modifier_only_release_cannot_leave_remote_modifiers_pressed() {
-        let events = map_rdp_key_up("", 0, 0);
-        assert!(events.iter().any(|event| matches!(
-            event,
-            RdpInputEvent::KeyUp {
-                scancode: SC_LSHIFT,
-                extended: false
-            }
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            RdpInputEvent::KeyUp {
-                scancode: SC_LCTRL,
-                extended: false
-            }
-        )));
+    fn rdp_nonmodifier_does_not_replay_or_release_modifier_snapshot() {
+        assert_eq!(
+            key_events(&map_rdp_key_down("c", 0, MOD_CTRL | MOD_SHIFT)),
+            [TestKeyEvent::Down(0x2e, false)]
+        );
+        assert_eq!(
+            key_events(&map_rdp_key_up("c", 0, MOD_CTRL | MOD_SHIFT)),
+            [TestKeyEvent::Up(0x2e, false)]
+        );
     }
 
     #[test]
-    fn rdp_character_release_clears_synthetic_modifiers_despite_stale_snapshot() {
-        let events = map_rdp_key_up("v", 0, 0);
-        assert!(matches!(
-            events.first(),
-            Some(RdpInputEvent::KeyUp {
-                scancode: 0x2F,
-                extended: false
-            })
-        ));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            RdpInputEvent::KeyUp {
-                scancode: SC_LSHIFT,
-                extended: false
-            }
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            RdpInputEvent::KeyUp {
-                scancode: SC_LCTRL,
-                extended: false
-            }
-        )));
+    fn rdp_physical_ctrl_alt_end_intercepts_to_delete_without_modifier_churn() {
+        let mut events = Vec::new();
+        events.extend(map_rdp_key_down("", 29, MOD_CTRL));
+        events.extend(map_rdp_key_down("", 31, MOD_CTRL | MOD_ALT));
+        events.extend(map_rdp_key_down("", 10, MOD_CTRL | MOD_ALT));
+        events.extend(map_rdp_key_up("", 10, MOD_CTRL | MOD_ALT));
+        events.extend(map_rdp_key_up("", 31, MOD_CTRL));
+        events.extend(map_rdp_key_up("", 29, 0));
+
+        assert_eq!(
+            key_events(&events),
+            [
+                TestKeyEvent::Down(SC_LCTRL, false),
+                TestKeyEvent::Down(SC_LALT, false),
+                TestKeyEvent::Down(SC_DELETE, true),
+                // IronRDP drops this unmatched End release at the production
+                // boundary and preserves the following Delete release.
+                TestKeyEvent::Up(0x4f, true),
+                TestKeyEvent::Up(SC_DELETE, true),
+                TestKeyEvent::Up(SC_LALT, false),
+                TestKeyEvent::Up(SC_LCTRL, false),
+            ]
+        );
     }
 
     #[test]
-    fn rdp_ctrl_alt_delete_uses_balanced_ctrl_alt_end_wire_sequence() {
+    fn rdp_ctrl_alt_delete_uses_balanced_extended_delete_wire_sequence() {
         assert_eq!(
             key_events(&rdp_ctrl_alt_delete_sequence()),
             [
                 TestKeyEvent::Down(SC_LCTRL, false),
                 TestKeyEvent::Down(SC_LALT, false),
-                TestKeyEvent::Down(SC_END, true),
-                TestKeyEvent::Up(SC_END, true),
+                TestKeyEvent::Down(SC_DELETE, true),
+                TestKeyEvent::Up(SC_DELETE, true),
                 TestKeyEvent::Up(SC_LALT, false),
                 TestKeyEvent::Up(SC_LCTRL, false),
             ]

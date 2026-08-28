@@ -5,6 +5,7 @@
 mod support;
 
 use cm_core::RdpInputEvent;
+use i_slint_backend_testing::{ElementHandle, ElementRoot};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, Model};
 
@@ -28,6 +29,8 @@ fn open_menu(ui: &cm_ui::AppWindow) -> i_slint_backend_testing::ElementHandle {
 
 fn terminal_menu_and_split_targeting() {
     let (h, _repo, provider) = harness();
+    h.ui.window()
+        .set_size(slint::LogicalSize::new(900.0, 600.0));
 
     h.ui.invoke_open_palette();
     assert!(palette_has(&h.ui, "Copy Visible Screen"));
@@ -40,6 +43,13 @@ fn terminal_menu_and_split_targeting() {
     assert!(find_descendant_by_label_opt(&menu, "Paste").is_some());
     assert!(find_descendant_by_label_opt(&menu, "Find").is_some());
     assert!(find_descendant_by_label_opt(&menu, "Send Alt+Tab").is_none());
+    assert_compact_anchored_menu(&h.ui, &menu, "Find");
+
+    h.ui.set_sidebar_collapsed(true);
+    h.ui.window()
+        .set_size(slint::LogicalSize::new(520.0, 400.0));
+    pump_ticks(1);
+    assert_compact_anchored_menu(&h.ui, &menu, "Find");
     find_descendant_by_label(&menu, "Copy All Scrollback").invoke_accessible_default_action();
     assert!(!h.ui.get_session_actions_open());
     assert_eq!(provider.search_request_sessions(), vec![0]);
@@ -68,6 +78,8 @@ fn terminal_menu_and_split_targeting() {
 
 fn rdp_menu_and_split_targeting() {
     let (h, _repo, provider) = harness();
+    h.ui.window()
+        .set_size(slint::LogicalSize::new(900.0, 600.0));
     h.ui.invoke_quick_connect();
     h.ui.set_qc_kind(1);
     h.ui.set_qc_host("rdp-actions.example.invalid".into());
@@ -88,6 +100,13 @@ fn rdp_menu_and_split_targeting() {
     assert!(find_descendant_by_label_opt(&menu, "Send Alt+Tab").is_some());
     assert!(find_descendant_by_label_opt(&menu, "Release Modifiers").is_some());
     assert!(find_descendant_by_label_opt(&menu, "Copy Visible Screen").is_none());
+    assert_compact_anchored_menu(&h.ui, &menu, "Release Modifiers");
+
+    h.ui.set_sidebar_collapsed(true);
+    h.ui.window()
+        .set_size(slint::LogicalSize::new(520.0, 400.0));
+    pump_ticks(1);
+    assert_compact_anchored_menu(&h.ui, &menu, "Release Modifiers");
 
     // RDP has separate down/up callbacks. Esc dismisses only after its key-up
     // so neither half of the local menu gesture can leak to the destination.
@@ -105,11 +124,34 @@ fn rdp_menu_and_split_targeting() {
         vec![
             (true, 0x1d, false),
             (true, 0x38, false),
-            (true, 0x4f, true),
-            (false, 0x4f, true),
+            (true, 0x53, true),
+            (false, 0x53, true),
             (false, 0x38, false),
             (false, 0x1d, false),
         ]
+    );
+
+    let before_physical = provider.rdp_keyboard_events_for(1).len();
+    h.ui.invoke_rdp_key_down("".into(), 29, 1);
+    h.ui.invoke_rdp_key_down("".into(), 31, 3);
+    h.ui.invoke_rdp_key_down("".into(), 10, 3);
+    h.ui.invoke_rdp_key_up("".into(), 10, 3);
+    h.ui.invoke_rdp_key_up("".into(), 31, 1);
+    h.ui.invoke_rdp_key_up("".into(), 29, 0);
+    assert_eq!(
+        key_events(&provider.rdp_keyboard_events_for(1)[before_physical..]),
+        vec![
+            (true, 0x1d, false),
+            (true, 0x38, false),
+            (true, 0x53, true),
+            // The production IronRDP state database discards this unmatched
+            // release, retaining only the following extended Delete release.
+            (false, 0x4f, true),
+            (false, 0x53, true),
+            (false, 0x38, false),
+            (false, 0x1d, false),
+        ],
+        "physical Ctrl+Alt+End must not replay already-held modifiers"
     );
 
     // Splitting creates and focuses a local pane. RDP-only callbacks must not
@@ -203,6 +245,56 @@ fn rdp_menu_and_split_targeting() {
         provider.rdp_keyboard_events_for(1).len(),
         before_modal_keys,
         "modal-owned RDP down/up events must never reach the destination"
+    );
+}
+
+fn assert_compact_anchored_menu(
+    ui: &cm_ui::AppWindow,
+    menu: &ElementHandle,
+    last_action_label: &str,
+) {
+    let trigger = find_by_id(ui, "AppWindow::session-actions-btn");
+    let last_action = find_descendant_by_label(menu, last_action_label);
+    let viewport = ui.root_element().size();
+    let menu_position = menu.absolute_position();
+    let menu_size = menu.size();
+    let trigger_position = trigger.absolute_position();
+    let trigger_size = trigger.size();
+    let last_action_position = last_action.absolute_position();
+    let last_action_size = last_action.size();
+
+    let menu_right = menu_position.x + menu_size.width;
+    let menu_bottom = menu_position.y + menu_size.height;
+    let trigger_right = trigger_position.x + trigger_size.width;
+    let trigger_bottom = trigger_position.y + trigger_size.height;
+    let last_action_bottom = last_action_position.y + last_action_size.height;
+    let bottom_padding = menu_bottom - last_action_bottom;
+
+    assert!(
+        menu_position.x >= -0.5
+            && menu_position.y >= -0.5
+            && menu_right <= viewport.width + 0.5
+            && menu_bottom <= viewport.height + 0.5,
+        "session menu must remain inside the viewport: menu=({menu_position:?}, {menu_size:?}), \
+         viewport={viewport:?}"
+    );
+    assert!(
+        menu_size.width <= 270.5 && menu_size.width <= viewport.width - 23.5,
+        "session menu width must be bounded at normal and narrow sizes: menu={menu_size:?}, \
+         viewport={viewport:?}"
+    );
+    assert!(
+        menu_position.y >= trigger_bottom - 0.5
+            && menu_position.y - trigger_bottom <= 12.5
+            && trigger_right >= menu_position.x
+            && trigger_position.x <= menu_right,
+        "session menu must stay anchored below the ellipsis: trigger=({trigger_position:?}, \
+         {trigger_size:?}), menu=({menu_position:?}, {menu_size:?})"
+    );
+    assert!(
+        (bottom_padding - 8.0).abs() <= 0.5,
+        "session menu must end at the final visible row plus its 8px token padding; \
+         tail={bottom_padding}, menu_bottom={menu_bottom}, last_action_bottom={last_action_bottom}"
     );
 }
 

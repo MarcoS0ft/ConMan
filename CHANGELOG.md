@@ -30,6 +30,19 @@ All notable user-facing changes to Connection Manager are documented here.
 - Use a bounded, user-configurable terminal history with a 10,000-line default
   and an independent 64 MiB backing limit per terminal session.
 
+### Fixed
+
+- Send the actual Ctrl+Alt+Delete sequence from RDP Session Actions instead of
+  forwarding the client-side Ctrl+Alt+End shortcut as remote input.
+- Keep RDP keyboard chords stable by forwarding physical modifier transitions
+  once and translating Ctrl+Alt+End at the client boundary.
+- Show sanitized native error dialogs with technical details and relevant file
+  paths when the graphical application cannot finish starting.
+- Prevent standalone left/right modifier presses in terminal sessions from
+  emitting control characters or triggering clipboard shortcuts.
+- Keep contextual session-action menus compact and anchored to their tab-strip
+  trigger instead of stretching them to the full window height.
+
 ### Security
 
 - Use native platform credential stores consistently from both the GUI and
