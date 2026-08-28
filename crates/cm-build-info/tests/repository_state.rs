@@ -157,6 +157,7 @@ impl TempRepository {
     fn new() -> Self {
         let path = unique_temp_path("conman-build-info-test");
         fs::create_dir_all(&path).expect("create temporary repository");
+        let path = fs::canonicalize(path).expect("canonicalize temporary repository");
         let repo = Self { path };
         repo.git(&["init", "-q"]);
         repo.git(&["config", "user.email", "build-info-test@conman.invalid"]);
@@ -233,6 +234,7 @@ impl<'a> LinkedWorktree<'a> {
             path_arg,
             "HEAD",
         ]);
+        let path = fs::canonicalize(path).expect("canonicalize linked worktree");
         Self { owner, path }
     }
 
