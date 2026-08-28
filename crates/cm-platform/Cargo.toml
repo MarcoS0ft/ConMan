@@ -6,12 +6,20 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+cm-core = { path = "../cm-core" }
 # Resolves per-OS standard user directories (data, config, cache).
 # P6.3 (gap 29): consolidated on `dirs` — the same crate already used by
 # cm-session and cm-ui — replacing `directories`, which only had this one
 # call site here. No memo required (dep already approved/present workspace-wide).
 dirs = "6"
+# Safe cross-platform opened-handle identity checks for the config writer lock.
+# Already present in the workspace lockfile through existing dependencies.
+same-file = "1"
+# Stable, path-identity digest for identity-scoped single-instance handshakes.
+# Already present in the workspace dependency graph.
+sha2 = "0.10"
 thiserror = "2"
+tempfile = "3"
 # Structured logging facade (P6.3). The composition root (`conman`) installs
 # the actual subscriber; libraries only ever call the `tracing::*` macros.
 tracing = "0.1"
