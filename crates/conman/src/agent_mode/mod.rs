@@ -2,16 +2,16 @@
 //!
 //! Compiled in only behind the `agent-mode` Cargo feature (off by default,
 //! same posture as `automation`); even then, nothing listens
-//! unless the user has turned the interface on via
-//! `cm_core::SettingsService::load_automation` (`automation.enabled`,
+//! unless the user has turned the interface on via the editable
+//! `config.conman` document (`automation-enabled`,
 //! off by default — the product's decided consent model, see
 //! `docs/devel/tasks/P8.6-agentic-product-slice.md`). See [`proxy`] for the
 //! actual scope-enforcement engine.
 //!
 //! ## Two-phase startup (mirrors `render_backend`'s split)
 //! 1. [`prepare`] — called from `main` **before** `logging::init()`, in the
-//!    same single-threaded window `render_backend::resolve` relies on for its
-//!    own `unsafe std::env::set_var`. If automation is enabled, this binds
+//!    same environment-safe window `render_backend::resolve` relies on for
+//!    its own `unsafe std::env::set_var`. If automation is enabled, this binds
 //!    the user-facing (external) loopback listener immediately, picks a port
 //!    for the internal vendored Slint MCP server, and sets `SLINT_MCP_PORT`
 //!    to that internal port — which must happen before the Slint backend
@@ -32,7 +32,7 @@
 //! `secrets`/`session_provider`), so the Settings section can (a) display
 //! the listening port + loopback host, (b) show the persistent active
 //! indicator, and (c) write a new `ScopeSet` into the handle's lock when the
-//! user changes a scope checkbox. Turning `automation.enabled` off at
+//! user changes a scope checkbox. Turning `automation-enabled` off at
 //! runtime does **not** stop an already-running listener this session (only
 //! scope changes are live-reloadable per the spec) — full disable takes
 //! effect on next launch; flagged for Fable/user review alongside the rest
@@ -44,7 +44,7 @@ use std::net::TcpListener;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 
-use cm_core::{ConnectionRepository, ScopeSet, SettingsService};
+use cm_core::{AppConfigStore, ScopeSet, SettingsService};
 
 /// The result of [`prepare`]: an already-bound external listener plus
 /// everything [`spawn`] needs to start serving it. Threaded through `main`
@@ -72,7 +72,7 @@ pub(crate) struct AgentModeHandle {
 
 /// Binds the external (agent-facing) loopback listener and picks an internal
 /// port for the vendored Slint MCP server, **if and only if**
-/// `automation.enabled` is set. Must be called before `logging::init()` —
+/// `automation-enabled` is set. Must be called before `logging::init()` —
 /// see the module doc.
 ///
 /// # Safety / ordering invariant
@@ -80,13 +80,23 @@ pub(crate) struct AgentModeHandle {
 /// because it races with any other thread reading the environment. This
 /// function is only ever called from `main`, before `logging::init()`
 /// (which, in release builds, spawns a background log-appender thread) and
-/// before anything else that could spawn a thread — the process is still
-/// strictly single-threaded here, exactly the invariant
-/// `render_backend::force_software_backend` documents and upholds for
-/// `SLINT_BACKEND`. Do not call this after `logging::init()`.
-pub(crate) fn prepare(repo: Option<&dyn ConnectionRepository>) -> Option<Prepared> {
-    let repo = repo?;
-    let automation = SettingsService::new(repo).load_automation().ok()?;
+/// before unrestricted workers. The sole concurrent worker is the audited
+/// single-instance responder, which performs only socket I/O, tracing, and
+/// mpsc sends and never accesses the environment. This is exactly the
+/// invariant `render_backend::force_software_backend` documents for
+/// `SLINT_BACKEND`. Do not call this after other workers are allowed to start.
+pub(crate) fn prepare(config_store: &dyn AppConfigStore) -> Option<Prepared> {
+    let automation = match SettingsService::new(config_store).load_automation() {
+        Ok(settings) => settings,
+        Err(error) => {
+            // No subscriber exists yet. Fail closed: malformed or unreadable
+            // configuration must never enable the listener accidentally.
+            write_pre_logging_error(format_args!(
+                "agent-mode: could not read automation configuration: {error}"
+            ));
+            return None;
+        }
+    };
     if !automation.enabled {
         return None;
     }
@@ -97,7 +107,9 @@ pub(crate) fn prepare(repo: Option<&dyn ConnectionRepository>) -> Option<Prepare
             // No tracing subscriber yet (this runs before `logging::init()`)
             // -- stderr is the only option, matching main.rs's other
             // pre-logging fatal-adjacent messages.
-            eprintln!("agent-mode: failed to bind the external loopback listener: {e}");
+            write_pre_logging_error(format_args!(
+                "agent-mode: failed to bind the external loopback listener: {e}"
+            ));
             return None;
         }
     };
@@ -113,12 +125,16 @@ pub(crate) fn prepare(repo: Option<&dyn ConnectionRepository>) -> Option<Prepare
         Ok(probe) => match probe.local_addr() {
             Ok(addr) => addr.port(),
             Err(e) => {
-                eprintln!("agent-mode: failed to read a free internal port: {e}");
+                write_pre_logging_error(format_args!(
+                    "agent-mode: failed to read a free internal port: {e}"
+                ));
                 return None;
             }
         },
         Err(e) => {
-            eprintln!("agent-mode: failed to allocate an internal port: {e}");
+            write_pre_logging_error(format_args!(
+                "agent-mode: failed to allocate an internal port: {e}"
+            ));
             return None;
         }
     };
@@ -133,6 +149,11 @@ pub(crate) fn prepare(repo: Option<&dyn ConnectionRepository>) -> Option<Prepare
         internal_port,
         scopes: automation.scopes,
     })
+}
+
+fn write_pre_logging_error(message: std::fmt::Arguments<'_>) {
+    let safe = cm_cli::neutralize_terminal_text(&message.to_string());
+    let _ = cm_platform::write_stderr_line(&safe);
 }
 
 /// Starts the proxy's accept-loop thread. Safe to call any time after
@@ -172,5 +193,40 @@ pub(crate) fn spawn(prepared: Prepared) -> AgentModeHandle {
         internal_port,
         scopes,
         mcp_interaction_count,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cm_core::AppConfigError;
+
+    struct EmptyConfig;
+
+    impl AppConfigStore for EmptyConfig {
+        fn get_value(&self, _key: &str) -> Result<Option<String>, AppConfigError> {
+            Ok(None)
+        }
+
+        fn set_value(&self, _key: &str, _value: &str) -> Result<(), AppConfigError> {
+            unreachable!("agent-mode preparation only reads configuration")
+        }
+
+        fn set_values(&self, _values: &[(&str, &str)]) -> Result<(), AppConfigError> {
+            unreachable!("agent-mode preparation only reads configuration")
+        }
+
+        fn document_text(&self) -> Result<String, AppConfigError> {
+            Ok(String::new())
+        }
+
+        fn replace_document(&self, _document: &str) -> Result<(), AppConfigError> {
+            unreachable!("agent-mode preparation only reads configuration")
+        }
+    }
+
+    #[test]
+    fn disabled_default_does_not_prepare_a_listener() {
+        assert!(prepare(&EmptyConfig).is_none());
     }
 }

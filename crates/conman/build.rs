@@ -1,9 +1,10 @@
 //! Build script for the `conman` binary.
 //!
-//! Purpose: on Windows, place `ghostty-vt.dll` next to the produced
-//! `conman.exe` automatically, so `cargo run`/`cargo build` "just work" with no
-//! manual copy step (and no risk of the historical clobber bug where the exe
-//! was overwritten by a copy).
+//! Purpose: on Windows, embed ConMan's application icon in the executable and
+//! place `ghostty-vt.dll` next to the produced `conman.exe` automatically, so
+//! `cargo run`/`cargo build` "just work" with no manual packaging step (and no
+//! risk of the historical clobber bug where the exe was overwritten by a
+//! copy).
 //!
 //! Background: `libghostty-vt-sys` links the engine **statically** on Linux/macOS
 //! (`libghostty-vt.a`), so there is no runtime library to ship there — this
@@ -23,6 +24,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const DLL_NAME: &str = "ghostty-vt.dll";
+const ICON_PATH_FROM_MANIFEST: &str = "../../resources/ConMan.ico";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=DEP_GHOSTTY_VT_INCLUDE");
@@ -31,6 +33,8 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+
+    embed_windows_icon();
 
     let Ok(out_dir) = std::env::var("OUT_DIR").map(PathBuf::from) else {
         return;
@@ -67,6 +71,28 @@ fn main() {
             dest_dll.display()
         );
     }
+}
+
+/// Compile the tracked application icon into the Windows PE resource section.
+///
+/// `winresource` supports both MSVC's resource compiler and GNU `windres`, so
+/// this also works for cross-builds. A missing or invalid product icon is a
+/// packaging error and intentionally fails the Windows build.
+fn embed_windows_icon() {
+    let manifest_dir = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR")
+            .expect("Cargo must provide CARGO_MANIFEST_DIR to build scripts"),
+    );
+    let icon = manifest_dir.join(ICON_PATH_FROM_MANIFEST);
+    println!("cargo:rerun-if-changed={}", icon.display());
+
+    let icon = icon
+        .to_str()
+        .expect("ConMan icon path must be valid Unicode");
+    winresource::WindowsResource::new()
+        .set_icon(icon)
+        .compile()
+        .expect("failed to compile resources/ConMan.ico into conman.exe");
 }
 
 /// Resolve the DLL from the `-sys` crate's `links` metadata: `DEP_GHOSTTY_VT_INCLUDE`

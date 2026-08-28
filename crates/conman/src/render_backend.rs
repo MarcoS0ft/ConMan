@@ -31,9 +31,9 @@
 //!   broken driver) isn't a Rust panic at all -- `catch_unwind` can't catch
 //!   it regardless.
 //!
-//! Instead, before touching *any* real application state (single-instance
-//! lock, keyring, database, UI), `conman` spawns a disposable, side-effect-
-//! free copy of itself ([`run_probe_child`]) that does nothing but create a
+//! Instead, before initializing Slint or acquiring the single-instance lock,
+//! `conman` spawns a disposable, side-effect-free copy of itself
+//! ([`run_probe_child`]) that does nothing but create a
 //! trivial window and run it through the exact same `show()` +
 //! `run_event_loop()` sequence the real app uses (see the generated
 //! `ComponentHandle::run()` that `cm_ui::run` calls). If that child exits
@@ -42,9 +42,9 @@
 //! renderer is forced for the real run that follows in this (parent)
 //! process, which still has its one-and-only `set_platform` call unused.
 //!
-//! An explicit user-set `SLINT_BACKEND` always wins and skips the probe
-//! entirely, so the xvfb/QA gates (which set `winit-femtovg` / `software`)
-//! are unaffected.
+//! An explicit user-set `SLINT_BACKEND` always wins, followed by an explicit
+//! `config.conman` preference. Either skips the probe entirely, so xvfb/QA
+//! gates (which set `winit-femtovg` / `software`) are unaffected.
 //!
 //! [`resolve`] (which may call `force_software_backend`'s `unsafe
 //! std::env::set_var`) must run **before** `logging::init()` -- see
@@ -54,6 +54,8 @@
 
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
+
+use cm_core::RendererBackend;
 
 /// Set (to any value) on the disposable probe child so `main` takes the
 /// minimal probe branch instead of the real startup path. Internal only --
@@ -150,13 +152,14 @@ fn probe() -> ProbeOutcome {
 /// `std::env::set_var` is `unsafe` because mutating the environment races
 /// with any other thread reading it. This is only ever called from
 /// [`resolve`], which `main` calls **before** `logging::init()` (which, in
-/// release builds, spawns a background log-appender thread) and before
-/// anything else that could spawn a thread (e.g. the single-instance
-/// listener thread, `cm_platform::single_instance`). The process is still
-/// strictly single-threaded at this point, so no other thread exists yet to
-/// race with (CONVENTIONS §2 unsafe-usage rule; see also
-/// `docs/devel/memos/P7.1-backend-fallback.md`). Do not call this after
-/// `logging::init()` -- that would break the invariant.
+/// release builds, spawns a background log-appender thread) and before any
+/// unrestricted worker exists. The sole concurrent worker is the
+/// single-instance responder started by the composition root; its audited
+/// loop performs only bounded socket I/O, tracing, and mpsc sends and never
+/// reads or mutates the environment. Therefore no concurrent environment
+/// access can race this mutation (CONVENTIONS §2 unsafe-usage rule; see also
+/// `docs/devel/memos/P7.1-backend-fallback.md`). Do not call this after other
+/// workers are allowed to start -- that would break the invariant.
 fn force_software_backend() {
     #[allow(unsafe_code)] // see the doc comment above for the upheld invariant
     unsafe {
@@ -169,12 +172,14 @@ fn force_software_backend() {
 pub(crate) enum RendererDecision {
     /// The user set `SLINT_BACKEND` themselves; honored verbatim.
     ExplicitEnv(String),
-    /// A previously-persisted backend was honored from the settings cache, so
+    /// An explicit `renderer-backend` preference from `config.conman`.
+    Configured(RendererBackend),
+    /// A previously-persisted backend was honored from machine-local state, so
     /// the probe was skipped this launch (P7.1 cont.). Carries the backend
     /// string ("software" | "accelerated"). For "software" the fallback has
     /// already been forced inside [`resolve`]; "accelerated" needs nothing set
     /// (it is Slint's default).
-    Cached(String),
+    Cached(RendererBackend),
     /// No override; the probe confirmed the accelerated renderer comes up.
     Accelerated,
     /// No override; couldn't tell either way (e.g. failed to spawn the
@@ -191,23 +196,34 @@ pub(crate) enum RendererDecision {
 ///
 /// Must run before any Slint API is used in this process, and **before**
 /// `logging::init()`: forcing the fallback needs `std::env::set_var`, which
-/// is only sound while the process is still single-threaded (see
-/// `force_software_backend`'s doc comment), and `logging::init()` is the
-/// first thing in `main` that can spawn a thread. Returns the decision for
+/// is only sound while no concurrent thread can access the environment (see
+/// `force_software_backend`'s doc comment). Returns the decision for
 /// [`log_decision`] to report once logging is up.
 ///
-/// Precedence (P7.1 cont.): an explicit `SLINT_BACKEND` env var wins, then the
-/// persisted `cached` setting (read from the settings table by `main`), then a
-/// fresh probe. Setting `CONMAN_RENDER_REPROBE` (to any value) ignores the
-/// cache and forces a re-probe -- the escape hatch for moving a DB copy to
-/// hardware where the persisted choice no longer applies.
+/// Precedence: an explicit `SLINT_BACKEND` environment value wins, followed
+/// by an explicit `renderer-backend` preference in `config.conman`, the
+/// machine-local probe cache, and finally a fresh probe. Setting
+/// `CONMAN_RENDER_REPROBE` ignores only the automatic cache; it never
+/// overrides an explicit user preference.
 ///
-/// `cached` is the backend string persisted from a previous run (see
-/// [`crate::render_backend::RendererDecision::Cached`]); `None`/absent/"auto"
-/// all mean "no cache -- probe".
-pub(crate) fn resolve(cached: Option<&str>) -> RendererDecision {
+/// `cached` is the machine-local backend learned during an earlier probe (see
+/// [`crate::render_backend::RendererDecision::Cached`]); `None` means there is
+/// no learned fallback and the automatic path must probe.
+pub(crate) fn resolve(
+    configured: RendererBackend,
+    cached: Option<RendererBackend>,
+) -> RendererDecision {
     if let Ok(explicit) = std::env::var("SLINT_BACKEND") {
         return RendererDecision::ExplicitEnv(explicit);
+    }
+
+    match configured {
+        RendererBackend::Software => {
+            force_software_backend();
+            return RendererDecision::Configured(configured);
+        }
+        RendererBackend::Accelerated => return RendererDecision::Configured(configured),
+        RendererBackend::Auto => {}
     }
 
     // Escape hatch: re-probe and ignore whatever is cached.
@@ -217,14 +233,14 @@ pub(crate) fn resolve(cached: Option<&str>) -> RendererDecision {
         match cached {
             // The forced-software case must actually set the env var this run;
             // "software" carries safely to any hardware.
-            Some("software") => {
+            Some(RendererBackend::Software) => {
                 force_software_backend();
-                return RendererDecision::Cached("software".to_owned());
+                return RendererDecision::Cached(RendererBackend::Software);
             }
             // "accelerated" is Slint's default, so nothing to set -- just skip
             // the probe.
-            Some("accelerated") => {
-                return RendererDecision::Cached("accelerated".to_owned());
+            Some(RendererBackend::Accelerated) => {
+                return RendererDecision::Cached(RendererBackend::Accelerated);
             }
             // Anything else (None / "auto" / unknown) falls through to a probe.
             _ => {}
@@ -241,11 +257,10 @@ pub(crate) fn resolve(cached: Option<&str>) -> RendererDecision {
     }
 }
 
-/// Decides whether (and to what) the persisted renderer-backend cache
-/// (`render.backend`, read/written via
-/// `cm_core::SettingsService::{load,save}_renderer_backend`) should be
-/// updated after [`resolve`] has made its `decision`, given what `cached`
-/// currently holds. Returns `None` when nothing should be written.
+/// Decides whether the machine-local renderer probe cache should be updated
+/// after [`resolve`] has made its decision. The composition root applies the
+/// result through `AppStateService`; the editable renderer preference never
+/// enters this cache. Returns `None` when nothing should be written.
 ///
 /// This is the single source of truth for the two safety invariants `main`
 /// must uphold (pulled out of `main` itself so they're unit-testable, P7.1
@@ -270,11 +285,15 @@ pub(crate) fn resolve(cached: Option<&str>) -> RendererDecision {
 ///   proceeds with today's default without changing what's on disk.
 pub(crate) fn persist_decision(
     decision: &RendererDecision,
-    cached: Option<&str>,
-) -> Option<&'static str> {
+    cached: Option<RendererBackend>,
+) -> Option<RendererBackend> {
     match decision {
-        RendererDecision::FallbackForced(_) if cached != Some("software") => Some("software"),
-        RendererDecision::Accelerated if cached == Some("software") => Some("auto"),
+        RendererDecision::FallbackForced(_) if cached != Some(RendererBackend::Software) => {
+            Some(RendererBackend::Software)
+        }
+        RendererDecision::Accelerated if cached == Some(RendererBackend::Software) => {
+            Some(RendererBackend::Auto)
+        }
         _ => None,
     }
 }
@@ -290,9 +309,16 @@ pub(crate) fn log_decision(decision: &RendererDecision) {
                 "startup renderer: honoring explicit SLINT_BACKEND"
             );
         }
+        RendererDecision::Configured(configured) => {
+            tracing::info!(
+                renderer = configured.as_str(),
+                configured = true,
+                "startup renderer: honoring config.conman preference"
+            );
+        }
         RendererDecision::Cached(v) => {
             tracing::info!(
-                renderer = %v,
+                renderer = v.as_str(),
                 cached = true,
                 "startup renderer: honored persisted backend, probe skipped"
             );
@@ -406,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_honors_env_then_cache_then_reprobe() {
+    fn resolve_honors_env_then_config_then_cache_then_reprobe() {
         // If we are the probe child spawned by the reprobe step below, do
         // nothing (see the module-level note): this both avoids probe
         // recursion and keeps the child's exit status clean.
@@ -423,7 +449,10 @@ mod tests {
 
         // Cached "software" is honored (no probe) and forces the fallback env.
         assert!(
-            matches!(resolve(Some("software")), RendererDecision::Cached(ref v) if v == "software"),
+            matches!(
+                resolve(RendererBackend::Auto, Some(RendererBackend::Software)),
+                RendererDecision::Cached(RendererBackend::Software)
+            ),
             "cached software must be honored without probing"
         );
         // `force_software_backend` set SLINT_BACKEND; clear it before the next
@@ -432,14 +461,32 @@ mod tests {
 
         // Cached "accelerated" is honored (no probe, no env needed).
         assert!(
-            matches!(resolve(Some("accelerated")), RendererDecision::Cached(ref v) if v == "accelerated"),
+            matches!(
+                resolve(RendererBackend::Auto, Some(RendererBackend::Accelerated)),
+                RendererDecision::Cached(RendererBackend::Accelerated)
+            ),
             "cached accelerated must be honored without probing"
         );
+
+        // An explicit text-config preference beats machine-local state.
+        assert!(matches!(
+            resolve(
+                RendererBackend::Accelerated,
+                Some(RendererBackend::Software)
+            ),
+            RendererDecision::Configured(RendererBackend::Accelerated)
+        ));
 
         // An explicit SLINT_BACKEND beats any cached value.
         set_env("SLINT_BACKEND", Some("software"));
         assert!(
-            matches!(resolve(Some("accelerated")), RendererDecision::ExplicitEnv(ref v) if v == "software"),
+            matches!(
+                resolve(
+                    RendererBackend::Accelerated,
+                    Some(RendererBackend::Accelerated)
+                ),
+                RendererDecision::ExplicitEnv(ref v) if v == "software"
+            ),
             "explicit SLINT_BACKEND must win over the cache"
         );
         set_env("SLINT_BACKEND", None);
@@ -448,7 +495,7 @@ mod tests {
         // through to the probe, so the outcome is never `Cached`. (The probe
         // itself is neutralized by the guard at the top of this fn.)
         set_env("CONMAN_RENDER_REPROBE", Some("1"));
-        let reprobed = resolve(Some("software"));
+        let reprobed = resolve(RendererBackend::Auto, Some(RendererBackend::Software));
         assert!(
             !matches!(reprobed, RendererDecision::Cached(_)),
             "reprobe must ignore the cache and take the probe path, got a Cached decision"
@@ -471,11 +518,14 @@ mod tests {
         // GPU-less machine that later imports/inherits this DB.
         assert_eq!(persist_decision(&RendererDecision::Accelerated, None), None);
         assert_eq!(
-            persist_decision(&RendererDecision::Accelerated, Some("auto")),
+            persist_decision(&RendererDecision::Accelerated, Some(RendererBackend::Auto)),
             None
         );
         assert_eq!(
-            persist_decision(&RendererDecision::Accelerated, Some("accelerated")),
+            persist_decision(
+                &RendererDecision::Accelerated,
+                Some(RendererBackend::Accelerated)
+            ),
             None
         );
     }
@@ -483,18 +533,27 @@ mod tests {
     #[test]
     fn persist_decision_persists_software_fallback_when_not_already_cached() {
         let decision = RendererDecision::FallbackForced("boom".to_owned());
-        assert_eq!(persist_decision(&decision, None), Some("software"));
-        assert_eq!(persist_decision(&decision, Some("auto")), Some("software"));
         assert_eq!(
-            persist_decision(&decision, Some("accelerated")),
-            Some("software")
+            persist_decision(&decision, None),
+            Some(RendererBackend::Software)
+        );
+        assert_eq!(
+            persist_decision(&decision, Some(RendererBackend::Auto)),
+            Some(RendererBackend::Software)
+        );
+        assert_eq!(
+            persist_decision(&decision, Some(RendererBackend::Accelerated)),
+            Some(RendererBackend::Software)
         );
     }
 
     #[test]
     fn persist_decision_skips_rewriting_an_already_cached_software_fallback() {
         let decision = RendererDecision::FallbackForced("boom".to_owned());
-        assert_eq!(persist_decision(&decision, Some("software")), None);
+        assert_eq!(
+            persist_decision(&decision, Some(RendererBackend::Software)),
+            None
+        );
     }
 
     #[test]
@@ -504,8 +563,11 @@ mod tests {
         // Accelerated -- clear the cache to "auto" so future launches probe
         // fresh instead of staying stuck in software.
         assert_eq!(
-            persist_decision(&RendererDecision::Accelerated, Some("software")),
-            Some("auto")
+            persist_decision(
+                &RendererDecision::Accelerated,
+                Some(RendererBackend::Software)
+            ),
+            Some(RendererBackend::Auto)
         );
     }
 
@@ -513,8 +575,23 @@ mod tests {
     fn persist_decision_never_persists_an_explicit_env_override() {
         let decision = RendererDecision::ExplicitEnv("software".to_owned());
         assert_eq!(persist_decision(&decision, None), None);
-        assert_eq!(persist_decision(&decision, Some("software")), None);
-        assert_eq!(persist_decision(&decision, Some("accelerated")), None);
+        assert_eq!(
+            persist_decision(&decision, Some(RendererBackend::Software)),
+            None
+        );
+        assert_eq!(
+            persist_decision(&decision, Some(RendererBackend::Accelerated)),
+            None
+        );
+    }
+
+    #[test]
+    fn persist_decision_never_changes_cache_for_explicit_config() {
+        let decision = RendererDecision::Configured(RendererBackend::Accelerated);
+        assert_eq!(
+            persist_decision(&decision, Some(RendererBackend::Software)),
+            None
+        );
     }
 
     #[test]
@@ -523,8 +600,8 @@ mod tests {
         // probe deliberately proceeds without touching the cache.
         assert_eq!(
             persist_decision(
-                &RendererDecision::Cached("software".to_owned()),
-                Some("software")
+                &RendererDecision::Cached(RendererBackend::Software),
+                Some(RendererBackend::Software)
             ),
             None
         );
