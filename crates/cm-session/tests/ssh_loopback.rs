@@ -32,11 +32,12 @@ use std::time::{Duration, Instant};
 use cm_core::terminal::{GridSnapshot, Key, KeyEvent, KeyModifiers, TerminalSize};
 use cm_core::{
     CredentialId, CredentialPurpose, CredentialRef, CredentialStore, Secret, SshSettings,
+    TerminalOptions,
 };
 use cm_session::{
     HostKeyDecision, HostKeyInfo, HostKeySituation, HostKeyVerifier, KbdInteractiveChallenge,
     KbdInteractiveHandler, KnownHostSource, KnownHosts, SessionStatus, SshAuthInput,
-    SshTerminalSession, TerminalSession,
+    SshTerminalSession as RealSshTerminalSession, TerminalSession,
 };
 use russh::keys::known_hosts::learn_known_hosts_path;
 use russh::keys::ssh_key::{HashAlg, PublicKey};
@@ -45,6 +46,29 @@ use russh::keys::{PrivateKey, load_secret_key};
 use support::{
     InMemoryCredentialStore, KbdInteractiveTestConfig, KbdRound, LoopbackSshServer, SshServerConfig,
 };
+
+/// Preserve concise call sites while making the per-session terminal options
+/// explicit at the production constructor boundary.
+struct SshTerminalSession;
+
+impl SshTerminalSession {
+    fn connect(
+        settings: &SshSettings,
+        auth: SshAuthInput,
+        verifier: Arc<dyn HostKeyVerifier>,
+        known_hosts: KnownHosts,
+        size: TerminalSize,
+    ) -> Result<RealSshTerminalSession, cm_session::SshError> {
+        RealSshTerminalSession::connect(
+            settings,
+            auth,
+            verifier,
+            known_hosts,
+            size,
+            TerminalOptions::default(),
+        )
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shared helpers

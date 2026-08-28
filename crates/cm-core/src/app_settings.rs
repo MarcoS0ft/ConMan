@@ -1,221 +1,63 @@
-//! Typed settings helpers for ConMan (P5.2).
+//! Typed application preferences and machine-local state.
 //!
-//! All persistent UI preferences live in the `settings(key, value)` table
-//! (added in schema v2).  This module defines the canonical key strings and
-//! a [`SettingsService`] that reads / writes typed values through a
-//! [`ConnectionRepository`].
-//!
-//! ## Design
-//! - Keys are `&'static str` constants so callers never construct strings.
-//! - Values are stored as their `Display` string; parsing is infallible —
-//!   on parse failure the default is returned (untrusted DB content).
-//! - No `unwrap` / `panic` on I/O paths (CONVENTIONS §2.2).
-//!
-//! **P6.15:** moved here from `cm-storage::settings` — this module only ever
-//! depended on the [`ConnectionRepository`] *port*, never on the concrete
-//! SQLite adapter, so it belongs in `cm-core` with the rest of the port
-//! surface (gap 27 cont. — cuts the `cm-ui` → `cm-storage` concrete edge for
-//! `SettingsService`/`AppSettings`; see
-//! `docs/devel/memos/P6.15-sessionprovider-port.md`). Named `app_settings`
-//! (not `settings`) to avoid colliding with `cm-core`'s existing, unrelated
-//! private `settings` module (`ConnectionSettings`/`RdpSettings`/
-//! `SshSettings` — per-connection-kind settings, not app-wide preferences).
+//! User preferences are stored in the editable `config.conman` document via
+//! [`AppConfigStore`]. Machine/runtime state is deliberately separate and is
+//! stored via [`AppStateRepository`]. Connection data and credentials do not
+//! cross either boundary.
 
-use crate::error::RepositoryError;
+use crate::error::{AppConfigError, RepositoryError};
 use crate::ids::ConnectionId;
-use crate::ports::ConnectionRepository;
+use crate::ports::{AppConfigStore, AppStateRepository};
 use serde::{Deserialize, Serialize};
+use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 
-// ---------------------------------------------------------------------------
-// Key constants (single source of truth)
-// ---------------------------------------------------------------------------
-
-/// Theme mode: "0" dark, "1" light, "2" system.
-pub(crate) const KEY_THEME_MODE: &str = "ui.theme_mode";
-/// Accent preset index (into `Theme.accent-presets`).
-pub(crate) const KEY_ACCENT_INDEX: &str = "ui.accent_index";
-/// Density preset: "0" compact, "1" cosy.
-pub(crate) const KEY_DENSITY: &str = "ui.density";
-/// Terminal font size in pt (integer string).
-pub(crate) const KEY_FONT_SIZE: &str = "terminal.font_size";
-/// Terminal font family (exact family name from the platform font system).
-pub(crate) const KEY_FONT_FAMILY: &str = "terminal.font_family";
-/// Built-in terminal-family default. The renderer may resolve this to its
-/// effective fallback when the family is unavailable on the current host.
 pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
-/// Default local shell executable path (may be empty).
-pub(crate) const KEY_SHELL_PATH: &str = "terminal.shell_path";
-/// Extra shell arguments (space-separated; may be empty).
-pub(crate) const KEY_SHELL_ARGS: &str = "terminal.shell_args";
-/// Default working directory for local sessions (may be empty = home).
-pub(crate) const KEY_SHELL_CWD: &str = "terminal.shell_cwd";
-/// Startup behavior: "0" clean start, "1" restore last session.
-pub(crate) const KEY_STARTUP_BEHAVIOR: &str = "ui.startup_behavior";
-/// Last active side-panel index (0 Connections, 1 Keys, 2 Settings).
-pub(crate) const KEY_ACTIVE_PANEL: &str = "ui.active_panel";
-/// Sidebar collapsed: "0" visible, "1" collapsed.
-pub(crate) const KEY_SIDEBAR_COLLAPSED: &str = "ui.sidebar_collapsed";
-/// Side-panel width in logical px (integer string). P6.9 gap 11: the
-/// `side-panel-width` token comment promised this persistence since P5.2.
-pub(crate) const KEY_SIDE_PANEL_WIDTH: &str = "ui.side_panel_width";
-/// First-run demo data seeded: "1" = already seeded, absent / "0" = not yet.
-/// Gating on this setting (rather than `list_groups().is_empty()`) prevents
-/// re-seeding when the user intentionally deletes all groups (CONVENTIONS §P1.5).
-/// `pub` (not `pub(crate)`) — unlike the other keys above, this one is also
-/// referenced from `cm-storage`'s export-envelope exclusion list
-/// (`EXPORT_EXCLUDED_SETTING_KEYS`) so that list can reference the constant
-/// instead of duplicating the literal string (drift guard).
-pub const KEY_FIRST_RUN_SEEDED: &str = "app.first_run_seeded";
-/// Persisted "restore last session" tab snapshot (P6.14, gap 4) — a JSON
-/// [`SessionTabSnapshot`]. Absent, empty, or malformed all mean "nothing to
-/// restore" (see [`SettingsService::load_session_tabs`]). Reuses the existing
-/// `settings` key/value store rather than a new table: this is a single,
-/// wholesale-replaced blob (never queried/filtered in SQL), unlike `recents`
-/// which needs per-row upsert + ordering (see the schema memo).
-///
-/// `pub` (not `pub(crate)`) — see [`KEY_FIRST_RUN_SEEDED`]'s note; also
-/// referenced from `cm-storage`'s export-envelope exclusion list.
-pub const KEY_SESSION_TABS: &str = "ui.session_tabs";
-/// Cached renderer backend (P7.1 cont.): persisted result of the startup
-/// renderer probe so the expensive GPU-less probe runs at most once. One of
-/// "software" | "accelerated" | "auto" (or absent). "auto"/absent means
-/// "probe each launch"; only the "software" fallback is auto-persisted (safe
-/// to carry to other hardware), never "accelerated" (see `render_backend`).
-///
-/// `pub` (not `pub(crate)`) — see [`KEY_FIRST_RUN_SEEDED`]'s note; also
-/// referenced from `cm-storage`'s export-envelope exclusion list (P7.1 cont.:
-/// a cached `accelerated` must never cross machines, see that list's docs).
-pub const KEY_RENDERER_BACKEND: &str = "render.backend";
-/// Master enable/disable for the agent-mode automation interface (P8.6).
-/// "1"/"0"; absent means disabled (off by default — the product's decided
-/// consent model). Read at startup by `conman`'s scope-enforcement proxy
-/// (P8.6-A) and by `cm-ui`'s Settings surface + execute-scope launch-gate
-/// (P8.6-B).
-///
-/// `pub` (not `pub(crate)`) — see [`KEY_FIRST_RUN_SEEDED`]'s note; also
-/// referenced from `cm-storage`'s export-envelope exclusion list: this is
-/// per-machine security posture, not connection data, and must never travel
-/// on export/import (a DB copied to another machine must not silently arrive
-/// with automation already enabled there).
-pub const KEY_AUTOMATION_ENABLED: &str = "automation.enabled";
-/// Which automation scopes are granted (P8.6) — a stable CSV of zero or more
-/// of `"read"`, `"write"`, `"execute"` (e.g. `"read,write"`); absent/empty
-/// means none granted. See [`ScopeSet::parse`]/[`ScopeSet::format`] for the
-/// wire format.
-///
-/// `pub` (not `pub(crate)`) — same export-exclusion reasoning as
-/// [`KEY_AUTOMATION_ENABLED`].
-pub const KEY_AUTOMATION_SCOPES: &str = "automation.scopes";
+pub const MIN_FONT_SIZE: i32 = 6;
+pub const MAX_FONT_SIZE: i32 = 72;
+pub const DEFAULT_SCROLLBACK_LIMIT: usize = 10_000;
+/// Maximum configurable terminal history ceiling in lines. Terminal sessions
+/// also enforce a separate 64 MiB backing-store ceiling, so content-dense rows
+/// may reach the memory ceiling before this line ceiling.
+pub const MAX_SCROLLBACK_LIMIT: usize = 32_768;
 
-// ---------------------------------------------------------------------------
-// AppSettings — the loaded settings snapshot
-// ---------------------------------------------------------------------------
-
-/// All persistent UI preferences loaded from the repository at startup.
-///
-/// Fields are plain Rust values; the service converts to/from strings.
-#[derive(Debug, Clone)]
-pub struct AppSettings {
-    /// 0 dark · 1 light · 2 system
-    pub theme_mode: i32,
-    /// Index into the accent preset list (0-based).
-    pub accent_index: i32,
-    /// 0 compact · 1 cosy
-    pub density: i32,
-    /// Terminal font size (pt).
-    pub font_size: i32,
-    /// Terminal font family requested at startup. The renderer resolves stale
-    /// or unavailable values before the setting is presented to the user.
-    pub font_family: String,
-    /// Default local shell path (empty = OS default).
-    pub shell_path: String,
-    /// Extra shell arguments.
-    pub shell_args: String,
-    /// Default working directory (empty = home).
-    pub shell_cwd: String,
-    /// 0 clean start · 1 restore last session
-    pub startup_behavior: i32,
-    /// Last active side-panel index.
-    pub active_panel: i32,
-    /// Whether the sidebar was collapsed on last exit.
-    pub sidebar_collapsed: bool,
-    /// Side-panel width in logical px, persisted across restarts (P6.9 gap 11).
-    pub side_panel_width: i32,
-    /// Persisted renderer backend (P7.1 cont.): "auto" (probe each launch),
-    /// "software", or "accelerated". "auto" is the default. Surfaced in the
-    /// Settings "Rendering" control; the actual renderer switch takes effect on
-    /// the next launch.
-    pub renderer_backend: String,
-}
-
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            theme_mode: 2,   // system
-            accent_index: 0, // cool blue
-            density: 0,      // compact
-            font_size: 13,
-            font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
-            shell_path: String::new(),
-            shell_args: String::new(),
-            shell_cwd: String::new(),
-            startup_behavior: 0, // clean start
-            active_panel: 0,     // Connections
-            sidebar_collapsed: false,
-            side_panel_width: 252, // matches Theme.side-panel-width (cm-ui/ui/theme.slint)
-            renderer_backend: "auto".to_owned(),
+macro_rules! string_enum {
+    ($name:ident { $($variant:ident => $wire:literal),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum $name { $($variant),+ }
+        impl $name {
+            pub const fn as_str(self) -> &'static str {
+                match self { $(Self::$variant => $wire),+ }
+            }
         }
-    }
+        impl Display for $name {
+            fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+        impl FromStr for $name {
+            type Err = &'static str;
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                match value {
+                    $($wire => Ok(Self::$variant),)+
+                    _ => Err(concat!("unsupported ", stringify!($name), " value")),
+                }
+            }
+        }
+    };
 }
 
-// ---------------------------------------------------------------------------
-// Session-tab restore (P6.14, gap 4)
-// ---------------------------------------------------------------------------
+string_enum!(ThemeMode { System => "system", Dark => "dark", Light => "light" });
+string_enum!(AccentColor {
+    Blue => "blue", Teal => "teal", Green => "green", Purple => "purple", System => "system"
+});
+string_enum!(Density { Compact => "compact", Cosy => "cosy" });
+string_enum!(TerminalTheme { Dark => "dark", Light => "light" });
+string_enum!(StartupBehavior { Clean => "clean", Restore => "restore" });
+string_enum!(RendererBackend {
+    Auto => "auto", Software => "software", Accelerated => "accelerated"
+});
 
-/// One restorable tab slot. Carries only what's needed to *reopen* a session,
-/// never live state or secrets:
-/// - `Local` — a plain local shell; restores as a fresh shell.
-/// - `Connection` — a tree-launched, stored connection; restores through the
-///   same credential-resolving connect path used everywhere else (the secret
-///   is fetched fresh from the keychain, never cached here).
-///
-/// Any tab without a resolvable stored connection (quick-connect, reattached
-/// sessions) is recorded as `Local` on save — there is nothing safe to
-/// replay for those without either caching a secret or re-prompting, and the
-/// task spec only asks for the tree-launched case.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionTabEntry {
-    Local,
-    Connection(ConnectionId),
-}
-
-/// The full "last session" snapshot: an ordered tab list plus which one was
-/// active. `active` is an index into `tabs`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct SessionTabSnapshot {
-    pub tabs: Vec<SessionTabEntry>,
-    pub active: usize,
-}
-
-// ---------------------------------------------------------------------------
-// Automation scopes (P8.6)
-// ---------------------------------------------------------------------------
-
-/// Which agent-mode automation scopes the user has granted. The three scopes
-/// are independently grantable and cumulative *in risk* (read < write <
-/// execute) per the product's decided consent model — not a strict
-/// hierarchy: `execute` without `write` is a valid (if unusual) grant, and
-/// this type does not enforce any ordering between the fields.
-///
-/// - `read` — observe only (element tree, screenshots, etc.); gated by
-///   `conman`'s proxy (P8.6-A).
-/// - `write` — mutate saved data / UI state; gated by the same proxy.
-/// - `execute` — launch/open sessions with stored credentials. **Not gated by
-///   the proxy** — "execute" is not a distinct MCP tool, it rides the write
-///   tools targeting launch UI, so a tool-name-based proxy cannot separate it
-///   from `write`. Enforced instead at `cm-ui`'s session-launch actions
-///   (P8.6-B). See `docs/devel/tasks/P8.6-impl.md`'s "Critical architectural
-///   finding".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ScopeSet {
     pub read: bool,
@@ -224,29 +66,22 @@ pub struct ScopeSet {
 }
 
 impl ScopeSet {
-    /// Parses the stable CSV wire format (e.g. `"read,write"`), matching
-    /// [`Self::format`]'s output. Case-insensitive; blank/whitespace-only
-    /// segments and an empty string are ignored (-> no scopes granted).
-    /// Unrecognized tokens are silently ignored — defensive against
-    /// hand-edited or stale DB content (CONVENTIONS §2), never a parse
-    /// error.
+    /// Runtime parsing is resilient. Strict config validation is provided by
+    /// [`SettingKey::validate_value`].
     pub fn parse(csv: &str) -> Self {
         let mut scopes = Self::default();
-        for token in csv.split(',') {
-            match token.trim().to_ascii_lowercase().as_str() {
+        for token in csv.split(',').map(str::trim) {
+            match token {
                 "read" => scopes.read = true,
                 "write" => scopes.write = true,
                 "execute" => scopes.execute = true,
-                _ => {} // unknown/blank token — ignored, not an error
+                _ => {}
             }
         }
         scopes
     }
 
-    /// Formats back to the stable CSV wire format: only the granted scopes,
-    /// always in `read,write,execute` order (so the stored string is stable
-    /// regardless of grant order) — an empty [`ScopeSet`] formats to `""`.
-    pub fn format(&self) -> String {
+    pub fn format(self) -> String {
         let mut parts = Vec::with_capacity(3);
         if self.read {
             parts.push("read");
@@ -259,633 +94,914 @@ impl ScopeSet {
         }
         parts.join(",")
     }
+
+    fn validate(csv: &str) -> Result<(), &'static str> {
+        if csv
+            .split(',')
+            .map(str::trim)
+            .all(|token| token.is_empty() || matches!(token, "read" | "write" | "execute"))
+        {
+            Ok(())
+        } else {
+            Err("expected a comma-separated subset of read, write, execute")
+        }
+    }
 }
 
-/// Runtime state of the agent-mode automation interface (P8.6): whether it's
-/// enabled at all, and which [`ScopeSet`] is granted. `enabled: false` is the
-/// default (off by default, per the product's decided consent model) —
-/// distinct from whether the `agent-mode`/`automation` Cargo feature was
-/// compiled in at all (that's a build-time gate; this is the runtime one
-/// read from settings).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AutomationSettings {
     pub enabled: bool,
     pub scopes: ScopeSet,
 }
 
-// ---------------------------------------------------------------------------
-// SettingsService
-// ---------------------------------------------------------------------------
+/// Canonical known keys in `config.conman`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SettingKey {
+    Theme,
+    AccentColor,
+    Density,
+    TerminalTheme,
+    FontFamily,
+    FontSize,
+    ScrollbackLimit,
+    Command,
+    CommandArgs,
+    WorkingDirectory,
+    Startup,
+    RendererBackend,
+    PlainCopyPasteShortcuts,
+    CopyOnSelect,
+    ConfirmCloseActiveTab,
+    ConfirmQuitActiveConnections,
+    AutomationEnabled,
+    AutomationScopes,
+}
 
-/// Reads and writes [`AppSettings`] through a [`ConnectionRepository`].
-///
-/// The service is stateless — every call hits the DB.  This is fine because
-/// settings are read once on startup and written on change; there is no
-/// hot-path concern.
+pub const ALL_SETTING_KEYS: &[SettingKey] = &[
+    SettingKey::Theme,
+    SettingKey::AccentColor,
+    SettingKey::Density,
+    SettingKey::TerminalTheme,
+    SettingKey::FontFamily,
+    SettingKey::FontSize,
+    SettingKey::ScrollbackLimit,
+    SettingKey::Command,
+    SettingKey::CommandArgs,
+    SettingKey::WorkingDirectory,
+    SettingKey::Startup,
+    SettingKey::RendererBackend,
+    SettingKey::PlainCopyPasteShortcuts,
+    SettingKey::CopyOnSelect,
+    SettingKey::ConfirmCloseActiveTab,
+    SettingKey::ConfirmQuitActiveConnections,
+    SettingKey::AutomationEnabled,
+    SettingKey::AutomationScopes,
+];
+
+impl SettingKey {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Theme => "theme",
+            Self::AccentColor => "accent-color",
+            Self::Density => "density",
+            Self::TerminalTheme => "terminal-theme",
+            Self::FontFamily => "font-family",
+            Self::FontSize => "font-size",
+            Self::ScrollbackLimit => "scrollback-limit",
+            Self::Command => "command",
+            Self::CommandArgs => "command-args",
+            Self::WorkingDirectory => "working-directory",
+            Self::Startup => "startup",
+            Self::RendererBackend => "renderer-backend",
+            Self::PlainCopyPasteShortcuts => "plain-copy-paste-shortcuts",
+            Self::CopyOnSelect => "copy-on-select",
+            Self::ConfirmCloseActiveTab => "confirm-close-active-tab",
+            Self::ConfirmQuitActiveConnections => "confirm-quit-active-connections",
+            Self::AutomationEnabled => "automation-enabled",
+            Self::AutomationScopes => "automation-scopes",
+        }
+    }
+
+    /// Empty means reset to the built-in default and is valid for every key.
+    pub fn validate_value(self, value: &str) -> Result<(), AppConfigError> {
+        if value.is_empty() {
+            return Ok(());
+        }
+        let result: Result<(), String> = match self {
+            Self::Theme => parse_enum::<ThemeMode>(value),
+            Self::AccentColor => parse_enum::<AccentColor>(value),
+            Self::Density => parse_enum::<Density>(value),
+            Self::TerminalTheme => parse_enum::<TerminalTheme>(value),
+            Self::Startup => parse_enum::<StartupBehavior>(value),
+            Self::RendererBackend => parse_enum::<RendererBackend>(value),
+            Self::FontSize => parse_range(value, MIN_FONT_SIZE as usize, MAX_FONT_SIZE as usize),
+            Self::ScrollbackLimit => parse_range(value, 0, MAX_SCROLLBACK_LIMIT),
+            Self::PlainCopyPasteShortcuts
+            | Self::CopyOnSelect
+            | Self::ConfirmCloseActiveTab
+            | Self::ConfirmQuitActiveConnections
+            | Self::AutomationEnabled => parse_bool(value),
+            Self::AutomationScopes => ScopeSet::validate(value).map_err(str::to_owned),
+            Self::FontFamily | Self::Command | Self::CommandArgs | Self::WorkingDirectory => Ok(()),
+        };
+        result.map_err(|message| AppConfigError::InvalidValue {
+            key: self.as_str().to_owned(),
+            message,
+        })
+    }
+}
+
+impl FromStr for SettingKey {
+    type Err = ();
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        ALL_SETTING_KEYS
+            .iter()
+            .copied()
+            .find(|key| key.as_str() == value)
+            .ok_or(())
+    }
+}
+
+fn parse_enum<T: FromStr>(value: &str) -> Result<(), String>
+where
+    T::Err: Display,
+{
+    value
+        .parse::<T>()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn parse_range(value: &str, min: usize, max: usize) -> Result<(), String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("expected an integer from {min} through {max}"))?;
+    if (min..=max).contains(&parsed) {
+        Ok(())
+    } else {
+        Err(format!("expected an integer from {min} through {max}"))
+    }
+}
+
+fn parse_bool(value: &str) -> Result<(), String> {
+    match value {
+        "true" | "false" => Ok(()),
+        _ => Err("expected true or false".to_owned()),
+    }
+}
+
+/// Complete user-preference snapshot. It contains no machine-local UI state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppSettings {
+    pub theme: ThemeMode,
+    pub accent_color: AccentColor,
+    pub density: Density,
+    pub terminal_theme: TerminalTheme,
+    pub font_family: String,
+    pub font_size: i32,
+    pub scrollback_limit: usize,
+    pub command: String,
+    pub command_args: String,
+    pub working_directory: String,
+    pub startup: StartupBehavior,
+    pub renderer_backend: RendererBackend,
+    pub plain_copy_paste_shortcuts: bool,
+    pub copy_on_select: bool,
+    pub confirm_close_active_tab: bool,
+    pub confirm_quit_active_connections: bool,
+    pub automation: AutomationSettings,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            theme: ThemeMode::System,
+            accent_color: AccentColor::Blue,
+            density: Density::Compact,
+            terminal_theme: TerminalTheme::Dark,
+            font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
+            font_size: 14,
+            scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
+            command: String::new(),
+            command_args: String::new(),
+            working_directory: String::new(),
+            startup: StartupBehavior::Clean,
+            renderer_backend: RendererBackend::Auto,
+            plain_copy_paste_shortcuts: true,
+            copy_on_select: false,
+            confirm_close_active_tab: true,
+            confirm_quit_active_connections: true,
+            automation: AutomationSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingWarning {
+    pub key: SettingKey,
+    pub value: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedAppSettings {
+    pub settings: AppSettings,
+    pub warnings: Vec<SettingWarning>,
+}
+
+/// Typed facade over a line-preserving [`AppConfigStore`].
 pub struct SettingsService<'a> {
-    repo: &'a dyn ConnectionRepository,
+    store: &'a dyn AppConfigStore,
 }
 
 impl std::fmt::Debug for SettingsService<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SettingsService").finish_non_exhaustive()
     }
 }
 
 impl<'a> SettingsService<'a> {
-    /// Wrap `repo` in a service.
-    pub fn new(repo: &'a dyn ConnectionRepository) -> Self {
-        Self { repo }
+    pub fn new(store: &'a dyn AppConfigStore) -> Self {
+        Self { store }
     }
 
-    /// Load all settings from the repository.  Any missing key falls back to
-    /// the [`AppSettings::default`] value; any unparseable value does the same.
-    ///
-    /// # Errors
-    /// Returns [`RepositoryError`] only if the underlying DB call fails in a
-    /// way that is not simply "key not present".
-    pub fn load(&self) -> Result<AppSettings, RepositoryError> {
+    pub fn load(&self) -> Result<AppSettings, AppConfigError> {
+        Ok(self.load_with_warnings()?.settings)
+    }
+
+    /// Invalid hand-edited values fall back independently and are returned as
+    /// warnings so the caller can surface them without preventing startup.
+    pub fn load_with_warnings(&self) -> Result<LoadedAppSettings, AppConfigError> {
         let mut s = AppSettings::default();
-        s.theme_mode = self.read_i32(KEY_THEME_MODE, s.theme_mode)?;
-        s.accent_index = self.read_i32(KEY_ACCENT_INDEX, s.accent_index)?;
-        s.density = self.read_i32(KEY_DENSITY, s.density)?;
-        s.font_size = self.read_i32(KEY_FONT_SIZE, s.font_size)?;
-        s.font_family = self.read_string(KEY_FONT_FAMILY, &s.font_family)?;
-        s.shell_path = self.read_string(KEY_SHELL_PATH, &s.shell_path)?;
-        s.shell_args = self.read_string(KEY_SHELL_ARGS, &s.shell_args)?;
-        s.shell_cwd = self.read_string(KEY_SHELL_CWD, &s.shell_cwd)?;
-        s.startup_behavior = self.read_i32(KEY_STARTUP_BEHAVIOR, s.startup_behavior)?;
-        s.active_panel = self.read_i32(KEY_ACTIVE_PANEL, s.active_panel)?;
-        s.sidebar_collapsed = self.read_bool(KEY_SIDEBAR_COLLAPSED, s.sidebar_collapsed)?;
-        s.side_panel_width = self.read_i32(KEY_SIDE_PANEL_WIDTH, s.side_panel_width)?;
-        // Read the raw value (including "auto") for the Settings UI; the
-        // separate `load_renderer_backend` collapses "auto"/absent to None for
-        // the startup precedence logic.
-        s.renderer_backend = self.read_string(KEY_RENDERER_BACKEND, &s.renderer_backend)?;
-        Ok(s)
+        let mut warnings = Vec::new();
+        s.theme = self.read_parsed(SettingKey::Theme, s.theme, &mut warnings)?;
+        s.accent_color =
+            self.read_parsed(SettingKey::AccentColor, s.accent_color, &mut warnings)?;
+        s.density = self.read_parsed(SettingKey::Density, s.density, &mut warnings)?;
+        s.terminal_theme =
+            self.read_parsed(SettingKey::TerminalTheme, s.terminal_theme, &mut warnings)?;
+        s.font_family = self.read_string(SettingKey::FontFamily, &s.font_family)?;
+        s.font_size = self.read_i32(
+            SettingKey::FontSize,
+            s.font_size,
+            MIN_FONT_SIZE,
+            MAX_FONT_SIZE,
+            &mut warnings,
+        )?;
+        s.scrollback_limit = self.read_usize(
+            SettingKey::ScrollbackLimit,
+            s.scrollback_limit,
+            MAX_SCROLLBACK_LIMIT,
+            &mut warnings,
+        )?;
+        s.command = self.read_string(SettingKey::Command, &s.command)?;
+        s.command_args = self.read_string(SettingKey::CommandArgs, &s.command_args)?;
+        s.working_directory =
+            self.read_string(SettingKey::WorkingDirectory, &s.working_directory)?;
+        s.startup = self.read_parsed(SettingKey::Startup, s.startup, &mut warnings)?;
+        s.renderer_backend = self.read_parsed(
+            SettingKey::RendererBackend,
+            s.renderer_backend,
+            &mut warnings,
+        )?;
+        s.plain_copy_paste_shortcuts = self.read_bool(
+            SettingKey::PlainCopyPasteShortcuts,
+            s.plain_copy_paste_shortcuts,
+            &mut warnings,
+        )?;
+        s.copy_on_select =
+            self.read_bool(SettingKey::CopyOnSelect, s.copy_on_select, &mut warnings)?;
+        s.confirm_close_active_tab = self.read_bool(
+            SettingKey::ConfirmCloseActiveTab,
+            s.confirm_close_active_tab,
+            &mut warnings,
+        )?;
+        s.confirm_quit_active_connections = self.read_bool(
+            SettingKey::ConfirmQuitActiveConnections,
+            s.confirm_quit_active_connections,
+            &mut warnings,
+        )?;
+        s.automation.enabled = self.read_bool(
+            SettingKey::AutomationEnabled,
+            s.automation.enabled,
+            &mut warnings,
+        )?;
+        if let Some(raw) = self.raw(SettingKey::AutomationScopes)? {
+            if let Err(message) = ScopeSet::validate(&raw) {
+                warnings.push(warning(SettingKey::AutomationScopes, raw, message));
+            } else {
+                s.automation.scopes = ScopeSet::parse(&raw);
+            }
+        }
+        Ok(LoadedAppSettings {
+            settings: s,
+            warnings,
+        })
     }
 
-    /// Persist `theme_mode` (0 dark · 1 light · 2 system).
-    pub fn save_theme_mode(&self, v: i32) -> Result<(), RepositoryError> {
-        self.repo.set_setting(KEY_THEME_MODE, &v.to_string())
-    }
-
-    /// Persist `accent_index`.
-    pub fn save_accent_index(&self, v: i32) -> Result<(), RepositoryError> {
-        self.repo.set_setting(KEY_ACCENT_INDEX, &v.to_string())
-    }
-
-    /// Persist `density` (0 compact · 1 cosy).
-    pub fn save_density(&self, v: i32) -> Result<(), RepositoryError> {
-        self.repo.set_setting(KEY_DENSITY, &v.to_string())
-    }
-
-    /// Persist terminal `font_size`.
-    pub fn save_font_size(&self, v: i32) -> Result<(), RepositoryError> {
-        self.repo.set_setting(KEY_FONT_SIZE, &v.to_string())
-    }
-
-    /// Persist the effective terminal font family.
-    pub fn save_font_family(&self, v: &str) -> Result<(), RepositoryError> {
-        self.repo.set_setting(KEY_FONT_FAMILY, v)
-    }
-
-    /// Persist default `shell_path`.
-    pub fn save_shell_path(&self, v: &str) -> Result<(), RepositoryError> {
-        self.repo.set_setting(KEY_SHELL_PATH, v)
-    }
-
-    /// Persist default `shell_args`.
-    pub fn save_shell_args(&self, v: &str) -> Result<(), RepositoryError> {
-        self.repo.set_setting(KEY_SHELL_ARGS, v)
-    }
-
-    /// Persist default `shell_cwd`.
-    pub fn save_shell_cwd(&self, v: &str) -> Result<(), RepositoryError> {
-        self.repo.set_setting(KEY_SHELL_CWD, v)
-    }
-
-    /// Persist `startup_behavior`.
-    pub fn save_startup_behavior(&self, v: i32) -> Result<(), RepositoryError> {
-        self.repo.set_setting(KEY_STARTUP_BEHAVIOR, &v.to_string())
-    }
-
-    /// Persist `active_panel`.
-    pub fn save_active_panel(&self, v: i32) -> Result<(), RepositoryError> {
-        self.repo.set_setting(KEY_ACTIVE_PANEL, &v.to_string())
-    }
-
-    /// Persist `sidebar_collapsed`.
-    pub fn save_sidebar_collapsed(&self, v: bool) -> Result<(), RepositoryError> {
-        self.repo
-            .set_setting(KEY_SIDEBAR_COLLAPSED, if v { "1" } else { "0" })
-    }
-
-    /// Persist `side_panel_width` (logical px).
-    pub fn save_side_panel_width(&self, v: i32) -> Result<(), RepositoryError> {
-        self.repo.set_setting(KEY_SIDE_PANEL_WIDTH, &v.to_string())
-    }
-
-    /// Read whether first-run demo data has been seeded.
+    /// Persist all known preferences as one atomic document update.
     ///
-    /// Returns `false` when the key is absent (pre-existing DB) or unparseable.
-    pub fn load_first_run_seeded(&self) -> Result<bool, RepositoryError> {
-        self.read_bool(KEY_FIRST_RUN_SEEDED, false)
+    /// Every value is validated before the store is called. The adapter then
+    /// applies the complete batch under its own document mutation boundary, so
+    /// neither validation nor I/O failure can expose a partially updated
+    /// settings snapshot.
+    pub fn save(&self, s: &AppSettings) -> Result<(), AppConfigError> {
+        let values = serialize_settings(s);
+        for (key, value) in &values {
+            key.validate_value(value)?;
+        }
+        let raw_values = values
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        self.store.set_values(&raw_values)
     }
 
-    /// Mark first-run demo data as seeded (persists "1").
-    pub fn save_first_run_seeded(&self) -> Result<(), RepositoryError> {
-        self.repo.set_setting(KEY_FIRST_RUN_SEEDED, "1")
+    pub fn set(&self, key: SettingKey, value: &str) -> Result<(), AppConfigError> {
+        key.validate_value(value)?;
+        self.store.set_value(key.as_str(), value)
     }
 
-    /// Persist the "restore last session" tab snapshot (P6.14). Always
-    /// writes, even an empty snapshot — [`load_session_tabs`] treats an
-    /// empty `tabs` list the same as "absent".
-    ///
-    /// [`load_session_tabs`]: Self::load_session_tabs
-    pub fn save_session_tabs(&self, snapshot: &SessionTabSnapshot) -> Result<(), RepositoryError> {
-        // Our own struct, our own serializer -- this can't fail in practice,
-        // but never panic on it (CONVENTIONS §2): fall back to an empty
-        // snapshot's JSON rather than unwrap.
-        let json = serde_json::to_string(snapshot).unwrap_or_else(|_| "{\"tabs\":[]}".to_owned());
-        self.repo.set_setting(KEY_SESSION_TABS, &json)
+    pub fn set_bool(&self, key: SettingKey, value: bool) -> Result<(), AppConfigError> {
+        self.set(key, if value { "true" } else { "false" })
     }
 
-    /// Load the "restore last session" tab snapshot. Returns `Ok(None)` when
-    /// the key is absent, the JSON is malformed (defensively parsed --
-    /// CONVENTIONS §2: stored files are untrusted), or the snapshot's tab
-    /// list is empty.
-    pub fn load_session_tabs(&self) -> Result<Option<SessionTabSnapshot>, RepositoryError> {
-        let Some(raw) = self.repo.get_setting(KEY_SESSION_TABS)? else {
-            return Ok(None);
+    pub fn load_automation(&self) -> Result<AutomationSettings, AppConfigError> {
+        Ok(self.load()?.automation)
+    }
+
+    fn raw(&self, key: SettingKey) -> Result<Option<String>, AppConfigError> {
+        Ok(self
+            .store
+            .get_value(key.as_str())?
+            .filter(|value| !value.is_empty()))
+    }
+    fn read_string(&self, key: SettingKey, default: &str) -> Result<String, AppConfigError> {
+        Ok(self.raw(key)?.unwrap_or_else(|| default.to_owned()))
+    }
+    fn read_parsed<T: FromStr>(
+        &self,
+        key: SettingKey,
+        default: T,
+        warnings: &mut Vec<SettingWarning>,
+    ) -> Result<T, AppConfigError>
+    where
+        T::Err: Display,
+    {
+        let Some(raw) = self.raw(key)? else {
+            return Ok(default);
         };
-        match serde_json::from_str::<SessionTabSnapshot>(&raw) {
-            Ok(snap) if !snap.tabs.is_empty() => Ok(Some(snap)),
-            _ => Ok(None),
+        match raw.parse() {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                warnings.push(warning(key, raw, &error.to_string()));
+                Ok(default)
+            }
         }
     }
-
-    /// Cached renderer backend. `Ok(None)` when absent or "auto" (= probe each
-    /// launch); otherwise the persisted backend string ("software" |
-    /// "accelerated").
-    pub fn load_renderer_backend(&self) -> Result<Option<String>, RepositoryError> {
-        Ok(self
-            .repo
-            .get_setting(KEY_RENDERER_BACKEND)?
-            .filter(|v| v != "auto" && !v.is_empty()))
+    fn read_bool(
+        &self,
+        key: SettingKey,
+        default: bool,
+        warnings: &mut Vec<SettingWarning>,
+    ) -> Result<bool, AppConfigError> {
+        let Some(raw) = self.raw(key)? else {
+            return Ok(default);
+        };
+        match raw.as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => {
+                warnings.push(warning(key, raw, "expected true or false"));
+                Ok(default)
+            }
+        }
     }
-
-    /// Persist renderer backend ("software" | "accelerated" | "auto").
-    pub fn save_renderer_backend(&self, v: &str) -> Result<(), RepositoryError> {
-        self.repo.set_setting(KEY_RENDERER_BACKEND, v)
+    fn read_i32(
+        &self,
+        key: SettingKey,
+        default: i32,
+        min: i32,
+        max: i32,
+        warnings: &mut Vec<SettingWarning>,
+    ) -> Result<i32, AppConfigError> {
+        let Some(raw) = self.raw(key)? else {
+            return Ok(default);
+        };
+        match raw.parse::<i32>() {
+            Ok(value) if (min..=max).contains(&value) => Ok(value),
+            _ => {
+                warnings.push(warning(key, raw, "integer is outside the supported range"));
+                Ok(default)
+            }
+        }
     }
-
-    /// Load the agent-mode automation interface's runtime state (P8.6):
-    /// whether it's enabled and which scopes are granted. Absent/unparseable
-    /// state collapses to [`AutomationSettings::default`] (disabled, no
-    /// scopes) — never a hard error on stale/malformed DB content.
-    pub fn load_automation(&self) -> Result<AutomationSettings, RepositoryError> {
-        let enabled = self.read_bool(KEY_AUTOMATION_ENABLED, false)?;
-        let scopes = ScopeSet::parse(&self.read_string(KEY_AUTOMATION_SCOPES, "")?);
-        Ok(AutomationSettings { enabled, scopes })
-    }
-
-    /// Persist the automation master enable/disable.
-    pub fn save_automation_enabled(&self, v: bool) -> Result<(), RepositoryError> {
-        self.repo
-            .set_setting(KEY_AUTOMATION_ENABLED, if v { "1" } else { "0" })
-    }
-
-    /// Persist the granted [`ScopeSet`].
-    pub fn save_automation_scopes(&self, scopes: ScopeSet) -> Result<(), RepositoryError> {
-        self.repo
-            .set_setting(KEY_AUTOMATION_SCOPES, &scopes.format())
-    }
-
-    // ── private helpers ────────────────────────────────────────────────────
-
-    fn read_i32(&self, key: &str, default: i32) -> Result<i32, RepositoryError> {
-        Ok(self
-            .repo
-            .get_setting(key)?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(default))
-    }
-
-    fn read_bool(&self, key: &str, default: bool) -> Result<bool, RepositoryError> {
-        Ok(self
-            .repo
-            .get_setting(key)?
-            .map(|v| v == "1")
-            .unwrap_or(default))
-    }
-
-    fn read_string(&self, key: &str, default: &str) -> Result<String, RepositoryError> {
-        Ok(self
-            .repo
-            .get_setting(key)?
-            .unwrap_or_else(|| default.to_owned()))
+    fn read_usize(
+        &self,
+        key: SettingKey,
+        default: usize,
+        max: usize,
+        warnings: &mut Vec<SettingWarning>,
+    ) -> Result<usize, AppConfigError> {
+        let Some(raw) = self.raw(key)? else {
+            return Ok(default);
+        };
+        match raw.parse::<usize>() {
+            Ok(value) if value <= max => Ok(value),
+            _ => {
+                warnings.push(warning(key, raw, "integer is outside the supported range"));
+                Ok(default)
+            }
+        }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+fn serialize_settings(settings: &AppSettings) -> Vec<(SettingKey, String)> {
+    vec![
+        (SettingKey::Theme, settings.theme.to_string()),
+        (SettingKey::AccentColor, settings.accent_color.to_string()),
+        (SettingKey::Density, settings.density.to_string()),
+        (
+            SettingKey::TerminalTheme,
+            settings.terminal_theme.to_string(),
+        ),
+        (SettingKey::FontFamily, settings.font_family.clone()),
+        (SettingKey::FontSize, settings.font_size.to_string()),
+        (
+            SettingKey::ScrollbackLimit,
+            settings.scrollback_limit.to_string(),
+        ),
+        (SettingKey::Command, settings.command.clone()),
+        (SettingKey::CommandArgs, settings.command_args.clone()),
+        (
+            SettingKey::WorkingDirectory,
+            settings.working_directory.clone(),
+        ),
+        (SettingKey::Startup, settings.startup.to_string()),
+        (
+            SettingKey::RendererBackend,
+            settings.renderer_backend.to_string(),
+        ),
+        (
+            SettingKey::PlainCopyPasteShortcuts,
+            bool_wire(settings.plain_copy_paste_shortcuts).to_owned(),
+        ),
+        (
+            SettingKey::CopyOnSelect,
+            bool_wire(settings.copy_on_select).to_owned(),
+        ),
+        (
+            SettingKey::ConfirmCloseActiveTab,
+            bool_wire(settings.confirm_close_active_tab).to_owned(),
+        ),
+        (
+            SettingKey::ConfirmQuitActiveConnections,
+            bool_wire(settings.confirm_quit_active_connections).to_owned(),
+        ),
+        (
+            SettingKey::AutomationEnabled,
+            bool_wire(settings.automation.enabled).to_owned(),
+        ),
+        (
+            SettingKey::AutomationScopes,
+            settings.automation.scopes.format(),
+        ),
+    ]
+}
+
+fn warning(key: SettingKey, value: String, message: &str) -> SettingWarning {
+    SettingWarning {
+        key,
+        value,
+        message: message.to_owned(),
+    }
+}
+
+// Machine-local keys are intentionally unrelated to public config keys.
+pub const STATE_ACTIVE_PANEL: &str = "ui.active-panel";
+pub const STATE_SIDEBAR_COLLAPSED: &str = "ui.sidebar-collapsed";
+pub const STATE_SIDE_PANEL_WIDTH: &str = "ui.side-panel-width";
+pub const STATE_FIRST_RUN_SEEDED: &str = "app.first-run-seeded";
+pub const STATE_SESSION_TABS: &str = "session.tabs";
+pub const STATE_RENDERER_PROBE_CACHE: &str = "render.probe-cache";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppState {
+    pub active_panel: i32,
+    pub sidebar_collapsed: bool,
+    pub side_panel_width: i32,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            active_panel: 0,
+            sidebar_collapsed: false,
+            side_panel_width: 252,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionTabEntry {
+    Local,
+    Connection(ConnectionId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SessionTabSnapshot {
+    pub tabs: Vec<SessionTabEntry>,
+    pub active: usize,
+}
+
+pub struct AppStateService<'a> {
+    repo: &'a dyn AppStateRepository,
+}
+
+impl std::fmt::Debug for AppStateService<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppStateService").finish_non_exhaustive()
+    }
+}
+
+impl<'a> AppStateService<'a> {
+    pub fn new(repo: &'a dyn AppStateRepository) -> Self {
+        Self { repo }
+    }
+    pub fn load(&self) -> Result<AppState, RepositoryError> {
+        let d = AppState::default();
+        Ok(AppState {
+            active_panel: self.read_i32(STATE_ACTIVE_PANEL, d.active_panel)?,
+            sidebar_collapsed: self.read_bool(STATE_SIDEBAR_COLLAPSED, d.sidebar_collapsed)?,
+            side_panel_width: self.read_i32(STATE_SIDE_PANEL_WIDTH, d.side_panel_width)?,
+        })
+    }
+    pub fn save_active_panel(&self, value: i32) -> Result<(), RepositoryError> {
+        self.repo.set_state(STATE_ACTIVE_PANEL, &value.to_string())
+    }
+    pub fn save_sidebar_collapsed(&self, value: bool) -> Result<(), RepositoryError> {
+        self.repo
+            .set_state(STATE_SIDEBAR_COLLAPSED, bool_wire(value))
+    }
+    pub fn save_side_panel_width(&self, value: i32) -> Result<(), RepositoryError> {
+        self.repo
+            .set_state(STATE_SIDE_PANEL_WIDTH, &value.to_string())
+    }
+    pub fn load_first_run_seeded(&self) -> Result<bool, RepositoryError> {
+        self.read_bool(STATE_FIRST_RUN_SEEDED, false)
+    }
+    pub fn save_first_run_seeded(&self) -> Result<(), RepositoryError> {
+        self.repo.set_state(STATE_FIRST_RUN_SEEDED, "true")
+    }
+    pub fn save_session_tabs(&self, snapshot: &SessionTabSnapshot) -> Result<(), RepositoryError> {
+        let json = serde_json::to_string(snapshot)
+            .map_err(|error| RepositoryError::Backend(error.to_string()))?;
+        self.repo.set_state(STATE_SESSION_TABS, &json)
+    }
+    pub fn load_session_tabs(&self) -> Result<Option<SessionTabSnapshot>, RepositoryError> {
+        let Some(raw) = self.repo.get_state(STATE_SESSION_TABS)? else {
+            return Ok(None);
+        };
+        Ok(serde_json::from_str::<SessionTabSnapshot>(&raw)
+            .ok()
+            .filter(|snapshot| !snapshot.tabs.is_empty()))
+    }
+    pub fn load_renderer_probe_cache(&self) -> Result<Option<RendererBackend>, RepositoryError> {
+        Ok(self
+            .repo
+            .get_state(STATE_RENDERER_PROBE_CACHE)?
+            .and_then(|raw| raw.parse().ok())
+            .filter(|value| *value != RendererBackend::Auto))
+    }
+    pub fn save_renderer_probe_cache(
+        &self,
+        backend: RendererBackend,
+    ) -> Result<(), RepositoryError> {
+        if backend == RendererBackend::Auto {
+            self.clear_renderer_probe_cache()
+        } else {
+            self.repo
+                .set_state(STATE_RENDERER_PROBE_CACHE, backend.as_str())
+        }
+    }
+    pub fn clear_renderer_probe_cache(&self) -> Result<(), RepositoryError> {
+        self.repo.delete_state(STATE_RENDERER_PROBE_CACHE)
+    }
+    fn read_i32(&self, key: &str, default: i32) -> Result<i32, RepositoryError> {
+        Ok(self
+            .repo
+            .get_state(key)?
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(default))
+    }
+    fn read_bool(&self, key: &str, default: bool) -> Result<bool, RepositoryError> {
+        Ok(self
+            .repo
+            .get_state(key)?
+            .and_then(|raw| match raw.as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            })
+            .unwrap_or(default))
+    }
+}
+
+fn bool_wire(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connection::{Connection, Group};
-    use crate::credential::{Credential, CredentialFolder};
-    use crate::error::RepositoryError;
-    use crate::ids::{CredentialFolderId, CredentialId, GroupId};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    /// Minimal in-memory [`ConnectionRepository`] fake, settings-only (P6.15:
-    /// `app_settings` moved from `cm-storage` to `cm-core`, which cannot
-    /// depend on `cm-storage::SqliteRepository` — that would be a
-    /// cm-core -> cm-storage dependency, the wrong direction). Every method
-    /// besides `get_setting`/`set_setting` is a harmless stub; nothing in
-    /// this test module calls them (mirrors the stub style already used by
-    /// `cm-core/tests/domain.rs`'s own `InMemoryRepo`).
     #[derive(Default)]
-    struct FakeRepo {
-        settings: Mutex<HashMap<String, String>>,
-    }
-
-    impl ConnectionRepository for FakeRepo {
-        fn list_connections(&self) -> Result<Vec<Connection>, RepositoryError> {
-            Ok(Vec::new())
+    struct MemoryConfig(Mutex<HashMap<String, String>>);
+    impl AppConfigStore for MemoryConfig {
+        fn get_value(&self, key: &str) -> Result<Option<String>, AppConfigError> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
         }
-        fn get_connection(&self, _id: ConnectionId) -> Result<Option<Connection>, RepositoryError> {
-            Ok(None)
-        }
-        fn upsert_connection(&self, _conn: &Connection) -> Result<ConnectionId, RepositoryError> {
-            Err(RepositoryError::Backend(
-                "not implemented in FakeRepo".into(),
-            ))
-        }
-        fn delete_connection(&self, _id: ConnectionId) -> Result<(), RepositoryError> {
+        fn set_value(&self, key: &str, value: &str) -> Result<(), AppConfigError> {
+            self.0.lock().unwrap().insert(key.into(), value.into());
             Ok(())
         }
-        fn move_connection(
-            &self,
-            _id: ConnectionId,
-            _new_group: Option<GroupId>,
-            _new_sort: i64,
-        ) -> Result<(), RepositoryError> {
+        fn set_values(&self, values: &[(&str, &str)]) -> Result<(), AppConfigError> {
+            let mut stored = self.0.lock().unwrap();
+            for (key, value) in values {
+                stored.insert((*key).to_owned(), (*value).to_owned());
+            }
             Ok(())
         }
-        fn list_groups(&self) -> Result<Vec<Group>, RepositoryError> {
-            Ok(Vec::new())
+        fn document_text(&self) -> Result<String, AppConfigError> {
+            Ok(String::new())
         }
-        fn get_group(&self, _id: GroupId) -> Result<Option<Group>, RepositoryError> {
-            Ok(None)
-        }
-        fn upsert_group(&self, _group: &Group) -> Result<GroupId, RepositoryError> {
-            Err(RepositoryError::Backend(
-                "not implemented in FakeRepo".into(),
-            ))
-        }
-        fn delete_group(&self, _id: GroupId) -> Result<(), RepositoryError> {
+        fn replace_document(&self, _document: &str) -> Result<(), AppConfigError> {
             Ok(())
-        }
-        fn move_group(
-            &self,
-            _id: GroupId,
-            _new_parent: Option<GroupId>,
-            _new_sort: i64,
-        ) -> Result<(), RepositoryError> {
-            Ok(())
-        }
-        fn list_credentials(&self) -> Result<Vec<Credential>, RepositoryError> {
-            Ok(Vec::new())
-        }
-        fn get_credential(&self, _id: CredentialId) -> Result<Option<Credential>, RepositoryError> {
-            Ok(None)
-        }
-        fn upsert_credential(&self, _cred: &Credential) -> Result<CredentialId, RepositoryError> {
-            Err(RepositoryError::Backend(
-                "not implemented in FakeRepo".into(),
-            ))
-        }
-        fn delete_credential(&self, _id: CredentialId) -> Result<(), RepositoryError> {
-            Ok(())
-        }
-        fn list_credential_folders(&self) -> Result<Vec<CredentialFolder>, RepositoryError> {
-            Ok(Vec::new())
-        }
-        fn get_credential_folder(
-            &self,
-            _id: CredentialFolderId,
-        ) -> Result<Option<CredentialFolder>, RepositoryError> {
-            Ok(None)
-        }
-        fn upsert_credential_folder(
-            &self,
-            _folder: &CredentialFolder,
-        ) -> Result<CredentialFolderId, RepositoryError> {
-            Err(RepositoryError::Backend(
-                "not implemented in FakeRepo".into(),
-            ))
-        }
-        fn delete_credential_folder(&self, _id: CredentialFolderId) -> Result<(), RepositoryError> {
-            Ok(())
-        }
-        fn move_credential_folder(
-            &self,
-            _id: CredentialFolderId,
-            _new_parent: Option<CredentialFolderId>,
-            _new_sort: i64,
-        ) -> Result<(), RepositoryError> {
-            Ok(())
-        }
-        fn resolve_effective_credential(
-            &self,
-            _conn_id: ConnectionId,
-        ) -> Result<Option<CredentialId>, RepositoryError> {
-            Ok(None)
-        }
-        fn get_setting(&self, key: &str) -> Result<Option<String>, RepositoryError> {
-            Ok(self.settings.lock().unwrap().get(key).cloned())
-        }
-        fn set_setting(&self, key: &str, value: &str) -> Result<(), RepositoryError> {
-            self.settings
-                .lock()
-                .unwrap()
-                .insert(key.to_owned(), value.to_owned());
-            Ok(())
-        }
-        fn list_settings(&self) -> Result<Vec<(String, String)>, RepositoryError> {
-            Ok(self
-                .settings
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect())
-        }
-        fn record_recent(&self, _id: ConnectionId, _opened_at: i64) -> Result<(), RepositoryError> {
-            Ok(())
-        }
-        fn list_recents(&self, _limit: usize) -> Result<Vec<(ConnectionId, i64)>, RepositoryError> {
-            Ok(Vec::new())
         }
     }
 
-    fn fresh() -> FakeRepo {
-        FakeRepo::default()
+    #[derive(Default)]
+    struct MemoryState(Mutex<HashMap<String, String>>);
+    impl AppStateRepository for MemoryState {
+        fn get_state(&self, key: &str) -> Result<Option<String>, RepositoryError> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+        fn set_state(&self, key: &str, value: &str) -> Result<(), RepositoryError> {
+            self.0.lock().unwrap().insert(key.into(), value.into());
+            Ok(())
+        }
+        fn delete_state(&self, key: &str) -> Result<(), RepositoryError> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
     }
 
     #[test]
-    fn defaults_returned_on_empty_db() {
-        let repo = fresh();
-        let svc = SettingsService::new(&repo);
-        let s = svc.load().expect("load");
-        assert_eq!(s.theme_mode, 2);
-        assert_eq!(s.density, 0);
-        assert_eq!(s.font_size, 13);
-        assert_eq!(s.font_family, DEFAULT_TERMINAL_FONT_FAMILY);
-        assert!(!s.sidebar_collapsed);
-        assert_eq!(s.active_panel, 0);
-        assert_eq!(s.side_panel_width, 252);
+    fn product_defaults_are_pinned() {
+        let settings = AppSettings::default();
+        assert_eq!(settings.theme, ThemeMode::System);
+        assert_eq!(settings.accent_color, AccentColor::Blue);
+        assert_eq!(settings.density, Density::Compact);
+        assert_eq!(settings.terminal_theme, TerminalTheme::Dark);
+        assert_eq!(settings.font_size, 14);
+        assert_eq!(settings.scrollback_limit, 10_000);
+        assert!(settings.plain_copy_paste_shortcuts);
+        assert!(!settings.copy_on_select);
+        assert!(settings.confirm_close_active_tab);
+        assert!(settings.confirm_quit_active_connections);
+        assert_eq!(settings.renderer_backend, RendererBackend::Auto);
+        assert_eq!(settings.automation, AutomationSettings::default());
     }
 
     #[test]
-    fn round_trip_all_fields() {
-        let repo = fresh();
-        let svc = SettingsService::new(&repo);
-
-        svc.save_theme_mode(1).unwrap();
-        svc.save_accent_index(3).unwrap();
-        svc.save_density(1).unwrap();
-        svc.save_font_size(16).unwrap();
-        svc.save_font_family("Cascadia Mono").unwrap();
-        svc.save_shell_path("/usr/bin/zsh").unwrap();
-        svc.save_shell_args("--login").unwrap();
-        svc.save_shell_cwd("/home/user").unwrap();
-        svc.save_startup_behavior(1).unwrap();
-        svc.save_active_panel(2).unwrap();
-        svc.save_sidebar_collapsed(true).unwrap();
-        svc.save_side_panel_width(340).unwrap();
-
-        let s = svc.load().unwrap();
-        assert_eq!(s.theme_mode, 1);
-        assert_eq!(s.accent_index, 3);
-        assert_eq!(s.density, 1);
-        assert_eq!(s.font_size, 16);
-        assert_eq!(s.font_family, "Cascadia Mono");
-        assert_eq!(s.shell_path, "/usr/bin/zsh");
-        assert_eq!(s.shell_args, "--login");
-        assert_eq!(s.shell_cwd, "/home/user");
-        assert_eq!(s.startup_behavior, 1);
-        assert_eq!(s.active_panel, 2);
-        assert!(s.sidebar_collapsed);
-        assert_eq!(s.side_panel_width, 340);
-    }
-
-    #[test]
-    fn side_panel_width_round_trips_independently() {
-        let repo = fresh();
-        let svc = SettingsService::new(&repo);
-        assert_eq!(svc.load().unwrap().side_panel_width, 252, "default");
-        svc.save_side_panel_width(180).unwrap();
-        assert_eq!(svc.load().unwrap().side_panel_width, 180);
-        svc.save_side_panel_width(480).unwrap();
-        assert_eq!(svc.load().unwrap().side_panel_width, 480);
-    }
-
-    #[test]
-    fn corrupt_value_falls_back_to_default() {
-        let repo = fresh();
-        repo.set_setting(KEY_FONT_SIZE, "not-a-number").unwrap();
-        let svc = SettingsService::new(&repo);
-        let s = svc.load().unwrap();
-        assert_eq!(s.font_size, 13, "corrupt value should fall back to default");
-    }
-
-    #[test]
-    fn overwrite_updates_value() {
-        let repo = fresh();
-        let svc = SettingsService::new(&repo);
-        svc.save_theme_mode(0).unwrap();
-        svc.save_theme_mode(1).unwrap();
-        let s = svc.load().unwrap();
-        assert_eq!(s.theme_mode, 1);
-    }
-
-    // ── P6.14: session-tab restore snapshot ─────────────────────────────
-
-    #[test]
-    fn load_session_tabs_absent_is_none() {
-        let repo = fresh();
-        let svc = SettingsService::new(&repo);
-        assert_eq!(svc.load_session_tabs().unwrap(), None);
-    }
-
-    #[test]
-    fn session_tabs_round_trip() {
-        let repo = fresh();
-        let svc = SettingsService::new(&repo);
-        let snap = SessionTabSnapshot {
-            tabs: vec![
-                SessionTabEntry::Connection(ConnectionId::new(7)),
-                SessionTabEntry::Local,
-                SessionTabEntry::Connection(ConnectionId::new(3)),
-            ],
-            active: 1,
+    fn all_settings_round_trip_in_canonical_form() {
+        let store = MemoryConfig::default();
+        let service = SettingsService::new(&store);
+        let expected = AppSettings {
+            theme: ThemeMode::Dark,
+            accent_color: AccentColor::Purple,
+            density: Density::Cosy,
+            terminal_theme: TerminalTheme::Light,
+            font_family: "Cascadia Mono".into(),
+            font_size: 21,
+            scrollback_limit: 32_000,
+            command: "pwsh.exe".into(),
+            command_args: "-NoLogo".into(),
+            working_directory: "C:\\work".into(),
+            startup: StartupBehavior::Restore,
+            renderer_backend: RendererBackend::Software,
+            plain_copy_paste_shortcuts: false,
+            copy_on_select: true,
+            confirm_close_active_tab: false,
+            confirm_quit_active_connections: false,
+            automation: AutomationSettings {
+                enabled: true,
+                scopes: ScopeSet {
+                    read: true,
+                    write: false,
+                    execute: true,
+                },
+            },
         };
-        svc.save_session_tabs(&snap).unwrap();
-        let loaded = svc.load_session_tabs().unwrap().expect("snapshot present");
-        assert_eq!(loaded, snap);
+        service.save(&expected).unwrap();
+        assert_eq!(service.load().unwrap(), expected);
+        assert_eq!(store.0.lock().unwrap()["automation-scopes"], "read,execute");
     }
 
     #[test]
-    fn saving_an_empty_snapshot_loads_as_none() {
-        let repo = fresh();
-        let svc = SettingsService::new(&repo);
-        svc.save_session_tabs(&SessionTabSnapshot::default())
-            .unwrap();
-        assert_eq!(svc.load_session_tabs().unwrap(), None);
-    }
-
-    #[test]
-    fn corrupt_session_tabs_json_falls_back_to_none() {
-        let repo = fresh();
-        repo.set_setting(KEY_SESSION_TABS, "not json").unwrap();
-        let svc = SettingsService::new(&repo);
-        assert_eq!(svc.load_session_tabs().unwrap(), None);
-    }
-
-    // ── P7.1: cached renderer backend ────────────────────────────────────
-
-    #[test]
-    fn renderer_backend_absent_is_none() {
-        let repo = fresh();
-        let svc = SettingsService::new(&repo);
-        assert_eq!(svc.load_renderer_backend().unwrap(), None);
-    }
-
-    #[test]
-    fn renderer_backend_round_trips() {
-        let repo = fresh();
-        let svc = SettingsService::new(&repo);
-        svc.save_renderer_backend("software").unwrap();
-        assert_eq!(
-            svc.load_renderer_backend().unwrap(),
-            Some("software".to_owned())
-        );
-        svc.save_renderer_backend("accelerated").unwrap();
-        assert_eq!(
-            svc.load_renderer_backend().unwrap(),
-            Some("accelerated".to_owned())
-        );
-    }
-
-    #[test]
-    fn renderer_backend_auto_or_empty_is_none() {
-        let repo = fresh();
-        let svc = SettingsService::new(&repo);
-        svc.save_renderer_backend("auto").unwrap();
-        assert_eq!(
-            svc.load_renderer_backend().unwrap(),
-            None,
-            "\"auto\" means probe each launch"
-        );
-        svc.save_renderer_backend("").unwrap();
-        assert_eq!(svc.load_renderer_backend().unwrap(), None, "empty is None");
-    }
-
-    // ── P8.6: automation scopes ──────────────────────────────────────────
-
-    #[test]
-    fn scope_set_parses_the_csv_wire_format() {
-        assert_eq!(
-            ScopeSet::parse("read,write"),
-            ScopeSet {
-                read: true,
-                write: true,
-                execute: false
+    fn failed_bulk_save_leaves_the_original_snapshot_untouched() {
+        struct FailingBatchStore {
+            values: Mutex<HashMap<String, String>>,
+            single_writes: Mutex<usize>,
+            batch_writes: Mutex<usize>,
+        }
+        impl AppConfigStore for FailingBatchStore {
+            fn get_value(&self, key: &str) -> Result<Option<String>, AppConfigError> {
+                Ok(self.values.lock().unwrap().get(key).cloned())
             }
-        );
-        assert_eq!(
-            ScopeSet::parse("execute"),
-            ScopeSet {
-                read: false,
-                write: false,
-                execute: true
+            fn set_value(&self, _key: &str, _value: &str) -> Result<(), AppConfigError> {
+                *self.single_writes.lock().unwrap() += 1;
+                unreachable!("bulk save must not degrade into individual writes")
             }
-        );
-        assert_eq!(ScopeSet::parse(""), ScopeSet::default());
+            fn set_values(&self, _values: &[(&str, &str)]) -> Result<(), AppConfigError> {
+                *self.batch_writes.lock().unwrap() += 1;
+                Err(AppConfigError::Backend(
+                    "injected atomic-write failure".into(),
+                ))
+            }
+            fn document_text(&self) -> Result<String, AppConfigError> {
+                Ok(String::new())
+            }
+            fn replace_document(&self, _document: &str) -> Result<(), AppConfigError> {
+                unreachable!("typed bulk save uses the atomic batch operation")
+            }
+        }
+
+        let store = FailingBatchStore {
+            values: Mutex::new(HashMap::from([
+                ("theme".to_owned(), "light".to_owned()),
+                ("font-size".to_owned(), "17".to_owned()),
+                ("future-setting".to_owned(), "preserved".to_owned()),
+            ])),
+            single_writes: Mutex::new(0),
+            batch_writes: Mutex::new(0),
+        };
+        let before = store.values.lock().unwrap().clone();
+        let changed = AppSettings {
+            theme: ThemeMode::Dark,
+            font_size: 24,
+            ..AppSettings::default()
+        };
+
+        assert!(SettingsService::new(&store).save(&changed).is_err());
+        assert_eq!(*store.single_writes.lock().unwrap(), 0);
+        assert_eq!(*store.batch_writes.lock().unwrap(), 1);
+        assert_eq!(*store.values.lock().unwrap(), before);
     }
 
     #[test]
-    fn scope_set_parse_is_case_insensitive_and_tolerates_whitespace_and_junk() {
-        assert_eq!(
-            ScopeSet::parse(" Read , WRITE ,bogus, "),
-            ScopeSet {
-                read: true,
-                write: true,
-                execute: false
+    fn invalid_bulk_snapshot_is_rejected_before_the_store_is_called() {
+        struct PanicStore;
+        impl AppConfigStore for PanicStore {
+            fn get_value(&self, _key: &str) -> Result<Option<String>, AppConfigError> {
+                unreachable!()
             }
+            fn set_value(&self, _key: &str, _value: &str) -> Result<(), AppConfigError> {
+                unreachable!()
+            }
+            fn set_values(&self, _values: &[(&str, &str)]) -> Result<(), AppConfigError> {
+                unreachable!("validation must finish before touching the store")
+            }
+            fn document_text(&self) -> Result<String, AppConfigError> {
+                unreachable!()
+            }
+            fn replace_document(&self, _document: &str) -> Result<(), AppConfigError> {
+                unreachable!()
+            }
+        }
+        let invalid = AppSettings {
+            scrollback_limit: MAX_SCROLLBACK_LIMIT + 1,
+            ..AppSettings::default()
+        };
+        assert!(SettingsService::new(&PanicStore).save(&invalid).is_err());
+    }
+
+    #[test]
+    fn empty_values_reset_and_invalid_values_warn_per_key() {
+        let store = MemoryConfig::default();
+        for (key, value) in [
+            ("theme", "sepia"),
+            ("font-size", "999"),
+            ("scrollback-limit", "many"),
+            ("copy-on-select", "yes"),
+            ("automation-scopes", "read,root"),
+        ] {
+            store.set_value(key, value).unwrap();
+        }
+        store.set_value("font-family", "").unwrap();
+        let loaded = SettingsService::new(&store).load_with_warnings().unwrap();
+        assert_eq!(loaded.settings, AppSettings::default());
+        assert_eq!(loaded.warnings.len(), 5);
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|warning| warning.key == SettingKey::Theme)
         );
     }
 
     #[test]
-    fn scope_set_format_round_trips_and_is_order_stable() {
+    fn strict_validation_is_case_sensitive_and_checks_ranges() {
+        assert_eq!(ALL_SETTING_KEYS.len(), 18);
+        for key in ALL_SETTING_KEYS {
+            key.validate_value("").unwrap();
+        }
+        SettingKey::ScrollbackLimit.validate_value("0").unwrap();
+        SettingKey::ScrollbackLimit.validate_value("32768").unwrap();
+        assert!(SettingKey::ScrollbackLimit.validate_value("32769").is_err());
+        assert!(
+            SettingKey::ScrollbackLimit
+                .validate_value("1000000")
+                .is_err()
+        );
+        assert!(SettingKey::FontSize.validate_value("5").is_err());
+        assert!(SettingKey::Theme.validate_value("Dark").is_err());
+        assert!(SettingKey::CopyOnSelect.validate_value("1").is_err());
+        assert!(
+            SettingKey::AutomationScopes
+                .validate_value("read,admin")
+                .is_err()
+        );
+        assert_eq!("renderer-backend".parse(), Ok(SettingKey::RendererBackend));
+        assert!("Renderer-Backend".parse::<SettingKey>().is_err());
+    }
+
+    #[test]
+    fn scope_format_is_stable_and_parse_is_runtime_resilient() {
         let scopes = ScopeSet {
             read: true,
             write: false,
             execute: true,
         };
-        let csv = scopes.format();
-        assert_eq!(csv, "read,execute");
-        assert_eq!(ScopeSet::parse(&csv), scopes);
-
-        assert_eq!(ScopeSet::default().format(), "");
+        assert_eq!(scopes.format(), "read,execute");
+        assert_eq!(ScopeSet::parse("read,junk,execute"), scopes);
     }
 
     #[test]
-    fn automation_absent_is_disabled_with_no_scopes() {
-        let repo = fresh();
-        let svc = SettingsService::new(&repo);
-        assert_eq!(
-            svc.load_automation().unwrap(),
-            AutomationSettings::default()
-        );
+    fn ports_are_object_safe() {
+        let config: Box<dyn AppConfigStore> = Box::new(MemoryConfig::default());
+        let state: Box<dyn AppStateRepository> = Box::new(MemoryState::default());
+        assert!(config.get_value("theme").unwrap().is_none());
+        assert!(state.get_state(STATE_ACTIVE_PANEL).unwrap().is_none());
     }
 
     #[test]
-    fn automation_round_trips() {
-        let repo = fresh();
-        let svc = SettingsService::new(&repo);
-        svc.save_automation_enabled(true).unwrap();
-        svc.save_automation_scopes(ScopeSet {
-            read: true,
-            write: true,
-            execute: false,
-        })
-        .unwrap();
-
-        let loaded = svc.load_automation().unwrap();
-        assert!(loaded.enabled);
+    fn machine_state_round_trips_and_is_defensively_loaded() {
+        let repo = MemoryState::default();
+        let service = AppStateService::new(&repo);
+        service.save_active_panel(2).unwrap();
+        service.save_sidebar_collapsed(true).unwrap();
+        service.save_side_panel_width(340).unwrap();
         assert_eq!(
-            loaded.scopes,
-            ScopeSet {
-                read: true,
-                write: true,
-                execute: false
+            service.load().unwrap(),
+            AppState {
+                active_panel: 2,
+                sidebar_collapsed: true,
+                side_panel_width: 340,
             }
         );
+        repo.set_state(STATE_ACTIVE_PANEL, "broken").unwrap();
+        assert_eq!(service.load().unwrap().active_panel, 0);
     }
 
     #[test]
-    fn automation_disabled_after_being_enabled_round_trips_back_to_false() {
-        let repo = fresh();
-        let svc = SettingsService::new(&repo);
-        svc.save_automation_enabled(true).unwrap();
-        svc.save_automation_enabled(false).unwrap();
-        assert!(!svc.load_automation().unwrap().enabled);
+    fn first_run_tabs_and_renderer_cache_are_machine_state() {
+        let repo = MemoryState::default();
+        let service = AppStateService::new(&repo);
+        assert!(!service.load_first_run_seeded().unwrap());
+        service.save_first_run_seeded().unwrap();
+        assert!(service.load_first_run_seeded().unwrap());
+        let snapshot = SessionTabSnapshot {
+            tabs: vec![
+                SessionTabEntry::Connection(ConnectionId::new(7)),
+                SessionTabEntry::Local,
+            ],
+            active: 1,
+        };
+        service.save_session_tabs(&snapshot).unwrap();
+        assert_eq!(service.load_session_tabs().unwrap(), Some(snapshot));
+        service
+            .save_renderer_probe_cache(RendererBackend::Software)
+            .unwrap();
+        assert_eq!(
+            service.load_renderer_probe_cache().unwrap(),
+            Some(RendererBackend::Software)
+        );
+        service
+            .save_renderer_probe_cache(RendererBackend::Auto)
+            .unwrap();
+        assert_eq!(service.load_renderer_probe_cache().unwrap(), None);
     }
 }

@@ -17,6 +17,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use cm_core::LocalSettings;
+use cm_core::TerminalOptions;
 use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalSize};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -90,12 +91,17 @@ pub struct LocalTerminalSession {
 
 impl LocalTerminalSession {
     /// Spawn the shell described by `cfg` (a `None` program means the OS default
-    /// shell) at the given initial grid size, wiring up the byte-pump threads.
+    /// shell) at the given initial grid size and terminal options, wiring up
+    /// the byte-pump threads. Options are captured for this session's lifetime.
     ///
     /// # Errors
     /// Returns a [`SessionError`] if the PTY cannot be opened, the shell cannot
     /// be spawned, a thread cannot start, or the engine fails to initialize.
-    pub fn spawn(cfg: &LocalSettings, size: TerminalSize) -> Result<Self, SessionError> {
+    pub fn spawn(
+        cfg: &LocalSettings,
+        size: TerminalSize,
+        options: TerminalOptions,
+    ) -> Result<Self, SessionError> {
         // P9.8 D1: shell path/argv0 only -- never cfg.env (may carry secrets
         // via an inherited/overridden variable) or cfg.args (may carry a
         // password on the command line for some tools).
@@ -149,7 +155,15 @@ impl LocalTerminalSession {
         let owner_handle = thread::Builder::new()
             .name("vt-engine-owner".to_owned())
             .spawn(move || {
-                run_engine_owner(size, transport, &control_rx, &snapshot_tx, &ready_tx, start);
+                run_engine_owner(
+                    size,
+                    options,
+                    transport,
+                    &control_rx,
+                    &snapshot_tx,
+                    &ready_tx,
+                    start,
+                );
             })
             .map_err(SessionError::Thread)?;
 
@@ -454,6 +468,7 @@ mod tests {
         let session = LocalTerminalSession::spawn(
             &sh(&["-c", "printf 'HELLO_PTY\\n'"]),
             TerminalSize { rows: 24, cols: 80 },
+            TerminalOptions::default(),
         )
         .expect("spawn");
         assert!(
@@ -465,8 +480,12 @@ mod tests {
 
     #[test]
     fn key_enter_round_trips_to_shell() {
-        let session = LocalTerminalSession::spawn(&sh(&[]), TerminalSize { rows: 24, cols: 80 })
-            .expect("spawn");
+        let session = LocalTerminalSession::spawn(
+            &sh(&[]),
+            TerminalSize { rows: 24, cols: 80 },
+            TerminalOptions::default(),
+        )
+        .expect("spawn");
         // Type a command whose OUTPUT differs from the echoed input, so a match
         // proves Enter reached the shell and it executed.
         session.paste(b"echo MARK$((6*7))".to_vec());
@@ -483,8 +502,12 @@ mod tests {
 
     #[test]
     fn resize_changes_snapshot_dimensions() {
-        let session = LocalTerminalSession::spawn(&sh(&[]), TerminalSize { rows: 24, cols: 80 })
-            .expect("spawn");
+        let session = LocalTerminalSession::spawn(
+            &sh(&[]),
+            TerminalSize { rows: 24, cols: 80 },
+            TerminalOptions::default(),
+        )
+        .expect("spawn");
         session.paste(b"printf 'READY\\n'\n".to_vec());
         assert!(wait_for_text(&session, "READY", Duration::from_secs(5)));
 
@@ -516,6 +539,7 @@ mod tests {
         let session = LocalTerminalSession::spawn(
             &sh(&["-c", "exit 0"]),
             TerminalSize { rows: 24, cols: 80 },
+            TerminalOptions::default(),
         )
         .expect("spawn");
 
@@ -540,8 +564,12 @@ mod tests {
 
     #[test]
     fn shutdown_does_not_hang() {
-        let session = LocalTerminalSession::spawn(&sh(&[]), TerminalSize { rows: 24, cols: 80 })
-            .expect("spawn");
+        let session = LocalTerminalSession::spawn(
+            &sh(&[]),
+            TerminalSize { rows: 24, cols: 80 },
+            TerminalOptions::default(),
+        )
+        .expect("spawn");
 
         let (done_tx, done_rx) = mpsc::channel::<()>();
         thread::spawn(move || {
@@ -573,7 +601,12 @@ mod resize_storm_tests {
     /// requested size — confirms the session layer is last-write-wins.
     #[test]
     fn last_resize_in_a_storm_wins() {
-        let s = LocalTerminalSession::spawn(&sh(), TerminalSize { rows: 24, cols: 80 }).unwrap();
+        let s = LocalTerminalSession::spawn(
+            &sh(),
+            TerminalSize { rows: 24, cols: 80 },
+            TerminalOptions::default(),
+        )
+        .unwrap();
         for (rows, cols) in [(10, 40), (40, 120), (12, 50), (30, 100)] {
             s.resize(TerminalSize { rows, cols });
         }
@@ -631,7 +664,8 @@ mod startup_timing {
         size: TerminalSize,
     ) -> (Duration, Option<Duration>, LocalTerminalSession) {
         let t0 = Instant::now();
-        let s = LocalTerminalSession::spawn(&probe_settings(), size).expect("spawn");
+        let s = LocalTerminalSession::spawn(&probe_settings(), size, TerminalOptions::default())
+            .expect("spawn");
         let spawned = t0.elapsed();
         if std::env::var_os("CONMAN_PROBE_POKE").is_some() {
             s.paste(b"\r".to_vec());

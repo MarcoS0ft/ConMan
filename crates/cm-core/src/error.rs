@@ -15,6 +15,23 @@ pub enum RepositoryError {
     Backend(String),
 }
 
+/// Errors raised while reading, validating, or atomically replacing the
+/// user-editable application configuration document.
+///
+/// Adapter messages must contain paths and diagnostics only; configuration
+/// values can include commands and automation policy and should not be echoed
+/// indiscriminately by lower layers.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum AppConfigError {
+    #[error("configuration backend error: {0}")]
+    Backend(String),
+    #[error("configuration syntax error on line {line}: {message}")]
+    Syntax { line: usize, message: String },
+    #[error("invalid value for `{key}`: {message}")]
+    InvalidValue { key: String, message: String },
+}
+
 /// Errors from a [`crate::CredentialStore`].
 ///
 /// `Backend` carries an adapter-specific message; it must never contain the

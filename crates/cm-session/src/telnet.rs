@@ -17,6 +17,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use cm_core::TelnetSettings;
+use cm_core::TerminalOptions;
 use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalSize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -191,7 +192,12 @@ impl TelnetTerminalSession {
     ///
     /// # Errors
     /// Returns an error only when synchronous engine or thread setup fails.
-    pub fn connect(cfg: &TelnetSettings, size: TerminalSize) -> Result<Self, TelnetError> {
+    /// Terminal options are captured for this session's lifetime.
+    pub fn connect(
+        cfg: &TelnetSettings,
+        size: TerminalSize,
+        options: TerminalOptions,
+    ) -> Result<Self, TelnetError> {
         let (control_tx, control_rx) = mpsc::sync_channel::<Msg>(CONTROL_QUEUE_CAPACITY);
         let (remote_tx, remote_rx) = mpsc::sync_channel::<Msg>(REMOTE_QUEUE_CAPACITY);
         let (snapshot_tx, snapshot_rx) =
@@ -217,7 +223,9 @@ impl TelnetTerminalSession {
                     shutdown: Arc::clone(&shutdown_flag),
                 };
                 move || {
-                    run_engine_owner(size, transport, &control, &snapshots, &ready_tx, start);
+                    run_engine_owner(
+                        size, options, transport, &control, &snapshots, &ready_tx, start,
+                    );
                 }
             })
             .map_err(TelnetError::Thread)?;
@@ -745,9 +753,11 @@ mod tests {
             tx: snapshot_tx,
             shutdown,
         };
-        let mut engine =
-            crate::libghostty::LibghosttyEngine::new(TerminalSize { cols: 80, rows: 24 })
-                .expect("engine");
+        let mut engine = crate::libghostty::LibghosttyEngine::new(
+            TerminalSize { cols: 80, rows: 24 },
+            TerminalOptions::default(),
+        )
+        .expect("engine");
         engine.feed(b"first");
         assert!(sink.send_snapshot(engine.snapshot(0)));
         engine.feed(b"\rFINAL_SNAPSHOT_MARKER");

@@ -6,9 +6,22 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cm_core::TelnetSettings;
 use cm_core::terminal::{GridSnapshot, Key, KeyEvent, KeyModifiers, TerminalSize};
-use cm_session::{SessionStatus, TelnetTerminalSession, TerminalSession};
+use cm_core::{TelnetSettings, TerminalOptions};
+use cm_session::{
+    SessionStatus, TelnetTerminalSession as RealTelnetTerminalSession, TerminalSession,
+};
+
+struct TelnetTerminalSession;
+
+impl TelnetTerminalSession {
+    fn connect(
+        settings: &TelnetSettings,
+        size: TerminalSize,
+    ) -> Result<RealTelnetTerminalSession, cm_session::TelnetError> {
+        RealTelnetTerminalSession::connect(settings, size, TerminalOptions::default())
+    }
+}
 
 const IAC: u8 = 255;
 const DO: u8 = 253;

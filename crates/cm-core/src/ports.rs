@@ -1,6 +1,6 @@
 use crate::connection::{Connection, Group};
 use crate::credential::{Credential, CredentialFolder, CredentialRef, Secret};
-use crate::error::{CredentialError, RepositoryError};
+use crate::error::{AppConfigError, CredentialError, RepositoryError};
 use crate::ids::{ConnectionId, CredentialFolderId, CredentialId, GroupId};
 
 /// Persistence port for connections, groups, credentials, and credential
@@ -126,19 +126,6 @@ pub trait ConnectionRepository: Send + Sync {
     ) -> Result<Option<CredentialId>, RepositoryError>;
 
     // -----------------------------------------------------------------------
-    // Settings
-    // -----------------------------------------------------------------------
-
-    fn get_setting(&self, key: &str) -> Result<Option<String>, RepositoryError>;
-    fn set_setting(&self, key: &str, value: &str) -> Result<(), RepositoryError>;
-
-    /// Enumerate the whole settings key/value table as `(key, value)` pairs.
-    /// Order is unspecified; callers that need determinism should sort. Used by
-    /// the export/import envelope (v2) to carry app settings alongside a DB
-    /// copy (P1.2 cont.).
-    fn list_settings(&self) -> Result<Vec<(String, String)>, RepositoryError>;
-
-    // -----------------------------------------------------------------------
     // Recents (P6.14 — Launchpad)
     // -----------------------------------------------------------------------
 
@@ -155,6 +142,47 @@ pub trait ConnectionRepository: Send + Sync {
     /// deleted since it was recorded is never returned (its recents row is
     /// removed with it — see the schema memo).
     fn list_recents(&self, limit: usize) -> Result<Vec<(ConnectionId, i64)>, RepositoryError>;
+}
+
+/// Persistence port for ConMan's user-editable text configuration.
+///
+/// The adapter owns parsing and line-preserving document updates. Consumers
+/// that only need typed preferences should use `SettingsService`; document
+/// access exists for Open/Reload and `conmanctl config` workflows. The trait is
+/// intentionally synchronous and object-safe, matching the other persistence
+/// ports.
+pub trait AppConfigStore: Send + Sync {
+    /// Return the effective raw value for `key` (the last assignment in the
+    /// document), or `None` when it is not assigned.
+    fn get_value(&self, key: &str) -> Result<Option<String>, AppConfigError>;
+
+    /// Replace the last assignment for `key`, or append it when absent, while
+    /// preserving unrelated comments, blank lines, and unknown keys.
+    fn set_value(&self, key: &str, value: &str) -> Result<(), AppConfigError>;
+
+    /// Apply all assignments as one atomic document update.
+    ///
+    /// Implementations must either make every requested change visible or
+    /// leave the original document unchanged. In particular, this must not be
+    /// implemented by repeatedly calling [`Self::set_value`].
+    fn set_values(&self, values: &[(&str, &str)]) -> Result<(), AppConfigError>;
+
+    /// Return the complete UTF-8 source document.
+    fn document_text(&self) -> Result<String, AppConfigError>;
+
+    /// Validate and atomically replace the complete source document.
+    fn replace_document(&self, document: &str) -> Result<(), AppConfigError>;
+}
+
+/// SQLite-backed machine/runtime state that must not travel with a user's
+/// editable configuration.
+///
+/// Values are opaque to the adapter. Typed interpretation is provided by
+/// `AppStateService`.
+pub trait AppStateRepository: Send + Sync {
+    fn get_state(&self, key: &str) -> Result<Option<String>, RepositoryError>;
+    fn set_state(&self, key: &str, value: &str) -> Result<(), RepositoryError>;
+    fn delete_state(&self, key: &str) -> Result<(), RepositoryError>;
 }
 
 /// Secret-storage port backed by the OS keychain. Secrets cross this boundary

@@ -9,6 +9,7 @@
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 
+use cm_core::TerminalOptions;
 use cm_core::terminal::{GridSnapshot, Key, KeyEvent, MouseEvent, TerminalEngine, TerminalSize};
 
 use crate::libghostty::{EngineError, LibghosttyEngine};
@@ -157,13 +158,14 @@ impl ControlSource for Receiver<Msg> {
 /// transport; the `transport` parameter is the only variation point.
 pub(crate) fn run_engine_owner<T: Transport, S: SnapshotSink, C: ControlSource>(
     size: TerminalSize,
+    options: TerminalOptions,
     mut transport: T,
     control_rx: &C,
     snapshot_tx: &S,
     ready_tx: &Sender<Result<(), EngineError>>,
     start: Instant,
 ) {
-    let mut engine = match LibghosttyEngine::new(size) {
+    let mut engine = match LibghosttyEngine::new(size, options) {
         Ok(engine) => {
             let _ = ready_tx.send(Ok(()));
             engine
@@ -329,6 +331,7 @@ mod tests {
 
         run_engine_owner(
             TerminalSize { rows: 24, cols: 80 },
+            TerminalOptions::default(),
             transport,
             &control_rx,
             &snapshot_tx,
@@ -395,6 +398,7 @@ mod tests {
 
         run_engine_owner(
             TerminalSize { rows, cols },
+            TerminalOptions::default(),
             transport,
             &control_rx,
             &snapshot_tx,

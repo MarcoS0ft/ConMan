@@ -18,6 +18,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use cm_core::TerminalOptions;
 use cm_core::terminal::{
     Cell, CellAttrs, Color, CursorShape, CursorState, GridSnapshot, Key, KeyEvent, KeyModifiers,
     MouseAction, MouseButton, MouseEvent, TerminalEngine, TerminalSize,
@@ -26,11 +27,6 @@ use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::{Style as VtStyle, StyleColor, Underline};
 use libghostty_vt::terminal::{Mode, Options, Point, PointCoordinate, Terminal};
 use libghostty_vt::{key, mouse};
-
-/// Scrollback retained by the engine, in lines. Exposed for viewport-offset
-/// rendering and whole-buffer search since P6.7 (`TerminalEngine::snapshot`'s
-/// `scroll_offset` param, `scrollback_len`, `buffer_text`).
-const DEFAULT_MAX_SCROLLBACK: usize = 10_000;
 
 /// Nominal cell pixel size used for `resize` (libghostty wants pixel metrics
 /// for in-band size reports). The renderer supplies real metrics in P2.3; until
@@ -41,6 +37,24 @@ const NOMINAL_CELL_PX_H: u32 = 16;
 /// Grapheme-cluster scratch buffer length. 16 codepoints comfortably covers a
 /// base char plus combining marks / ZWJ emoji sequences.
 const GRAPHEME_BUF_LEN: usize = 16;
+
+/// libghostty's C option is documented by the Rust wrapper as a line count,
+/// but Ghostty's backing screen interprets it as a byte budget. There is no
+/// row-pruning hook in the public API, and arbitrary grapheme/style payloads
+/// make a guaranteed bytes-per-row conversion impossible. Use one explicit,
+/// lazy 64 MiB backing-store ceiling for every enabled terminal and separately
+/// enforce the configured line ceiling in snapshots and whole-buffer text.
+/// Thus the public contract is the smaller of the line and memory ceilings;
+/// dense rows can retain fewer lines, without unbounded per-pane memory.
+const MAX_SCROLLBACK_BYTES_PER_PANE: usize = 64 * 1024 * 1024;
+
+fn scrollback_memory_budget(max_lines: usize) -> usize {
+    if max_lines == 0 {
+        0
+    } else {
+        MAX_SCROLLBACK_BYTES_PER_PANE
+    }
+}
 
 /// Errors constructing a [`LibghosttyEngine`].
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +69,7 @@ pub enum EngineError {
 pub struct LibghosttyEngine {
     term: Terminal<'static, 'static>,
     size: TerminalSize,
+    max_scrollback_lines: usize,
     /// Bytes the terminal wants written back to the PTY (replies to host
     /// queries such as DSR/`CSI 6 n`). Filled by the `on_pty_write` callback
     /// during `feed`; drained by [`take_responses`](TerminalEngine::take_responses).
@@ -69,11 +84,11 @@ impl LibghosttyEngine {
     /// # Errors
     /// Returns [`EngineError::Init`] if libghostty-vt cannot allocate the
     /// terminal (e.g. zero-sized grid or out of memory).
-    pub fn new(size: TerminalSize) -> Result<Self, EngineError> {
+    pub fn new(size: TerminalSize, options: TerminalOptions) -> Result<Self, EngineError> {
         let mut term = Terminal::new(Options {
             cols: size.cols,
             rows: size.rows,
-            max_scrollback: DEFAULT_MAX_SCROLLBACK,
+            max_scrollback: scrollback_memory_budget(options.max_scrollback),
         })
         .map_err(|e| EngineError::Init(format!("{e:?}")))?;
 
@@ -90,6 +105,7 @@ impl LibghosttyEngine {
         Ok(Self {
             term,
             size,
+            max_scrollback_lines: options.max_scrollback,
             responses,
         })
     }
@@ -257,13 +273,22 @@ impl TerminalEngine for LibghosttyEngine {
     }
 
     fn scrollback_len(&self) -> u32 {
-        u32::try_from(self.term.scrollback_rows().unwrap_or(0)).unwrap_or(u32::MAX)
+        let retained = self
+            .term
+            .scrollback_rows()
+            .unwrap_or(0)
+            .min(self.max_scrollback_lines);
+        u32::try_from(retained).unwrap_or(u32::MAX)
     }
 
     fn buffer_text(&self) -> Vec<String> {
         let total_rows = u32::try_from(self.term.total_rows().unwrap_or(0)).unwrap_or(0);
-        let mut lines = Vec::with_capacity(total_rows as usize);
-        for y in 0..total_rows {
+        let retained_rows = self
+            .scrollback_len()
+            .saturating_add(u32::from(self.size.rows));
+        let first_row = total_rows.saturating_sub(retained_rows);
+        let mut lines = Vec::with_capacity(total_rows.saturating_sub(first_row) as usize);
+        for y in first_row..total_rows {
             let mut line = String::new();
             for x in 0..self.size.cols {
                 let cell = self.read_cell(Point::Screen(PointCoordinate { x, y }));
@@ -471,7 +496,16 @@ mod tests {
     use super::*;
 
     fn engine(rows: u16, cols: u16) -> LibghosttyEngine {
-        LibghosttyEngine::new(TerminalSize { rows, cols }).expect("engine init")
+        LibghosttyEngine::new(TerminalSize { rows, cols }, TerminalOptions::default())
+            .expect("engine init")
+    }
+
+    fn engine_with_scrollback(rows: u16, cols: u16, max_scrollback: usize) -> LibghosttyEngine {
+        LibghosttyEngine::new(
+            TerminalSize { rows, cols },
+            TerminalOptions { max_scrollback },
+        )
+        .expect("engine init")
     }
 
     fn cell_at(snap: &GridSnapshot, row: u16, col: u16) -> &Cell {
@@ -690,6 +724,83 @@ mod tests {
         assert_eq!(scrolled.scroll_offset, max);
         assert_eq!(cell_at(&scrolled, 0, 0).grapheme, "L");
         assert_eq!(cell_at(&scrolled, 0, 1).grapheme, "0");
+    }
+
+    #[test]
+    fn zero_scrollback_limit_disables_retained_history() {
+        let mut e = engine_with_scrollback(4, 10, 0);
+        feed_numbered_lines(&mut e, 10);
+
+        assert_eq!(e.scrollback_len(), 0);
+        assert_eq!(e.snapshot(u32::MAX).scroll_offset, 0);
+        assert_eq!(e.buffer_text().len(), 4, "only active rows are retained");
+    }
+
+    #[test]
+    fn configured_scrollback_limit_is_enforced_exactly() {
+        let mut e = engine_with_scrollback(4, 10, 3);
+        feed_numbered_lines(&mut e, 20);
+
+        assert_eq!(e.scrollback_len(), 3);
+        assert_eq!(e.snapshot(u32::MAX).scroll_offset, 3);
+        assert_eq!(e.buffer_text().len(), 7, "history plus four active rows");
+    }
+
+    #[test]
+    fn default_limit_retains_exactly_ten_thousand_short_lines() {
+        let mut e = engine(4, 16);
+        feed_numbered_lines(&mut e, 10_100);
+
+        assert_eq!(e.scrollback_len(), 10_000);
+        assert_eq!(e.buffer_text().len(), 10_004);
+    }
+
+    #[test]
+    fn scrollback_memory_budget_is_hard_bounded_for_extreme_limits() {
+        assert_eq!(scrollback_memory_budget(0), 0);
+        assert_eq!(scrollback_memory_budget(1), MAX_SCROLLBACK_BYTES_PER_PANE);
+        assert_eq!(
+            scrollback_memory_budget(cm_core::MAX_SCROLLBACK_LIMIT),
+            MAX_SCROLLBACK_BYTES_PER_PANE
+        );
+        assert_eq!(
+            scrollback_memory_budget(1_000_000),
+            MAX_SCROLLBACK_BYTES_PER_PANE
+        );
+        assert_eq!(
+            scrollback_memory_budget(usize::MAX),
+            MAX_SCROLLBACK_BYTES_PER_PANE
+        );
+    }
+
+    #[test]
+    fn pathological_long_line_stays_within_the_line_and_memory_caps() {
+        let mut e = engine_with_scrollback(4, 10, cm_core::MAX_SCROLLBACK_LIMIT);
+        e.feed(&vec![b'x'; 256 * 1024]);
+
+        assert!(e.scrollback_len() <= cm_core::MAX_SCROLLBACK_LIMIT as u32);
+        assert_eq!(
+            scrollback_memory_budget(e.max_scrollback_lines),
+            MAX_SCROLLBACK_BYTES_PER_PANE
+        );
+    }
+
+    #[test]
+    fn dense_max_width_rows_respect_the_configured_line_ceiling() {
+        let requested_lines = 32;
+        let mut e = engine_with_scrollback(4, u16::MAX, requested_lines);
+        let mut row = vec![b'x'; usize::from(u16::MAX)];
+        row.extend_from_slice(b"\r\n");
+        for _ in 0..100 {
+            e.feed(&row);
+        }
+
+        assert_eq!(e.scrollback_len(), requested_lines as u32);
+        assert_eq!(e.buffer_text().len(), requested_lines + 4);
+        assert_eq!(
+            scrollback_memory_budget(e.max_scrollback_lines),
+            MAX_SCROLLBACK_BYTES_PER_PANE
+        );
     }
 
     #[test]

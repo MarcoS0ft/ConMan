@@ -380,7 +380,7 @@ fn validate_catches_tampered_deserialized_connection() {
         "name": "tampered",
         "kind": "ssh",
         "settings": { "local": { "program": null, "args": [], "working_dir": null, "env": [] } },
-        "credential": null,
+        "credential_source": null,
         "sort": 0,
         "created_at": 0,
         "updated_at": 0
@@ -791,22 +791,6 @@ impl ConnectionRepository for InMemoryRepo {
         _conn_id: ConnectionId,
     ) -> Result<Option<CredentialId>, RepositoryError> {
         Ok(None)
-    }
-
-    // --- Settings (stubs) ---
-
-    fn get_setting(&self, _key: &str) -> Result<Option<String>, RepositoryError> {
-        Ok(None)
-    }
-
-    fn set_setting(&self, _key: &str, _value: &str) -> Result<(), RepositoryError> {
-        Err(RepositoryError::Backend(
-            "not implemented in InMemoryRepo".into(),
-        ))
-    }
-
-    fn list_settings(&self) -> Result<Vec<(String, String)>, RepositoryError> {
-        Ok(Vec::new())
     }
 
     // --- Recents (stub) ---

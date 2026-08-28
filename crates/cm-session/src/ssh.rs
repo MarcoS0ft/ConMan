@@ -19,6 +19,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use cm_core::Secret;
+use cm_core::TerminalOptions;
 use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalSize};
 use russh::keys::known_hosts::{
     check_known_hosts_path, known_host_keys_path, learn_known_hosts_path,
@@ -317,12 +318,14 @@ impl SshTerminalSession {
     /// # Errors
     /// Returns [`SshError`] only for synchronous setup failures (engine init,
     /// thread spawn). Network/auth/host-key failures surface via `status()`.
+    /// Terminal options are captured for this session's lifetime.
     pub fn connect(
         cfg: &SshSettings,
         auth: SshAuthInput,
         verifier: Arc<dyn HostKeyVerifier>,
         known_hosts: KnownHosts,
         size: TerminalSize,
+        options: TerminalOptions,
     ) -> Result<Self, SshError> {
         let (control_tx, control_rx) = mpsc::channel::<Msg>();
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<GridSnapshot>();
@@ -337,7 +340,15 @@ impl SshTerminalSession {
             .spawn({
                 let transport = SshTransport { out_tx };
                 move || {
-                    run_engine_owner(size, transport, &control_rx, &snapshot_tx, &ready_tx, start);
+                    run_engine_owner(
+                        size,
+                        options,
+                        transport,
+                        &control_rx,
+                        &snapshot_tx,
+                        &ready_tx,
+                        start,
+                    );
                 }
             })
             .map_err(SshError::Thread)?;

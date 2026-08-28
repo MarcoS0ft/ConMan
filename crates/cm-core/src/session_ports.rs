@@ -1,8 +1,8 @@
 //! `SessionProvider` port (P6.15, gap 27).
 //!
-//! Establishes live sessions for the three connection kinds ConMan supports,
-//! hiding the concrete adapter types (`LocalTerminalSession`,
-//! `SshTerminalSession`, `RdpSession` — all in `cm-session`) behind one
+//! Establishes live sessions for ConMan's supported connection kinds, hiding
+//! the concrete adapter types (`LocalTerminalSession`, `SshTerminalSession`,
+//! `TelnetTerminalSession`, `RdpSession` — all in `cm-session`) behind one
 //! object-safe port. `cm-ui` depends on this trait only (never the concrete
 //! adapters); the `conman` composition root constructs `cm_session::
 //! SessionProviderImpl` and injects it as `Arc<dyn SessionProvider>` —
@@ -24,6 +24,28 @@ use crate::session::{Session, SessionEndpointId};
 use crate::settings::{LocalSettings, RdpSettings, SshSettings, TelnetSettings};
 use crate::ssh::{HostKeyVerifier, SshAuthInput};
 use crate::terminal::TerminalSize;
+
+/// Per-session options shared by terminal-backed transports.
+///
+/// The options are captured when a Local, SSH, or Telnet session is created,
+/// so changing application preferences affects only subsequently-created
+/// sessions. RDP does not use a terminal buffer and is intentionally
+/// unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalOptions {
+    /// Maximum number of history lines exposed above the active screen. Zero
+    /// disables retained scrollback. Implementations may additionally impose
+    /// a documented memory ceiling, so dense rows can yield fewer lines.
+    pub max_scrollback: usize,
+}
+
+impl Default for TerminalOptions {
+    fn default() -> Self {
+        Self {
+            max_scrollback: crate::app_settings::DEFAULT_SCROLLBACK_LIMIT,
+        }
+    }
+}
 
 /// Uniform, string-only failure returned when a [`SessionProvider`] cannot
 /// establish a session synchronously (thread/spawn/connect setup failure —
@@ -62,6 +84,7 @@ pub trait SessionProvider: Send + Sync {
         &self,
         settings: &LocalSettings,
         size: TerminalSize,
+        options: TerminalOptions,
     ) -> Result<Box<dyn Session>, SessionSetupError>;
 
     /// Connect an SSH session. `verifier` decides unknown/mismatched host
@@ -73,6 +96,7 @@ pub trait SessionProvider: Send + Sync {
         auth: SshAuthInput,
         verifier: Arc<dyn HostKeyVerifier>,
         size: TerminalSize,
+        options: TerminalOptions,
     ) -> Result<Box<dyn Session>, SessionSetupError>;
 
     /// Connect a Telnet session. Login is performed interactively through
@@ -81,6 +105,7 @@ pub trait SessionProvider: Send + Sync {
         &self,
         settings: &TelnetSettings,
         size: TerminalSize,
+        options: TerminalOptions,
     ) -> Result<Box<dyn Session>, SessionSetupError>;
 
     /// Connect an RDP session. `verifier` decides unknown/changed server

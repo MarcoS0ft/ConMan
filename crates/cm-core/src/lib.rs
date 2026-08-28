@@ -27,9 +27,12 @@ pub mod ssh;
 pub mod terminal;
 
 pub use app_settings::{
-    AppSettings, AutomationSettings, DEFAULT_TERMINAL_FONT_FAMILY, KEY_AUTOMATION_ENABLED,
-    KEY_AUTOMATION_SCOPES, KEY_FIRST_RUN_SEEDED, KEY_RENDERER_BACKEND, KEY_SESSION_TABS, ScopeSet,
-    SessionTabEntry, SessionTabSnapshot, SettingsService,
+    ALL_SETTING_KEYS, AccentColor, AppSettings, AppState, AppStateService, AutomationSettings,
+    DEFAULT_SCROLLBACK_LIMIT, DEFAULT_TERMINAL_FONT_FAMILY, Density, LoadedAppSettings,
+    MAX_FONT_SIZE, MAX_SCROLLBACK_LIMIT, MIN_FONT_SIZE, RendererBackend, STATE_ACTIVE_PANEL,
+    STATE_FIRST_RUN_SEEDED, STATE_RENDERER_PROBE_CACHE, STATE_SESSION_TABS, STATE_SIDE_PANEL_WIDTH,
+    STATE_SIDEBAR_COLLAPSED, ScopeSet, SessionTabEntry, SessionTabSnapshot, SettingKey,
+    SettingWarning, SettingsService, StartupBehavior, TerminalTheme, ThemeMode,
 };
 pub use connection::{
     Connection, CredentialSource, Group, ResolvedAuth, resolve_connection_auth,
@@ -38,17 +41,17 @@ pub use connection::{
 pub use credential::{
     Credential, CredentialFolder, CredentialKind, CredentialPurpose, CredentialRef, Secret,
 };
-pub use error::{CredentialError, DomainError, RepositoryError};
+pub use error::{AppConfigError, CredentialError, DomainError, RepositoryError};
 pub use ids::{ConnectionId, CredentialFolderId, CredentialId, GroupId};
 pub use kind::ConnectionKind;
-pub use ports::{ConnectionRepository, CredentialStore};
+pub use ports::{AppConfigStore, AppStateRepository, ConnectionRepository, CredentialStore};
 pub use session::{
     ClipboardPublishResult, ClipboardSnapshot, ExitStatus, FailedSession, FrameUpdate,
     LocalClipboardRevision, RdpClipboardCommand, RdpClipboardEvent, RdpInputEvent, RdpMouseButton,
     RemoteClipboardContent, RemoteClipboardRevision, Session, SessionEndpointId, SessionInput,
     SessionStatus, Surface,
 };
-pub use session_ports::{SessionProvider, SessionSetupError};
+pub use session_ports::{SessionProvider, SessionSetupError, TerminalOptions};
 pub use settings::{
     ConnectionSettings, LocalSettings, RdpSettings, SshAuthMethod, SshSettings, TelnetSettings,
 };

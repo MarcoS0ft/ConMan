@@ -13,7 +13,7 @@ use std::sync::Arc;
 use cm_core::rdp::{CertVerifier, RdpAuthInput};
 use cm_core::session::Session;
 use cm_core::session::SessionEndpointId;
-use cm_core::session_ports::{SessionProvider, SessionSetupError};
+use cm_core::session_ports::{SessionProvider, SessionSetupError, TerminalOptions};
 use cm_core::ssh::{HostKeyVerifier, SshAuthInput};
 use cm_core::terminal::TerminalSize;
 use cm_core::{LocalSettings, RdpSettings, SshSettings, TelnetSettings};
@@ -57,8 +57,9 @@ impl SessionProvider for SessionProviderImpl {
         &self,
         settings: &LocalSettings,
         size: TerminalSize,
+        options: TerminalOptions,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
-        LocalTerminalSession::spawn(settings, size)
+        LocalTerminalSession::spawn(settings, size, options)
             .map(|s| Box::new(s) as Box<dyn Session>)
             .map_err(|e| SessionSetupError::new(e.to_string()))
     }
@@ -69,18 +70,27 @@ impl SessionProvider for SessionProviderImpl {
         auth: SshAuthInput,
         verifier: Arc<dyn HostKeyVerifier>,
         size: TerminalSize,
+        options: TerminalOptions,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
-        SshTerminalSession::connect(settings, auth, verifier, KnownHosts::with_defaults(), size)
-            .map(|s| Box::new(s) as Box<dyn Session>)
-            .map_err(|e| SessionSetupError::new(e.to_string()))
+        SshTerminalSession::connect(
+            settings,
+            auth,
+            verifier,
+            KnownHosts::with_defaults(),
+            size,
+            options,
+        )
+        .map(|s| Box::new(s) as Box<dyn Session>)
+        .map_err(|e| SessionSetupError::new(e.to_string()))
     }
 
     fn connect_telnet(
         &self,
         settings: &TelnetSettings,
         size: TerminalSize,
+        options: TerminalOptions,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
-        TelnetTerminalSession::connect(settings, size)
+        TelnetTerminalSession::connect(settings, size, options)
             .map(|session| Box::new(session) as Box<dyn Session>)
             .map_err(|error| SessionSetupError::new(error.to_string()))
     }
