@@ -1,9 +1,8 @@
 // ConMan — Command palette (GUI_DESIGN §5; Ctrl-Shift-K / Ctrl-K). Centered overlay over
 // a scrim with a fuzzy-filterable action list. Mount inside a Modal (screens/dialogs.slint)
 // so click-out and Esc dismiss work. Rust supplies the already-filtered, already-grouped
-// `actions`. Keyboard: Ctrl-K / Ctrl-Shift-K (intercepted in TerminalSurface before the
-// terminal sees it) opens the palette; typing updates the query via Rust on_key_input;
-// Up/Down move `selected-index`; Enter dispatches the selected action.
+// `actions`. The AppWindow shortcut layer opens it from every focus owner; this component
+// then owns focus, query editing, navigation, activation, and dismissal until it closes.
 //
 //   import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
 
@@ -26,12 +25,14 @@ export struct PaletteAction {
 }
 
 export component CommandPalette inherits Rectangle {
+    in property <bool>                open: false;
     in-out property <string>          query;
     in property <[PaletteAction]>     actions;
-    // Keyboard-selection index (0 = first item). Driven by Rust on_key_input (Up/Down)
-    // when the palette is open; reset to 0 by Rust on each query change.
+    // Keyboard-selection index (0 = first item). Owned by the palette's
+    // FocusScope and reset on open and on each query change.
     in-out property <int>             selected-index: 0;
     callback edited(string);
+    callback dismissed();
     // activated(idx): dispatches the action at `idx` in the current filtered list.
     callback activated(int);
 
@@ -45,11 +46,56 @@ export component CommandPalette inherits Rectangle {
     border-radius: Theme.radius-lg;
     border-width: 1px;
     border-color: Theme.color-stroke;
+    forward-focus: input;
+
+    changed open => {
+        if (root.open) {
+            root.selected-index = 0;
+            results.viewport-y = 0px;
+            input.focus();
+        }
+    }
 
     TouchArea {}   // absorb clicks
 
-    VerticalLayout {
-        spacing: 0px;
+    palette-keyboard := FocusScope {
+        width: 100%;
+        height: 100%;
+        capture-key-pressed(e) => {
+            if (e.text == Key.Escape) {
+                root.dismissed();
+                accept
+            } else if (e.text == Key.UpArrow) {
+                root.selected-index = max(0, root.selected-index - 1);
+                accept
+            } else if (e.text == Key.DownArrow) {
+                if (root.actions.length > 0) {
+                    root.selected-index = min(
+                        root.actions.length - 1,
+                        root.selected-index + 1);
+                }
+                accept
+            } else if (e.text == Key.Return) {
+                if (root.selected-index >= 0
+                        && root.selected-index < root.actions.length) {
+                    root.activated(root.selected-index);
+                }
+                accept
+            } else {
+                reject
+            }
+        }
+        capture-key-released(e) => {
+            if (e.text == Key.Escape || e.text == Key.UpArrow
+                    || e.text == Key.DownArrow || e.text == Key.Return) {
+                accept
+            } else {
+                reject
+            }
+        }
+
+        VerticalLayout {
+            spacing: 0px;
 
         // Query row.
         Rectangle {
@@ -74,8 +120,6 @@ export component CommandPalette inherits Rectangle {
                         root.selected-index = 0;
                         root.edited(t);
                     }
-                    // Enter in the search field dispatches the currently selected action.
-                    accepted => { root.activated(root.selected-index); }
                 }
             }
         }
@@ -174,6 +218,7 @@ export component CommandPalette inherits Rectangle {
                 }
                 }
             }
+        }
         }
     }
 }

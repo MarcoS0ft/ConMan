@@ -5,7 +5,7 @@
 mod support;
 
 use slint::platform::{Key, PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition};
+use slint::{ComponentHandle, LogicalPosition, Model};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -18,16 +18,40 @@ fn ctrl_k_is_global_across_settings_and_rdp_focus() {
     i_slint_backend_testing::init_integration_test_with_mock_time();
 
     let (settings, _repo, provider) = harness();
-    assert_shift_insert_is_mapped_to_the_terminal_paste_shortcut(&settings.ui);
+
+    // A Settings LineEdit used to retain focus behind the newly-opened
+    // palette. Prove that real text and navigation now belong to the palette,
+    // and that Escape dismisses on key-down without editing the field below.
     find_by_id(&settings.ui, "AppWindow::settings-panel-btn").invoke_accessible_default_action();
     find_by_id(&settings.ui, "SettingsPanel::settings-shell-path-field")
         .mock_single_click(PointerEventButton::Left);
+    let shell_path_before = settings.ui.get_settings_shell_path();
     dispatch_ctrl_k(&settings.ui);
-    assert!(
-        settings.ui.get_palette_open(),
-        "Ctrl+K must open the palette while a Settings field owns focus"
-    );
-    settings.ui.set_palette_open(false);
+    assert_fresh_palette(&settings.ui, "Settings focus");
+    dispatch_key_pair(&settings.ui, Key::DownArrow);
+    assert_eq!(settings.ui.get_palette_selected(), 1);
+    dispatch_key_pair(&settings.ui, Key::UpArrow);
+    assert_eq!(settings.ui.get_palette_selected(), 0);
+    dispatch_text(&settings.ui, "open settings");
+    assert_eq!(settings.ui.get_palette_query().as_str(), "open settings");
+    assert_eq!(settings.ui.get_settings_shell_path(), shell_path_before);
+    dismiss_palette_with_escape(&settings.ui);
+
+    // The same contract must hold when the terminal surface owned focus.
+    // Return is captured by the palette and dispatches its selected action;
+    // neither the query nor Return may become terminal input.
+    find_by_id(&settings.ui, "TerminalSurface::ta").mock_single_click(PointerEventButton::Left);
+    dispatch_ctrl_k(&settings.ui);
+    assert_fresh_palette(&settings.ui, "terminal focus");
+    let terminal_input_before = provider.terminal_key_input_count();
+    let tabs_before = settings.ui.get_tabs().row_count();
+    dispatch_text(&settings.ui, "new local tab");
+    dispatch_key_pair(&settings.ui, Key::Return);
+    assert!(!settings.ui.get_palette_open());
+    assert_eq!(settings.ui.get_tabs().row_count(), tabs_before + 1);
+    assert_eq!(provider.terminal_key_input_count(), terminal_input_before);
+
+    assert_shift_insert_is_mapped_to_the_terminal_paste_shortcut(&settings.ui);
 
     settings.ui.invoke_quick_connect();
     settings.ui.set_qc_kind(1);
@@ -99,10 +123,96 @@ fn ctrl_k_is_global_across_settings_and_rdp_focus() {
 
     focus_rdp_without_advancing_session_timer(&settings.ui);
     dispatch_ctrl_k(&settings.ui);
-    assert!(
-        settings.ui.get_palette_open(),
-        "Ctrl+K must open the palette while an RDP surface owns focus"
+    let rdp_action_count = assert_fresh_palette(&settings.ui, "RDP focus");
+    let before_palette_keys = provider.rdp_keyboard_events().len();
+    dispatch_text(&settings.ui, "open settings");
+    assert_eq!(settings.ui.get_palette_query().as_str(), "open settings");
+    dispatch_key_pair(&settings.ui, Key::Return);
+    assert!(!settings.ui.get_palette_open());
+    assert_eq!(settings.ui.get_active_panel(), 2);
+    assert_eq!(
+        provider.rdp_keyboard_events().len(),
+        before_palette_keys,
+        "palette text/Return must not leak to the RDP destination"
     );
+
+    focus_rdp_without_advancing_session_timer(&settings.ui);
+    dispatch_ctrl_k(&settings.ui);
+    assert_eq!(
+        assert_fresh_palette(&settings.ui, "reopened RDP focus"),
+        rdp_action_count
+    );
+    dispatch_text(&settings.ui, "x");
+    let before_escape = provider.rdp_keyboard_events().len();
+    settings
+        .ui
+        .window()
+        .dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Escape.into(),
+        });
+    assert!(
+        !settings.ui.get_palette_open(),
+        "Escape must dismiss the palette on key-down"
+    );
+    settings
+        .ui
+        .window()
+        .dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Escape.into(),
+        });
+    assert_eq!(
+        provider.rdp_keyboard_events().len(),
+        before_escape,
+        "neither phase of palette Escape may leak to RDP"
+    );
+}
+
+fn assert_fresh_palette(ui: &cm_ui::AppWindow, owner: &str) -> usize {
+    assert!(ui.get_palette_open(), "Ctrl+K did not open from {owner}");
+    assert_eq!(
+        ui.get_palette_query().as_str(),
+        "",
+        "every open must clear the previous query ({owner})"
+    );
+    assert_eq!(
+        ui.get_palette_selected(),
+        0,
+        "every open must select the first row ({owner})"
+    );
+    let count = ui.get_palette_actions().row_count();
+    assert!(
+        count > 1,
+        "fresh palette model is unexpectedly empty ({owner})"
+    );
+    count
+}
+
+fn dismiss_palette_with_escape(ui: &cm_ui::AppWindow) {
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Escape.into(),
+    });
+    assert!(!ui.get_palette_open(), "Escape must dismiss on key-down");
+    ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Escape.into(),
+    });
+}
+
+fn dispatch_text(ui: &cm_ui::AppWindow, text: &str) {
+    for character in text.chars() {
+        let text = character.to_string();
+        ui.window().dispatch_event(WindowEvent::KeyPressed {
+            text: text.clone().into(),
+        });
+        ui.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: text.into() });
+    }
+}
+
+fn dispatch_key_pair(ui: &cm_ui::AppWindow, key: Key) {
+    ui.window()
+        .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+    ui.window()
+        .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
 }
 
 fn assert_shift_insert_is_mapped_to_the_terminal_paste_shortcut(ui: &cm_ui::AppWindow) {

@@ -50,7 +50,6 @@ pub(super) fn wire_sessions(ctx: &Ctx) {
 fn wire_key_input(ctx: &Ctx) {
     ctx.ui.on_key_input({
         let state = ctx.state.clone();
-        let pal_model_kb = ctx.palette_model.clone();
         let tab_model_kb = ctx.tab_model.clone();
         let toast_model_kb = ctx.toast_model.clone();
         let toast_next_id_kb = ctx.toast_next_id.clone();
@@ -69,22 +68,9 @@ fn wire_key_input(ctx: &Ctx) {
                 // modifier snapshots cannot leak through menu navigation.
                 return;
             }
-            if ui.get_palette_open() {
-                palette::handle_palette_key(
-                    &ui,
-                    &state,
-                    &tab_model_kb,
-                    &pal_model_kb,
-                    text,
-                    special,
-                    mods,
-                );
-                return;
-            }
             // P6.7: while the terminal search overlay is open, the terminal
-            // FocusScope still forwards keys here (same pattern as the
-            // palette above) — route them to the query box instead of the
-            // session/Ctrl+Shift dispatch below. `Ctrl⇧F` closes it (handled
+            // FocusScope still forwards keys here — route them to the query
+            // box instead of the session/Ctrl+Shift dispatch below. `Ctrl⇧F` closes it (handled
             // inside `handle_search_key`); opening it is the ordinary
             // Ctrl+Shift dispatch case below, reached only when not open.
             if ui.get_terminal_search_open() {

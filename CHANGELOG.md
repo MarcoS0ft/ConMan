@@ -32,6 +32,9 @@ All notable user-facing changes to Connection Manager are documented here.
 
 ### Fixed
 
+- Restore command-palette keyboard ownership so Ctrl+K focuses its search,
+  Escape dismisses it without leaking input to a session, and every reopen
+  starts with an empty query and reset selection.
 - Send the actual Ctrl+Alt+Delete sequence from RDP Session Actions instead of
   forwarding the client-side Ctrl+Alt+End shortcut as remote input.
 - Keep RDP keyboard chords stable by forwarding physical modifier transitions

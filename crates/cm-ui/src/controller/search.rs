@@ -186,10 +186,9 @@ pub(super) fn refresh_search_ui_from(ui: &AppWindow, st: &State) {
     ui.set_terminal_search_current_index(tab.search.current().map_or(-1, |i| i as i32));
 }
 
-/// Route to the search overlay's editing keys when it is open — mirrors
-/// `palette::handle_palette_key`'s "the terminal FocusScope still forwards
-/// keys here" pattern (`sessions.rs`'s `wire_key_input` checks
-/// `ui.get_terminal_search_open()` first, exactly like `palette_open`).
+/// Route to the search overlay's editing keys while the terminal FocusScope
+/// remains focused (`sessions.rs`'s `wire_key_input` checks
+/// `ui.get_terminal_search_open()` before ordinary session input).
 /// `Ctrl⇧F` here closes the overlay (opening it is handled by the ordinary
 /// Ctrl⇧ dispatch table when *not* already open).
 pub(super) fn handle_search_key(

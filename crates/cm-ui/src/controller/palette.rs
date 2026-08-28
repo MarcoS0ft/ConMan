@@ -35,7 +35,8 @@ fn wire_open_palette(ctx: &Ctx) {
                 let tabs: Vec<(usize, String)> = (0..tab_model_op.row_count())
                     .filter_map(|i| tab_model_op.row_data(i).map(|t| (i, t.title.to_string())))
                     .collect();
-                let q = ui.get_palette_query();
+                let q = SharedString::default();
+                ui.set_palette_query(q.clone());
                 rebuild_palette_model_for(
                     &pal_model,
                     &q,
@@ -96,24 +97,6 @@ fn wire_palette_activated(ctx: &Ctx) {
     });
 }
 
-/// Collect the dynamic context needed to rebuild the palette:
-/// returns `(detached_labels, tab_entries)`.
-pub(super) fn collect_palette_context(
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-) -> (Vec<String>, Vec<(usize, String)>) {
-    let labels: Vec<String> = state
-        .borrow()
-        .detached
-        .iter()
-        .map(|d| d.label.clone())
-        .collect();
-    let tabs: Vec<(usize, String)> = (0..tab_model.row_count())
-        .filter_map(|i| tab_model.row_data(i).map(|t| (i, t.title.to_string())))
-        .collect();
-    (labels, tabs)
-}
-
 #[cfg(test)]
 fn rebuild_palette_model(
     pal_model: &Rc<VecModel<PaletteAction>>,
@@ -144,76 +127,6 @@ fn rebuild_palette_model_for(
     }
     for a in filtered {
         pal_model.push(a);
-    }
-}
-
-pub(super) fn handle_palette_key(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    tab_model: &Rc<VecModel<TabItem>>,
-    pal_model: &Rc<VecModel<PaletteAction>>,
-    text: SharedString,
-    special: i32,
-    mods: i32,
-) {
-    match special {
-        4 => {
-            ui.set_palette_open(false);
-            ui.set_palette_selected(0);
-        }
-        5 => {
-            let cur = ui.get_palette_selected();
-            if cur > 0 {
-                ui.set_palette_selected(cur - 1);
-            }
-        }
-        6 => {
-            let cur = ui.get_palette_selected();
-            let max = (pal_model.row_count() as i32).saturating_sub(1);
-            if cur < max {
-                ui.set_palette_selected(cur + 1);
-            }
-        }
-        1 => {
-            let idx = ui.get_palette_selected() as usize;
-            ui.set_palette_open(false);
-            ui.set_palette_selected(0);
-            dispatch_palette_action(state, tab_model, pal_model, ui, idx);
-        }
-        3 if mods & 0b1001 == 0 => {
-            let q = ui.get_palette_query();
-            let new_q: String = {
-                let mut s = q.as_str().to_owned();
-                s.pop();
-                s
-            };
-            let new_q = SharedString::from(new_q.as_str());
-            let (labels, tabs) = collect_palette_context(state, tab_model);
-            rebuild_palette_model_for(
-                pal_model,
-                &new_q,
-                &labels,
-                &tabs,
-                sessions::focused_session_kind(&state.borrow()),
-            );
-            ui.set_palette_query(new_q);
-            ui.set_palette_selected(0);
-        }
-        0 if mods & 0b1001 == 0 && !text.is_empty() => {
-            let q = ui.get_palette_query();
-            let new_q = SharedString::from(format!("{}{}", q.as_str(), text.as_str()).as_str());
-            let (labels, tabs) = collect_palette_context(state, tab_model);
-            rebuild_palette_model_for(
-                pal_model,
-                &new_q,
-                &labels,
-                &tabs,
-                sessions::focused_session_kind(&state.borrow()),
-            );
-            ui.set_palette_query(new_q);
-            ui.set_palette_selected(0);
-        }
-        _ => {}
     }
 }
 
@@ -892,16 +805,6 @@ mod tests {
         let first_count = model.row_count();
         rebuild_palette_model(&model, &SharedString::from(""), &[], &[]);
         assert_eq!(model.row_count(), first_count);
-    }
-
-    #[test]
-    fn handle_palette_key_mod_bitmask_plain_is_zero() {
-        let plain: i32 = 0;
-        let ctrl: i32 = 1;
-        let meta: i32 = 8;
-        assert_eq!(plain & 0b1001, 0);
-        assert_ne!(ctrl & 0b1001, 0);
-        assert_ne!(meta & 0b1001, 0);
     }
 
     #[test]

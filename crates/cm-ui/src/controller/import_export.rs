@@ -58,8 +58,7 @@ const TOAST_ERROR: i32 = 3;
 /// after a successful import.
 ///
 /// Cloned onto `State` (see `mod.rs`) rather than widening
-/// `dispatch_palette_action`'s / `handle_palette_key`'s signatures because
-/// the keyboard-dispatch path in `sessions.rs` also calls them.
+/// `dispatch_palette_action`'s signature.
 #[derive(Clone)]
 pub(super) struct ImportExportHandles {
     pub(super) repo: Arc<dyn ConnectionRepository>,

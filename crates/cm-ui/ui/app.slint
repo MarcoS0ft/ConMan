@@ -111,7 +111,6 @@ component TerminalSurface inherits Rectangle {
     callback pointer(int, int, length, length, int);
     callback scroll(length, length);
     callback resized(length, length);
-    callback toggle-palette();
 
     pure function mods(c: bool, a: bool, s: bool, m: bool) -> int {
         (c ? 1 : 0) + (a ? 2 : 0) + (s ? 4 : 0) + (m ? 8 : 0)
@@ -125,11 +124,7 @@ component TerminalSurface inherits Rectangle {
         height: 100%;
 
         key-pressed(e) => {
-            if (e.modifiers.control && (e.text == "k" || e.text == "K")) {
-                root.toggle-palette();
-                accept
-            } else {
-                root.key-input(
+            root.key-input(
                     e.text,
                     (e.text == Key.Return) ? 1
                         : (e.text == Key.Tab) ? 2
@@ -155,8 +150,7 @@ component TerminalSurface inherits Rectangle {
                         : (e.text == Key.MetaR) ? 34
                         : 0,
                     root.mods(e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta));
-                accept
-            }
+            accept
         }
 
         Image {
@@ -1128,7 +1122,6 @@ component PaneSlot inherits Rectangle {
     callback scroll(length, length);                        // terminal panes
     callback rdp-scroll(length, length, length, length);    // RDP panes
     callback resized(length, length);
-    callback toggle-palette();
     // P9.10 #2: per-pane disconnect -- arg is `root.pane-index` (this pane's
     // real id), not the repeater's own iteration index.
     callback pane-disconnect(int);
@@ -1163,7 +1156,6 @@ component PaneSlot inherits Rectangle {
             }
             scroll(dx, dy) => { root.scroll(dx, dy); }
             resized(w, h)  => { root.resized(w, h); }
-            toggle-palette => { root.toggle-palette(); }
         }
 
         if root.is-rdp : RdpSurface {
@@ -2402,10 +2394,6 @@ export component AppWindow inherits Window {
                     pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
                     scroll(dx, dy) => { root.scroll(dx, dy); }
                     resized(w, h) => { root.surface-resized(w, h); }
-                    toggle-palette => {
-                        root.palette-open = !root.palette-open;
-                        if (!root.palette-open) { root.palette-selected = 0; }
-                    }
                 }
 
                 // ── RDP surface (P4.2; only shown when an unsplit RDP tab is
@@ -2453,10 +2441,6 @@ export component AppWindow inherits Window {
                         rdp-scroll(px, py, dx, dy) => { root.rdp-scroll(px, py, dx, dy); }
                         resized(w, h) => { root.pane-resized(cell.pane, w, h); }
                         pane-disconnect(i) => { root.pane-disconnect(i); }
-                        toggle-palette => {
-                            root.palette-open = !root.palette-open;
-                            if (!root.palette-open) { root.palette-selected = 0; }
-                        }
                     }
                 }
 
@@ -3049,10 +3033,12 @@ export component AppWindow inherits Window {
             root.palette-selected = 0;
         }
         command-palette-dialog := CommandPalette {
+            open: root.palette-open;
             query <=> root.palette-query;
             actions: root.palette-actions;
             selected-index <=> root.palette-selected;
             edited(q) => { root.palette-edited(q); }
+            dismissed => { palette-modal.dismissed(); }
             activated(idx) => {
                 root.palette-open = false;
                 root.palette-selected = 0;

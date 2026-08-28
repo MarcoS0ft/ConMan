@@ -5,7 +5,8 @@
 mod support;
 
 use i_slint_backend_testing::ElementHandle;
-use slint::{ComponentHandle, Model};
+use slint::platform::{Key, PointerEventButton, WindowEvent};
+use slint::{ComponentHandle, LogicalPosition, Model};
 
 use support::{find_by_id, harness, nth_by_id, pump_ticks};
 
@@ -31,11 +32,11 @@ fn command_palette_keeps_groups_and_selection_visible() {
         "a group heading must not render without its first actionable row"
     );
 
-    // Down-arrow through the real AppWindow key-input callback until the
-    // first PANELS action is selected. The ScrollView must bring the action
-    // and its heading into view without a synthetic property poke.
+    // Down-arrow through the focused palette's real Slint key boundary until
+    // the first PANELS action is selected. The ScrollView must bring the
+    // action and its heading into view without a synthetic property poke.
     for _ in 0..7 {
-        h.ui.invoke_key_input("".into(), 6, 0);
+        dispatch_key_pair(&h.ui, Key::DownArrow);
     }
     pump_ticks(1);
     assert_eq!(h.ui.get_palette_selected(), 7);
@@ -47,25 +48,66 @@ fn command_palette_keeps_groups_and_selection_visible() {
 
     let action_count = h.ui.get_palette_actions().row_count();
     for _ in 8..action_count {
-        h.ui.invoke_key_input("".into(), 6, 0);
+        dispatch_key_pair(&h.ui, Key::DownArrow);
     }
     pump_ticks(1);
     assert_eq!(h.ui.get_palette_selected(), action_count as i32 - 1);
     assert_fully_inside_results(&h.ui, action_count - 1);
 
-    // Closing resets selection; reopening rebuilds the model. Verify that an
-    // intervening mouse-wheel scroll cannot leave selected row zero off-screen
-    // on the next opening (the query itself is intentionally untouched).
-    h.ui.invoke_key_input("".into(), 4, 0);
+    // Every open is a fresh interaction: query/model/selection/scroll/focus
+    // reset together rather than retaining the hidden component's state.
+    dispatch_text(&h.ui, "open settings");
+    assert_eq!(h.ui.get_palette_query().as_str(), "open settings");
+    dispatch_key_pair(&h.ui, Key::Escape);
     find_by_id(&h.ui, "AppWindow::palette-badge-btn").invoke_accessible_default_action();
+    assert_eq!(h.ui.get_palette_query().as_str(), "");
+    assert_eq!(h.ui.get_palette_actions().row_count(), action_count);
     let results = find_by_id(&h.ui, "CommandPalette::results");
     results.scroll(0.0, -10_000.0);
     pump_ticks(1);
-    h.ui.invoke_key_input("".into(), 4, 0);
+    dispatch_key_pair(&h.ui, Key::Escape);
     find_by_id(&h.ui, "AppWindow::palette-badge-btn").invoke_accessible_default_action();
     pump_ticks(1);
     assert_eq!(h.ui.get_palette_selected(), 0);
     assert_fully_inside_results(&h.ui, 0);
+
+    // Typing after the second reopen proves focus was reacquired, not merely
+    // that the externally-visible properties happened to be reset.
+    dispatch_text(&h.ui, "n");
+    assert_eq!(h.ui.get_palette_query().as_str(), "n");
+
+    // The full-window Modal scrim still owns pointer dismissal outside the
+    // centered card after keyboard ownership moved into CommandPalette.
+    let outside = LogicalPosition::new(2.0, 2.0);
+    h.ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: outside });
+    h.ui.window().dispatch_event(WindowEvent::PointerPressed {
+        position: outside,
+        button: PointerEventButton::Left,
+    });
+    h.ui.window().dispatch_event(WindowEvent::PointerReleased {
+        position: outside,
+        button: PointerEventButton::Left,
+    });
+    assert!(!h.ui.get_palette_open(), "outside click must still dismiss");
+}
+
+fn dispatch_text(ui: &cm_ui::AppWindow, text: &str) {
+    for character in text.chars() {
+        let text = character.to_string();
+        ui.window().dispatch_event(WindowEvent::KeyPressed {
+            text: text.clone().into(),
+        });
+        ui.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: text.into() });
+    }
+}
+
+fn dispatch_key_pair(ui: &cm_ui::AppWindow, key: Key) {
+    ui.window()
+        .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+    ui.window()
+        .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
 }
 
 fn visible_group_headings(ui: &cm_ui::AppWindow) -> Vec<&str> {
