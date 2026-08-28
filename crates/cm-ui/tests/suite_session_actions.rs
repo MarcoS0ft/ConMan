@@ -286,8 +286,12 @@ fn assert_compact_anchored_menu(
     assert!(
         menu_position.y >= trigger_bottom - 0.5
             && menu_position.y - trigger_bottom <= 12.5
-            && trigger_right >= menu_position.x
-            && trigger_position.x <= menu_right,
+            && trigger_right >= menu_position.x - 1.5
+            // Slint backends can round the independently positioned trigger
+            // and popover to adjacent logical pixels. A one-pixel seam still
+            // reads as anchored and must not make this cross-platform test
+            // backend-dependent.
+            && trigger_position.x <= menu_right + 1.5,
         "session menu must stay anchored below the ellipsis: trigger=({trigger_position:?}, \
          {trigger_size:?}), menu=({menu_position:?}, {menu_size:?})"
     );

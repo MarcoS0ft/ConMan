@@ -351,6 +351,21 @@ pub(crate) fn log_decision(decision: &RendererDecision) {
 mod tests {
     use super::*;
 
+    fn child_that_exits(code: u8) -> Command {
+        #[cfg(windows)]
+        {
+            let mut command = Command::new("cmd.exe");
+            command.args(["/D", "/C", &format!("exit {code}")]);
+            command
+        }
+        #[cfg(not(windows))]
+        {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", &format!("exit {code}")]);
+            command
+        }
+    }
+
     /// The probe child must actually take the minimal branch and never fall
     /// through into the real app's storage/keyring/UI startup -- exercised
     /// indirectly via `main`'s dispatch, but the constant itself must not
@@ -374,9 +389,9 @@ mod tests {
         // test suite (recursion). To keep this test cheap and deterministic
         // it directly exercises the wait/classify loop against a trivial
         // child instead of `probe()`'s `current_exe()` path.
-        let mut child = Command::new("true")
+        let mut child = child_that_exits(0)
             .spawn()
-            .expect("the `true` coreutil must exist for this test");
+            .expect("the platform command interpreter must exist for this test");
         let start = Instant::now();
         let status = loop {
             match child.try_wait().expect("try_wait") {
@@ -395,9 +410,9 @@ mod tests {
 
     #[test]
     fn probe_classifies_a_nonzero_exit_as_failed() {
-        let mut child = Command::new("false")
+        let mut child = child_that_exits(1)
             .spawn()
-            .expect("the `false` coreutil must exist for this test");
+            .expect("the platform command interpreter must exist for this test");
         let status = child.wait().expect("wait");
         assert!(!status.success());
     }
