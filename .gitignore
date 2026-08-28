@@ -1,6 +1,7 @@
 # ── Rust ──────────────────────────────────────────────────────────────────
 /target/
 **/target/
+/dist/
 # Project-local Zig toolchain fetched by scripts/bootstrap-zig.*
 /.zig/
 # Note: Cargo.lock IS committed — ConMan ships as an application, not a library.
@@ -36,3 +37,6 @@ desktop.ini
 # ── Scratch ─────────────────────────────────────────────────────────────────
 /tmp/
 /scratch/
+
+# Machine-specific local CI/build orchestration (hosts, users, fixed paths).
+/scripts/local/
