@@ -138,13 +138,61 @@ fn apply_migration_tx(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+
+    type ColumnShape = (String, String, i64, Option<String>, i64);
+    type SchemaShape = BTreeMap<String, Vec<ColumnShape>>;
 
     fn open_in_memory() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().expect("in-memory DB");
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .expect("FK pragma");
         conn
+    }
+
+    fn domain_schema_shape(conn: &rusqlite::Connection) -> SchemaShape {
+        let mut tables_stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_schema \
+                 WHERE type = 'table' \
+                   AND name NOT IN ('schema_version', 'sqlite_sequence') \
+                 ORDER BY name",
+            )
+            .expect("prepare table listing");
+        let tables: Vec<String> = tables_stmt
+            .query_map([], |row| row.get(0))
+            .expect("list tables")
+            .collect::<Result<_, _>>()
+            .expect("collect tables");
+        drop(tables_stmt);
+
+        tables
+            .into_iter()
+            .map(|table| {
+                let mut columns_stmt = conn
+                    .prepare(
+                        "SELECT name, type, \"notnull\", dflt_value, pk \
+                         FROM pragma_table_info(?1) ORDER BY cid",
+                    )
+                    .expect("prepare column listing");
+                let columns = columns_stmt
+                    .query_map([&table], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    })
+                    .expect("list columns")
+                    .collect::<Result<_, _>>()
+                    .expect("collect columns");
+                (table, columns)
+            })
+            .collect()
     }
 
     #[test]
@@ -155,6 +203,40 @@ mod tests {
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .expect("version row");
         assert_eq!(version, CURRENT_VERSION);
+
+        let app_state_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'app_state'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("app_state table count");
+        let legacy_settings_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'settings'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy settings table count");
+        assert_eq!(app_state_tables, 1);
+        assert_eq!(legacy_settings_tables, 0);
+    }
+
+    #[test]
+    fn authoritative_schema_matches_fresh_migration_tables_and_columns() {
+        let mut migrated = open_in_memory();
+        run_migrations(&mut migrated).expect("migrate fresh database");
+
+        let documented = open_in_memory();
+        documented
+            .execute_batch(include_str!("../schema.sql"))
+            .expect("execute authoritative schema snapshot");
+
+        assert_eq!(
+            domain_schema_shape(&documented),
+            domain_schema_shape(&migrated),
+            "schema.sql must describe every current domain table and column"
+        );
     }
 
     #[test]
@@ -169,11 +251,11 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v2_migration() {
+    fn v1_to_v2_adds_app_state() {
         let mut conn = open_in_memory();
 
         // Set up only v1 (groups/connections/credentials/credential_folders;
-        // no settings table yet).
+        // no app-state table yet).
         setup_db_at_version(&mut conn, 1).expect("v1 setup");
 
         let version: u32 = conn
@@ -181,13 +263,13 @@ mod tests {
             .expect("version row");
         assert_eq!(version, 1, "should be at v1 before upgrade");
 
-        // The settings table must not exist yet.
-        let settings_missing = conn
-            .execute("INSERT INTO settings (key, value) VALUES ('x', 'y')", [])
+        // The app_state table must not exist yet.
+        let app_state_missing = conn
+            .execute("INSERT INTO app_state (key, value) VALUES ('x', 'y')", [])
             .is_err();
         assert!(
-            settings_missing,
-            "settings table should not exist in v1 schema"
+            app_state_missing,
+            "app_state table should not exist in v1 schema"
         );
 
         // Insert data that must survive the migration.
@@ -197,7 +279,7 @@ mod tests {
         )
         .expect("insert group");
 
-        // Apply all remaining migrations (v2 adds the settings table; later
+        // Apply all remaining migrations (v2 adds the app-state table; later
         // versions, e.g. v3's `recents` table, ride along -- `run_migrations`
         // always walks to `CURRENT_VERSION`, so this asserts against that
         // constant rather than a version number that will go stale again).
@@ -211,18 +293,18 @@ mod tests {
             "should be at the current version after migration"
         );
 
-        // Settings table must now exist.
+        // Machine-local application state can now be persisted.
         conn.execute(
-            "INSERT INTO settings (key, value) VALUES ('hello', 'world')",
+            "INSERT INTO app_state (key, value) VALUES ('hello', 'world')",
             [],
         )
-        .expect("insert into settings after migration");
+        .expect("insert into app_state after migration");
 
         let val: String = conn
-            .query_row("SELECT value FROM settings WHERE key = 'hello'", [], |r| {
+            .query_row("SELECT value FROM app_state WHERE key = 'hello'", [], |r| {
                 r.get(0)
             })
-            .expect("read setting");
+            .expect("read app state");
         assert_eq!(val, "world");
 
         // Pre-migration data survives.

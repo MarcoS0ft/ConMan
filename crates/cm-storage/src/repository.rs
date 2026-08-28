@@ -1,9 +1,10 @@
 use std::sync::{Arc, Mutex};
 
 use cm_core::{
-    Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings, Credential,
-    CredentialFolder, CredentialFolderId, CredentialId, CredentialKind, CredentialPurpose,
-    CredentialRef, CredentialSource, CredentialStore, Group, GroupId, RepositoryError,
+    AppStateRepository, Connection, ConnectionId, ConnectionKind, ConnectionRepository,
+    ConnectionSettings, Credential, CredentialFolder, CredentialFolderId, CredentialId,
+    CredentialKind, CredentialPurpose, CredentialRef, CredentialSource, CredentialStore, Group,
+    GroupId, RepositoryError,
 };
 use rusqlite::OptionalExtension as _;
 
@@ -14,6 +15,35 @@ use crate::migrations::run_migrations;
 /// A valid (acyclic) tree of *N* nodes has paths of at most *N* steps; this
 /// constant guards against walking an already-corrupt tree forever.
 const MAX_TREE_DEPTH: usize = 1024;
+
+/// Write-only view used by one connection import transaction.
+///
+/// Every method inserts a freshly remapped record. Dropping the transaction
+/// without calling [`commit`](Self::commit) rolls the complete batch back.
+pub trait ImportTransaction {
+    fn insert_credential_folder(
+        &mut self,
+        folder: &CredentialFolder,
+    ) -> Result<CredentialFolderId, RepositoryError>;
+    fn insert_credential(
+        &mut self,
+        credential: &Credential,
+    ) -> Result<CredentialId, RepositoryError>;
+    fn insert_group(&mut self, group: &Group) -> Result<GroupId, RepositoryError>;
+    fn insert_connection(
+        &mut self,
+        connection: &Connection,
+    ) -> Result<ConnectionId, RepositoryError>;
+    fn commit(self: Box<Self>) -> Result<(), RepositoryError>;
+}
+
+/// Repository capability required by native and foreign connection imports.
+///
+/// It is separate from [`ConnectionRepository`] so ordinary CRUD adapters do
+/// not accidentally claim atomic batch semantics they cannot provide.
+pub trait AtomicImportRepository: Send + Sync {
+    fn begin_import(&self) -> Result<Box<dyn ImportTransaction + '_>, RepositoryError>;
+}
 
 // ---------------------------------------------------------------------------
 // SqliteRepository
@@ -713,41 +743,6 @@ impl ConnectionRepository for SqliteRepository {
     }
 
     // -----------------------------------------------------------------------
-    // Settings
-    // -----------------------------------------------------------------------
-
-    fn get_setting(&self, key: &str) -> Result<Option<String>, RepositoryError> {
-        let conn = self.lock()?;
-        conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
-            r.get(0)
-        })
-        .optional()
-        .map_err(map_err)
-    }
-
-    fn set_setting(&self, key: &str, value: &str) -> Result<(), RepositoryError> {
-        let conn = self.lock()?;
-        conn.execute(
-            "INSERT INTO settings (key, value) VALUES (?1, ?2) \
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [key, value],
-        )
-        .map_err(map_err)?;
-        Ok(())
-    }
-
-    fn list_settings(&self) -> Result<Vec<(String, String)>, RepositoryError> {
-        let conn = self.lock()?;
-        let mut stmt = conn
-            .prepare("SELECT key, value FROM settings ORDER BY key")
-            .map_err(map_err)?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .map_err(map_err)?;
-        rows.map(|r| r.map_err(map_err)).collect()
-    }
-
-    // -----------------------------------------------------------------------
     // Recents (P6.14 — Launchpad)
     // -----------------------------------------------------------------------
 
@@ -780,6 +775,157 @@ impl ConnectionRepository for SqliteRepository {
                 .map_err(map_err)
         })
         .collect()
+    }
+}
+
+impl AppStateRepository for SqliteRepository {
+    fn get_state(&self, key: &str) -> Result<Option<String>, RepositoryError> {
+        let conn = self.lock()?;
+        conn.query_row("SELECT value FROM app_state WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(map_err)
+    }
+
+    fn set_state(&self, key: &str, value: &str) -> Result<(), RepositoryError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO app_state (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [key, value],
+        )
+        .map_err(map_err)?;
+        Ok(())
+    }
+
+    fn delete_state(&self, key: &str) -> Result<(), RepositoryError> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM app_state WHERE key = ?1", [key])
+            .map_err(map_err)?;
+        Ok(())
+    }
+}
+
+struct SqliteImportTransaction<'a> {
+    conn: std::sync::MutexGuard<'a, rusqlite::Connection>,
+    completed: bool,
+}
+
+impl Drop for SqliteImportTransaction<'_> {
+    fn drop(&mut self) {
+        if !self.completed
+            && let Err(error) = self.conn.execute_batch("ROLLBACK")
+        {
+            tracing::error!(%error, "failed to roll back connection import transaction");
+        }
+    }
+}
+
+impl ImportTransaction for SqliteImportTransaction<'_> {
+    fn insert_credential_folder(
+        &mut self,
+        folder: &CredentialFolder,
+    ) -> Result<CredentialFolderId, RepositoryError> {
+        self.conn
+            .execute(
+                "INSERT INTO credential_folders (parent_id, name, sort) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    folder.parent_id.map(|id| id.get()),
+                    folder.name,
+                    folder.sort
+                ],
+            )
+            .map_err(map_err)?;
+        Ok(CredentialFolderId::new(self.conn.last_insert_rowid()))
+    }
+
+    fn insert_credential(
+        &mut self,
+        credential: &Credential,
+    ) -> Result<CredentialId, RepositoryError> {
+        self.conn
+            .execute(
+                "INSERT INTO credentials (folder_id, name, kind, username) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    credential.folder_id.map(|id| id.get()),
+                    credential.name,
+                    credential_kind_str(credential.kind),
+                    credential.username,
+                ],
+            )
+            .map_err(map_err)?;
+        Ok(CredentialId::new(self.conn.last_insert_rowid()))
+    }
+
+    fn insert_group(&mut self, group: &Group) -> Result<GroupId, RepositoryError> {
+        self.conn
+            .execute(
+                "INSERT INTO groups (parent_id, name, sort, default_credential_id) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    group.parent_id.map(|id| id.get()),
+                    group.name,
+                    group.sort,
+                    group.default_credential.map(|id| id.get()),
+                ],
+            )
+            .map_err(map_err)?;
+        Ok(GroupId::new(self.conn.last_insert_rowid()))
+    }
+
+    fn insert_connection(
+        &mut self,
+        connection: &Connection,
+    ) -> Result<ConnectionId, RepositoryError> {
+        let settings_json = serde_json::to_string(&connection.settings)
+            .map_err(|error| RepositoryError::Backend(error.to_string()))?;
+        let (host, port) = extract_host_port(&connection.settings);
+        let (source_kind, credential_id, username, domain, has_secret) =
+            cred_source_columns(&connection.credential_source);
+        self.conn
+            .execute(
+                "INSERT INTO connections \
+                 (group_id, kind, name, host, port, settings_json, credential_id, \
+                  cred_source_kind, inline_username, inline_domain, inline_has_secret, \
+                  sort, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                rusqlite::params![
+                    connection.group_id.map(|id| id.get()),
+                    connection_kind_str(connection.kind),
+                    connection.name,
+                    host,
+                    port,
+                    settings_json,
+                    credential_id,
+                    source_kind,
+                    username,
+                    domain,
+                    has_secret,
+                    connection.sort,
+                    connection.created_at,
+                    connection.updated_at,
+                ],
+            )
+            .map_err(map_err)?;
+        Ok(ConnectionId::new(self.conn.last_insert_rowid()))
+    }
+
+    fn commit(mut self: Box<Self>) -> Result<(), RepositoryError> {
+        self.conn.execute_batch("COMMIT").map_err(map_err)?;
+        self.completed = true;
+        Ok(())
+    }
+}
+
+impl AtomicImportRepository for SqliteRepository {
+    fn begin_import(&self) -> Result<Box<dyn ImportTransaction + '_>, RepositoryError> {
+        let conn = self.lock()?;
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(map_err)?;
+        Ok(Box::new(SqliteImportTransaction {
+            conn,
+            completed: false,
+        }))
     }
 }
 
@@ -1167,8 +1313,8 @@ mod tests {
             .expect("build connection");
             repo.upsert_connection(&conn).expect("upsert connection");
 
-            repo.set_setting("persist-key", "persist-value")
-                .expect("set setting");
+            repo.set_state("persist-key", "persist-value")
+                .expect("set app state");
         } // repo dropped here — connection closed
 
         // ── Second open: verify data survives ─────────────────────────────
@@ -1188,9 +1334,9 @@ mod tests {
             assert_eq!(creds[0].name, "persist-cred");
 
             let val = repo
-                .get_setting("persist-key")
-                .expect("get setting")
-                .expect("setting present");
+                .get_state("persist-key")
+                .expect("get app state")
+                .expect("app state present");
             assert_eq!(val, "persist-value");
         }
     }

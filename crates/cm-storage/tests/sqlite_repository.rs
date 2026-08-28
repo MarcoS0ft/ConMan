@@ -8,11 +8,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cm_core::{
-    Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings, Credential,
-    CredentialError, CredentialFolder, CredentialFolderId, CredentialId, CredentialKind,
-    CredentialPurpose, CredentialRef, CredentialSource, CredentialStore, Group, GroupId,
-    LocalSettings, RdpSettings, RepositoryError, Secret, SshAuthMethod, SshSettings,
-    TelnetSettings,
+    AppStateRepository, Connection, ConnectionId, ConnectionKind, ConnectionRepository,
+    ConnectionSettings, Credential, CredentialError, CredentialFolder, CredentialFolderId,
+    CredentialId, CredentialKind, CredentialPurpose, CredentialRef, CredentialSource,
+    CredentialStore, Group, GroupId, LocalSettings, RdpSettings, RepositoryError, Secret,
+    SshAuthMethod, SshSettings, TelnetSettings,
 };
 use cm_storage::SqliteRepository;
 
@@ -1014,26 +1014,30 @@ fn groups_ordered_by_sort_within_parent() {
 }
 
 // ---------------------------------------------------------------------------
-// Settings
+// Machine-local application state
 // ---------------------------------------------------------------------------
 
 #[test]
-fn settings_get_set() {
+fn app_state_get_set_delete() {
     let db = repo();
-    assert_eq!(db.get_setting("theme").expect("get"), None);
+    assert_eq!(db.get_state("active-panel").expect("get"), None);
 
-    db.set_setting("theme", "dark").expect("set");
+    db.set_state("active-panel", "settings").expect("set");
     assert_eq!(
-        db.get_setting("theme").expect("get"),
-        Some("dark".to_string())
+        db.get_state("active-panel").expect("get"),
+        Some("settings".to_string())
     );
 
     // Overwrite
-    db.set_setting("theme", "light").expect("overwrite");
+    db.set_state("active-panel", "connections")
+        .expect("overwrite");
     assert_eq!(
-        db.get_setting("theme").expect("get"),
-        Some("light".to_string())
+        db.get_state("active-panel").expect("get"),
+        Some("connections".to_string())
     );
+
+    db.delete_state("active-panel").expect("delete");
+    assert_eq!(db.get_state("active-panel").expect("get"), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -1045,6 +1049,16 @@ fn repository_is_object_safe() {
     let r: Box<dyn ConnectionRepository> = Box::new(repo());
     let gid = r.upsert_group(&mk_group("g", None, None)).expect("group");
     assert!(!gid.get_id().is_unsaved());
+}
+
+#[test]
+fn app_state_repository_is_object_safe() {
+    let state: Box<dyn AppStateRepository> = Box::new(repo());
+    state.set_state("key", "value").expect("set");
+    assert_eq!(
+        state.get_state("key").expect("get").as_deref(),
+        Some("value")
+    );
 }
 
 // ---------------------------------------------------------------------------

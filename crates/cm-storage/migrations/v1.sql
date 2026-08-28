@@ -1,6 +1,6 @@
 -- v1: initial ConMan schema
 -- Groups, connections, credentials, credential_folders.
--- Settings table added in v2.
+-- Machine-local app-state table added in v2.
 
 CREATE TABLE IF NOT EXISTS credential_folders (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,

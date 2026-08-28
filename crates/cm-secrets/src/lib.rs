@@ -30,19 +30,46 @@
 //!
 //! # Backend selection
 //!
-//! `keyring` 3.x selects the backend at compile time based on enabled
-//! features.  With **no platform features** — which is what this crate's
-//! `Cargo.toml` specifies — keyring falls back to its built-in mock backend
-//! on every platform.  The `conman` binary (or an integration-test harness)
-//! can override this at runtime by calling
-//! [`keyring::set_default_credential_builder`] with a platform-specific
-//! builder before constructing any [`KeyringStore`] instances.
+//! `keyring` 3.x selects available backends at compile time. This crate enables
+//! the native backend for each supported OS and exposes
+//! [`initialize_native_keyring`] so every composition root (`conman`,
+//! `conmanctl`, and future headless tools) selects the same implementation
+//! before constructing a [`KeyringStore`]. Tests may still install keyring's
+//! in-memory mock builder explicitly.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use cm_core::{CredentialError, CredentialRef, CredentialStore, Secret};
+
+/// Select the platform-native credential backend for this process.
+///
+/// Composition roots must call this once before constructing a
+/// [`KeyringStore`]. Unsupported targets retain keyring's in-memory backend.
+/// No secret material is accessed by initialization itself.
+pub fn initialize_native_keyring() {
+    #[cfg(target_os = "linux")]
+    {
+        keyring::set_default_credential_builder(keyring::keyutils::default_credential_builder());
+        tracing::info!(backend = "keyutils", "keychain backend initialized");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        keyring::set_default_credential_builder(keyring::macos::default_credential_builder());
+        tracing::info!(backend = "macos", "keychain backend initialized");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        keyring::set_default_credential_builder(keyring::windows::default_credential_builder());
+        tracing::info!(backend = "windows", "keychain backend initialized");
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    tracing::warn!(
+        backend = "mock",
+        "keychain backend initialized; secrets are not persisted"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // KeyringStore

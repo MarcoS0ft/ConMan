@@ -1,24 +1,18 @@
 //! Versioned JSON import/export for the full connection tree.
 //!
-//! ## Envelope schema (version 2, P1.2)
+//! ## Envelope schema (version 1)
 //!
 //! ```json
 //! {
-//!   "conman_export_version": 2,
+//!   "conman_export_version": 1,
 //!   "exported_at": <epoch-seconds>,
 //!   "credential_folders": [...],
 //!   "credentials":         [...],
 //!   "groups":              [...],
 //!   "connections":         [...],
-//!   "credential_secrets":  [...],  // omitted when empty
-//!   "settings":            [["ui.theme_mode","1"], ...]  // v2; omitted when empty
+//!   "credential_secrets":  [...]   // omitted when empty
 //! }
 //! ```
-//!
-//! Version 1 (pinned 2026-06-28) is identical minus the `settings` field.
-//! [`import`] accepts both v1 and v2; a v1 envelope simply carries no settings.
-//! Volatile/machine-specific settings keys ([`EXPORT_EXCLUDED_SETTING_KEYS`])
-//! are never exported.
 //!
 //! ## Import semantics (additive, pinned)
 //!
@@ -27,14 +21,14 @@
 //! credential links are rewritten to the newly assigned IDs.  Links to IDs not
 //! present in the envelope are silently set to `None` (never a panic or hard
 //! failure).  Cyclic parent references in untrusted input are broken by
-//! treating the offending node as a root — no abort, no loop.
+//! treating the offending node as a root — no abort, no loop. All database
+//! writes are one transaction; keychain writes begin only after it commits.
 //!
 //! ## Secrets
 //!
-//! Secrets are **excluded by default**.  They are embedded only when
-//! [`ExportOptions::include_secrets`] is `true` *and* a
-//! [`cm_core::CredentialStore`] is supplied.  Encoding: lower-case hex
-//! (`secret_hex`); no additional dependency beyond `serde_json`.
+//! Secrets are **excluded by default**. When explicitly requested, every
+//! expected secret must be readable or export fails without producing a
+//! backup document. Encoding: lower-case hex (`secret_hex`).
 
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,10 +36,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cm_core::{
     Connection, ConnectionId, ConnectionKind, ConnectionRepository, Credential, CredentialFolder,
     CredentialFolderId, CredentialId, CredentialKind, CredentialPurpose, CredentialRef,
-    CredentialSource, CredentialStore, Group, GroupId, KEY_AUTOMATION_ENABLED,
-    KEY_AUTOMATION_SCOPES, KEY_FIRST_RUN_SEEDED, KEY_RENDERER_BACKEND, KEY_SESSION_TABS, Secret,
+    CredentialSource, CredentialStore, Group, GroupId, Secret,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::repository::{AtomicImportRepository, ImportTransaction};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -53,44 +48,10 @@ use serde::{Deserialize, Serialize};
 
 /// Envelope schema version produced by this build.
 ///
-/// - v1 (P1.2): tree + optional gated secrets.
-/// - v2 (P1.2 cont.): adds an optional `settings` list carrying app settings.
-///
-/// [`export`] always emits [`ENVELOPE_VERSION`]; [`import`] accepts both v1 and
-/// v2 (see [`MIN_SUPPORTED_VERSION`]) and rejects anything else with
-/// [`ImportExportError::UnsupportedVersion`].
-pub const ENVELOPE_VERSION: u32 = 2;
-
-/// Oldest envelope version [`import`] still accepts. v1 envelopes simply carry
-/// no `settings` (the field defaults to empty), so no migration is needed.
-pub const MIN_SUPPORTED_VERSION: u32 = 1;
-
-/// Settings keys deliberately EXCLUDED from an export: machine-specific /
-/// volatile state that must not travel with a shared or backed-up envelope.
-/// References `cm-core`'s canonical key constants (rather than duplicating
-/// the literal strings here) so a key rename can't silently desync this list
-/// from the settings it's meant to catch.
-/// - [`KEY_SESSION_TABS`]: the last-session tab snapshot — references local
-///   connection IDs and is per-machine session state.
-/// - [`KEY_FIRST_RUN_SEEDED`]: the demo-seed guard — importing it would
-///   suppress first-run seeding on a fresh target DB.
-/// - [`KEY_RENDERER_BACKEND`]: cached hardware-capability probe result
-///   (P7.1). A pinned "accelerated" cache carried to a GPU-less machine
-///   would crash on launch, defeating the renderer probe/fallback entirely —
-///   the importing machine must always re-probe (its absence collapses to
-///   "auto", see [`cm_core::SettingsService::load_renderer_backend`]).
-/// - [`KEY_AUTOMATION_ENABLED`] / [`KEY_AUTOMATION_SCOPES`] (P8.6): the
-///   agent-mode automation master enable + granted scopes are per-machine
-///   security posture, not connection data — a DB copied to another machine
-///   (or a shared/backed-up envelope) must never silently arrive with
-///   automation already enabled or scoped there.
-const EXPORT_EXCLUDED_SETTING_KEYS: &[&str] = &[
-    KEY_SESSION_TABS,
-    KEY_FIRST_RUN_SEEDED,
-    KEY_RENDERER_BACKEND,
-    KEY_AUTOMATION_ENABLED,
-    KEY_AUTOMATION_SCOPES,
-];
+/// [`export`] always emits this version and [`import`] accepts only this exact
+/// schema. ConMan is greenfield, so import does not carry compatibility readers
+/// for superseded envelope shapes.
+pub const ENVELOPE_VERSION: u32 = 1;
 
 /// Upper bound on topological-sort passes to guard against cyclic or otherwise
 /// malformed input from untrusted JSON.
@@ -114,6 +75,58 @@ pub struct ExportOptions {
     pub include_secrets: bool,
 }
 
+/// Completeness accounting for a secret-inclusive backup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SecretExportReport {
+    pub attempted: usize,
+    pub included: usize,
+    pub failures: usize,
+}
+
+impl SecretExportReport {
+    fn merge(&mut self, other: Self) {
+        self.attempted += other.attempted;
+        self.included += other.included;
+        self.failures += other.failures;
+    }
+}
+
+/// Structured result of exporting the connection tree.
+#[derive(Debug, Clone)]
+pub struct ExportOutcome {
+    pub envelope: ExportEnvelope,
+    pub secret_report: SecretExportReport,
+}
+
+impl std::ops::Deref for ExportOutcome {
+    type Target = ExportEnvelope;
+
+    fn deref(&self) -> &Self::Target {
+        &self.envelope
+    }
+}
+
+/// JSON serialization plus the same completeness report as [`ExportOutcome`].
+#[derive(Debug, Clone)]
+pub struct ExportJsonOutcome {
+    pub json: String,
+    pub secret_report: SecretExportReport,
+}
+
+impl std::ops::Deref for ExportJsonOutcome {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.json
+    }
+}
+
+impl AsRef<[u8]> for ExportJsonOutcome {
+    fn as_ref(&self) -> &[u8] {
+        self.json.as_bytes()
+    }
+}
+
 /// Versioned JSON export envelope.
 ///
 /// Serialised with `serde_json`; the schema is pinned at version
@@ -121,6 +134,7 @@ pub struct ExportOptions {
 /// succeeds at the JSON level but [`import`] will reject it with
 /// [`ImportExportError::UnsupportedVersion`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExportEnvelope {
     pub conman_export_version: u32,
     /// UTC epoch-seconds at export time.
@@ -134,25 +148,11 @@ pub struct ExportEnvelope {
     /// default export carries no hint of the field.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub credential_secrets: Vec<ExportedSecret>,
-    /// P9.6-A: inline (`CredentialSource::Inline`) per-connection secrets,
-    /// the connection-scoped counterpart to `credential_secrets`. Additive
-    /// and `#[serde(default)]` — an envelope from before P9.6-A simply has
-    /// none (every connection back then could only reference a credential
-    /// object, covered by `credential_secrets`); an older ConMan reading a
-    /// new envelope just doesn't recognize this field and drops it
-    /// (forward-compat is accepted as a gap, noted in the P9.6-A report —
-    /// deliberately not bumping `ENVELOPE_VERSION` for a change this
-    /// additive-compatible). Same secret-exclusion default as
-    /// `credential_secrets` (only populated when
-    /// [`ExportOptions::include_secrets`] is `true`).
+    /// Inline (`CredentialSource::Inline`) per-connection secrets, the
+    /// connection-scoped counterpart to `credential_secrets`. Populated only
+    /// when [`ExportOptions::include_secrets`] is `true`.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub connection_secrets: Vec<ExportedConnectionSecret>,
-    /// App settings (v2) as ordered `[key, value]` string pairs. Volatile /
-    /// machine-specific keys ([`EXPORT_EXCLUDED_SETTING_KEYS`]) are omitted.
-    /// Empty for v1 envelopes (the field is absent there and defaults empty),
-    /// and suppressed from serialisation when empty.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub settings: Vec<(String, String)>,
 }
 
 /// One secret entry in a gated export, tied to a credential **object**.
@@ -177,9 +177,7 @@ pub struct ExportedSecret {
 /// One inline (`CredentialSource::Inline`) secret entry, tied to a
 /// **connection** rather than a credential object — the P9.6-A counterpart to
 /// [`ExportedSecret`]. Always `purpose == "password"` in practice today
-/// (inline is password-only per the P9.6 non-goals), but `purpose` is still
-/// carried as a string for the same forward-compat reason `ExportedSecret`
-/// does.
+/// because inline authentication is password-only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportedConnectionSecret {
     /// The **exported** (pre-remap) connection ID.  During import this is
@@ -207,9 +205,16 @@ pub enum ImportExportError {
     /// A repository operation failed during import.
     #[error("repository error during import: {0}")]
     Repository(#[from] cm_core::RepositoryError),
-    /// A keychain operation failed during a secrets-inclusive export.
-    #[error("keychain error during export: {0}")]
-    SecretStore(String),
+    /// A requested secret-inclusive backup could not retrieve every expected
+    /// secret. No envelope or JSON document is returned in this case.
+    #[error(
+        "secret-inclusive export incomplete: attempted {attempted}, included {included}, failures {failures}"
+    )]
+    IncompleteSecretExport {
+        attempted: usize,
+        included: usize,
+        failures: usize,
+    },
     /// P9.4: the attempted password did not decrypt an mRemoteNG file's
     /// encrypted fields (wrong password, or a custom one was never
     /// supplied). The caller should prompt for the correct password and
@@ -228,8 +233,6 @@ pub struct ImportStats {
     pub connections_imported: usize,
     /// Number of individual secrets successfully written to the keychain.
     pub secrets_imported: usize,
-    /// Number of app-settings key/value pairs applied (v2 envelopes).
-    pub settings_imported: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,37 +241,36 @@ pub struct ImportStats {
 
 /// Export the full tree from `repo` into a versioned [`ExportEnvelope`].
 ///
-/// Secrets are excluded unless `options.include_secrets == true` *and* a
-/// `store` is supplied.  When `include_secrets` is `true` but `store` is
-/// `None` the export succeeds with an empty `credential_secrets` list.
+/// Secrets are excluded unless `options.include_secrets == true`. A requested
+/// secret-inclusive export succeeds only when every expected secret can be
+/// retrieved; otherwise it fails before returning an envelope.
 pub fn export(
     repo: &dyn ConnectionRepository,
     options: &ExportOptions,
     store: Option<&dyn CredentialStore>,
-) -> Result<ExportEnvelope, ImportExportError> {
+) -> Result<ExportOutcome, ImportExportError> {
     let credential_folders = repo.list_credential_folders()?;
     let credentials = repo.list_credentials()?;
     let groups = repo.list_groups()?;
     let connections = repo.list_connections()?;
 
-    let (credential_secrets, connection_secrets) = if options.include_secrets {
-        match store {
-            Some(s) => (
-                collect_secrets(&credentials, s),
-                collect_connection_secrets(&connections, s),
-            ),
-            None => (Vec::new(), Vec::new()),
-        }
+    let (credential_secrets, connection_secrets, secret_report) = if options.include_secrets {
+        let (credential_secrets, mut report) = collect_secrets(&credentials, store);
+        let (connection_secrets, connection_report) =
+            collect_connection_secrets(&connections, store);
+        report.merge(connection_report);
+        (credential_secrets, connection_secrets, report)
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), SecretExportReport::default())
     };
 
-    // v2: carry app settings, minus the volatile/machine-specific keys.
-    let settings: Vec<(String, String)> = repo
-        .list_settings()?
-        .into_iter()
-        .filter(|(k, _)| !EXPORT_EXCLUDED_SETTING_KEYS.contains(&k.as_str()))
-        .collect();
+    if secret_report.failures > 0 {
+        return Err(ImportExportError::IncompleteSecretExport {
+            attempted: secret_report.attempted,
+            included: secret_report.included,
+            failures: secret_report.failures,
+        });
+    }
 
     tracing::info!(
         credentials = credentials.len(),
@@ -280,16 +282,18 @@ pub fn export(
         "exporting envelope"
     );
 
-    Ok(ExportEnvelope {
-        conman_export_version: ENVELOPE_VERSION,
-        exported_at: current_epoch_secs(),
-        credential_folders,
-        credentials,
-        groups,
-        connections,
-        credential_secrets,
-        connection_secrets,
-        settings,
+    Ok(ExportOutcome {
+        envelope: ExportEnvelope {
+            conman_export_version: ENVELOPE_VERSION,
+            exported_at: current_epoch_secs(),
+            credential_folders,
+            credentials,
+            groups,
+            connections,
+            credential_secrets,
+            connection_secrets,
+        },
+        secret_report,
     })
 }
 
@@ -300,9 +304,13 @@ pub fn export_to_json(
     repo: &dyn ConnectionRepository,
     options: &ExportOptions,
     store: Option<&dyn CredentialStore>,
-) -> Result<String, ImportExportError> {
-    let envelope = export(repo, options, store)?;
-    serde_json::to_string_pretty(&envelope).map_err(ImportExportError::Json)
+) -> Result<ExportJsonOutcome, ImportExportError> {
+    let outcome = export(repo, options, store)?;
+    let json = serde_json::to_string_pretty(&outcome.envelope)?;
+    Ok(ExportJsonOutcome {
+        json,
+        secret_report: outcome.secret_report,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -314,17 +322,17 @@ pub fn export_to_json(
 ///
 /// See the [module-level documentation][self] for full semantics.
 ///
-/// If `store` is provided and the envelope contains secrets they are written
-/// to the keychain under the **new** credential IDs.  Per-entry secret
-/// failures are non-fatal; [`ImportStats::secrets_imported`] counts successes
-/// only.
+/// Database changes commit atomically before any keychain mutation. If `store`
+/// is provided, envelope secrets are then written under the **new** IDs;
+/// per-entry keychain failures remain non-fatal and
+/// [`ImportStats::secrets_imported`] counts successes only.
 pub fn import(
     envelope: &ExportEnvelope,
-    repo: &dyn ConnectionRepository,
+    repo: &dyn AtomicImportRepository,
     store: Option<&dyn CredentialStore>,
 ) -> Result<ImportStats, ImportExportError> {
     let found = envelope.conman_export_version;
-    if !(MIN_SUPPORTED_VERSION..=ENVELOPE_VERSION).contains(&found) {
+    if found != ENVELOPE_VERSION {
         tracing::warn!(
             found,
             supported = ENVELOPE_VERSION,
@@ -349,28 +357,48 @@ pub fn import(
     }
 
     let mut stats = ImportStats::default();
+    let mut transaction = repo.begin_import()?;
 
     // Insertion order matters: each step depends on the maps built by the
     // previous steps.
 
     // 1. Credential folders (topologically sorted — parents first).
-    let folder_id_map = import_credential_folders(&envelope.credential_folders, repo, &mut stats)?;
+    let folder_id_map = import_credential_folders(
+        &envelope.credential_folders,
+        transaction.as_mut(),
+        &mut stats,
+    )?;
 
     // 2. Credentials (reference folders).
-    let cred_id_map = import_credentials(&envelope.credentials, &folder_id_map, repo, &mut stats)?;
+    let cred_id_map = import_credentials(
+        &envelope.credentials,
+        &folder_id_map,
+        transaction.as_mut(),
+        &mut stats,
+    )?;
 
     // 3. Groups (topologically sorted; may reference credentials via
     //    default_credential).
-    let group_id_map = import_groups(&envelope.groups, &cred_id_map, repo, &mut stats)?;
+    let group_id_map = import_groups(
+        &envelope.groups,
+        &cred_id_map,
+        transaction.as_mut(),
+        &mut stats,
+    )?;
 
     // 4. Connections (reference groups and credentials).
     let (conn_id_map, connection_secret_ids) = import_connections(
         &envelope.connections,
         &group_id_map,
         &cred_id_map,
-        repo,
+        transaction.as_mut(),
         &mut stats,
     )?;
+
+    // Commit all database records before adopting any secret into the
+    // keychain. A write or commit failure therefore rolls the whole batch back
+    // and cannot leave secrets referring to records that were never imported.
+    transaction.commit()?;
 
     // 5. Secrets — non-fatal per-entry, guarded by store availability.
     if let Some(s) = store {
@@ -388,24 +416,12 @@ pub fn import(
         }
     }
 
-    // 6. App settings (v2) — applied verbatim via set_setting. Absent in v1
-    //    envelopes (empty). Excluded keys were already dropped at export; be
-    //    defensive and skip them here too in case of hand-edited input.
-    for (key, value) in &envelope.settings {
-        if EXPORT_EXCLUDED_SETTING_KEYS.contains(&key.as_str()) {
-            continue;
-        }
-        repo.set_setting(key, value)?;
-        stats.settings_imported += 1;
-    }
-
     tracing::info!(
         folders = stats.credential_folders_imported,
         credentials = stats.credentials_imported,
         groups = stats.groups_imported,
         connections = stats.connections_imported,
         secrets = stats.secrets_imported,
-        settings = stats.settings_imported,
         "import complete"
     );
 
@@ -418,7 +434,7 @@ pub fn import(
 /// [`ImportExportError::Json`] on JSON parse failure — both without panicking.
 pub fn import_from_json(
     json: &str,
-    repo: &dyn ConnectionRepository,
+    repo: &dyn AtomicImportRepository,
     store: Option<&dyn CredentialStore>,
 ) -> Result<ImportStats, ImportExportError> {
     if json.trim().is_empty() {
@@ -434,14 +450,14 @@ pub fn import_from_json(
 
 fn import_credential_folders(
     folders: &[CredentialFolder],
-    repo: &dyn ConnectionRepository,
+    transaction: &mut dyn ImportTransaction,
     stats: &mut ImportStats,
 ) -> Result<HashMap<CredentialFolderId, CredentialFolderId>, ImportExportError> {
     let mut id_map: HashMap<CredentialFolderId, CredentialFolderId> = HashMap::new();
 
     for folder in topo_sort_folders(folders) {
         let new_parent = folder.parent_id.and_then(|old| id_map.get(&old).copied());
-        let new_id = repo.upsert_credential_folder(&CredentialFolder {
+        let new_id = transaction.insert_credential_folder(&CredentialFolder {
             id: CredentialFolderId::UNSAVED,
             parent_id: new_parent,
             name: folder.name.clone(),
@@ -457,7 +473,7 @@ fn import_credential_folders(
 fn import_credentials(
     credentials: &[Credential],
     folder_id_map: &HashMap<CredentialFolderId, CredentialFolderId>,
-    repo: &dyn ConnectionRepository,
+    transaction: &mut dyn ImportTransaction,
     stats: &mut ImportStats,
 ) -> Result<HashMap<CredentialId, CredentialId>, ImportExportError> {
     let mut id_map: HashMap<CredentialId, CredentialId> = HashMap::new();
@@ -466,7 +482,7 @@ fn import_credentials(
         let new_folder = cred
             .folder_id
             .and_then(|old| folder_id_map.get(&old).copied());
-        let new_id = repo.upsert_credential(&Credential {
+        let new_id = transaction.insert_credential(&Credential {
             id: CredentialId::UNSAVED,
             folder_id: new_folder,
             name: cred.name.clone(),
@@ -483,7 +499,7 @@ fn import_credentials(
 fn import_groups(
     groups: &[Group],
     cred_id_map: &HashMap<CredentialId, CredentialId>,
-    repo: &dyn ConnectionRepository,
+    transaction: &mut dyn ImportTransaction,
     stats: &mut ImportStats,
 ) -> Result<HashMap<GroupId, GroupId>, ImportExportError> {
     let mut id_map: HashMap<GroupId, GroupId> = HashMap::new();
@@ -493,7 +509,7 @@ fn import_groups(
         let new_default_cred = group
             .default_credential
             .and_then(|old| cred_id_map.get(&old).copied());
-        let new_id = repo.upsert_group(&Group {
+        let new_id = transaction.insert_group(&Group {
             id: GroupId::UNSAVED,
             parent_id: new_parent,
             name: group.name.clone(),
@@ -507,19 +523,7 @@ fn import_groups(
     Ok(id_map)
 }
 
-/// P9.6-A back-compat: an old-shape envelope carries a bare
-/// `"credential": <id|null>` field (deserialized into
-/// [`Connection::legacy_credential`]) instead of `credential_source`. Maps it
-/// forward: `Some(id) → Object(id)`, `None`/absent → inherit (`None`) — the
-/// exact meaning the old field always had. A new-shape envelope's
-/// `credential_source` (if present) always wins.
-fn normalize_credential_source(conn: &Connection) -> Option<CredentialSource> {
-    conn.credential_source
-        .clone()
-        .or_else(|| conn.legacy_credential.map(CredentialSource::Object))
-}
-
-/// Remaps a (already-normalized) [`CredentialSource`]'s `Object` id through
+/// Remaps a [`CredentialSource`]'s `Object` id through
 /// `cred_id_map`, exactly like every other cross-reference in this file — a
 /// reference to a credential outside this import batch silently collapses to
 /// `None` (inherit), never a hard failure. `Inline`/`Prompt` pass through
@@ -542,7 +546,7 @@ fn import_connections(
     connections: &[Connection],
     group_id_map: &HashMap<GroupId, GroupId>,
     cred_id_map: &HashMap<CredentialId, CredentialId>,
-    repo: &dyn ConnectionRepository,
+    transaction: &mut dyn ImportTransaction,
     stats: &mut ImportStats,
 ) -> Result<(HashMap<ConnectionId, ConnectionId>, HashSet<ConnectionId>), ImportExportError> {
     let mut id_map: HashMap<ConnectionId, ConnectionId> = HashMap::new();
@@ -552,7 +556,7 @@ fn import_connections(
         let new_group = conn
             .group_id
             .and_then(|old| group_id_map.get(&old).copied());
-        let new_source = remap_credential_source(normalize_credential_source(conn), cred_id_map);
+        let new_source = remap_credential_source(conn.credential_source.clone(), cred_id_map);
 
         // Use Connection::new to re-validate the kind/settings invariant against
         // untrusted data.
@@ -574,7 +578,7 @@ fn import_connections(
             ))
         })?;
 
-        let new_id = repo.upsert_connection(&to_insert)?;
+        let new_id = transaction.insert_connection(&to_insert)?;
         if matches!(
             to_insert.credential_source,
             Some(CredentialSource::Inline {
@@ -706,8 +710,12 @@ fn import_connection_secrets(
 // Secret collection for export
 // ---------------------------------------------------------------------------
 
-fn collect_secrets(credentials: &[Credential], store: &dyn CredentialStore) -> Vec<ExportedSecret> {
+fn collect_secrets(
+    credentials: &[Credential],
+    store: Option<&dyn CredentialStore>,
+) -> (Vec<ExportedSecret>, SecretExportReport) {
     let mut out = Vec::new();
+    let mut report = SecretExportReport::default();
     for cred in credentials {
         let purposes: &[CredentialPurpose] = match cred.kind {
             CredentialKind::Password => &[CredentialPurpose::Password],
@@ -717,29 +725,38 @@ fn collect_secrets(credentials: &[Credential], store: &dyn CredentialStore) -> V
             }
         };
         for &purpose in purposes {
+            report.attempted += 1;
             let key = CredentialRef::new(cred.id, purpose);
-            // Absent or error → skip; export continues (never fatal).
-            match store.get(&key) {
-                Ok(Some(secret)) => out.push(ExportedSecret {
-                    credential_id: cred.id,
-                    purpose: purpose.as_str().to_string(),
-                    secret_hex: to_hex(secret.expose()),
-                }),
-                Ok(None) => tracing::debug!(
-                    credential_id = cred.id.get(),
-                    purpose = purpose.as_str(),
-                    "secret absent during export"
-                ),
-                Err(e) => tracing::debug!(
-                    credential_id = cred.id.get(),
-                    purpose = purpose.as_str(),
-                    error = %e,
-                    "secret unreadable during export"
-                ),
+            match store.map(|store| store.get(&key)) {
+                Some(Ok(Some(secret))) => {
+                    report.included += 1;
+                    out.push(ExportedSecret {
+                        credential_id: cred.id,
+                        purpose: purpose.as_str().to_string(),
+                        secret_hex: to_hex(secret.expose()),
+                    });
+                }
+                Some(Ok(None)) | None => {
+                    report.failures += 1;
+                    tracing::warn!(
+                        credential_id = cred.id.get(),
+                        purpose = purpose.as_str(),
+                        "required secret absent during secret-inclusive export"
+                    );
+                }
+                Some(Err(error)) => {
+                    report.failures += 1;
+                    tracing::warn!(
+                        credential_id = cred.id.get(),
+                        purpose = purpose.as_str(),
+                        %error,
+                        "required secret unreadable during secret-inclusive export"
+                    );
+                }
             }
         }
     }
-    out
+    (out, report)
 }
 
 /// P9.6-A: the `CredentialSource::Inline` counterpart to [`collect_secrets`] —
@@ -748,9 +765,10 @@ fn collect_secrets(credentials: &[Credential], store: &dyn CredentialStore) -> V
 /// purpose, per the non-goals), same absent/error-is-never-fatal posture.
 fn collect_connection_secrets(
     connections: &[Connection],
-    store: &dyn CredentialStore,
-) -> Vec<ExportedConnectionSecret> {
+    store: Option<&dyn CredentialStore>,
+) -> (Vec<ExportedConnectionSecret>, SecretExportReport) {
     let mut out = Vec::new();
+    let mut report = SecretExportReport::default();
     for conn in connections {
         // A valid Telnet profile can only use Prompt. Keep this explicit so
         // even a malformed repository row cannot make a Telnet secret leave
@@ -764,25 +782,35 @@ fn collect_connection_secrets(
         else {
             continue;
         };
+        report.attempted += 1;
         let key = CredentialRef::for_connection(conn.id, CredentialPurpose::Password);
-        match store.get(&key) {
-            Ok(Some(secret)) => out.push(ExportedConnectionSecret {
-                connection_id: conn.id,
-                purpose: CredentialPurpose::Password.as_str().to_string(),
-                secret_hex: to_hex(secret.expose()),
-            }),
-            Ok(None) => tracing::debug!(
-                connection_id = conn.id.get(),
-                "inline secret absent during export"
-            ),
-            Err(e) => tracing::debug!(
-                connection_id = conn.id.get(),
-                error = %e,
-                "inline secret unreadable during export"
-            ),
+        match store.map(|store| store.get(&key)) {
+            Some(Ok(Some(secret))) => {
+                report.included += 1;
+                out.push(ExportedConnectionSecret {
+                    connection_id: conn.id,
+                    purpose: CredentialPurpose::Password.as_str().to_string(),
+                    secret_hex: to_hex(secret.expose()),
+                });
+            }
+            Some(Ok(None)) | None => {
+                report.failures += 1;
+                tracing::warn!(
+                    connection_id = conn.id.get(),
+                    "required inline secret absent during secret-inclusive export"
+                );
+            }
+            Some(Err(error)) => {
+                report.failures += 1;
+                tracing::warn!(
+                    connection_id = conn.id.get(),
+                    %error,
+                    "required inline secret unreadable during secret-inclusive export"
+                );
+            }
         }
     }
-    out
+    (out, report)
 }
 
 // ---------------------------------------------------------------------------

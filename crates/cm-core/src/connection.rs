@@ -70,6 +70,7 @@ pub struct Group {
 ///
 /// Timestamps are `i64` epoch seconds (no `chrono` dependency).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Connection {
     pub id: ConnectionId,
     /// Owning group; `None` means root level.
@@ -82,22 +83,21 @@ pub struct Connection {
     /// preserves today's behavior. `Some(_)` is one of the three explicit,
     /// user-facing modes (P9.6-A): reference a shared object, inline
     /// creds, or explicitly prompt.
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_credential_source")]
     pub credential_source: Option<CredentialSource>,
-    /// **Deserialize-only legacy shim** (P9.6-A): pre-P9.6 exports/envelopes
-    /// serialized the credential link as a bare `"credential": <id|null>`
-    /// field (no `credential_source`). Reading that old shape populates this
-    /// field via serde; `cm_storage::json_io::import`'s normalization step
-    /// maps it into `credential_source` (`Some(id) → Object(id)`, `None` →
-    /// inherit) and clears it. Never populated by new code, never
-    /// serialized out — `credential_source` is the only wire shape new
-    /// exports produce.
-    #[serde(rename = "credential", default, skip_serializing)]
-    pub legacy_credential: Option<CredentialId>,
     /// Ordering among siblings.
     pub sort: i64,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+fn deserialize_credential_source<'de, D>(
+    deserializer: D,
+) -> Result<Option<CredentialSource>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<CredentialSource>::deserialize(deserializer)
 }
 
 impl Connection {
@@ -124,7 +124,6 @@ impl Connection {
             kind,
             settings,
             credential_source,
-            legacy_credential: None,
             sort,
             created_at,
             updated_at,

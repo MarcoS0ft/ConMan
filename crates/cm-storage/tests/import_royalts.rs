@@ -186,3 +186,34 @@ fn royalts_fixture_round_trips_into_a_real_repo_and_keychain() {
         .expect("password secret should be present");
     assert_eq!(secret.expose(), b"hunter2-plaintext");
 }
+
+#[test]
+fn foreign_import_repository_failure_rolls_back_database_and_keychain() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database_path = directory.path().join("foreign-atomic.sqlite");
+    let repo = SqliteRepository::open(&database_path).expect("open repository");
+    let injector = rusqlite::Connection::open(&database_path).expect("failure injector");
+    injector
+        .execute_batch(
+            "CREATE TRIGGER fail_foreign_connection \
+             BEFORE INSERT ON connections \
+             BEGIN SELECT RAISE(ABORT, 'injected foreign import failure'); END;",
+        )
+        .expect("install failure trigger");
+
+    let store = MockStore::default();
+    let fixture_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/royalts_sample.rjson"
+    );
+    assert!(import_from_path(fixture_path.as_ref(), &repo, Some(&store)).is_err());
+
+    assert!(repo.list_credential_folders().expect("folders").is_empty());
+    assert!(repo.list_credentials().expect("credentials").is_empty());
+    assert!(repo.list_groups().expect("groups").is_empty());
+    assert!(repo.list_connections().expect("connections").is_empty());
+    assert!(
+        store.data.lock().expect("keychain lock").is_empty(),
+        "foreign import DB failure must happen before adopting any secret"
+    );
+}

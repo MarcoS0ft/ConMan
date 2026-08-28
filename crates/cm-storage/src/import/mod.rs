@@ -2,10 +2,9 @@
 //!
 //! Every foreign importer follows the same shape: **parse** a third-party
 //! file into an in-memory, v1-shaped [`ExportEnvelope`], then hand it to the
-//! existing, unmodified [`crate::json_io::import`] seam. That reuses ID
-//! remap, topo-sorted parent insertion, [`cm_core::Connection::new`]
-//! domain validation, and the plaintext-secret → OS-keychain path — no new
-//! import engine, no envelope schema change. Foreign importers are just
+//! shared [`crate::json_io::import`] seam. That reuses atomic ID remapping,
+//! topo-sorted parent insertion, [`cm_core::Connection::new`] domain
+//! validation, and keychain-after-commit ordering. Foreign importers are just
 //! alternate front-ends producing the same envelope shape `cm_storage`'s
 //! native JSON export already produces.
 //!
@@ -38,9 +37,10 @@ pub mod royalts;
 
 use std::path::Path;
 
-use cm_core::{ConnectionRepository, CredentialStore};
+use cm_core::CredentialStore;
 
 use crate::json_io::{self, ExportEnvelope, ImportExportError, ImportStats};
+use crate::repository::AtomicImportRepository;
 
 /// A single non-fatal issue surfaced while translating a foreign file into an
 /// [`ExportEnvelope`]: a skipped/unsupported node kind, a defaulted field,
@@ -90,7 +90,7 @@ pub struct ForeignImportOutcome {
 ///   [`ImportExportError::Malformed`].
 pub fn import_from_path(
     path: &Path,
-    repo: &dyn ConnectionRepository,
+    repo: &dyn AtomicImportRepository,
     store: Option<&dyn CredentialStore>,
 ) -> Result<ForeignImportOutcome, ImportExportError> {
     import_from_path_with_password(path, repo, store, mremoteng_crypto::DEFAULT_PASSWORD)
@@ -104,7 +104,7 @@ pub fn import_from_path(
 /// by hand.
 pub fn import_from_path_with_password(
     path: &Path,
-    repo: &dyn ConnectionRepository,
+    repo: &dyn AtomicImportRepository,
     store: Option<&dyn CredentialStore>,
     password: &str,
 ) -> Result<ForeignImportOutcome, ImportExportError> {
@@ -172,15 +172,15 @@ pub fn import_from_path_with_password(
 #[cfg(test)]
 mod tests {
     use cm_core::{
-        Connection, ConnectionId, ConnectionKind, ConnectionSettings, Credential, CredentialId,
-        CredentialKind, CredentialSource, Group, GroupId, LocalSettings,
+        Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings,
+        Credential, CredentialId, CredentialKind, CredentialSource, Group, GroupId, LocalSettings,
     };
 
     use super::*;
     use crate::SqliteRepository;
 
     #[test]
-    fn json_extension_still_routes_through_the_unmodified_native_import() {
+    fn json_extension_still_routes_through_the_shared_native_import() {
         // Regression: the native `.json` envelope path is untouched by this
         // framework — same behavior via `import_from_path` as calling
         // `json_io::import_from_json` directly.

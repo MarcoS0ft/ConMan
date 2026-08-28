@@ -100,7 +100,7 @@ pub fn parse(contents: &str) -> Result<(ExportEnvelope, Vec<ImportWarning>), Imp
     walk_nodes(&doc.objects, None, &mut ctx);
 
     let envelope = ExportEnvelope {
-        conman_export_version: json_io::MIN_SUPPORTED_VERSION,
+        conman_export_version: json_io::ENVELOPE_VERSION,
         exported_at: 0, // foreign import: no meaningful export timestamp
         credential_folders: Vec::new(),
         credentials: ctx.credentials,
@@ -108,7 +108,6 @@ pub fn parse(contents: &str) -> Result<(ExportEnvelope, Vec<ImportWarning>), Imp
         connections: ctx.connections,
         credential_secrets: ctx.credential_secrets,
         connection_secrets: Vec::new(),
-        settings: Vec::new(),
     };
 
     Ok((envelope, ctx.warnings))

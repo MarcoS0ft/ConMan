@@ -16,10 +16,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use cm_core::{
-    Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings, Credential,
-    CredentialError, CredentialFolder, CredentialFolderId, CredentialId, CredentialKind,
-    CredentialPurpose, CredentialRef, CredentialSource, CredentialStore, Group, GroupId,
-    LocalSettings, RdpSettings, Secret, SshAuthMethod, SshSettings, TelnetSettings,
+    AppStateRepository, Connection, ConnectionId, ConnectionKind, ConnectionRepository,
+    ConnectionSettings, Credential, CredentialError, CredentialFolder, CredentialFolderId,
+    CredentialId, CredentialKind, CredentialPurpose, CredentialRef, CredentialSource,
+    CredentialStore, Group, GroupId, LocalSettings, RdpSettings, Secret, SshAuthMethod,
+    SshSettings, TelnetSettings,
 };
 use cm_storage::{
     ENVELOPE_VERSION, ExportOptions, ImportExportError, ImportStats, SqliteRepository, export,
@@ -208,6 +209,22 @@ impl CredentialStore for MockStore {
             .lock()
             .expect("lock")
             .remove(&(key.service().to_string(), key.account().to_string()));
+        Ok(())
+    }
+}
+
+struct FailingReadStore;
+
+impl CredentialStore for FailingReadStore {
+    fn store(&self, _key: &CredentialRef, _secret: &Secret) -> Result<(), CredentialError> {
+        Ok(())
+    }
+
+    fn get(&self, _key: &CredentialRef) -> Result<Option<Secret>, CredentialError> {
+        Err(CredentialError::Backend("test read failure".to_owned()))
+    }
+
+    fn delete(&self, _key: &CredentialRef) -> Result<(), CredentialError> {
         Ok(())
     }
 }
@@ -526,7 +543,7 @@ fn secrets_inclusive_export_never_collects_telnet_connection_secrets() {
     )
     .expect("export Telnet");
     assert!(envelope.connection_secrets.is_empty());
-    let serialized = serde_json::to_string(&envelope).expect("serialize envelope");
+    let serialized = serde_json::to_string(&envelope.envelope).expect("serialize envelope");
     assert!(!serialized.contains("must-not-be-exported"));
     assert!(!serialized.contains("connection_secrets"));
 }
@@ -568,7 +585,7 @@ fn secrets_excluded_by_default() {
     );
 
     // The serialised JSON must not contain the field at all.
-    let json = serde_json::to_string(&envelope).expect("to_json");
+    let json = serde_json::to_string(&envelope.envelope).expect("to_json");
     assert!(
         !json.contains("credential_secrets"),
         "skip_serializing_if must suppress the field"
@@ -591,6 +608,9 @@ fn gated_secrets_export_and_import() {
     };
     let envelope = export(&src, &opts, Some(&src_store)).expect("export with secrets");
 
+    assert_eq!(envelope.secret_report.attempted, 1);
+    assert_eq!(envelope.secret_report.included, 1);
+    assert_eq!(envelope.secret_report.failures, 0);
     assert_eq!(envelope.credential_secrets.len(), 1);
     assert_eq!(envelope.credential_secrets[0].purpose, "password");
     // Hex of b"s3cr3t!" — verify it round-trips.
@@ -670,20 +690,95 @@ fn gated_secrets_ssh_key_with_passphrase() {
 }
 
 #[test]
-fn include_secrets_without_store_gives_empty_secrets() {
+fn include_secrets_without_store_fails_closed() {
     let src = repo();
     src.upsert_credential(&mk_cred("pw", CredentialKind::Password, None))
         .expect("cred");
 
-    // include_secrets = true but no store → secrets silently omitted.
     let opts = ExportOptions {
         include_secrets: true,
     };
-    let envelope = export(&src, &opts, None).expect("export");
-    assert!(
-        envelope.credential_secrets.is_empty(),
-        "no store → no secrets"
+    assert!(matches!(
+        export(&src, &opts, None),
+        Err(ImportExportError::IncompleteSecretExport {
+            attempted: 1,
+            included: 0,
+            failures: 1,
+        })
+    ));
+}
+
+#[test]
+fn include_secrets_with_missing_secret_fails_closed() {
+    let src = repo();
+    src.upsert_credential(&mk_cred("pw", CredentialKind::Password, None))
+        .expect("cred");
+
+    let store = MockStore::new();
+    let result = export_to_json(
+        &src,
+        &ExportOptions {
+            include_secrets: true,
+        },
+        Some(&store),
     );
+    assert!(matches!(
+        result,
+        Err(ImportExportError::IncompleteSecretExport {
+            attempted: 1,
+            included: 0,
+            failures: 1,
+        })
+    ));
+}
+
+#[test]
+fn include_secrets_with_unreadable_secret_fails_closed() {
+    let src = repo();
+    src.upsert_credential(&mk_cred("pw", CredentialKind::Password, None))
+        .expect("cred");
+
+    let result = export_to_json(
+        &src,
+        &ExportOptions {
+            include_secrets: true,
+        },
+        Some(&FailingReadStore),
+    );
+    assert!(matches!(
+        result,
+        Err(ImportExportError::IncompleteSecretExport {
+            attempted: 1,
+            included: 0,
+            failures: 1,
+        })
+    ));
+}
+
+#[test]
+fn one_missing_secret_rejects_the_entire_backup_document() {
+    let src = repo();
+    let credential_id = src
+        .upsert_credential(&mk_cred("key", CredentialKind::SshKeyWithPassphrase, None))
+        .expect("credential");
+    let store = MockStore::new();
+    store.seed(credential_id, CredentialPurpose::SshKey, b"private-key");
+
+    let result = export_to_json(
+        &src,
+        &ExportOptions {
+            include_secrets: true,
+        },
+        Some(&store),
+    );
+    assert!(matches!(
+        result,
+        Err(ImportExportError::IncompleteSecretExport {
+            attempted: 2,
+            included: 1,
+            failures: 1,
+        })
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -906,7 +1001,7 @@ fn unknown_connection_kind_returns_json_error() {
             "name": "bad",
             "kind": "telepathy",
             "settings": {"rdp": {"host": "x", "port": 3389, "domain": null, "username": null}},
-            "credential": null,
+            "credential_source": null,
             "sort": 0, "created_at": 0, "updated_at": 0
         }]
     }"#;
@@ -916,6 +1011,85 @@ fn unknown_connection_kind_returns_json_error() {
         matches!(result, Err(ImportExportError::Json(_))),
         "expected Json error for unknown kind, got: {result:?}"
     );
+}
+
+#[test]
+fn deprecated_connection_credential_field_is_rejected_before_any_import() {
+    let dst = repo();
+    let json = serde_json::json!({
+        "conman_export_version": ENVELOPE_VERSION,
+        "exported_at": 0,
+        "credential_folders": [],
+        "credentials": [{
+            "id": 1,
+            "folder_id": null,
+            "name": "must-not-import",
+            "kind": "password",
+            "username": "admin"
+        }],
+        "groups": [{
+            "id": 1,
+            "parent_id": null,
+            "name": "must-not-import",
+            "sort": 0,
+            "default_credential": null
+        }],
+        "connections": [{
+            "id": 1,
+            "group_id": 1,
+            "name": "legacy-shape",
+            "kind": "local",
+            "settings": {
+                "local": { "program": null, "args": [], "working_dir": null, "env": [] }
+            },
+            "credential_source": null,
+            "credential": 1,
+            "sort": 0,
+            "created_at": 0,
+            "updated_at": 0
+        }]
+    })
+    .to_string();
+
+    assert!(matches!(
+        import_from_json(&json, &dst, None),
+        Err(ImportExportError::Json(_))
+    ));
+    assert!(dst.list_credential_folders().expect("folders").is_empty());
+    assert!(dst.list_credentials().expect("credentials").is_empty());
+    assert!(dst.list_groups().expect("groups").is_empty());
+    assert!(dst.list_connections().expect("connections").is_empty());
+}
+
+#[test]
+fn missing_current_credential_source_field_is_rejected() {
+    let dst = repo();
+    let json = serde_json::json!({
+        "conman_export_version": ENVELOPE_VERSION,
+        "exported_at": 0,
+        "credential_folders": [],
+        "credentials": [],
+        "groups": [],
+        "connections": [{
+            "id": 1,
+            "group_id": null,
+            "name": "missing-current-field",
+            "kind": "local",
+            "settings": {
+                "local": { "program": null, "args": [], "working_dir": null, "env": [] }
+            },
+            "sort": 0,
+            "created_at": 0,
+            "updated_at": 0
+        }]
+    })
+    .to_string();
+
+    assert!(matches!(
+        import_from_json(&json, &dst, None),
+        Err(ImportExportError::Json(_))
+    ));
+    assert!(dst.list_connections().expect("connections").is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -1045,7 +1219,7 @@ fn dangling_credential_reference_becomes_none() {
             "name": "no-cred",
             "kind": "local",
             "settings": {"local": {"program": null, "args": [], "working_dir": null, "env": []}},
-            "credential": 42,
+            "credential_source": { "kind": "object", "value": 42 },
             "sort": 0,
             "created_at": 0,
             "updated_at": 0
@@ -1102,6 +1276,67 @@ fn import_is_additive() {
     assert_eq!(conns.len(), 1, "only the pre-existing connection");
 }
 
+#[test]
+fn repository_failure_rolls_back_the_entire_import_before_keychain_writes() {
+    let src = repo();
+    let credential_id = src
+        .upsert_credential(&mk_cred("credential", CredentialKind::Password, None))
+        .expect("source credential");
+    let group_id = src
+        .upsert_group(&mk_group("group", None, Some(credential_id)))
+        .expect("source group");
+    src.upsert_connection(&mk_rdp_conn(
+        "connection",
+        Some(group_id),
+        Some(credential_id),
+    ))
+    .expect("source connection");
+
+    let source_store = MockStore::new();
+    source_store.seed(
+        credential_id,
+        CredentialPurpose::Password,
+        b"must-not-be-adopted",
+    );
+    let envelope = export(
+        &src,
+        &ExportOptions {
+            include_secrets: true,
+        },
+        Some(&source_store),
+    )
+    .expect("source export")
+    .envelope;
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database_path = directory.path().join("atomic.sqlite");
+    let dst = SqliteRepository::open(&database_path).expect("destination repository");
+    let injector = rusqlite::Connection::open(&database_path).expect("failure injector");
+    injector
+        .execute_batch(
+            "CREATE TRIGGER fail_imported_connection \
+             BEFORE INSERT ON connections \
+             BEGIN SELECT RAISE(ABORT, 'injected import failure'); END;",
+        )
+        .expect("install failure trigger");
+
+    let destination_store = MockStore::new();
+    assert!(matches!(
+        import(&envelope, &dst, Some(&destination_store)),
+        Err(ImportExportError::Repository(_))
+    ));
+
+    assert!(dst.list_credential_folders().expect("folders").is_empty());
+    assert!(dst.list_credentials().expect("credentials").is_empty());
+    assert!(dst.list_groups().expect("groups").is_empty());
+    assert!(dst.list_connections().expect("connections").is_empty());
+    assert_eq!(
+        destination_store.entry_count(),
+        0,
+        "a rolled-back database import must not adopt any keychain secret"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Tests: envelope schema fields
 // ---------------------------------------------------------------------------
@@ -1128,185 +1363,68 @@ fn envelope_version_constant_matches_serialised() {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: v2 settings travel in the envelope
+// Tests: connection-only envelope and strict current schema
 // ---------------------------------------------------------------------------
 
 #[test]
-fn settings_exported_and_reimported() {
+fn app_state_never_travels_with_connections() {
     let src = repo();
-    src.set_setting("ui.theme_mode", "1").expect("set theme");
-    src.set_setting("ui.density", "1").expect("set density");
-    src.set_setting("terminal.font_size", "14")
-        .expect("set font size");
-
-    let envelope = export(&src, &ExportOptions::default(), None).expect("export");
-    // Exported as ordered [key, value] pairs.
-    assert!(
-        envelope
-            .settings
-            .iter()
-            .any(|(k, v)| k == "terminal.font_size" && v == "14"),
-        "a normal (non-excluded) setting must be exported"
-    );
-    assert_eq!(envelope.settings.len(), 3, "all three settings exported");
-
-    // Round-trip into a fresh repo.
-    let dst = repo();
-    let stats = import(&envelope, &dst, None).expect("import");
-    assert_eq!(stats.settings_imported, 3);
-
-    assert_eq!(
-        dst.get_setting("ui.theme_mode").unwrap().as_deref(),
-        Some("1")
-    );
-    assert_eq!(dst.get_setting("ui.density").unwrap().as_deref(), Some("1"));
-    assert_eq!(
-        dst.get_setting("terminal.font_size").unwrap().as_deref(),
-        Some("14")
-    );
-}
-
-#[test]
-fn excluded_settings_keys_are_not_exported() {
-    let src = repo();
-    // Volatile / machine-specific keys that must NOT travel.
-    src.set_setting("ui.session_tabs", "{\"tabs\":[]}")
-        .expect("set tabs");
-    src.set_setting("app.first_run_seeded", "1")
-        .expect("set seeded");
-    // Machine hardware-capability cache (P7.1 cont.) — must NOT travel: a
-    // pinned "accelerated" imported on a GPU-less machine would crash it.
-    src.set_setting("render.backend", "accelerated")
-        .expect("set render backend");
-    // Agent-mode automation posture (P8.6) — must NOT travel: a DB copy must
-    // never silently arrive with automation already enabled/scoped.
-    src.set_setting("automation.enabled", "1")
-        .expect("set automation enabled");
-    src.set_setting("automation.scopes", "read,write,execute")
-        .expect("set automation scopes");
-    // A normal key that SHOULD travel.
-    src.set_setting("ui.theme_mode", "0").expect("set theme");
-
-    let envelope = export(&src, &ExportOptions::default(), None).expect("export");
-
-    let keys: Vec<&str> = envelope.settings.iter().map(|(k, _)| k.as_str()).collect();
-    assert!(
-        !keys.contains(&"ui.session_tabs"),
-        "ui.session_tabs must be excluded"
-    );
-    assert!(
-        !keys.contains(&"app.first_run_seeded"),
-        "app.first_run_seeded must be excluded"
-    );
-    assert!(
-        !keys.contains(&"render.backend"),
-        "render.backend must be excluded — it is machine-specific hardware \
-         capability, and the importing machine must re-probe"
-    );
-    assert!(
-        !keys.contains(&"automation.enabled"),
-        "automation.enabled must be excluded — per-machine security posture"
-    );
-    assert!(
-        !keys.contains(&"automation.scopes"),
-        "automation.scopes must be excluded — per-machine security posture"
-    );
-    assert!(keys.contains(&"ui.theme_mode"), "normal key must be kept");
-
-    // The serialised JSON must not mention the excluded keys at all.
-    let json = serde_json::to_string(&envelope).expect("to_json");
-    assert!(!json.contains("session_tabs"));
-    assert!(!json.contains("first_run_seeded"));
-    assert!(!json.contains("render.backend"));
-    assert!(!json.contains("\"accelerated\""));
-    assert!(!json.contains("automation.enabled"));
-    assert!(!json.contains("automation.scopes"));
-}
-
-#[test]
-fn empty_settings_field_is_suppressed_in_json() {
-    let src = repo();
+    src.set_state("active-panel", "settings")
+        .expect("set source state");
     let json = export_to_json(&src, &ExportOptions::default(), None).expect("export");
-    assert!(
-        !json.contains("\"settings\""),
-        "empty settings list must be omitted from serialisation"
+    assert!(!json.contains("active-panel"));
+    assert!(!json.contains("app_state"));
+
+    let dst = repo();
+    dst.set_state("active-panel", "connections")
+        .expect("set destination state");
+    import_from_json(&json, &dst, None).expect("import");
+    assert_eq!(
+        dst.get_state("active-panel")
+            .expect("get destination state")
+            .as_deref(),
+        Some("connections")
     );
 }
 
 #[test]
-fn v1_envelope_without_settings_still_imports() {
-    // A hand-written v1 envelope (no `settings` field) must import cleanly for
-    // backward compatibility.
+fn superseded_envelope_version_is_rejected() {
     let json = serde_json::json!({
-        "conman_export_version": 1,
+        "conman_export_version": 2,
         "exported_at": 123,
         "credential_folders": [],
         "credentials": [],
-        "groups": [
-            { "id": 1, "parent_id": null, "name": "G", "sort": 0, "default_credential": null }
-        ],
+        "groups": [],
         "connections": []
     })
     .to_string();
 
     let dst = repo();
-    let stats = import_from_json(&json, &dst, None).expect("v1 import must succeed");
-    assert_eq!(stats.groups_imported, 1);
-    assert_eq!(stats.settings_imported, 0, "v1 carries no settings");
+    assert!(matches!(
+        import_from_json(&json, &dst, None),
+        Err(ImportExportError::UnsupportedVersion {
+            found: 2,
+            supported: 1
+        })
+    ));
 }
 
 #[test]
-fn v2_envelope_with_settings_imports() {
-    // A hand-written v2 envelope with a settings list.
+fn obsolete_settings_field_is_rejected() {
     let json = serde_json::json!({
-        "conman_export_version": 2,
+        "conman_export_version": ENVELOPE_VERSION,
         "exported_at": 123,
         "credential_folders": [],
         "credentials": [],
         "groups": [],
         "connections": [],
-        "settings": [["terminal.font_size", "16"], ["ui.theme_mode", "1"]]
+        "settings": [["theme", "dark"]]
     })
     .to_string();
 
     let dst = repo();
-    let stats = import_from_json(&json, &dst, None).expect("v2 import");
-    assert_eq!(stats.settings_imported, 2);
-    assert_eq!(
-        dst.get_setting("terminal.font_size").unwrap().as_deref(),
-        Some("16")
-    );
-}
-
-#[test]
-fn v2_envelope_with_render_backend_is_skipped_on_import() {
-    // Defense in depth: even a hand-edited / untrusted envelope that carries
-    // the excluded `render.backend` key must NOT have it applied on import —
-    // mirrors the defensive re-filter in `import()` (P7.1 cont.).
-    let json = serde_json::json!({
-        "conman_export_version": 2,
-        "exported_at": 123,
-        "credential_folders": [],
-        "credentials": [],
-        "groups": [],
-        "connections": [],
-        "settings": [["render.backend", "accelerated"], ["ui.theme_mode", "1"]]
-    })
-    .to_string();
-
-    let dst = repo();
-    let stats = import_from_json(&json, &dst, None).expect("v2 import");
-    assert_eq!(
-        stats.settings_imported, 1,
-        "only the non-excluded key is counted"
-    );
-    assert_eq!(
-        dst.get_setting("render.backend").unwrap(),
-        None,
-        "render.backend must not be applied even if present in the input"
-    );
-    assert_eq!(
-        dst.get_setting("ui.theme_mode").unwrap().as_deref(),
-        Some("1")
-    );
+    assert!(matches!(
+        import_from_json(&json, &dst, None),
+        Err(ImportExportError::Json(_))
+    ));
 }

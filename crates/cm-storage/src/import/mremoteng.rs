@@ -151,7 +151,7 @@ pub fn parse(
     walk_nodes(&roots, None, &Inherited::default(), &mut ctx)?;
 
     let envelope = ExportEnvelope {
-        conman_export_version: json_io::MIN_SUPPORTED_VERSION,
+        conman_export_version: json_io::ENVELOPE_VERSION,
         exported_at: 0, // foreign import: no meaningful export timestamp
         credential_folders: Vec::new(),
         // mRemoteNG never produces a shared credential object (P9.6 decision
@@ -162,7 +162,6 @@ pub fn parse(
         connections: ctx.connections,
         credential_secrets: Vec::new(),
         connection_secrets: ctx.connection_secrets,
-        settings: Vec::new(),
     };
 
     Ok((envelope, ctx.warnings))
