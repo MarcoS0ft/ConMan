@@ -151,7 +151,7 @@ pub fn parse(contents: &str) -> Result<(ExportEnvelope, Vec<ImportWarning>), Imp
 
     let mut ctx = ParseCtx::default();
     collect_credentials(&records, &idx, &mut ctx);
-    walk_rows(&records, &idx, &mut ctx);
+    walk_rows(contents, &records, &idx, &mut ctx);
 
     let envelope = ExportEnvelope {
         conman_export_version: json_io::ENVELOPE_VERSION,
@@ -229,12 +229,31 @@ fn field(idx: &HeaderIndex, rec: &::csv::StringRecord, name: &str) -> Option<Str
 }
 
 /// The 1-based source line number for `rec`, used in every "row N" warning.
-/// `csv::Reader` tracks this even across a multi-line quoted field (e.g. a
-/// PEM block spanning several physical lines still reports the record's
-/// *starting* line) — falls back to the record index (data rows start after
-/// the header) only if the reader somehow didn't track a position.
-fn row_number(rec: &::csv::StringRecord, index: usize) -> u64 {
-    rec.position().map(|p| p.line()).unwrap_or(index as u64 + 2)
+///
+/// The csv crate's tracked `line()` differs between LF and CRLF input after a
+/// multi-line quoted record. Its byte offset is stable, so count newline bytes
+/// before the record instead. This keeps diagnostics tied to the user's real
+/// source line on every platform. Falls back to the record index only when the
+/// reader did not retain a position.
+fn row_number(contents: &str, rec: &::csv::StringRecord, index: usize) -> u64 {
+    rec.position().map_or(index as u64 + 2, |position| {
+        let record_start = usize::try_from(position.byte())
+            .unwrap_or(contents.len())
+            .min(contents.len());
+        // For CRLF input csv::Position points at the LF byte; for LF input it
+        // points just after it. Include a newline at the position itself so
+        // both conventions yield the same physical line count.
+        let prefix_end = if contents.as_bytes().get(record_start) == Some(&b'\n') {
+            record_start + 1
+        } else {
+            record_start
+        };
+        contents.as_bytes()[..prefix_end]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count() as u64
+            + 1
+    })
 }
 
 /// Parses `raw` as `T`, falling back to `default` on `None` or a parse
@@ -353,9 +372,14 @@ fn collect_credentials(records: &[::csv::StringRecord], idx: &HeaderIndex, ctx: 
 // Pass 2: group tree + connections
 // ---------------------------------------------------------------------------
 
-fn walk_rows(records: &[::csv::StringRecord], idx: &HeaderIndex, ctx: &mut ParseCtx) {
+fn walk_rows(
+    contents: &str,
+    records: &[::csv::StringRecord],
+    idx: &HeaderIndex,
+    ctx: &mut ParseCtx,
+) {
     for (i, rec) in records.iter().enumerate() {
-        let row_num = row_number(rec, i);
+        let row_num = row_number(contents, rec, i);
         process_row(row_num, rec, idx, ctx);
     }
 }
@@ -846,6 +870,19 @@ mod tests {
                 .any(|w| w.message.contains("row 10: missing 'host'")),
             "skipping must cite the real source line (row 10), not just be a counted warning: {warnings:?}"
         );
+    }
+
+    #[test]
+    fn warning_source_lines_are_identical_for_lf_and_crlf() {
+        for fixture in [FIXTURE.to_string(), FIXTURE.replace('\n', "\r\n")] {
+            let (_, warnings) = parse(&fixture).expect("fixture should parse");
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.message.contains("row 10: missing 'host'")),
+                "source row must remain physical line 10 for either newline style: {warnings:?}"
+            );
+        }
     }
 
     #[test]
