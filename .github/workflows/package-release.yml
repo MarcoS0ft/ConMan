@@ -1,28 +1,31 @@
-# Cross-platform build and test gate for ConMan.
-#
-# Keep action revisions pinned, matching the supply-chain posture used by the
-# sibling SafeTunnel project. Successful, uncompressed release binaries are
-# retained briefly for diagnostics; publishing and UPX finalization happen only
-# in the release workflows after this gate succeeds.
+# Shared release builder. Callers provide an immutable commit/tag ref; every
+# platform checks out and packages that exact source revision.
 
-name: CI
+name: Package release
 
 on:
-  push:
-    branches: [master]
-  pull_request:
-    branches: [master]
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Exact commit or tag to build
+        required: true
+        type: string
+      expected_version:
+        description: Exact version required from the executable; empty for dev builds
+        required: false
+        default: ''
+        type: string
+      run_tests:
+        description: Run the workspace test suite before packaging
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  build:
+  package:
     name: ${{ matrix.name }}
     strategy:
       fail-fast: false
@@ -39,14 +42,20 @@ jobs:
             platform: windows-x86_64
 
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 75
 
     steps:
-      - name: Checkout
+      - name: Checkout exact source revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # BuildInfo uses the monotonic repository commit count.
+          ref: ${{ inputs.source_ref }}
           fetch-depth: 0
+
+      - name: Verify exact checkout
+        shell: bash
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$(git rev-parse '${{ inputs.source_ref }}^{commit}')"
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -64,7 +73,7 @@ jobs:
             openssh-client
 
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
+        run: rustup toolchain install 1.96.0 --profile minimal
 
       - name: Bootstrap Zig 0.15.2 (Linux/macOS)
         if: runner.os != 'Windows'
@@ -84,22 +93,16 @@ jobs:
           $zig.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           & $zig.FullName version
 
-      - name: Check formatting
-        if: runner.os == 'Linux'
-        run: cargo fmt --all -- --check
-
-      - name: Lint all targets and features
-        if: runner.os == 'Linux'
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-
       - name: Test workspace
+        if: inputs.run_tests
         run: cargo test --locked --workspace
 
       - name: Test UI accessibility and interaction boundary
+        if: inputs.run_tests
         run: cargo test --locked -p cm-ui --features ui-introspection
 
       - name: Test release staging contracts
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && inputs.run_tests
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python -m unittest discover -s scripts/dist -p 'test_*.py' -v
@@ -107,21 +110,45 @@ jobs:
       - name: Build release executables
         run: cargo build --locked --workspace --release --bins
 
-      - name: Stage uncompressed diagnostic artifact
-        id: stage
+      - name: Stage, compress, and verify release executables
+        id: prepare
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
         run: |
+          set -eu
+          expected_args=()
+          if [[ -n "$EXPECTED_VERSION" ]]; then
+            expected_args=(--expected-version "$EXPECTED_VERSION")
+          fi
           python scripts/dist/prepare_release.py \
             --target-dir target/release \
-            --stage-dir dist/raw \
-            --platform ${{ matrix.platform }} \
-            --skip-upx \
-            --github-output "$GITHUB_OUTPUT"
-        shell: bash
+            --stage-dir dist/stage \
+            --platform '${{ matrix.platform }}' \
+            --github-output "$GITHUB_OUTPUT" \
+            "${expected_args[@]}"
 
-      - name: Upload uncompressed diagnostic artifact
+      # Future platform signing belongs here: UPX has completed and passed its
+      # integrity/smoke tests, while no archive or checksum exists yet.
+      - name: Signing boundary
+        shell: bash
+        run: echo "Unsigned build; platform signing will run at this boundary."
+
+      - name: Archive and checksum staged files
+        id: archive
+        shell: bash
+        run: |
+          python scripts/dist/package_release.py \
+            --stage-dir dist/stage \
+            --output-dir dist/packages \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Upload packed release artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: raw-conman-${{ steps.stage.outputs.sanitized_version }}-${{ matrix.platform }}
-          path: dist/raw/
+          name: release-${{ steps.prepare.outputs.sanitized_version }}-${{ matrix.platform }}
+          path: |
+            ${{ steps.archive.outputs.archive }}
+            ${{ steps.archive.outputs.checksum }}
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
