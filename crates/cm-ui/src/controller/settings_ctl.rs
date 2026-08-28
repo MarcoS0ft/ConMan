@@ -1,8 +1,11 @@
-//! Settings persistence: theme/density/accent/font-family/font-size/shell
-//! path-args-cwd/startup-behavior callbacks, plus the AppSettings <-> live-UI
-//! helpers.
+//! Editable application preferences and their live UI/runtime projection.
 
-use cm_core::{AppSettings, LocalSettings, SettingsService};
+#[cfg(feature = "agent-mode")]
+use cm_core::ScopeSet;
+use cm_core::{
+    AccentColor, AppConfigStore, AppSettings, AppState, Density, LocalSettings, RendererBackend,
+    SettingKey, SettingsService, StartupBehavior, TerminalTheme, ThemeMode,
+};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::AppWindow;
@@ -13,87 +16,151 @@ pub(super) fn wire_settings_ctl(ctx: &Ctx) {
     wire_theme_changed(ctx);
     wire_density_changed(ctx);
     wire_accent_changed(ctx);
+    wire_terminal_theme_changed(ctx);
     wire_settings_font_family_changed(ctx);
     wire_settings_font_size_changed(ctx);
+    wire_scrollback_limit_changed(ctx);
     wire_settings_shell_path_changed(ctx);
     wire_settings_shell_args_changed(ctx);
     wire_settings_shell_cwd_changed(ctx);
+    wire_plain_copy_paste_changed(ctx);
+    wire_copy_on_select_changed(ctx);
+    wire_confirm_close_active_tab_changed(ctx);
+    wire_confirm_quit_active_connections_changed(ctx);
     wire_startup_behavior_changed(ctx);
     wire_render_backend_changed(ctx);
+    wire_open_config(ctx);
+    wire_reload_config(ctx);
+    wire_copy_build_info(ctx);
     #[cfg(feature = "agent-mode")]
     wire_agent_mode_ctl(ctx);
 }
 
-/// Map the Rendering segmented-control index to the persisted `render.backend`
-/// string. 0 = Auto (clears the cache → re-probe next launch), 1 = Software
-/// (pins the safe fallback), 2 = Hardware (pins the accelerated renderer).
-fn render_backend_str(idx: i32) -> &'static str {
-    match idx {
-        1 => "software",
-        2 => "accelerated",
-        _ => "auto",
+fn persist(store: &dyn AppConfigStore, key: SettingKey, value: &str) {
+    if let Err(error) = SettingsService::new(store).set(key, value) {
+        tracing::warn!(key = key.as_str(), %error, "failed to save setting");
     }
 }
 
-/// Inverse of [`render_backend_str`]: persisted string → control index.
-fn render_backend_index(v: &str) -> i32 {
-    match v {
-        "software" => 1,
-        "accelerated" => 2,
-        _ => 0, // "auto", absent, or unknown
+fn theme_from_index(index: i32) -> ThemeMode {
+    match index {
+        0 => ThemeMode::Dark,
+        1 => ThemeMode::Light,
+        _ => ThemeMode::System,
+    }
+}
+
+fn theme_index(theme: ThemeMode) -> i32 {
+    match theme {
+        ThemeMode::Dark => 0,
+        ThemeMode::Light => 1,
+        ThemeMode::System => 2,
+    }
+}
+
+fn accent_from_index(index: i32) -> AccentColor {
+    match index {
+        1 => AccentColor::Teal,
+        2 => AccentColor::Green,
+        3 => AccentColor::Purple,
+        4 => AccentColor::System,
+        _ => AccentColor::Blue,
+    }
+}
+
+fn accent_index(accent: AccentColor) -> i32 {
+    match accent {
+        AccentColor::Blue => 0,
+        AccentColor::Teal => 1,
+        AccentColor::Green => 2,
+        AccentColor::Purple => 3,
+        AccentColor::System => 4,
+    }
+}
+
+fn density_from_index(index: i32) -> Density {
+    if index == 1 {
+        Density::Cosy
+    } else {
+        Density::Compact
+    }
+}
+
+fn density_index(density: Density) -> i32 {
+    i32::from(density == Density::Cosy)
+}
+
+fn terminal_theme_from_index(index: i32) -> TerminalTheme {
+    if index == 1 {
+        TerminalTheme::Light
+    } else {
+        TerminalTheme::Dark
+    }
+}
+
+fn terminal_theme_index(theme: TerminalTheme) -> i32 {
+    i32::from(theme == TerminalTheme::Light)
+}
+
+fn startup_from_index(index: i32) -> StartupBehavior {
+    if index == 1 {
+        StartupBehavior::Restore
+    } else {
+        StartupBehavior::Clean
+    }
+}
+
+fn startup_index(startup: StartupBehavior) -> i32 {
+    i32::from(startup == StartupBehavior::Restore)
+}
+
+fn render_backend_from_index(index: i32) -> RendererBackend {
+    match index {
+        1 => RendererBackend::Software,
+        2 => RendererBackend::Accelerated,
+        _ => RendererBackend::Auto,
+    }
+}
+
+fn render_backend_index(backend: RendererBackend) -> i32 {
+    match backend {
+        RendererBackend::Auto => 0,
+        RendererBackend::Software => 1,
+        RendererBackend::Accelerated => 2,
     }
 }
 
 fn wire_render_backend_changed(ctx: &Ctx) {
     ctx.ui.on_render_backend_changed({
-        let repo_s = ctx.repo.clone();
-        move |idx| {
-            // Persist only; the renderer switch takes effect on next launch
-            // (the Settings UI says "Applied on restart"). "auto" clears the
-            // cache so the probe runs again; "software"/"accelerated" pin it.
-            let svc = SettingsService::new(repo_s.as_ref());
-            if let Err(e) = svc.save_renderer_backend(render_backend_str(idx)) {
-                tracing::warn!("save render.backend: {e}");
-            }
+        let store = ctx.config_store.clone();
+        move |index| {
+            persist(
+                store.as_ref(),
+                SettingKey::RendererBackend,
+                render_backend_from_index(index).as_str(),
+            );
         }
     });
 }
 
-// ── P8.6-B: Automation / Agent mode ─────────────────────────────────────────
-// `automation.enabled`/`automation.scopes` are loaded/saved separately from
-// the rest of `AppSettings` (they're deliberately excluded from export --
-// see `EXPORT_EXCLUDED_SETTING_KEYS`, cm-storage), so they get their own
-// startup-apply function (`apply_agent_mode_to_ui`) rather than folding into
-// `apply_settings_to_ui` below.
-
 #[cfg(feature = "agent-mode")]
-fn agent_mode_scopes_from_ui(ui: &AppWindow) -> cm_core::ScopeSet {
-    cm_core::ScopeSet {
+fn agent_mode_scopes_from_ui(ui: &AppWindow) -> ScopeSet {
+    ScopeSet {
         read: ui.get_agent_mode_scope_read(),
         write: ui.get_agent_mode_scope_write(),
         execute: ui.get_agent_mode_scope_execute(),
     }
 }
 
-/// Persists a new granted-scopes set, then -- if the proxy is actually
-/// running this session (`agent_mode` is `Some`) -- writes it straight into
-/// the shared `Arc<RwLock<ScopeSet>>` the proxy thread reads on every
-/// `tools/call`. This is the P8.6-A "Reload behavior": a scope change takes
-/// effect on the proxy's very next request, no restart needed (only the
-/// master enable/disable toggle is restart-only -- see
-/// `wire_agent_mode_enabled_changed`).
 #[cfg(feature = "agent-mode")]
 fn persist_and_reload_agent_mode_scopes(
-    repo: &dyn cm_core::ConnectionRepository,
+    store: &dyn AppConfigStore,
     agent_mode: &Option<crate::AgentModeConfig>,
-    scopes: cm_core::ScopeSet,
+    scopes: ScopeSet,
 ) {
-    let svc = SettingsService::new(repo);
-    if let Err(e) = svc.save_automation_scopes(scopes) {
-        tracing::warn!("save automation.scopes: {e}");
-    }
-    if let Some(cfg) = agent_mode
-        && let Ok(mut guard) = cfg.scopes.write()
+    persist(store, SettingKey::AutomationScopes, &scopes.format());
+    if let Some(config) = agent_mode
+        && let Ok(mut guard) = config.scopes.write()
     {
         *guard = scopes;
     }
@@ -101,119 +168,79 @@ fn persist_and_reload_agent_mode_scopes(
 
 #[cfg(feature = "agent-mode")]
 fn wire_agent_mode_ctl(ctx: &Ctx) {
-    wire_agent_mode_enabled_changed(ctx);
-    wire_agent_mode_scope_read_changed(ctx);
-    wire_agent_mode_scope_write_changed(ctx);
-    wire_agent_mode_scope_execute_changed(ctx);
-}
-
-#[cfg(feature = "agent-mode")]
-fn wire_agent_mode_enabled_changed(ctx: &Ctx) {
     ctx.ui.on_agent_mode_enabled_changed({
-        let repo_s = ctx.repo.clone();
-        move |v| {
-            // Persist only -- takes effect on next launch (the Settings UI
-            // says "Applied on restart"); see `conman`'s `agent_mode` module
-            // doc for why the running proxy can't be started/stopped live.
-            let svc = SettingsService::new(repo_s.as_ref());
-            if let Err(e) = svc.save_automation_enabled(v) {
-                tracing::warn!("save automation.enabled: {e}");
-            }
+        let store = ctx.config_store.clone();
+        move |enabled| {
+            persist(
+                store.as_ref(),
+                SettingKey::AutomationEnabled,
+                if enabled { "true" } else { "false" },
+            );
         }
     });
+
+    macro_rules! wire_scope {
+        ($callback:ident) => {
+            ctx.ui.$callback({
+                let store = ctx.config_store.clone();
+                let agent_mode = ctx.state.borrow().agent_mode.clone();
+                let weak = ctx.ui.as_weak();
+                move |_| {
+                    let Some(ui) = weak.upgrade() else { return };
+                    persist_and_reload_agent_mode_scopes(
+                        store.as_ref(),
+                        &agent_mode,
+                        agent_mode_scopes_from_ui(&ui),
+                    );
+                }
+            });
+        };
+    }
+    wire_scope!(on_agent_mode_scope_read_changed);
+    wire_scope!(on_agent_mode_scope_write_changed);
+    wire_scope!(on_agent_mode_scope_execute_changed);
 }
 
-#[cfg(feature = "agent-mode")]
-fn wire_agent_mode_scope_read_changed(ctx: &Ctx) {
-    ctx.ui.on_agent_mode_scope_read_changed({
-        let repo_s = ctx.repo.clone();
-        let agent_mode = ctx.state.borrow().agent_mode.clone();
-        let weak = ctx.ui.as_weak();
-        move |_| {
-            let Some(ui) = weak.upgrade() else { return };
-            let scopes = agent_mode_scopes_from_ui(&ui);
-            persist_and_reload_agent_mode_scopes(repo_s.as_ref(), &agent_mode, scopes);
-        }
-    });
-}
-
-#[cfg(feature = "agent-mode")]
-fn wire_agent_mode_scope_write_changed(ctx: &Ctx) {
-    ctx.ui.on_agent_mode_scope_write_changed({
-        let repo_s = ctx.repo.clone();
-        let agent_mode = ctx.state.borrow().agent_mode.clone();
-        let weak = ctx.ui.as_weak();
-        move |_| {
-            let Some(ui) = weak.upgrade() else { return };
-            let scopes = agent_mode_scopes_from_ui(&ui);
-            persist_and_reload_agent_mode_scopes(repo_s.as_ref(), &agent_mode, scopes);
-        }
-    });
-}
-
-#[cfg(feature = "agent-mode")]
-fn wire_agent_mode_scope_execute_changed(ctx: &Ctx) {
-    ctx.ui.on_agent_mode_scope_execute_changed({
-        let repo_s = ctx.repo.clone();
-        let agent_mode = ctx.state.borrow().agent_mode.clone();
-        let weak = ctx.ui.as_weak();
-        move |_| {
-            let Some(ui) = weak.upgrade() else { return };
-            let scopes = agent_mode_scopes_from_ui(&ui);
-            persist_and_reload_agent_mode_scopes(repo_s.as_ref(), &agent_mode, scopes);
-        }
-    });
-}
-
-/// Applies the persisted `automation.enabled`/scopes plus the composition
-/// root's live [`crate::AgentModeConfig`] (whether the proxy is actually
-/// listening this session) to the Settings UI. Unconditional call site
-/// (`assemble`, controller/mod.rs); this function itself is feature-gated --
-/// a non-`agent-mode` build never calls it, so `agent-mode-available` stays
-/// at its Slint-compiled default (`false`), keeping the whole section hidden
-/// (see `AgentModeConfig`'s doc comment for the accepted trade-off: the
-/// section's *markup* still compiles into every build's Slint resources --
-/// only the Rust wiring and the listener itself are feature-gated).
 #[cfg(feature = "agent-mode")]
 pub(super) fn apply_agent_mode_to_ui(
-    repo: &dyn cm_core::ConnectionRepository,
+    store: &dyn AppConfigStore,
     agent_mode: Option<&crate::AgentModeConfig>,
     ui: &AppWindow,
 ) {
     ui.set_agent_mode_available(true);
-    let svc = SettingsService::new(repo);
-    match svc.load_automation() {
+    match SettingsService::new(store).load_automation() {
         Ok(automation) => {
             ui.set_agent_mode_enabled(automation.enabled);
             ui.set_agent_mode_scope_read(automation.scopes.read);
             ui.set_agent_mode_scope_write(automation.scopes.write);
             ui.set_agent_mode_scope_execute(automation.scopes.execute);
         }
-        Err(e) => tracing::warn!("load automation settings: {e}"),
+        Err(error) => tracing::warn!(%error, "failed to load automation settings"),
     }
-    let details = agent_mode
-        .map(|cfg| format!("127.0.0.1:{}", cfg.external_port))
-        .unwrap_or_default();
-    ui.set_agent_mode_connection_details(details.as_str().into());
+    ui.set_agent_mode_connection_details(
+        agent_mode
+            .map(|config| format!("127.0.0.1:{}", config.external_port))
+            .unwrap_or_default()
+            .into(),
+    );
 }
 
 fn wire_theme_changed(ctx: &Ctx) {
     ctx.ui.on_theme_changed({
-        let repo_s = ctx.repo.clone();
-        let state_tc = ctx.state.clone();
-        let weak_tc = ctx.ui.as_weak();
-        move |idx| {
-            let svc = SettingsService::new(repo_s.as_ref());
-            if let Err(e) = svc.save_theme_mode(idx) {
-                tracing::warn!("save theme_mode: {e}");
-            }
-            // P6.8 (gap 9): re-push the terminal palette to every open renderer so
-            // the grid recolors together with the chrome. The `.slint` handler
-            // (`settings_panel.slint`'s Theme segmented control) writes
-            // `Theme.dark-mode` *before* invoking this callback, so
-            // `ui.get_dark_mode()` here already reflects the new mode.
-            if let Some(ui) = weak_tc.upgrade() {
-                sessions::apply_terminal_theme_to_all(&state_tc, &ui);
+        let store = ctx.config_store.clone();
+        let weak = ctx.ui.as_weak();
+        move |index| {
+            persist(
+                store.as_ref(),
+                SettingKey::Theme,
+                theme_from_index(index).as_str(),
+            );
+            if let Some(ui) = weak.upgrade() {
+                match theme_from_index(index) {
+                    ThemeMode::Dark => ui.set_dark_mode(true),
+                    ThemeMode::Light => ui.set_dark_mode(false),
+                    ThemeMode::System => {}
+                }
             }
         }
     });
@@ -221,23 +248,45 @@ fn wire_theme_changed(ctx: &Ctx) {
 
 fn wire_density_changed(ctx: &Ctx) {
     ctx.ui.on_density_changed({
-        let repo_s = ctx.repo.clone();
-        move |idx| {
-            let svc = SettingsService::new(repo_s.as_ref());
-            if let Err(e) = svc.save_density(idx) {
-                tracing::warn!("save density: {e}");
-            }
+        let store = ctx.config_store.clone();
+        move |index| {
+            persist(
+                store.as_ref(),
+                SettingKey::Density,
+                density_from_index(index).as_str(),
+            );
         }
     });
 }
 
 fn wire_accent_changed(ctx: &Ctx) {
     ctx.ui.on_accent_changed({
-        let repo_s = ctx.repo.clone();
-        move |idx| {
-            let svc = SettingsService::new(repo_s.as_ref());
-            if let Err(e) = svc.save_accent_index(idx) {
-                tracing::warn!("save accent_index: {e}");
+        let store = ctx.config_store.clone();
+        let weak = ctx.ui.as_weak();
+        move |index| {
+            persist(
+                store.as_ref(),
+                SettingKey::AccentColor,
+                accent_from_index(index).as_str(),
+            );
+            if let Some(ui) = weak.upgrade() {
+                ui.invoke_apply_accent_index(index);
+            }
+        }
+    });
+}
+
+fn wire_terminal_theme_changed(ctx: &Ctx) {
+    ctx.ui.on_settings_terminal_theme_changed({
+        let store = ctx.config_store.clone();
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
+        move |index| {
+            let theme = terminal_theme_from_index(index);
+            persist(store.as_ref(), SettingKey::TerminalTheme, theme.as_str());
+            state.borrow_mut().terminal_theme = theme;
+            if let Some(ui) = weak.upgrade() {
+                sessions::apply_terminal_theme_to_all(&state, &ui);
             }
         }
     });
@@ -245,26 +294,23 @@ fn wire_accent_changed(ctx: &Ctx) {
 
 fn wire_settings_font_family_changed(ctx: &Ctx) {
     ctx.ui.on_settings_font_family_changed({
-        let repo_s = ctx.repo.clone();
-        let state_ff = ctx.state.clone();
-        let weak_ff = ctx.ui.as_weak();
+        let store = ctx.config_store.clone();
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
         move |family| {
             let requested = family.to_string();
             let (effective, selected_index) = {
-                let mut st = state_ff.borrow_mut();
-                // The ComboBox only offers owner-enumerated usable families,
-                // but every renderer still resolves defensively. Use the
-                // canonical result reported by the backend as UI/state truth.
-                let mut effective = st.fonts.resolve_family(&requested);
-                for tab in &mut st.tabs {
+                let mut state = state.borrow_mut();
+                let mut effective = state.fonts.resolve_family(&requested);
+                for tab in &mut state.tabs {
                     effective = tab.renderer.set_preferred_family(&effective).to_owned();
                     for pane in &mut tab.extra_panes {
                         let pane_effective = pane.renderer.set_preferred_family(&effective);
                         debug_assert_eq!(pane_effective, effective);
                     }
                 }
-                st.font_family = effective.clone();
-                let selected_index = st
+                state.font_family.clone_from(&effective);
+                let selected_index = state
                     .fonts
                     .available_monospace_families()
                     .iter()
@@ -272,50 +318,73 @@ fn wire_settings_font_family_changed(ctx: &Ctx) {
                     .unwrap_or(0) as i32;
                 (effective, selected_index)
             };
-
-            if let Some(ui) = weak_ff.upgrade() {
+            if let Some(ui) = weak.upgrade() {
                 ui.set_settings_font_family(effective.as_str().into());
                 ui.set_settings_font_family_index(selected_index);
-                // Family metrics may differ even though every offered family
-                // is monospaced, so recompute and commit every live grid.
-                tabs::apply_settled_resize(&state_ff, &ui);
+                tabs::apply_settled_resize(&state, &ui);
             }
-
-            let svc = SettingsService::new(repo_s.as_ref());
-            if let Err(e) = svc.save_font_family(&effective) {
-                tracing::warn!("save font_family: {e}");
-            }
+            persist(store.as_ref(), SettingKey::FontFamily, &effective);
         }
     });
 }
 
 fn wire_settings_font_size_changed(ctx: &Ctx) {
     ctx.ui.on_settings_font_size_changed({
-        let repo_s = ctx.repo.clone();
-        let state_fs = ctx.state.clone();
-        let weak_fs = ctx.ui.as_weak();
-        move |v| {
-            let svc = SettingsService::new(repo_s.as_ref());
-            if let Err(e) = svc.save_font_size(v) {
-                tracing::warn!("save font_size: {e}");
-            }
-            // Apply font size change to all live renderers immediately.
+        let store = ctx.config_store.clone();
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
+        move |value| {
+            persist(store.as_ref(), SettingKey::FontSize, &value.to_string());
             {
-                let mut st = state_fs.borrow_mut();
-                let new_px = v as f32;
-                st.font_size_px = new_px;
-                let scale = st.scale;
-                for tab in &mut st.tabs {
-                    tab.renderer.set_scale(new_px, scale);
-                    for ep in &mut tab.extra_panes {
-                        ep.renderer.set_scale(new_px, scale);
+                let mut state = state.borrow_mut();
+                state.font_size_px = value as f32;
+                let scale = state.scale;
+                for tab in &mut state.tabs {
+                    tab.renderer.set_scale(value as f32, scale);
+                    for pane in &mut tab.extra_panes {
+                        pane.renderer.set_scale(value as f32, scale);
                     }
                 }
-                // Drop borrow before calling apply_settled_resize (fix g).
             }
-            // Commit new cell dimensions to PTY/engine for all tabs (carry-over fix g).
-            if let Some(ui) = weak_fs.upgrade() {
-                tabs::apply_settled_resize(&state_fs, &ui);
+            if let Some(ui) = weak.upgrade() {
+                tabs::apply_settled_resize(&state, &ui);
+            }
+        }
+    });
+}
+
+fn wire_scrollback_limit_changed(ctx: &Ctx) {
+    ctx.ui.on_settings_scrollback_limit_changed({
+        let store = ctx.config_store.clone();
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
+        move |raw| {
+            let parsed = raw
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|value| *value <= cm_core::MAX_SCROLLBACK_LIMIT);
+            let Some(value) = parsed else {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_settings_scrollback_limit(
+                        state.borrow().scrollback_limit.to_string().into(),
+                    );
+                }
+                tracing::warn!(
+                    value = %raw,
+                    "scrollback limit must be between 0 and {}",
+                    cm_core::MAX_SCROLLBACK_LIMIT,
+                );
+                return;
+            };
+            persist(
+                store.as_ref(),
+                SettingKey::ScrollbackLimit,
+                &value.to_string(),
+            );
+            state.borrow_mut().scrollback_limit = value;
+            if let Some(ui) = weak.upgrade() {
+                ui.set_settings_scrollback_limit(value.to_string().into());
             }
         }
     });
@@ -323,140 +392,246 @@ fn wire_settings_font_size_changed(ctx: &Ctx) {
 
 fn wire_settings_shell_path_changed(ctx: &Ctx) {
     ctx.ui.on_settings_shell_path_changed({
-        let repo_s = ctx.repo.clone();
-        let state_sp = ctx.state.clone();
-        move |v| {
-            let svc = SettingsService::new(repo_s.as_ref());
-            if let Err(e) = svc.save_shell_path(v.as_str()) {
-                tracing::warn!("save shell_path: {e}");
-            }
-            let mut st = state_sp.borrow_mut();
-            st.local_settings.program = if v.is_empty() {
-                None
-            } else {
-                Some(v.to_string())
-            };
+        let store = ctx.config_store.clone();
+        let state = ctx.state.clone();
+        move |value| {
+            persist(store.as_ref(), SettingKey::Command, value.as_str());
+            state.borrow_mut().local_settings.program =
+                (!value.is_empty()).then(|| value.to_string());
         }
     });
 }
 
 fn wire_settings_shell_args_changed(ctx: &Ctx) {
     ctx.ui.on_settings_shell_args_changed({
-        let repo_s = ctx.repo.clone();
-        let state_sa = ctx.state.clone();
-        move |v| {
-            let svc = SettingsService::new(repo_s.as_ref());
-            if let Err(e) = svc.save_shell_args(v.as_str()) {
-                tracing::warn!("save shell_args: {e}");
-            }
-            let mut st = state_sa.borrow_mut();
-            st.local_settings.args = if v.is_empty() {
-                Vec::new()
-            } else {
-                v.split_whitespace().map(String::from).collect()
-            };
+        let store = ctx.config_store.clone();
+        let state = ctx.state.clone();
+        move |value| {
+            persist(store.as_ref(), SettingKey::CommandArgs, value.as_str());
+            state.borrow_mut().local_settings.args = split_args(value.as_str());
         }
     });
 }
 
 fn wire_settings_shell_cwd_changed(ctx: &Ctx) {
     ctx.ui.on_settings_shell_cwd_changed({
-        let repo_s = ctx.repo.clone();
-        let state_sc = ctx.state.clone();
-        move |v| {
-            let svc = SettingsService::new(repo_s.as_ref());
-            if let Err(e) = svc.save_shell_cwd(v.as_str()) {
-                tracing::warn!("save shell_cwd: {e}");
-            }
-            let mut st = state_sc.borrow_mut();
-            st.local_settings.working_dir = if v.is_empty() {
-                None
-            } else {
-                Some(v.to_string())
-            };
+        let store = ctx.config_store.clone();
+        let state = ctx.state.clone();
+        move |value| {
+            persist(store.as_ref(), SettingKey::WorkingDirectory, value.as_str());
+            state.borrow_mut().local_settings.working_dir =
+                (!value.is_empty()).then(|| value.to_string());
         }
     });
 }
+
+macro_rules! wire_bool_setting {
+    ($fn_name:ident, $callback:ident, $key:expr, $field:ident) => {
+        fn $fn_name(ctx: &Ctx) {
+            ctx.ui.$callback({
+                let store = ctx.config_store.clone();
+                let state = ctx.state.clone();
+                move |value| {
+                    persist(store.as_ref(), $key, if value { "true" } else { "false" });
+                    state.borrow_mut().$field = value;
+                }
+            });
+        }
+    };
+}
+
+wire_bool_setting!(
+    wire_plain_copy_paste_changed,
+    on_settings_plain_copy_paste_changed,
+    SettingKey::PlainCopyPasteShortcuts,
+    plain_copy_paste_shortcuts
+);
+wire_bool_setting!(
+    wire_copy_on_select_changed,
+    on_settings_copy_on_select_changed,
+    SettingKey::CopyOnSelect,
+    copy_on_select
+);
+wire_bool_setting!(
+    wire_confirm_close_active_tab_changed,
+    on_settings_confirm_close_active_tab_changed,
+    SettingKey::ConfirmCloseActiveTab,
+    confirm_close_active_tab
+);
+wire_bool_setting!(
+    wire_confirm_quit_active_connections_changed,
+    on_settings_confirm_quit_active_connections_changed,
+    SettingKey::ConfirmQuitActiveConnections,
+    confirm_quit_active_connections
+);
 
 fn wire_startup_behavior_changed(ctx: &Ctx) {
     ctx.ui.on_startup_behavior_changed({
-        let repo_s = ctx.repo.clone();
-        move |v| {
-            let svc = SettingsService::new(repo_s.as_ref());
-            if let Err(e) = svc.save_startup_behavior(v) {
-                tracing::warn!("save startup_behavior: {e}");
+        let store = ctx.config_store.clone();
+        move |index| {
+            persist(
+                store.as_ref(),
+                SettingKey::Startup,
+                startup_from_index(index).as_str(),
+            );
+        }
+    });
+}
+
+fn wire_open_config(ctx: &Ctx) {
+    ctx.ui.on_settings_open_config({
+        let store = ctx.config_store.clone();
+        let path = ctx.config_path.clone();
+        let io = ctx.state.borrow().io.clone();
+        move || {
+            let result = store
+                .document_text()
+                .and_then(|document| store.replace_document(&document))
+                .map_err(|error| error.to_string())
+                .and_then(|()| {
+                    cm_platform::open_path(path.clone()).map_err(|error| error.to_string())
+                });
+            if let Err(error) = result {
+                io.push_toast(format!("Could not open config: {error}"), 3);
             }
         }
     });
 }
 
-pub(super) fn local_settings_from_app(s: &AppSettings) -> LocalSettings {
+fn wire_reload_config(ctx: &Ctx) {
+    ctx.ui.on_settings_reload_config({
+        let store = ctx.config_store.clone();
+        let state = ctx.state.clone();
+        let app_state = ctx.app_state.clone();
+        let weak = ctx.ui.as_weak();
+        let io = ctx.state.borrow().io.clone();
+        move || match SettingsService::new(store.as_ref()).load_with_warnings() {
+            Ok(loaded) => {
+                let Some(ui) = weak.upgrade() else { return };
+                let machine = cm_core::AppStateService::new(app_state.as_ref())
+                    .load()
+                    .unwrap_or_default();
+                apply_settings_to_ui(&loaded.settings, &machine, &ui);
+                apply_settings_to_runtime(&state, &ui, &loaded.settings);
+                #[cfg(feature = "agent-mode")]
+                apply_agent_mode_to_ui(store.as_ref(), state.borrow().agent_mode.as_ref(), &ui);
+                for warning in &loaded.warnings {
+                    tracing::warn!(
+                        key = warning.key.as_str(),
+                        value = %warning.value,
+                        "invalid config value, using default: {}",
+                        warning.message
+                    );
+                }
+                let message = if loaded.warnings.is_empty() {
+                    "Configuration reloaded".to_owned()
+                } else {
+                    format!(
+                        "Configuration reloaded with {} warning(s)",
+                        loaded.warnings.len()
+                    )
+                };
+                io.push_toast(message, if loaded.warnings.is_empty() { 1 } else { 2 });
+            }
+            Err(error) => io.push_toast(format!("Could not reload config: {error}"), 3),
+        }
+    });
+}
+
+fn wire_copy_build_info(ctx: &Ctx) {
+    ctx.ui.on_settings_copy_build_info({
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let details = ui.get_settings_build_details().to_string();
+            if details.is_empty() {
+                return;
+            }
+            let mut state = state.borrow_mut();
+            let replaced = state.sys_clipboard.submit_write(
+                crate::clipboard::ClipboardWritePurpose::UiTextCopy,
+                crate::clipboard::ClipboardWrite::Text(details),
+            );
+            if let Some(replaced) = replaced {
+                sessions::handle_replaced_clipboard_write(&mut state, &replaced);
+            }
+        }
+    });
+}
+
+fn split_args(value: &str) -> Vec<String> {
+    value.split_whitespace().map(str::to_owned).collect()
+}
+
+pub(super) fn local_settings_from_app(settings: &AppSettings) -> LocalSettings {
     LocalSettings {
-        program: if s.shell_path.is_empty() {
-            None
-        } else {
-            Some(s.shell_path.clone())
-        },
-        args: if s.shell_args.is_empty() {
-            Vec::new()
-        } else {
-            s.shell_args.split_whitespace().map(String::from).collect()
-        },
-        working_dir: if s.shell_cwd.is_empty() {
-            None
-        } else {
-            Some(s.shell_cwd.clone())
-        },
+        program: (!settings.command.is_empty()).then(|| settings.command.clone()),
+        args: split_args(&settings.command_args),
+        working_dir: (!settings.working_directory.is_empty())
+            .then(|| settings.working_directory.clone()),
         env: Vec::new(),
     }
 }
 
-/// Push all persisted settings into the live UI globals.
-///
-/// Called once at startup after `AppWindow` is created.  `Theme.density` and
-/// `Theme.dark-mode` are in-out globals in Slint; the aliases on `AppWindow`
-/// (`density`, `dark-mode`) are bidirectional bindings, so writing them here
-/// updates the Theme global immediately.
-///
-/// NOTE (P1.5): In the current binary the repository is in-memory, so none of
-/// these values survive process restart.  End-to-end persistence will be
-/// observable once the disk-backed repository lands in P1.5.
-pub(super) fn apply_settings_to_ui(s: &AppSettings, ui: &AppWindow) {
-    ui.set_theme_mode(s.theme_mode);
-    ui.set_density(s.density);
-    ui.set_accent_index(s.accent_index);
-    ui.set_settings_font_size(s.font_size);
-    ui.set_settings_shell_path(s.shell_path.as_str().into());
-    ui.set_settings_shell_args(s.shell_args.as_str().into());
-    ui.set_settings_shell_cwd(s.shell_cwd.as_str().into());
-    ui.set_startup_behavior(s.startup_behavior);
-    // P7.1 cont.: reflect the persisted renderer backend ("auto" default) in
-    // the Rendering control.
-    ui.set_render_backend(render_backend_index(&s.renderer_backend));
-    ui.set_active_panel(s.active_panel);
-    ui.set_sidebar_collapsed(s.sidebar_collapsed);
-    // P6.9 (gap 11): restore the persisted side-panel width, defensively
-    // re-clamped in case the stored value predates a bounds change.
-    ui.set_sidebar_width(util::clamp_sidebar_width(s.side_panel_width));
+pub(super) fn apply_settings_to_ui(settings: &AppSettings, state: &AppState, ui: &AppWindow) {
+    ui.set_theme_mode(theme_index(settings.theme));
+    ui.set_density(density_index(settings.density));
+    ui.set_accent_index(accent_index(settings.accent_color));
+    ui.set_settings_terminal_theme(terminal_theme_index(settings.terminal_theme));
+    ui.set_settings_font_size(settings.font_size);
+    ui.set_settings_scrollback_limit(settings.scrollback_limit.to_string().into());
+    ui.set_settings_shell_path(settings.command.as_str().into());
+    ui.set_settings_shell_args(settings.command_args.as_str().into());
+    ui.set_settings_shell_cwd(settings.working_directory.as_str().into());
+    ui.set_settings_plain_copy_paste(settings.plain_copy_paste_shortcuts);
+    ui.set_settings_copy_on_select(settings.copy_on_select);
+    ui.set_settings_confirm_close_active_tab(settings.confirm_close_active_tab);
+    ui.set_settings_confirm_quit_active_connections(settings.confirm_quit_active_connections);
+    ui.set_startup_behavior(startup_index(settings.startup));
+    ui.set_render_backend(render_backend_index(settings.renderer_backend));
+    ui.set_active_panel(state.active_panel);
+    ui.set_sidebar_collapsed(state.sidebar_collapsed);
+    ui.set_sidebar_width(util::clamp_sidebar_width(state.side_panel_width));
 
-    // Apply theme-mode to the live Theme.dark-mode token (system is already the
-    // default; dark/light need an explicit override).
-    match s.theme_mode {
-        0 => ui.set_dark_mode(true),
-        1 => ui.set_dark_mode(false),
-        _ => {} // 2 (system): leave Theme.dark-mode at its Palette-derived default
+    match settings.theme {
+        ThemeMode::Dark => ui.set_dark_mode(true),
+        ThemeMode::Light => ui.set_dark_mode(false),
+        ThemeMode::System => {}
     }
-
-    // Restore persisted accent color.  `apply-accent-index` is implemented in
-    // Slint as `Theme.accent = Theme.accent-presets[idx]`, so invoking it here
-    // ensures the correct color is live immediately, not just the swatch index.
-    ui.invoke_apply_accent_index(s.accent_index);
+    ui.invoke_apply_accent_index(accent_index(settings.accent_color));
 }
 
-/// Push the renderer-owned family list and its effective startup selection to
-/// Settings. This is separate from [`apply_settings_to_ui`] because stale
-/// persisted family names can only be resolved after the shared font owner is
-/// constructed in controller state.
+fn apply_settings_to_runtime(state: &Rc<RefCell<State>>, ui: &AppWindow, settings: &AppSettings) {
+    {
+        let mut state = state.borrow_mut();
+        state.font_size_px = settings.font_size as f32;
+        state.local_settings = local_settings_from_app(settings);
+        state.plain_copy_paste_shortcuts = settings.plain_copy_paste_shortcuts;
+        state.copy_on_select = settings.copy_on_select;
+        state.confirm_close_active_tab = settings.confirm_close_active_tab;
+        state.confirm_quit_active_connections = settings.confirm_quit_active_connections;
+        state.terminal_theme = settings.terminal_theme;
+        state.scrollback_limit = settings.scrollback_limit;
+
+        let effective = state.fonts.resolve_family(&settings.font_family);
+        state.font_family.clone_from(&effective);
+        let scale = state.scale;
+        let size = state.font_size_px;
+        for tab in &mut state.tabs {
+            tab.renderer.set_preferred_family(&effective);
+            tab.renderer.set_scale(size, scale);
+            for pane in &mut tab.extra_panes {
+                pane.renderer.set_preferred_family(&effective);
+                pane.renderer.set_scale(size, scale);
+            }
+        }
+    }
+    apply_terminal_font_settings_to_ui(&state.borrow(), ui);
+    sessions::apply_terminal_theme_to_all(state, ui);
+    tabs::apply_settled_resize(state, ui);
+}
+
 pub(super) fn apply_terminal_font_settings_to_ui(state: &State, ui: &AppWindow) {
     let families = state
         .fonts

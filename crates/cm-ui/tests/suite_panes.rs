@@ -79,6 +79,8 @@ fn pane_disconnect_closes_the_targeted_pane_and_collapses_the_split() {
     assert_eq!(h.ui.get_active_pane(), 1, "seed: pane 1 is focused, not 0");
 
     h.ui.invoke_pane_disconnect(0);
+    assert!(h.ui.get_close_confirm_open());
+    h.ui.invoke_close_confirm_accept();
     pump_ticks(1);
 
     assert_eq!(
@@ -271,6 +273,8 @@ fn telnet_connect_in_split_dispatches_and_marks_insecure() {
     );
 
     h.ui.invoke_pane_disconnect(1);
+    assert!(h.ui.get_close_confirm_open());
+    h.ui.invoke_close_confirm_accept();
     pump_ticks(1);
     assert_eq!(active_tab_pane_count(&h), 1);
     assert!(
@@ -328,6 +332,8 @@ fn promoted_telnet_split_keeps_identity_origin_and_reconnect_dispatch() {
     assert_eq!(active_tab_pane_count(&h), 2);
 
     h.ui.invoke_pane_disconnect(0);
+    assert!(h.ui.get_close_confirm_open());
+    h.ui.invoke_close_confirm_accept();
     pump_ticks(1);
 
     assert_eq!(active_tab_pane_count(&h), 1);

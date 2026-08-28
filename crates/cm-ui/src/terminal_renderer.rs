@@ -184,12 +184,9 @@ impl SearchMatch {
 /// Terminal color theme: default fg/bg, the 16 ANSI base colors (extended to 256 via the
 /// standard color-cube/grayscale formula), and the cursor color.
 ///
-/// P6.8 (gap 9): both [`dark`](Self::dark) and [`light`](Self::light) exist, so the
-/// terminal can follow the app's light/dark mode (`Theme.dark-mode` in Slint) instead of
-/// always rendering dark chrome content. Default fg/bg are pinned to the
-/// `Theme.color-terminal-bg` / `Theme.color-terminal-fg` tokens (`ui/theme.slint`) — kept
-/// as literal RGB here (Rust has no access to the compiled `.slint` token values) but
-/// must be kept in sync with that file if either changes.
+/// Both [`dark`](Self::dark) and [`light`](Self::light) are selected independently
+/// of the application shell theme, so changing the surrounding chrome cannot alter
+/// terminal ANSI contrast. Values are literals because Rust cannot read Slint tokens.
 #[derive(Debug, Clone)]
 pub struct TerminalTheme {
     pub fg: Rgb,
@@ -450,7 +447,7 @@ impl TerminalRenderer {
         )
     }
 
-    /// Swap the color theme in place (P6.8: following the app's light/dark mode).
+    /// Swap the color theme in place for a future user-selected terminal scheme.
     ///
     /// No cache invalidation is needed: the glyph cache holds only grayscale coverage
     /// bitmaps (`GlyphBitmap`) — color is resolved from `self.theme` at composite time in
@@ -1746,13 +1743,12 @@ mod tests {
         assert!(Arc::ptr_eq(&a, &b));
     }
 
-    // ── P6.8: light theme + live theme switch ───────────────────────────────
+    // ── Available terminal palettes and live scheme switching ───────────────
 
     #[test]
     fn light_and_dark_themes_have_distinct_default_fg_bg() {
-        // Sanity: light() isn't just dark() renamed, and each is pinned to its
-        // matching `Theme.color-terminal-bg`/`color-terminal-fg` token value
-        // (ui/theme.slint) rather than an arbitrary color.
+        // Sanity: light() remains a genuine alternative scheme even though the
+        // application currently selects dark() for every new terminal.
         let dark = TerminalTheme::dark();
         let light = TerminalTheme::light();
         assert_eq!(dark.bg, (0x0a, 0x0c, 0x10));
@@ -1765,10 +1761,8 @@ mod tests {
 
     #[test]
     fn set_theme_recolors_the_very_next_render() {
-        // A renderer built dark, then switched live to light (P6.8: "re-push the
-        // palette to all open terminal renderers on a live theme switch"), must
-        // paint the new bg on the next render call -- no cache-invalidation step
-        // required by the caller.
+        // A future settings control can switch schemes without an additional
+        // cache-invalidation step at the call site.
         let mut r = TerminalRenderer::new(16.0, 1.0, TerminalTheme::dark());
         let cells = vec![Cell::default(); 2];
         let before = r.render(&snap(1, 2, cells.clone(), blank_cursor()));

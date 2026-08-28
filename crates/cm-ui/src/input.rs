@@ -260,6 +260,8 @@ const SC_LALT: u8 = 0x38;
 const SC_RSHIFT: u8 = 0x36;
 const SC_LMETA: u8 = 0x5B;
 const SC_RMETA: u8 = 0x5C;
+const SC_TAB: u8 = 0x0F;
+const SC_END: u8 = 0x4F;
 
 /// Resolve the modifier-specific `special` values emitted by `RdpSurface`.
 ///
@@ -390,6 +392,56 @@ pub(crate) fn rdp_modifier_key_ups() -> [RdpInputEvent; 8] {
     ]
 }
 
+/// Build the RDP key sequence for the user-facing "Send Ctrl+Alt+Delete" action.
+///
+/// RDP clients cannot forward the local secure-attention sequence directly. The
+/// established remote equivalent is Ctrl+Alt+End, with End sent as an extended
+/// key. Every key-down is paired with a reverse-order key-up so an interrupted
+/// host-side modifier snapshot cannot leave either synthetic modifier pressed.
+#[must_use]
+pub(crate) fn rdp_ctrl_alt_delete_sequence() -> Vec<RdpInputEvent> {
+    vec![
+        key_down(SC_LCTRL, false),
+        key_down(SC_LALT, false),
+        key_down(SC_END, true),
+        key_up(SC_END, true),
+        key_up(SC_LALT, false),
+        key_up(SC_LCTRL, false),
+    ]
+}
+
+/// Build a momentary left Windows/Super key press for an RDP destination.
+#[must_use]
+pub(crate) fn rdp_windows_key_sequence() -> Vec<RdpInputEvent> {
+    vec![key_down(SC_LMETA, true), key_up(SC_LMETA, true)]
+}
+
+/// Build a balanced Alt+Tab sequence for an RDP destination.
+#[must_use]
+pub(crate) fn rdp_alt_tab_sequence() -> Vec<RdpInputEvent> {
+    vec![
+        key_down(SC_LALT, false),
+        key_down(SC_TAB, false),
+        key_up(SC_TAB, false),
+        key_up(SC_LALT, false),
+    ]
+}
+
+/// Build the emergency release sequence for every modifier variant ConMan can
+/// send to an RDP destination.
+#[must_use]
+pub(crate) fn rdp_release_all_modifiers_sequence() -> Vec<RdpInputEvent> {
+    rdp_modifier_key_ups().into()
+}
+
+const fn key_down(scancode: u8, extended: bool) -> RdpInputEvent {
+    RdpInputEvent::KeyDown { scancode, extended }
+}
+
+const fn key_up(scancode: u8, extended: bool) -> RdpInputEvent {
+    RdpInputEvent::KeyUp { scancode, extended }
+}
+
 /// Coordinate-mapping context for RDP pointer events.
 ///
 /// Groups the surface pixel size and RDP desktop resolution to keep mouse/scroll
@@ -490,6 +542,27 @@ pub(crate) fn map_rdp_scroll(dy: f32, x: f32, y: f32, coords: &RdpCoords) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum TestKeyEvent {
+        Down(u8, bool),
+        Up(u8, bool),
+    }
+
+    fn key_events(events: &[RdpInputEvent]) -> Vec<TestKeyEvent> {
+        events
+            .iter()
+            .map(|event| match event {
+                RdpInputEvent::KeyDown { scancode, extended } => {
+                    TestKeyEvent::Down(*scancode, *extended)
+                }
+                RdpInputEvent::KeyUp { scancode, extended } => {
+                    TestKeyEvent::Up(*scancode, *extended)
+                }
+                _ => panic!("expected an RDP keyboard event"),
+            })
+            .collect()
+    }
 
     #[test]
     fn printable_text_maps_to_char() {
@@ -619,6 +692,62 @@ mod tests {
                 extended: false
             }
         )));
+    }
+
+    #[test]
+    fn rdp_ctrl_alt_delete_uses_balanced_ctrl_alt_end_wire_sequence() {
+        assert_eq!(
+            key_events(&rdp_ctrl_alt_delete_sequence()),
+            [
+                TestKeyEvent::Down(SC_LCTRL, false),
+                TestKeyEvent::Down(SC_LALT, false),
+                TestKeyEvent::Down(SC_END, true),
+                TestKeyEvent::Up(SC_END, true),
+                TestKeyEvent::Up(SC_LALT, false),
+                TestKeyEvent::Up(SC_LCTRL, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn rdp_windows_key_is_momentary_and_extended() {
+        assert_eq!(
+            key_events(&rdp_windows_key_sequence()),
+            [
+                TestKeyEvent::Down(SC_LMETA, true),
+                TestKeyEvent::Up(SC_LMETA, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn rdp_alt_tab_releases_tab_before_alt() {
+        assert_eq!(
+            key_events(&rdp_alt_tab_sequence()),
+            [
+                TestKeyEvent::Down(SC_LALT, false),
+                TestKeyEvent::Down(SC_TAB, false),
+                TestKeyEvent::Up(SC_TAB, false),
+                TestKeyEvent::Up(SC_LALT, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn rdp_release_all_modifiers_covers_left_right_and_extended_variants() {
+        assert_eq!(
+            key_events(&rdp_release_all_modifiers_sequence()),
+            [
+                TestKeyEvent::Up(SC_LSHIFT, false),
+                TestKeyEvent::Up(SC_RSHIFT, false),
+                TestKeyEvent::Up(SC_LALT, false),
+                TestKeyEvent::Up(SC_LALT, true),
+                TestKeyEvent::Up(SC_LCTRL, false),
+                TestKeyEvent::Up(SC_LCTRL, true),
+                TestKeyEvent::Up(SC_LMETA, true),
+                TestKeyEvent::Up(SC_RMETA, true),
+            ]
+        );
     }
 
     // ── RdpCoords::map ────────────────────────────────────────────────────────

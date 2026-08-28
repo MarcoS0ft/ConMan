@@ -3,11 +3,9 @@
 //! overlay's callbacks + the `Ctrl⇧F` / in-overlay keyboard shortcuts.
 //!
 //! Scoping decisions (see the task report):
-//! - Search targets the tab's **primary pane only** (`Tab::session`), not
-//!   whichever pane is focused in a split — mirrors `import_export.rs`'s
-//!   "small task, contained scope" spirit rather than replicating every
-//!   other per-pane concern (`sel`/`ExtraPaneState::sel`) for a feature the
-//!   spec does not call out as needing multi-pane awareness.
+//! - Search targets the pane that was focused when the overlay opened. The
+//!   stable pane index keeps split-pane Find aligned with the same contextual
+//!   action target as Copy/Paste and RDP send-key commands.
 //! - Matching is always case-insensitive; the spec calls a case-fold toggle
 //!   optional and no UI control for it is exposed (`find_matches` still
 //!   takes a `case_sensitive` param — it's independently useful/tested — but
@@ -96,8 +94,18 @@ pub(super) fn open_search(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         let mut st = state.borrow_mut();
         let active = st.active;
         if let Some(tab) = st.tabs.get_mut(active) {
-            let session: &dyn Session = tab.session.as_ref();
-            tab.search.open(session);
+            let target = tab.pane_group.focused();
+            if target == 0 {
+                if matches!(tab.session.surface(), cm_session::Surface::TerminalGrid(_)) {
+                    let session: &dyn Session = tab.session.as_ref();
+                    tab.search.open(target, session);
+                }
+            } else if let Some(pane) = tab.extra_panes.get(target - 1)
+                && matches!(pane.session.surface(), cm_session::Surface::TerminalGrid(_))
+            {
+                let session: &dyn Session = pane.session.as_ref();
+                tab.search.open(target, session);
+            }
         }
     }
     refresh_search_ui(ui, state);
@@ -118,8 +126,14 @@ fn edit_search_query(ui: &AppWindow, state: &Rc<RefCell<State>>, query: String) 
         let mut st = state.borrow_mut();
         let active = st.active;
         if let Some(tab) = st.tabs.get_mut(active) {
-            let session: &dyn Session = tab.session.as_ref();
-            tab.search.set_query(query, session);
+            let target = tab.search.target_pane();
+            if target == 0 {
+                let session: &dyn Session = tab.session.as_ref();
+                tab.search.set_query(query, session);
+            } else if let Some(pane) = tab.extra_panes.get(target - 1) {
+                let session: &dyn Session = pane.session.as_ref();
+                tab.search.set_query(query, session);
+            }
         }
     }
     refresh_search_ui(ui, state);
@@ -134,11 +148,23 @@ fn advance_search(ui: &AppWindow, state: &Rc<RefCell<State>>, forward: bool) {
     let Some(target_row) = tab.search.advance(forward) else {
         return;
     };
-    let Some(last) = tab.last.as_ref() else {
-        return;
-    };
-    let offset = offset_to_show_row(last.scrollback_len, target_row);
-    tab.session.send_input(SessionInput::Scroll(offset));
+    let target = tab.search.target_pane();
+    if target == 0 {
+        let Some(last) = tab.last.as_ref() else {
+            return;
+        };
+        let offset = offset_to_show_row(last.scrollback_len, target_row);
+        tab.session.send_input(SessionInput::Scroll(offset));
+    } else {
+        let Some(pane) = tab.extra_panes.get(target - 1) else {
+            return;
+        };
+        let Some(last) = pane.last.as_ref() else {
+            return;
+        };
+        let offset = offset_to_show_row(last.scrollback_len, target_row);
+        pane.session.send_input(SessionInput::Scroll(offset));
+    }
     drop(st);
     refresh_search_ui(ui, state);
 }
@@ -262,6 +288,7 @@ pub(crate) fn offset_to_show_row(scrollback_len: u32, target_row: u16) -> u32 {
 #[derive(Default)]
 pub(crate) struct SearchState {
     open: bool,
+    target_pane: usize,
     query: String,
     matches: Vec<SearchMatch>,
     current: Option<usize>,
@@ -281,13 +308,22 @@ impl SearchState {
         self.current
     }
 
+    pub(crate) fn target_pane(&self) -> usize {
+        self.target_pane
+    }
+
+    pub(crate) fn applies_to(&self, pane: usize) -> bool {
+        self.open && self.target_pane == pane
+    }
+
     fn current_match(&self) -> Option<SearchMatch> {
         self.current.and_then(|i| self.matches.get(i)).copied()
     }
 
     /// Open the overlay (idempotent) and (re-)request the buffer text.
-    pub(crate) fn open(&mut self, session: &dyn Session) {
+    pub(crate) fn open(&mut self, target_pane: usize, session: &dyn Session) {
         self.open = true;
+        self.target_pane = target_pane;
         self.request_text(session);
     }
 
@@ -470,7 +506,7 @@ mod tests {
         let session = NoopSession::new();
         let mut s = SearchState::default();
         assert!(!s.is_open());
-        s.open(&session);
+        s.open(0, &session);
         assert!(s.is_open());
         s.set_query("line".to_owned(), &session);
         assert!(s.poll(), "poll should pick up the queued reply");
@@ -485,7 +521,7 @@ mod tests {
         // No query yet -> no matches -> advance is a no-op.
         assert_eq!(s.advance(true), None);
 
-        s.open(&session);
+        s.open(0, &session);
         s.set_query("l".to_owned(), &session);
         s.poll();
         assert!(s.matches().len() >= 2, "'l' should hit both fixture lines");
@@ -503,7 +539,7 @@ mod tests {
     fn search_state_close_keeps_query_but_drops_pending() {
         let session = NoopSession::new();
         let mut s = SearchState::default();
-        s.open(&session);
+        s.open(0, &session);
         s.set_query("hello".to_owned(), &session);
         s.close();
         assert!(!s.is_open());

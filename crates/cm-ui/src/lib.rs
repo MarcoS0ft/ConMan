@@ -15,7 +15,9 @@
 
 use std::sync::Arc;
 
-use cm_core::{ConnectionRepository, CredentialStore, SessionProvider};
+use cm_core::{
+    AppConfigStore, AppStateRepository, ConnectionRepository, CredentialStore, SessionProvider,
+};
 
 mod clipboard;
 mod controller;
@@ -97,6 +99,15 @@ pub struct AgentModeConfig {
     pub mcp_interaction_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+/// Display-ready build identity injected by the executable composition root.
+/// Keeping owned strings here avoids coupling the UI library to the build
+/// metadata crate while still giving Settings a complete, copyable surface.
+#[derive(Debug, Clone, Default)]
+pub struct BuildIdentity {
+    pub version: String,
+    pub details: String,
+}
+
 impl AgentModeConfig {
     /// True while at least one agent-driven write-tool call is in flight.
     /// The execute-scope launch gate refuses a launch when this is true AND
@@ -132,6 +143,16 @@ impl std::fmt::Debug for AgentModeConfig {
 pub struct AppConfig {
     /// The SQLite-backed connection and credential repository.
     pub repo: Arc<dyn ConnectionRepository>,
+    /// The same SQLite adapter viewed through its atomic import capability.
+    pub import_repo: Arc<dyn cm_storage::AtomicImportRepository>,
+    /// The user-editable `config.conman` preferences store.
+    pub config_store: Arc<dyn AppConfigStore>,
+    /// Resolved path backing `config_store`, used by Settings' Open action.
+    pub config_path: std::path::PathBuf,
+    /// SQLite-backed machine-local UI/runtime state.
+    pub app_state: Arc<dyn AppStateRepository>,
+    /// Version and diagnostic build details shown in Settings.
+    pub build_identity: BuildIdentity,
     /// The OS-keychain credential store.
     pub secrets: Arc<dyn CredentialStore>,
     /// Establishes live sessions for Local, SSH, RDP, and Telnet tabs. The
@@ -197,6 +218,10 @@ pub struct TestHarness {
     /// `i_slint_backend_testing::ElementHandle`/`ElementRoot` the same way
     /// you would the real app's window.
     pub ui: AppWindow,
+    /// The same editable configuration store used by the wired controller.
+    /// Exposed only by the test harness so integration tests can verify
+    /// persistence without coupling preferences back to SQLite.
+    pub config_store: Arc<dyn AppConfigStore>,
     terminal_selection_probe: Box<dyn Fn() -> bool>,
     _keepalive: Box<dyn std::any::Any>,
 }
@@ -238,10 +263,12 @@ impl TestHarness {
 /// entry point; a failed harness construction should abort that test loudly.
 #[cfg(any(test, feature = "ui-introspection"))]
 pub fn build_for_test(config: AppConfig) -> TestHarness {
+    let config_store = config.config_store.clone();
     let (ui, ctx, redraw) = controller::build_for_test(config);
     let terminal_selection_probe = controller::terminal_selection_probe(&ctx);
     TestHarness {
         ui,
+        config_store,
         terminal_selection_probe,
         _keepalive: Box::new((ctx, redraw)),
     }

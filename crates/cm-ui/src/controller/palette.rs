@@ -36,7 +36,14 @@ fn wire_open_palette(ctx: &Ctx) {
                     .filter_map(|i| tab_model_op.row_data(i).map(|t| (i, t.title.to_string())))
                     .collect();
                 let q = ui.get_palette_query();
-                rebuild_palette_model(&pal_model, &q, &labels, &tabs);
+                rebuild_palette_model_for(
+                    &pal_model,
+                    &q,
+                    &labels,
+                    &tabs,
+                    sessions::focused_session_kind(&state.borrow()),
+                );
+                ui.set_session_actions_open(false);
                 ui.set_palette_selected(0);
                 ui.set_palette_open(true);
             }
@@ -60,7 +67,13 @@ fn wire_palette_edited(ctx: &Ctx) {
             let tabs: Vec<(usize, String)> = (0..tab_model_pe.row_count())
                 .filter_map(|i| tab_model_pe.row_data(i).map(|t| (i, t.title.to_string())))
                 .collect();
-            rebuild_palette_model(&pal_model, &query, &labels, &tabs);
+            rebuild_palette_model_for(
+                &pal_model,
+                &query,
+                &labels,
+                &tabs,
+                sessions::focused_session_kind(&state.borrow()),
+            );
             if let Some(ui) = weak.upgrade() {
                 ui.set_palette_query(query);
                 ui.set_palette_selected(0);
@@ -101,13 +114,31 @@ pub(super) fn collect_palette_context(
     (labels, tabs)
 }
 
-pub(super) fn rebuild_palette_model(
+#[cfg(test)]
+fn rebuild_palette_model(
     pal_model: &Rc<VecModel<PaletteAction>>,
     query: &SharedString,
     detached_labels: &[String],
     tab_entries: &[(usize, String)],
 ) {
-    let filtered = filter_palette_actions(query.as_str(), detached_labels, tab_entries);
+    rebuild_palette_model_for(
+        pal_model,
+        query,
+        detached_labels,
+        tab_entries,
+        sessions::FocusedSessionKind::None,
+    );
+}
+
+fn rebuild_palette_model_for(
+    pal_model: &Rc<VecModel<PaletteAction>>,
+    query: &SharedString,
+    detached_labels: &[String],
+    tab_entries: &[(usize, String)],
+    focused: sessions::FocusedSessionKind,
+) {
+    let filtered =
+        filter_palette_actions_for(query.as_str(), detached_labels, tab_entries, focused);
     while pal_model.row_count() > 0 {
         pal_model.remove(0);
     }
@@ -158,7 +189,13 @@ pub(super) fn handle_palette_key(
             };
             let new_q = SharedString::from(new_q.as_str());
             let (labels, tabs) = collect_palette_context(state, tab_model);
-            rebuild_palette_model(pal_model, &new_q, &labels, &tabs);
+            rebuild_palette_model_for(
+                pal_model,
+                &new_q,
+                &labels,
+                &tabs,
+                sessions::focused_session_kind(&state.borrow()),
+            );
             ui.set_palette_query(new_q);
             ui.set_palette_selected(0);
         }
@@ -166,7 +203,13 @@ pub(super) fn handle_palette_key(
             let q = ui.get_palette_query();
             let new_q = SharedString::from(format!("{}{}", q.as_str(), text.as_str()).as_str());
             let (labels, tabs) = collect_palette_context(state, tab_model);
-            rebuild_palette_model(pal_model, &new_q, &labels, &tabs);
+            rebuild_palette_model_for(
+                pal_model,
+                &new_q,
+                &labels,
+                &tabs,
+                sessions::focused_session_kind(&state.borrow()),
+            );
             ui.set_palette_query(new_q);
             ui.set_palette_selected(0);
         }
@@ -278,7 +321,7 @@ pub(super) fn dispatch_palette_action(
         }
         "Close current tab" => {
             let active = state.borrow().active;
-            tabs::close_tab(state, tab_model, ui, active);
+            close::request_tab_close(state, tab_model, ui, active);
         }
         "Toggle sidebar" => ui.set_sidebar_collapsed(!ui.get_sidebar_collapsed()),
         // ── PANELS ────────────────────────────────────────────────────────────
@@ -302,7 +345,7 @@ pub(super) fn dispatch_palette_action(
         "Split vertical" => panes::do_split(state, tab_model, ui, PaneLayout::VSplit),
         "Close pane" => {
             if let Some(pane_id) = panes::focused_pane_id(state) {
-                panes::do_close_pane(state, tab_model, ui, pane_id, false);
+                close::request_pane_close(state, tab_model, ui, pane_id);
             }
         }
         "Detach session" => {
@@ -312,6 +355,25 @@ pub(super) fn dispatch_palette_action(
         }
         "Toggle broadcast" => ui.set_broadcast_active(!ui.get_broadcast_active()),
         "Broadcast target\u{2026}" => ui.invoke_open_broadcast_target(),
+        // ── FOCUSED SESSION ──────────────────────────────────
+        "Copy Selection" => sessions::copy_selection(state),
+        "Copy Visible Screen" => sessions::copy_visible_screen(state),
+        "Copy All Scrollback" => sessions::copy_all_scrollback(state),
+        "Paste" => sessions::paste(state),
+        "Find" => search::open_search(ui, state),
+        "Send Ctrl+Alt+Delete" => {
+            sessions::send_focused_rdp_action(state, crate::input::rdp_ctrl_alt_delete_sequence())
+        }
+        "Send Windows/Super" => {
+            sessions::send_focused_rdp_action(state, crate::input::rdp_windows_key_sequence())
+        }
+        "Send Alt+Tab" => {
+            sessions::send_focused_rdp_action(state, crate::input::rdp_alt_tab_sequence())
+        }
+        "Release Modifiers" => sessions::send_focused_rdp_action(
+            state,
+            crate::input::rdp_release_all_modifiers_sequence(),
+        ),
         // ── TABS (dynamic) ────────────────────────────────────────────────────
         // "Switch to: <title>" — find the first tab with the matching title.
         label if label.starts_with("Switch to: ") => {
@@ -535,13 +597,29 @@ pub(super) fn initial_palette_actions() -> Vec<PaletteAction> {
     ]
 }
 
-pub(super) fn filter_palette_actions(
+#[cfg(test)]
+fn filter_palette_actions(
     query: &str,
     detached_labels: &[String],
     tab_entries: &[(usize, String)],
 ) -> Vec<PaletteAction> {
+    filter_palette_actions_for(
+        query,
+        detached_labels,
+        tab_entries,
+        sessions::FocusedSessionKind::None,
+    )
+}
+
+fn filter_palette_actions_for(
+    query: &str,
+    detached_labels: &[String],
+    tab_entries: &[(usize, String)],
+    focused: sessions::FocusedSessionKind,
+) -> Vec<PaletteAction> {
     // Build the full list: static actions + TABS + SESSIONS.
     let mut all = initial_palette_actions();
+    all.extend(session_palette_actions(focused));
     // One "Switch to: <title>" entry per open tab.
     for (i, (tab_idx, title)) in tab_entries.iter().enumerate() {
         all.push(PaletteAction {
@@ -581,6 +659,50 @@ pub(super) fn filter_palette_actions(
             a
         })
         .collect()
+}
+
+fn session_palette_actions(focused: sessions::FocusedSessionKind) -> Vec<PaletteAction> {
+    let action =
+        |label: &'static str, detail: &'static str, shortcut: &'static str| PaletteAction {
+            category: SharedString::from("SESSION"),
+            first_in_group: false,
+            label: SharedString::from(label),
+            detail: SharedString::from(detail),
+            shortcut: SharedString::from(shortcut),
+            glyph: SharedString::from("\u{EB6A}"),
+            status: SharedString::from(""),
+            selected: false,
+        };
+    let mut actions = match focused {
+        sessions::FocusedSessionKind::None => return Vec::new(),
+        sessions::FocusedSessionKind::Terminal { has_selection } => {
+            let mut entries = Vec::with_capacity(5);
+            if has_selection {
+                entries.push(action(
+                    "Copy Selection",
+                    "Focused terminal pane",
+                    "Ctrl+Shift+C",
+                ));
+            }
+            entries.extend([
+                action("Copy Visible Screen", "Focused terminal pane", ""),
+                action("Copy All Scrollback", "Focused terminal pane", ""),
+                action("Paste", "Focused terminal pane", "Ctrl+Shift+V"),
+                action("Find", "Focused terminal pane", "Ctrl+Shift+F"),
+            ]);
+            entries
+        }
+        sessions::FocusedSessionKind::Rdp => vec![
+            action("Send Ctrl+Alt+Delete", "Focused RDP pane", ""),
+            action("Send Windows/Super", "Focused RDP pane", ""),
+            action("Send Alt+Tab", "Focused RDP pane", ""),
+            action("Release Modifiers", "Focused RDP pane", ""),
+        ],
+    };
+    if let Some(first) = actions.first_mut() {
+        first.first_in_group = true;
+    }
+    actions
 }
 
 #[cfg(test)]
@@ -705,6 +827,62 @@ mod tests {
         let result = filter_palette_actions("web", &[], &tabs);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].label.as_str(), "Switch to: web-dev-01");
+    }
+
+    #[test]
+    fn terminal_session_actions_are_contextual() {
+        let without_selection = filter_palette_actions_for(
+            "",
+            &[],
+            &[],
+            sessions::FocusedSessionKind::Terminal {
+                has_selection: false,
+            },
+        );
+        assert!(
+            without_selection
+                .iter()
+                .any(|action| action.label.as_str() == "Copy Visible Screen")
+        );
+        assert!(
+            !without_selection
+                .iter()
+                .any(|action| action.label.as_str() == "Copy Selection")
+        );
+
+        let with_selection = filter_palette_actions_for(
+            "",
+            &[],
+            &[],
+            sessions::FocusedSessionKind::Terminal {
+                has_selection: true,
+            },
+        );
+        assert!(
+            with_selection
+                .iter()
+                .any(|action| action.label.as_str() == "Copy Selection")
+        );
+        assert!(
+            !with_selection
+                .iter()
+                .any(|action| action.label.as_str() == "Send Alt+Tab")
+        );
+    }
+
+    #[test]
+    fn rdp_session_actions_hide_terminal_commands() {
+        let actions = filter_palette_actions_for("", &[], &[], sessions::FocusedSessionKind::Rdp);
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.label.as_str() == "Send Ctrl+Alt+Delete")
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action.label.as_str() == "Copy Visible Screen")
+        );
     }
 
     #[test]

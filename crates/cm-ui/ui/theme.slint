@@ -26,6 +26,8 @@ export global Theme {
   // system) or cm-platform can write it. When following "system", leave this bound
   // to the Palette and don't write it.
   in-out property <bool> dark-mode: Palette.color-scheme == ColorScheme.dark;
+  // Terminal palette selection is intentionally independent of shell theme.
+  in-out property <bool> terminal-dark: true;
 
   // ── Accent color (preset or restored from settings; cool-blue fallback) ──────
   // Accent is set by the Settings panel accent picker or restored from persisted
@@ -62,11 +64,11 @@ export global Theme {
   out property <color> color-strip:    dark-mode ? #0b0d10 : #e2e5e9;
 
   // ── Terminal default surface ───────────────────────────────────────────────
-  // The glyph-atlas renderer (P2.3) draws cells, but its DEFAULT bg/fg should derive
-  // from these so a theme switch recolors chrome and the default terminal together
-  // (GUI_DESIGN §3 note). A user color-scheme overrides these per-session.
+  // Empty-state/overlay surface tokens follow the shell. The actual terminal canvas
+  // follows the separately selected terminal palette.
   out property <color> color-terminal-bg: dark-mode ? #0a0c10 : #ffffff;
   out property <color> color-terminal-fg: dark-mode ? #c9ccd1 : #2b2f36;
+  out property <color> color-terminal-canvas-bg: terminal-dark ? #0a0c10 : #ffffff;
 
   // ── Text — hand-tuned per scheme for guaranteed contrast ───────────────────
   out property <color> color-text:           dark-mode ? #e7e9ee : #1b1e24;

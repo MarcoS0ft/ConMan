@@ -31,18 +31,49 @@ fn settings_suite() {
     density_compact_cosy_toggle();
     accent_preset_selection();
     stale_font_family_uses_effective_default();
+    platform_shell_placeholders_are_truthful();
     font_family_selection_persists();
     settings_body_scrolls_beneath_fixed_header();
     settings_content_does_not_scroll_horizontally();
     render_backend_toggle_persists();
+    terminal_and_confirmation_preferences_persist_and_reload();
+    build_identity_is_exposed();
     #[cfg(feature = "agent-mode")]
     agent_mode_section_toggles_persist();
+}
+
+fn platform_shell_placeholders_are_truthful() {
+    let (h, _repo, _provider) = harness();
+    assert_eq!(
+        h.ui.get_settings_shell_args_placeholder().as_str(),
+        "No arguments"
+    );
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            h.ui.get_settings_shell_path_placeholder().as_str(),
+            "cmd.exe"
+        );
+        assert_eq!(
+            h.ui.get_settings_shell_cwd_placeholder().as_str(),
+            "%USERPROFILE%"
+        );
+        assert!(!h.ui.get_settings_shell_path_hint().contains("/bin/bash"));
+    }
+    #[cfg(not(windows))]
+    {
+        assert_eq!(
+            h.ui.get_settings_shell_path_placeholder().as_str(),
+            "$SHELL"
+        );
+        assert_eq!(h.ui.get_settings_shell_cwd_placeholder().as_str(), "~");
+    }
 }
 
 fn font_family_selection_persists() {
     use cm_core::{DEFAULT_TERMINAL_FONT_FAMILY, SettingsService};
 
-    let (h, repo, _provider) = harness();
+    let (h, _repo, _provider) = harness();
     open_settings(&h);
     let panel = find_singleton(&h.ui, "SettingsPanel");
     let combo = find_descendant_by_label(&panel, "Terminal font family");
@@ -88,7 +119,7 @@ fn font_family_selection_persists() {
 
     assert_eq!(h.ui.get_settings_font_family(), selected_family);
     assert_eq!(
-        SettingsService::new(repo.as_ref())
+        SettingsService::new(h.config_store.as_ref())
             .load()
             .expect("load settings")
             .font_family,
@@ -100,17 +131,29 @@ fn font_family_selection_persists() {
 fn stale_font_family_uses_effective_default() {
     use std::sync::Arc;
 
-    use cm_core::{ConnectionRepository, DEFAULT_TERMINAL_FONT_FAMILY};
+    use cm_core::{
+        AppConfigStore, AppStateRepository, ConnectionRepository, DEFAULT_TERMINAL_FONT_FAMILY,
+        SettingKey,
+    };
     use cm_storage::SqliteRepository;
-    use support::{MockSessionProvider, NullCredentialStore};
+    use support::{MemoryConfigStore, MockSessionProvider, NullCredentialStore};
 
-    let repo: Arc<dyn ConnectionRepository> =
-        Arc::new(SqliteRepository::open_in_memory().expect("open in-memory repository"));
-    repo.set_setting("terminal.font_family", "Definitely Missing Font")
+    let sqlite = Arc::new(SqliteRepository::open_in_memory().expect("open in-memory repository"));
+    let repo: Arc<dyn ConnectionRepository> = sqlite.clone();
+    let import_repo: Arc<dyn cm_storage::AtomicImportRepository> = sqlite.clone();
+    let app_state: Arc<dyn AppStateRepository> = sqlite;
+    let config_store: Arc<dyn AppConfigStore> = Arc::new(MemoryConfigStore::default());
+    config_store
+        .set_value(SettingKey::FontFamily.as_str(), "Definitely Missing Font")
         .expect("seed stale family");
     let provider = MockSessionProvider::new();
     let h = cm_ui::build_for_test(cm_ui::AppConfig {
         repo,
+        import_repo,
+        config_store,
+        config_path: std::path::PathBuf::from("config.conman"),
+        app_state,
+        build_identity: cm_ui::BuildIdentity::default(),
         secrets: Arc::new(NullCredentialStore),
         session_provider: provider,
         secure_clipboard_root: None,
@@ -399,7 +442,7 @@ fn accent_preset_selection() {
 fn render_backend_toggle_persists() {
     use cm_core::SettingsService;
 
-    let (h, repo, _provider) = harness();
+    let (h, _repo, _provider) = harness();
     open_settings(&h);
     let panel = find_singleton(&h.ui, "SettingsPanel");
 
@@ -409,15 +452,27 @@ fn render_backend_toggle_persists() {
         "renderer defaults to Auto (index 0)"
     );
 
-    find_descendant_by_label(&panel, "Software").invoke_accessible_default_action();
+    let scroll = find_by_id(&h.ui, "SettingsPanel::settings-scroll");
+    let mut software = None;
+    for _ in 0..8 {
+        software = ElementHandle::find_by_accessible_label(&h.ui, "Software").next();
+        if software.is_some() {
+            break;
+        }
+        scroll.scroll(0.0, -240.0);
+        pump_ticks(1);
+    }
+    software
+        .expect("Rendering section must be vertically reachable")
+        .invoke_accessible_default_action();
     pump_ticks(1);
     assert_eq!(h.ui.get_render_backend(), 1, "Software selects index 1");
     assert_eq!(
-        SettingsService::new(repo.as_ref())
-            .load_renderer_backend()
+        SettingsService::new(h.config_store.as_ref())
+            .load()
             .unwrap()
-            .as_deref(),
-        Some("software"),
+            .renderer_backend,
+        cm_core::RendererBackend::Software,
         "Software must persist render.backend=software"
     );
 
@@ -425,24 +480,83 @@ fn render_backend_toggle_persists() {
     pump_ticks(1);
     assert_eq!(h.ui.get_render_backend(), 2, "Hardware selects index 2");
     assert_eq!(
-        SettingsService::new(repo.as_ref())
-            .load_renderer_backend()
+        SettingsService::new(h.config_store.as_ref())
+            .load()
             .unwrap()
-            .as_deref(),
-        Some("accelerated"),
+            .renderer_backend,
+        cm_core::RendererBackend::Accelerated,
         "Hardware must persist render.backend=accelerated"
     );
 
     find_descendant_by_label(&panel, "Auto").invoke_accessible_default_action();
     pump_ticks(1);
     assert_eq!(h.ui.get_render_backend(), 0, "Auto selects index 0");
-    // "auto" clears the cache -> load_renderer_backend collapses it to None.
     assert_eq!(
-        SettingsService::new(repo.as_ref())
-            .load_renderer_backend()
-            .unwrap(),
-        None,
-        "Auto must clear the persisted backend (re-probe next launch)"
+        SettingsService::new(h.config_store.as_ref())
+            .load()
+            .unwrap()
+            .renderer_backend,
+        cm_core::RendererBackend::Auto,
+        "Auto must persist the auto preference"
+    );
+}
+
+fn terminal_and_confirmation_preferences_persist_and_reload() {
+    use cm_core::{SettingKey, SettingsService, TerminalTheme};
+
+    let (h, _repo, _provider) = harness();
+    h.ui.invoke_settings_terminal_theme_changed(1);
+    h.ui.invoke_settings_scrollback_limit_changed("25000".into());
+    h.ui.invoke_settings_plain_copy_paste_changed(false);
+    h.ui.invoke_settings_copy_on_select_changed(true);
+    h.ui.invoke_settings_confirm_close_active_tab_changed(false);
+    h.ui.invoke_settings_confirm_quit_active_connections_changed(false);
+
+    let saved = SettingsService::new(h.config_store.as_ref())
+        .load()
+        .expect("load persisted settings");
+    assert_eq!(saved.terminal_theme, TerminalTheme::Light);
+    assert_eq!(saved.scrollback_limit, 25_000);
+    assert!(!saved.plain_copy_paste_shortcuts);
+    assert!(saved.copy_on_select);
+    assert!(!saved.confirm_close_active_tab);
+    assert!(!saved.confirm_quit_active_connections);
+
+    h.config_store
+        .set_values(&[
+            (SettingKey::TerminalTheme.as_str(), "dark"),
+            (SettingKey::ScrollbackLimit.as_str(), "7000"),
+            (SettingKey::PlainCopyPasteShortcuts.as_str(), "true"),
+        ])
+        .expect("edit config externally");
+    h.ui.invoke_settings_reload_config();
+    assert_eq!(h.ui.get_settings_terminal_theme(), 0);
+    assert_eq!(h.ui.get_settings_scrollback_limit().as_str(), "7000");
+    assert!(h.ui.get_settings_plain_copy_paste());
+
+    h.ui.invoke_settings_scrollback_limit_changed(
+        (cm_core::MAX_SCROLLBACK_LIMIT + 1).to_string().into(),
+    );
+    assert_eq!(
+        h.ui.get_settings_scrollback_limit().as_str(),
+        "7000",
+        "invalid UI edits must be rejected and normalized"
+    );
+}
+
+fn build_identity_is_exposed() {
+    let (h, _repo, _provider) = harness();
+    assert_eq!(h.ui.get_settings_build_version().as_str(), "0.1.0-dev.test");
+    assert!(h.ui.get_settings_build_details().contains("Target: test"));
+    open_settings(&h);
+    let scroll = find_by_id(&h.ui, "SettingsPanel::settings-scroll");
+    scroll.scroll(0.0, -10_000.0);
+    pump_ticks(1);
+    assert!(
+        ElementHandle::find_by_accessible_label(&h.ui, "Copy build details")
+            .next()
+            .is_some(),
+        "About copy action must be reachable in the scrolling settings panel"
     );
 }
 
@@ -459,30 +573,22 @@ fn render_backend_toggle_persists() {
 fn agent_mode_section_toggles_persist() {
     use cm_core::SettingsService;
 
-    let (h, repo, _provider) = harness();
+    let (h, _repo, _provider) = harness();
+    h.ui.window()
+        .set_size(slint::LogicalSize::new(900.0, 420.0));
     open_settings(&h);
-    let panel = find_singleton(&h.ui, "SettingsPanel");
+    pump_ticks(1);
 
-    // The responsive rows add honest vertical space, so reach the optional
-    // section through the same real scroll boundary a user traverses instead
-    // of assuming it is instantiated in the initial viewport.
+    // Traverse the real constrained-height viewport until each control is
+    // resident. Settings rows above Automation can grow as features are
+    // added, so a fixed number of wheel steps is not a reachability contract.
     let scroll = find_by_id(&h.ui, "SettingsPanel::settings-scroll");
-    let mut enable_check = None;
-    for _ in 0..6 {
-        enable_check =
-            ElementHandle::find_by_element_id(&h.ui, "SettingsPanel::agent-mode-enable-check")
-                .next();
-        if enable_check.is_some() {
-            break;
-        }
-        scroll.scroll(0.0, -240.0);
-        pump_ticks(1);
-    }
-    let enable_check = enable_check.expect("agent-mode section must be vertically reachable");
+    let enable_check =
+        scroll_until_element(&h.ui, &scroll, "SettingsPanel::agent-mode-enable-check");
 
     assert!(!h.ui.get_agent_mode_enabled(), "agent mode defaults to off");
     assert!(
-        !SettingsService::new(repo.as_ref())
+        !SettingsService::new(h.config_store.as_ref())
             .load_automation()
             .unwrap()
             .enabled,
@@ -496,16 +602,18 @@ fn agent_mode_section_toggles_persist() {
         "toggling the checkbox must flip the model"
     );
     assert!(
-        SettingsService::new(repo.as_ref())
+        SettingsService::new(h.config_store.as_ref())
             .load_automation()
             .unwrap()
             .enabled,
         "toggling must persist automation.enabled=true"
     );
 
-    find_descendant_by_label(&panel, "Read").invoke_accessible_default_action();
+    let read_check = scroll_until_element(&h.ui, &scroll, "SettingsPanel::agent-mode-read-check");
+    assert_eq!(read_check.accessible_label().as_deref(), Some("Read"));
+    read_check.invoke_accessible_default_action();
     pump_ticks(1);
-    let persisted = SettingsService::new(repo.as_ref())
+    let persisted = SettingsService::new(h.config_store.as_ref())
         .load_automation()
         .unwrap()
         .scopes;
@@ -515,4 +623,20 @@ fn agent_mode_section_toggles_persist() {
     );
     assert!(!persisted.write, "Write must stay ungranted");
     assert!(!persisted.execute, "Execute must stay ungranted");
+}
+
+#[cfg(feature = "agent-mode")]
+fn scroll_until_element(
+    ui: &cm_ui::AppWindow,
+    scroll: &ElementHandle,
+    element_id: &str,
+) -> ElementHandle {
+    for _ in 0..64 {
+        if let Some(element) = ElementHandle::find_by_element_id(ui, element_id).next() {
+            return element;
+        }
+        scroll.scroll(0.0, -120.0);
+        pump_ticks(1);
+    }
+    panic!("{element_id} must be reachable through the Settings scroll viewport");
 }

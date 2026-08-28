@@ -24,11 +24,13 @@ pub(crate) mod mock_store;
 pub(crate) use mock_provider::MockSessionProvider;
 pub(crate) use mock_store::NullCredentialStore;
 
+use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
-use cm_core::ConnectionRepository;
+use cm_core::{AppConfigError, AppConfigStore, AppStateRepository, ConnectionRepository};
 use cm_storage::SqliteRepository;
 use cm_ui::{AppConfig, TestHarness};
 use i_slint_backend_testing::{ElementHandle, ElementQuery, ElementRoot};
@@ -39,6 +41,47 @@ use slint::ComponentHandle;
 /// here as the mock-tick step, so [`pump_until`]/[`pump_ticks`] advance mock
 /// time in the same granularity the real tick timer runs at.
 pub(crate) const REDRAW_TICK: Duration = Duration::from_millis(16);
+
+#[derive(Default)]
+pub(crate) struct MemoryConfigStore(Mutex<HashMap<String, String>>);
+
+impl AppConfigStore for MemoryConfigStore {
+    fn get_value(&self, key: &str) -> Result<Option<String>, AppConfigError> {
+        Ok(self.0.lock().expect("config lock").get(key).cloned())
+    }
+
+    fn set_value(&self, key: &str, value: &str) -> Result<(), AppConfigError> {
+        self.0
+            .lock()
+            .expect("config lock")
+            .insert(key.to_owned(), value.to_owned());
+        Ok(())
+    }
+
+    fn set_values(&self, values: &[(&str, &str)]) -> Result<(), AppConfigError> {
+        let mut config = self.0.lock().expect("config lock");
+        for (key, value) in values {
+            config.insert((*key).to_owned(), (*value).to_owned());
+        }
+        Ok(())
+    }
+
+    fn document_text(&self) -> Result<String, AppConfigError> {
+        let mut values = self
+            .0
+            .lock()
+            .expect("config lock")
+            .iter()
+            .map(|(key, value)| format!("{key} = {value}"))
+            .collect::<Vec<_>>();
+        values.sort();
+        Ok(values.join("\n"))
+    }
+
+    fn replace_document(&self, _document: &str) -> Result<(), AppConfigError> {
+        Ok(())
+    }
+}
 
 /// Builds a fresh, fully hermetic harness for one test scenario: an
 /// in-memory SQLite repo (never touches disk), a no-op credential store, and
@@ -93,11 +136,23 @@ pub(crate) fn harness_with_agent_mode(
     Arc<dyn ConnectionRepository>,
     Arc<MockSessionProvider>,
 ) {
-    let repo: Arc<dyn ConnectionRepository> =
+    let sqlite =
         Arc::new(SqliteRepository::open_in_memory().expect("open in-memory SqliteRepository"));
+    let repo: Arc<dyn ConnectionRepository> = sqlite.clone();
+    let import_repo: Arc<dyn cm_storage::AtomicImportRepository> = sqlite.clone();
+    let app_state: Arc<dyn AppStateRepository> = sqlite;
+    let config_store: Arc<dyn AppConfigStore> = Arc::new(MemoryConfigStore::default());
     let provider = MockSessionProvider::new();
     let config = AppConfig {
         repo: repo.clone(),
+        import_repo,
+        config_store,
+        config_path: std::path::PathBuf::from("config.conman"),
+        app_state,
+        build_identity: cm_ui::BuildIdentity {
+            version: "0.1.0-dev.test".to_owned(),
+            details: "Connection Manager 0.1.0-dev.test\nTarget: test".to_owned(),
+        },
         secrets: Arc::new(NullCredentialStore),
         session_provider: provider.clone(),
         secure_clipboard_root: None,

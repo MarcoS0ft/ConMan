@@ -8,14 +8,15 @@
 //! ever actually connects, so there is nothing to race or wait on.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use cm_core::rdp::{CertVerifier, RdpAuthInput};
 use cm_core::ssh::{HostKeyVerifier, SshAuthInput};
 use cm_core::{
-    LocalSettings, MouseEvent, RdpInputEvent, RdpSettings, Session, SessionInput, SessionProvider,
-    SessionSetupError, SessionStatus, SshSettings, Surface, TelnetSettings, TerminalSize,
+    FrameUpdate, GridSnapshot, LocalSettings, MouseEvent, RdpInputEvent, RdpSettings, Session,
+    SessionInput, SessionProvider, SessionSetupError, SessionStatus, SshSettings, Surface,
+    TelnetSettings, TerminalSize,
 };
 
 /// A [`Session`] whose lifecycle is entirely driven by a shared status cell
@@ -29,22 +30,55 @@ use cm_core::{
 pub(crate) struct ScriptedSession {
     status: Arc<Mutex<SessionStatus>>,
     surface: Surface,
+    shared: ScriptedSessionShared,
+    session_id: usize,
+}
+
+#[derive(Clone)]
+struct ScriptedSessionShared {
     inputs: Arc<Mutex<Vec<SessionInput>>>,
+    tagged_inputs: Arc<Mutex<Vec<(usize, SessionInput)>>>,
+    search_requests: Arc<AtomicUsize>,
+    search_request_sessions: Arc<Mutex<Vec<usize>>>,
     shutdowns: Arc<AtomicUsize>,
 }
 
 impl ScriptedSession {
-    pub(crate) fn new(
+    fn new(
         status: Arc<Mutex<SessionStatus>>,
-        inputs: Arc<Mutex<Vec<SessionInput>>>,
-        shutdowns: Arc<AtomicUsize>,
+        terminal_outputs: Arc<Mutex<Vec<Sender<GridSnapshot>>>>,
+        session_id: usize,
+        shared: ScriptedSessionShared,
     ) -> Self {
-        let (_tx, rx) = channel();
+        let (tx, rx) = channel();
+        terminal_outputs
+            .lock()
+            .expect("ScriptedSession terminal output mutex poisoned")
+            .push(tx);
         Self {
             status,
             surface: Surface::TerminalGrid(rx),
-            inputs,
-            shutdowns,
+            session_id,
+            shared,
+        }
+    }
+
+    fn new_rdp(
+        status: Arc<Mutex<SessionStatus>>,
+        rdp_outputs: Arc<Mutex<Vec<Sender<FrameUpdate>>>>,
+        session_id: usize,
+        shared: ScriptedSessionShared,
+    ) -> Self {
+        let (tx, rx) = channel::<FrameUpdate>();
+        rdp_outputs
+            .lock()
+            .expect("ScriptedSession RDP output mutex poisoned")
+            .push(tx);
+        Self {
+            status,
+            surface: Surface::Framebuffer(rx),
+            session_id,
+            shared,
         }
     }
 }
@@ -62,15 +96,31 @@ impl Session for ScriptedSession {
     }
 
     fn shutdown(&self) {
-        self.shutdowns.fetch_add(1, Ordering::SeqCst);
+        self.shared.shutdowns.fetch_add(1, Ordering::SeqCst);
     }
     fn resize_px(&self, _width: u32, _height: u32) {}
 
     fn send_input(&self, input: SessionInput) {
-        self.inputs
+        self.shared
+            .tagged_inputs
+            .lock()
+            .expect("ScriptedSession tagged inputs mutex poisoned")
+            .push((self.session_id, input.clone()));
+        self.shared
+            .inputs
             .lock()
             .expect("ScriptedSession inputs mutex poisoned")
             .push(input);
+    }
+
+    fn request_search_text(&self, reply: Sender<Vec<String>>) {
+        self.shared.search_requests.fetch_add(1, Ordering::SeqCst);
+        self.shared
+            .search_request_sessions
+            .lock()
+            .expect("ScriptedSession search request sessions mutex poisoned")
+            .push(self.session_id);
+        let _ = reply.send(vec!["mock full buffer".to_owned()]);
     }
 }
 
@@ -97,9 +147,25 @@ pub(crate) struct MockSessionProvider {
     telnet_connect_calls: AtomicUsize,
     inputs: Arc<Mutex<Vec<SessionInput>>>,
     shutdowns: Arc<AtomicUsize>,
+    terminal_outputs: Arc<Mutex<Vec<Sender<GridSnapshot>>>>,
+    rdp_outputs: Arc<Mutex<Vec<Sender<FrameUpdate>>>>,
+    next_session_id: AtomicUsize,
+    tagged_inputs: Arc<Mutex<Vec<(usize, SessionInput)>>>,
+    search_requests: Arc<AtomicUsize>,
+    search_request_sessions: Arc<Mutex<Vec<usize>>>,
 }
 
 impl MockSessionProvider {
+    fn scripted_shared(&self) -> ScriptedSessionShared {
+        ScriptedSessionShared {
+            inputs: self.inputs.clone(),
+            tagged_inputs: self.tagged_inputs.clone(),
+            search_requests: self.search_requests.clone(),
+            search_request_sessions: self.search_request_sessions.clone(),
+            shutdowns: self.shutdowns.clone(),
+        }
+    }
+
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             next_remote_status: Mutex::new(Arc::new(Mutex::new(SessionStatus::Connected))),
@@ -108,6 +174,12 @@ impl MockSessionProvider {
             telnet_connect_calls: AtomicUsize::new(0),
             inputs: Arc::new(Mutex::new(Vec::new())),
             shutdowns: Arc::new(AtomicUsize::new(0)),
+            terminal_outputs: Arc::new(Mutex::new(Vec::new())),
+            rdp_outputs: Arc::new(Mutex::new(Vec::new())),
+            next_session_id: AtomicUsize::new(0),
+            tagged_inputs: Arc::new(Mutex::new(Vec::new())),
+            search_requests: Arc::new(AtomicUsize::new(0)),
+            search_request_sessions: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -141,6 +213,17 @@ impl MockSessionProvider {
         self.shutdowns.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn search_request_count(&self) -> usize {
+        self.search_requests.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn search_request_sessions(&self) -> Vec<usize> {
+        self.search_request_sessions
+            .lock()
+            .expect("MockSessionProvider search request sessions mutex poisoned")
+            .clone()
+    }
+
     /// Terminal mouse inputs delivered through the real controller wiring.
     pub(crate) fn terminal_mouse_events(&self) -> Vec<MouseEvent> {
         self.inputs
@@ -152,6 +235,54 @@ impl MockSessionProvider {
                 _ => None,
             })
             .collect()
+    }
+
+    pub(crate) fn terminal_key_input_count(&self) -> usize {
+        self.inputs
+            .lock()
+            .expect("MockSessionProvider inputs mutex poisoned")
+            .iter()
+            .filter(|input| matches!(input, SessionInput::Key(_)))
+            .count()
+    }
+
+    pub(crate) fn terminal_mouse_events_for(&self, session_id: usize) -> Vec<MouseEvent> {
+        self.tagged_inputs
+            .lock()
+            .expect("MockSessionProvider tagged inputs mutex poisoned")
+            .iter()
+            .filter(|(id, _)| *id == session_id)
+            .filter_map(|(_, input)| match input {
+                SessionInput::Mouse(event) => Some(*event),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Publish a terminal grid to the selected scripted session. Sessions
+    /// are indexed in provider creation order; the startup local tab is 0.
+    pub(crate) fn publish_terminal_grid(&self, session_index: usize, snapshot: GridSnapshot) {
+        self.terminal_outputs
+            .lock()
+            .expect("MockSessionProvider terminal output mutex poisoned")
+            .get(session_index)
+            .expect("scripted terminal session index")
+            .send(snapshot)
+            .expect("scripted terminal receiver must remain live");
+    }
+
+    pub(crate) fn publish_rdp_frame(&self, rdp_index: usize, width: u16, height: u16) {
+        self.rdp_outputs
+            .lock()
+            .expect("MockSessionProvider RDP output mutex poisoned")
+            .get(rdp_index)
+            .expect("scripted RDP session index")
+            .send(FrameUpdate {
+                width,
+                height,
+                rgba: vec![0; usize::from(width) * usize::from(height) * 4],
+            })
+            .expect("scripted RDP receiver must remain live");
     }
 
     pub(crate) fn rdp_keyboard_events(&self) -> Vec<RdpInputEvent> {
@@ -173,6 +304,51 @@ impl MockSessionProvider {
             .cloned()
             .collect()
     }
+
+    pub(crate) fn rdp_keyboard_events_for(&self, session_id: usize) -> Vec<RdpInputEvent> {
+        self.tagged_inputs
+            .lock()
+            .expect("MockSessionProvider tagged inputs mutex poisoned")
+            .iter()
+            .filter(|(id, _)| *id == session_id)
+            .filter_map(|(_, input)| match input {
+                SessionInput::Rdp(events) => Some(events.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|event| {
+                matches!(
+                    event,
+                    RdpInputEvent::KeyDown { .. } | RdpInputEvent::KeyUp { .. }
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn rdp_pointer_events_for(&self, session_id: usize) -> Vec<RdpInputEvent> {
+        self.tagged_inputs
+            .lock()
+            .expect("MockSessionProvider tagged inputs mutex poisoned")
+            .iter()
+            .filter(|(id, _)| *id == session_id)
+            .filter_map(|(_, input)| match input {
+                SessionInput::Rdp(events) => Some(events.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|event| {
+                matches!(
+                    event,
+                    RdpInputEvent::MouseMove { .. }
+                        | RdpInputEvent::MouseDown { .. }
+                        | RdpInputEvent::MouseUp { .. }
+                        | RdpInputEvent::Scroll { .. }
+                )
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 impl SessionProvider for MockSessionProvider {
@@ -180,11 +356,14 @@ impl SessionProvider for MockSessionProvider {
         &self,
         _settings: &LocalSettings,
         _size: TerminalSize,
+        _options: cm_core::TerminalOptions,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
+        let session_id = self.next_session_id.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(ScriptedSession::new(
             Arc::new(Mutex::new(SessionStatus::Connected)),
-            self.inputs.clone(),
-            self.shutdowns.clone(),
+            self.terminal_outputs.clone(),
+            session_id,
+            self.scripted_shared(),
         )))
     }
 
@@ -194,6 +373,7 @@ impl SessionProvider for MockSessionProvider {
         _auth: SshAuthInput,
         _verifier: Arc<dyn HostKeyVerifier>,
         _size: TerminalSize,
+        _options: cm_core::TerminalOptions,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
         self.ssh_connect_calls.fetch_add(1, Ordering::SeqCst);
         let cell = self
@@ -201,10 +381,12 @@ impl SessionProvider for MockSessionProvider {
             .lock()
             .expect("MockSessionProvider.next_remote_status poisoned")
             .clone();
+        let session_id = self.next_session_id.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(ScriptedSession::new(
             cell,
-            self.inputs.clone(),
-            self.shutdowns.clone(),
+            self.terminal_outputs.clone(),
+            session_id,
+            self.scripted_shared(),
         )))
     }
 
@@ -212,6 +394,7 @@ impl SessionProvider for MockSessionProvider {
         &self,
         _settings: &TelnetSettings,
         _size: TerminalSize,
+        _options: cm_core::TerminalOptions,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
         self.telnet_connect_calls.fetch_add(1, Ordering::SeqCst);
         let cell = self
@@ -219,10 +402,12 @@ impl SessionProvider for MockSessionProvider {
             .lock()
             .expect("MockSessionProvider.next_remote_status poisoned")
             .clone();
+        let session_id = self.next_session_id.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(ScriptedSession::new(
             cell,
-            self.inputs.clone(),
-            self.shutdowns.clone(),
+            self.terminal_outputs.clone(),
+            session_id,
+            self.scripted_shared(),
         )))
     }
 
@@ -239,10 +424,12 @@ impl SessionProvider for MockSessionProvider {
             .lock()
             .expect("MockSessionProvider.next_remote_status poisoned")
             .clone();
-        Ok(Box::new(ScriptedSession::new(
+        let session_id = self.next_session_id.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(ScriptedSession::new_rdp(
             cell,
-            self.inputs.clone(),
-            self.shutdowns.clone(),
+            self.rdp_outputs.clone(),
+            session_id,
+            self.scripted_shared(),
         )))
     }
 }

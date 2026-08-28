@@ -1,7 +1,7 @@
 //! Overlay + panel chrome: connecting/error overlays driven by session status,
 //! toast dismissal, the Connections/Keys panel switch, and the sidebar toggle.
 
-use cm_core::SettingsService;
+use cm_core::AppStateService;
 use cm_session::SessionStatus;
 use slint::{ComponentHandle, Model, SharedString};
 
@@ -20,11 +20,11 @@ pub(super) fn wire_overlays(ctx: &Ctx) {
 fn wire_select_panel(ctx: &Ctx) {
     ctx.ui.on_select_panel({
         let weak = ctx.ui.as_weak();
-        let repo_sp = ctx.repo.clone();
+        let app_state = ctx.app_state.clone();
         move |idx| {
             if let Some(ui) = weak.upgrade() {
                 ui.set_active_panel(idx);
-                let svc = SettingsService::new(repo_sp.as_ref());
+                let svc = AppStateService::new(app_state.as_ref());
                 if let Err(e) = svc.save_active_panel(idx) {
                     tracing::warn!("save active_panel: {e}");
                 }
@@ -36,12 +36,12 @@ fn wire_select_panel(ctx: &Ctx) {
 fn wire_toggle_sidebar(ctx: &Ctx) {
     ctx.ui.on_toggle_sidebar({
         let weak = ctx.ui.as_weak();
-        let repo_ts = ctx.repo.clone();
+        let app_state = ctx.app_state.clone();
         move || {
             if let Some(ui) = weak.upgrade() {
                 let new_val = !ui.get_sidebar_collapsed();
                 ui.set_sidebar_collapsed(new_val);
-                let svc = SettingsService::new(repo_ts.as_ref());
+                let svc = AppStateService::new(app_state.as_ref());
                 if let Err(e) = svc.save_sidebar_collapsed(new_val) {
                     tracing::warn!("save sidebar_collapsed: {e}");
                 }
@@ -57,14 +57,14 @@ fn wire_toggle_sidebar(ctx: &Ctx) {
 fn wire_sidebar_width_changed(ctx: &Ctx) {
     ctx.ui.on_sidebar_width_changed({
         let weak = ctx.ui.as_weak();
-        let repo_sw = ctx.repo.clone();
+        let app_state = ctx.app_state.clone();
         move |v| {
             let Some(ui) = weak.upgrade() else { return };
             let clamped = util::clamp_sidebar_width(v);
             if clamped != v {
                 ui.set_sidebar_width(clamped);
             }
-            let svc = SettingsService::new(repo_sw.as_ref());
+            let svc = AppStateService::new(app_state.as_ref());
             if let Err(e) = svc.save_side_panel_width(clamped) {
                 tracing::warn!("save side_panel_width: {e}");
             }

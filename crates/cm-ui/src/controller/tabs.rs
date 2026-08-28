@@ -55,7 +55,7 @@ fn wire_close_tab(ctx: &Ctx) {
         let weak = ctx.ui.as_weak();
         move |idx| {
             if let Some(ui) = weak.upgrade() {
-                close_tab(&state, &tab_model, &ui, idx as usize);
+                close::request_tab_close(&state, &tab_model, &ui, idx as usize);
             }
         }
     });
@@ -114,7 +114,7 @@ fn wire_tab_disconnect(ctx: &Ctx) {
                 return;
             }
             select_tab(&state, &ui, idx as i32);
-            sessions::disconnect_tab(&state, &tab_model, &ui, idx);
+            close::request_tab_disconnect(&state, &tab_model, &ui, idx);
         }
     });
 }
@@ -386,7 +386,10 @@ fn spawn_local_tab(
     is_empty: bool,
 ) {
     let provider = state.borrow().session_provider.clone();
-    let session = match provider.spawn_local(&ls, size) {
+    let options = cm_core::TerminalOptions {
+        max_scrollback: state.borrow().scrollback_limit,
+    };
+    let session = match provider.spawn_local(&ls, size, options) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("failed to open terminal: {e}");
@@ -513,6 +516,12 @@ pub(super) fn close_tab(
     let mut st = state.borrow_mut();
     if idx >= st.tabs.len() {
         return;
+    }
+    let closing_endpoints: Vec<_> = std::iter::once(st.tabs[idx].endpoint_id)
+        .chain(st.tabs[idx].extra_panes.iter().map(|pane| pane.endpoint_id))
+        .collect();
+    for endpoint in closing_endpoints {
+        sessions::release_pointer_capture_for_endpoint(&mut st, endpoint);
     }
     let tab = st.tabs.remove(idx);
     // Closing a tab terminates every session in it. Keeping a session alive

@@ -17,7 +17,7 @@ import {
     StatusDot, StatusPill, IconButton, ActivityBarButton,
     PrimaryButton, SecondaryButton, EmptyState, Toast
 } from "components.slint";
-import { ListView, Palette, LineEdit } from "std-widgets.slint";
+import { CheckBox, ListView, Palette, LineEdit } from "std-widgets.slint";
 import { Modal, QuickConnectForm, HostKeyDialog, CertDialog, KbdInteractiveDialog, KbdPromptRow, ImportPasswordDialog, DeleteConfirmationDialog } from "screens/dialogs.slint";
 import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
 import { SettingsPanel } from "screens/settings_panel.slint";
@@ -117,7 +117,7 @@ component TerminalSurface inherits Rectangle {
         (c ? 1 : 0) + (a ? 2 : 0) + (s ? 4 : 0) + (m ? 8 : 0)
     }
 
-    background: Theme.color-terminal-bg;
+    background: Theme.color-terminal-canvas-bg;
     forward-focus: fs;
 
     fs := FocusScope {
@@ -143,6 +143,7 @@ component TerminalSurface inherits Rectangle {
                         : (e.text == Key.End) ? 10
                         : (e.text == Key.PageUp) ? 11
                         : (e.text == Key.PageDown) ? 12
+                        : (e.text == Key.Insert) ? 13
                         : (e.text == Key.Delete) ? 14
                         : 0,
                     root.mods(e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta));
@@ -225,6 +226,7 @@ component RdpSurface inherits Rectangle {
         : (text == Key.End)       ? 10
         : (text == Key.PageUp)    ? 11
         : (text == Key.PageDown)  ? 12
+        : (text == Key.Insert)    ? 13
         : (text == Key.Delete)    ? 14
         : (text == Key.F1)        ? 15
         : (text == Key.F2)        ? 16
@@ -249,7 +251,7 @@ component RdpSurface inherits Rectangle {
         : 0
     }
 
-    background: Theme.color-terminal-bg;
+    background: Theme.color-terminal-canvas-bg;
     forward-focus: rdp-fs;
 
     rdp-fs := FocusScope {
@@ -455,6 +457,120 @@ component Tab inherits Rectangle {
 // The base `touch` is the FIRST child so the HorizontalLayout (holding the
 // interactive action buttons) is rendered on top and captures clicks first —
 // the same pattern used by the Tab component's close button.
+// One keyboard/accessibility-reachable entry in the focused session's action
+// menu. Protocol-inapplicable actions are omitted by the menu itself.
+component SessionActionItem inherits Rectangle {
+    in property <string> label;
+    in property <string> shortcut: "";
+    in property <bool> enabled: true;
+    callback activated();
+
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.activated(); } }
+    height: 34px;
+    border-radius: Theme.radius-sm;
+    background: root.enabled && touch.has-hover ? Theme.color-hover : transparent;
+
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-4;
+        Text {
+            text: root.label;
+            color: root.enabled ? Theme.color-text : Theme.color-text-disabled;
+            font-size: Theme.font-base;
+            font-family: Theme.font-family;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        if root.shortcut != "" : Text {
+            text: root.shortcut;
+            color: root.enabled ? Theme.color-text-secondary : Theme.color-text-disabled;
+            font-size: Theme.font-xs;
+            font-family: Theme.font-family-mono;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.activated(); }
+    }
+}
+
+component SessionActionsMenu inherits Rectangle {
+    in property <bool> terminal;
+    in property <bool> rdp;
+    in property <bool> has-selection;
+    callback copy-selection();
+    callback copy-visible();
+    callback copy-all();
+    callback paste();
+    callback find();
+    callback rdp-ctrl-alt-delete();
+    callback rdp-windows-key();
+    callback rdp-alt-tab();
+    callback rdp-release-modifiers();
+
+    accessible-role: groupbox;
+    accessible-label: "Session actions menu";
+    width: 270px;
+    background: Theme.color-overlay;
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: Theme.color-stroke;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: #00000040;
+
+    TouchArea {}
+
+    VerticalLayout {
+        padding: Theme.space-2;
+        spacing: 1px;
+        if root.terminal : SessionActionItem {
+            label: "Copy Selection";
+            shortcut: "Ctrl+Shift+C";
+            enabled: root.has-selection;
+            activated => { root.copy-selection(); }
+        }
+        if root.terminal : SessionActionItem {
+            label: "Copy Visible Screen";
+            activated => { root.copy-visible(); }
+        }
+        if root.terminal : SessionActionItem {
+            label: "Copy All Scrollback";
+            activated => { root.copy-all(); }
+        }
+        if root.terminal : SessionActionItem {
+            label: "Paste";
+            shortcut: "Ctrl+Shift+V";
+            activated => { root.paste(); }
+        }
+        if root.terminal : SessionActionItem {
+            label: "Find";
+            shortcut: "Ctrl+Shift+F";
+            activated => { root.find(); }
+        }
+        if root.rdp : SessionActionItem {
+            label: "Send Ctrl+Alt+Delete";
+            activated => { root.rdp-ctrl-alt-delete(); }
+        }
+        if root.rdp : SessionActionItem {
+            label: "Send Windows/Super";
+            activated => { root.rdp-windows-key(); }
+        }
+        if root.rdp : SessionActionItem {
+            label: "Send Alt+Tab";
+            activated => { root.rdp-alt-tab(); }
+        }
+        if root.rdp : SessionActionItem {
+            label: "Release Modifiers";
+            activated => { root.rdp-release-modifiers(); }
+        }
+    }
+}
+
 component ConnectionRow inherits Rectangle {
     in property <ConnRow> data;
     // P5.3b: keyboard-navigation cursor highlight (driven by parent's kb-idx).
@@ -1079,9 +1195,106 @@ component PaneSlot inherits Rectangle {
     }
 }
 
+// ── Active-session close confirmation ─────────────────────────────────────
+component CloseConfirmationDialog inherits Rectangle {
+    in property <string> title: "Disconnect active connection?";
+    in property <string> message: "";
+    in property <string> action-label: "Disconnect";
+    in-out property <bool> dont-ask: false;
+    in property <int> focus-index: 1;
+    callback confirm();
+    callback cancel();
+    callback key-down(string, int);
+    callback key-up(string);
+
+    accessible-role: groupbox;
+    accessible-label: "Close confirmation dialog";
+    width: 480px;
+    background: Theme.color-overlay;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.color-stroke;
+    forward-focus: modal-keyboard;
+
+    // This scope is the capture ancestor once focus enters a dialog control.
+    // The shell-level scope remains the fallback during modal construction.
+    modal-keyboard := FocusScope {
+        width: 100%;
+        height: 100%;
+        capture-key-pressed(e) => {
+            root.key-down(
+                e.text,
+                e.text == Key.Escape ? 1
+                    : e.text == Key.Tab && e.modifiers.shift ? 3
+                    : e.text == Key.Tab ? 2
+                    : e.text == Key.Return || e.text == Key.Space ? 4
+                    : 0);
+            accept
+        }
+        capture-key-released(e) => {
+            root.key-up(e.text);
+            accept
+        }
+
+        // Absorb clicks so the modal scrim cannot dismiss through the card.
+        TouchArea {}
+
+        VerticalLayout {
+            padding: Theme.space-6;
+            spacing: Theme.space-4;
+
+            Text {
+                text: root.title;
+                color: Theme.color-text;
+                font-size: Theme.font-lg;
+                font-family: Theme.font-family;
+                font-weight: 700;
+                wrap: word-wrap;
+            }
+            Text {
+                text: root.message;
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-base;
+                font-family: Theme.font-family;
+                wrap: word-wrap;
+            }
+            checkbox-focus-ring := Rectangle {
+                height: Theme.control-height;
+                border-radius: Theme.radius-sm;
+                border-width: root.focus-index == 0 ? 2px : 0px;
+                border-color: Theme.color-accent;
+                close-confirm-dont-ask := CheckBox {
+                    x: Theme.space-2;
+                    y: (parent.height - self.height) / 2;
+                    width: parent.width - Theme.space-2 * 2;
+                    text: "Don't ask again";
+                    checked <=> root.dont-ask;
+                    accessible-label: "Don't ask again for this kind of close";
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                Rectangle { horizontal-stretch: 1; }
+                close-confirm-cancel-btn := SecondaryButton {
+                    text: "Cancel";
+                    keyboard-focused: root.focus-index == 1;
+                    clicked => { root.cancel(); }
+                }
+                close-confirm-accept-btn := PrimaryButton {
+                    text: root.action-label;
+                    destructive: true;
+                    keyboard-focused: root.focus-index == 2;
+                    clicked => { root.confirm(); }
+                }
+            }
+        }
+    }
+}
+
 // ── AppWindow ──────────────────────────────────────────────────────────────
 export component AppWindow inherits Window {
-    title: "ConMan";
+    title: "Connection Manager";
+    icon: @image-url("../../../resources/ConMan_128.png");
     preferred-width: 1280px;
     preferred-height: 760px;
     // Imperatively mirror the resolved window width for responsive modal
@@ -1213,6 +1426,23 @@ export component AppWindow inherits Window {
     in property <[PaletteAction]>    palette-actions;
     in-out property <int>            palette-selected: 0;
 
+    // One contextual menu for the active tab's focused pane. The controller
+    // snapshots surface kind and selection state when opening it.
+    in-out property <bool> session-actions-open: false;
+    in property <bool> session-actions-terminal: false;
+    in property <bool> session-actions-rdp: false;
+    in property <bool> session-actions-has-selection: false;
+    callback open-session-actions();
+    callback session-copy-selection();
+    callback session-copy-visible();
+    callback session-copy-all();
+    callback session-paste();
+    callback session-find();
+    callback session-rdp-ctrl-alt-delete();
+    callback session-rdp-windows-key();
+    callback session-rdp-alt-tab();
+    callback session-rdp-release-modifiers();
+
     // ── Terminal search overlay (P6.7, Ctrl⇧F) ─────────────────────────
     in-out property <bool>   terminal-search-open: false;
     in-out property <string> terminal-search-query: "";
@@ -1328,6 +1558,26 @@ export component AppWindow inherits Window {
     callback delete-confirm-accept();
     callback delete-confirm-cancel();
 
+    // ── Active-session close confirmation ────────────────────────────
+    in-out property <bool> close-confirm-open: false;
+    in property <string> close-confirm-title: "Disconnect active connection?";
+    in property <string> close-confirm-message: "";
+    in property <string> close-confirm-action-label: "Disconnect";
+    in-out property <bool> close-confirm-dont-ask: false;
+    // Remains true between a modal-owned key-down and its matching key-up,
+    // even if Escape/mouse closes the modal between those phases.
+    in-out property <bool> close-confirm-key-guard-active: false;
+    // 0 = Don't ask again, 1 = Cancel, 2 = destructive action. The modal
+    // explicitly owns traversal because the top-level capture must prevent
+    // terminal/RDP key leakage.
+    in-out property <int> close-confirm-focus-index: 1;
+    callback close-confirm-accept();
+    callback close-confirm-cancel();
+    // command: 0 = swallow, 1 = Escape, 2 = Tab, 3 = Shift+Tab,
+    // 4 = activate focused control.
+    callback close-confirm-key-down(string, int /* command */);
+    callback close-confirm-key-up(string);
+
     // ── Appearance (P5.2: full settings exposed here) ────────────────
     in-out property <int>   theme-mode: 2;
     in-out property <int>   density    <=> Theme.density;
@@ -1350,14 +1600,31 @@ export component AppWindow inherits Window {
     in-out property <string> settings-font-family: "JetBrainsMono Nerd Font Mono";
     in-out property <int> settings-font-family-index: 0;
     in-out property <int>    settings-font-size: 13;
+    in-out property <int> settings-terminal-theme: 0;
+    changed settings-terminal-theme => {
+        Theme.terminal-dark = self.settings-terminal-theme != 1;
+    }
+    in-out property <string> settings-scrollback-limit: "10000";
+    in-out property <bool> settings-plain-copy-paste: true;
+    in-out property <bool> settings-copy-on-select: false;
     in-out property <string> settings-shell-path: "";
     in-out property <string> settings-shell-args: "";
     in-out property <string> settings-shell-cwd: "";
+    in property <string> settings-shell-path-hint: "OS default shell";
+    in property <string> settings-shell-path-placeholder: "OS default";
+    in property <string> settings-shell-args-placeholder: "No arguments";
+    in property <string> settings-shell-cwd-placeholder: "Home directory";
     // Startup behavior: 0 = clean start, 1 = restore last session
     in-out property <int>    startup-behavior: 0;
     // Renderer backend (P7.1 cont.): 0 auto · 1 software · 2 hardware.
     // Applied on next launch; persisted to render.backend by the controller.
     in-out property <int>    render-backend: 0;
+    // Mirrored settings values. The settings panel owns the normal toggles;
+    // the close dialog writes these live when "Don't ask again" is confirmed.
+    in-out property <bool> settings-confirm-close-active-tab: true;
+    in-out property <bool> settings-confirm-quit-active-connections: true;
+    in property <string> settings-build-version: "";
+    in property <string> settings-build-details: "";
 
     // ── Automation / Agent mode (P8.6-B) ──────────────────────────────
     // See SettingsPanel's identically-named properties for the full doc
@@ -1434,6 +1701,15 @@ export component AppWindow inherits Window {
     }
     callback settings-font-size-changed(int);
     callback settings-font-family-changed(string);
+    callback settings-terminal-theme-changed(int);
+    callback settings-scrollback-limit-changed(string);
+    callback settings-plain-copy-paste-changed(bool);
+    callback settings-copy-on-select-changed(bool);
+    callback settings-confirm-close-active-tab-changed(bool);
+    callback settings-confirm-quit-active-connections-changed(bool);
+    callback settings-open-config();
+    callback settings-reload-config();
+    callback settings-copy-build-info();
     callback settings-shell-path-changed(string);
     callback settings-shell-args-changed(string);
     callback settings-shell-cwd-changed(string);
@@ -1490,7 +1766,16 @@ export component AppWindow inherits Window {
         focus-on-click: false;
         focus-on-tab-navigation: false;
         capture-key-pressed(e) => {
-            if (e.modifiers.control &&
+            if (root.close-confirm-open || root.close-confirm-key-guard-active) {
+                root.close-confirm-key-down(
+                    e.text,
+                    e.text == Key.Escape ? 1
+                        : e.text == Key.Tab && e.modifiers.shift ? 3
+                        : e.text == Key.Tab ? 2
+                        : e.text == Key.Return || e.text == Key.Space ? 4
+                        : 0);
+                accept
+            } else if (e.modifiers.control &&
                 (e.text == "k" || e.text == "K" || e.text == "\u{b}")) {
                 root.open-palette();
                 accept
@@ -1499,7 +1784,10 @@ export component AppWindow inherits Window {
             }
         }
         capture-key-released(e) => {
-            if (e.modifiers.control &&
+            if (root.close-confirm-open || root.close-confirm-key-guard-active) {
+                root.close-confirm-key-up(e.text);
+                accept
+            } else if (e.modifiers.control &&
                 (e.text == "k" || e.text == "K" || e.text == "\u{b}")) {
                 accept
             } else {
@@ -1888,11 +2176,23 @@ export component AppWindow inherits Window {
                     font-family         <=> root.settings-font-family;
                     font-family-index   <=> root.settings-font-family-index;
                     font-size           <=> root.settings-font-size;
+                    terminal-theme      <=> root.settings-terminal-theme;
+                    scrollback-limit    <=> root.settings-scrollback-limit;
+                    plain-copy-paste    <=> root.settings-plain-copy-paste;
+                    copy-on-select      <=> root.settings-copy-on-select;
                     shell-path          <=> root.settings-shell-path;
                     shell-args          <=> root.settings-shell-args;
                     shell-cwd           <=> root.settings-shell-cwd;
+                    shell-path-hint              : root.settings-shell-path-hint;
+                    shell-path-placeholder       : root.settings-shell-path-placeholder;
+                    shell-args-placeholder       : root.settings-shell-args-placeholder;
+                    shell-cwd-placeholder        : root.settings-shell-cwd-placeholder;
                     startup-behavior    <=> root.startup-behavior;
                     render-backend      <=> root.render-backend;
+                    confirm-close-active-tab <=> root.settings-confirm-close-active-tab;
+                    confirm-quit-active-connections <=> root.settings-confirm-quit-active-connections;
+                    build-version       : root.settings-build-version;
+                    build-details       : root.settings-build-details;
                     agent-mode-available            : root.agent-mode-available;
                     agent-mode-enabled               <=> root.agent-mode-enabled;
                     agent-mode-scope-read             <=> root.agent-mode-scope-read;
@@ -1906,11 +2206,20 @@ export component AppWindow inherits Window {
                     accent-changed(i)   => { root.accent-changed(i); }
                     font-family-changed(v)       => { root.settings-font-family-changed(v); }
                     font-size-changed(v)         => { root.settings-font-size-changed(v); }
+                    terminal-theme-changed(v)    => { root.settings-terminal-theme-changed(v); }
+                    scrollback-limit-changed(v)  => { root.settings-scrollback-limit-changed(v); }
+                    plain-copy-paste-changed(v)  => { root.settings-plain-copy-paste-changed(v); }
+                    copy-on-select-changed(v)    => { root.settings-copy-on-select-changed(v); }
                     shell-path-changed(v)        => { root.settings-shell-path-changed(v); }
                     shell-args-changed(v)        => { root.settings-shell-args-changed(v); }
                     shell-cwd-changed(v)         => { root.settings-shell-cwd-changed(v); }
                     startup-behavior-changed(v)  => { root.startup-behavior-changed(v); }
                     render-backend-changed(v)    => { root.render-backend-changed(v); }
+                    confirm-close-active-tab-changed(v) => { root.settings-confirm-close-active-tab-changed(v); }
+                    confirm-quit-active-connections-changed(v) => { root.settings-confirm-quit-active-connections-changed(v); }
+                    open-config() => { root.settings-open-config(); }
+                    reload-config() => { root.settings-reload-config(); }
+                    copy-build-info() => { root.settings-copy-build-info(); }
                     agent-mode-enabled-changed(v)       => { root.agent-mode-enabled-changed(v); }
                     agent-mode-scope-read-changed(v)    => { root.agent-mode-scope-read-changed(v); }
                     agent-mode-scope-write-changed(v)   => { root.agent-mode-scope-write-changed(v); }
@@ -1976,7 +2285,7 @@ export component AppWindow inherits Window {
                 // controls cannot feed back into this Rectangle's layout
                 // width (the loop produced by a conditional HorizontalLayout).
                 property <bool> has-overflow: root.tab-strip-content-width
-                    > self.width - Theme.control-height - Theme.space-1 * 3;
+                    > self.width - Theme.control-height * 2 - Theme.space-1 * 4;
 
                 if tab-strip.has-overflow : tab-scroll-left-btn := IconButton {
                     x: Theme.space-1;
@@ -1995,7 +2304,7 @@ export component AppWindow inherits Window {
                     y: Theme.space-1;
                     width: max(
                         0px,
-                        parent.width - self.x - Theme.control-height - Theme.space-1 * 2
+                        parent.width - self.x - Theme.control-height * 2 - Theme.space-1 * 3
                             - (tab-strip.has-overflow
                                 ? Theme.control-height + Theme.space-1
                                 : 0px));
@@ -2033,13 +2342,22 @@ export component AppWindow inherits Window {
                 }
 
                 if tab-strip.has-overflow : tab-scroll-right-btn := IconButton {
-                    x: parent.width - Theme.control-height * 2 - Theme.space-1 * 2;
+                    x: parent.width - Theme.control-height * 3 - Theme.space-1 * 3;
                     y: (parent.height - self.height) / 2;
                     glyph: "\u{EAB6}";
                     tooltip: "Next tab";
                     clicked => {
                         root.select-tab(min(tabs.length - 1, root.active-tab + 1));
                     }
+                }
+
+                session-actions-btn := IconButton {
+                    x: parent.width - Theme.control-height * 2 - Theme.space-1 * 2;
+                    y: (parent.height - self.height) / 2;
+                    glyph: "\u{F01D8}"; // md-dots-horizontal
+                    tooltip: "Session actions";
+                    accessible-label: "Session actions";
+                    clicked => { root.open-session-actions(); }
                 }
 
                 new-tab-btn := IconButton {
@@ -2675,6 +2993,40 @@ export component AppWindow inherits Window {
     }
 
     // ── Command palette (last child = topmost z-layer) ────────────────────
+    // Focused-pane actions live in one pinned tab-strip menu rather than
+    // permanent pane chrome. The full-window click catcher gives predictable
+    // click-out dismissal while the menu is open.
+    if root.session-actions-open : session-actions-layer := Rectangle {
+        x: 0px; y: 0px;
+        width: root.width; height: root.height;
+        background: transparent;
+        dismiss-session-actions := TouchArea {
+            clicked => { root.session-actions-open = false; }
+        }
+        session-actions-menu := SessionActionsMenu {
+            x: parent.width - self.width - Theme.space-3;
+            y: 40px + Theme.space-1;
+            terminal: root.session-actions-terminal;
+            rdp: root.session-actions-rdp;
+            has-selection: root.session-actions-has-selection;
+            copy-selection => { root.session-actions-open = false; root.session-copy-selection(); }
+            copy-visible => { root.session-actions-open = false; root.session-copy-visible(); }
+            copy-all => { root.session-actions-open = false; root.session-copy-all(); }
+            paste => { root.session-actions-open = false; root.session-paste(); }
+            find => { root.session-actions-open = false; root.session-find(); }
+            rdp-ctrl-alt-delete => {
+                root.session-actions-open = false; root.session-rdp-ctrl-alt-delete();
+            }
+            rdp-windows-key => {
+                root.session-actions-open = false; root.session-rdp-windows-key();
+            }
+            rdp-alt-tab => { root.session-actions-open = false; root.session-rdp-alt-tab(); }
+            rdp-release-modifiers => {
+                root.session-actions-open = false; root.session-rdp-release-modifiers();
+            }
+        }
+    }
+
     palette-modal := Modal {
         open: root.palette-open;
         dismissed => {
@@ -2691,6 +3043,25 @@ export component AppWindow inherits Window {
                 root.palette-selected = 0;
                 root.palette-activated(idx);
             }
+        }
+    }
+
+    // Close confirmation is intentionally the final child: a native window
+    // close request can arrive while another modal or the palette is open,
+    // and the destructive decision must remain visible and own all input.
+    close-confirm-modal := Modal {
+        open: root.close-confirm-open;
+        dismissed => { root.close-confirm-cancel(); }
+        close-confirm-dialog := CloseConfirmationDialog {
+            title: root.close-confirm-title;
+            message: root.close-confirm-message;
+            action-label: root.close-confirm-action-label;
+            dont-ask <=> root.close-confirm-dont-ask;
+            focus-index: root.close-confirm-focus-index;
+            key-down(text, command) => { root.close-confirm-key-down(text, command); }
+            key-up(text) => { root.close-confirm-key-up(text); }
+            confirm => { root.close-confirm-accept(); }
+            cancel => { root.close-confirm-cancel(); }
         }
     }
 }

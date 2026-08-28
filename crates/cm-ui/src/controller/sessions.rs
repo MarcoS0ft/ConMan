@@ -10,7 +10,7 @@ use std::time::Instant;
 use cm_core::terminal::GridSnapshot;
 use cm_core::{
     Connection, ConnectionSettings, CredentialPurpose, Group, LocalSettings, RdpSettings, Secret,
-    SshAuthMethod, SshSettings, TelnetSettings,
+    SshAuthMethod, SshSettings, TelnetSettings, TerminalOptions,
 };
 use cm_session::{
     CertDecision, CertInfo, CertVerifier, FailedSession, FocusDir, FrameUpdate, HostKeyDecision,
@@ -27,6 +27,7 @@ use super::*;
 
 pub(super) fn wire_sessions(ctx: &Ctx) {
     wire_key_input(ctx);
+    wire_session_actions(ctx);
     wire_pointer(ctx);
     wire_scroll(ctx);
     wire_rdp_scroll(ctx);
@@ -56,6 +57,18 @@ fn wire_key_input(ctx: &Ctx) {
         let weak_kb = ctx.ui.as_weak();
         move |text, special, mods| {
             let Some(ui) = weak_kb.upgrade() else { return };
+            if close::guard_terminal_key(&state, &ui, special) {
+                return;
+            }
+            if ui.get_session_actions_open() {
+                if special == 4 {
+                    ui.set_session_actions_open(false);
+                }
+                // A menu owns keyboard input while open. In particular, Esc
+                // dismisses without becoming a remote terminal/RDP key and
+                // modifier snapshots cannot leak through menu navigation.
+                return;
+            }
             if ui.get_palette_open() {
                 palette::handle_palette_key(
                     &ui,
@@ -132,7 +145,7 @@ fn wire_key_input(ctx: &Ctx) {
                     // Ctrl+Shift+W → close focused pane (detach = false → shutdown).
                     (0, "w" | "W") => {
                         if let Some(pane_id) = panes::focused_pane_id(&state) {
-                            panes::do_close_pane(&state, &tab_model_kb, &ui, pane_id, false);
+                            close::request_pane_close(&state, &tab_model_kb, &ui, pane_id);
                         }
                         return;
                     }
@@ -185,6 +198,40 @@ fn wire_key_input(ctx: &Ctx) {
                         return;
                     }
                     CtrlShiftAction::None => {}
+                }
+            }
+
+            // Mainstream terminal aliases. Ctrl+C is conditional: with a
+            // selection it copies, without one it must remain the terminal's
+            // interrupt key. Ctrl+V and Shift+Insert always request a paste
+            // when the focused pane is a terminal. Exact modifier matching
+            // leaves application/TUI combinations such as Ctrl+Alt+C alone.
+            let (focused_terminal, plain_clipboard_shortcuts) = {
+                let st = state.borrow();
+                (
+                    focused_pane_is_terminal(&st),
+                    st.plain_copy_paste_shortcuts,
+                )
+            };
+            if focused_terminal {
+                match classify_terminal_clipboard_shortcut(
+                    special,
+                    text.as_str(),
+                    mods,
+                    plain_clipboard_shortcuts,
+                ) {
+                    TerminalClipboardAction::CopyIfSelected
+                        if focused_pane_has_selection(&state.borrow()) =>
+                    {
+                        do_copy(&state);
+                        return;
+                    }
+                    TerminalClipboardAction::Paste => {
+                        do_paste(&state);
+                        return;
+                    }
+                    TerminalClipboardAction::CopyIfSelected
+                    | TerminalClipboardAction::None => {}
                 }
             }
 
@@ -329,37 +376,92 @@ pub(super) fn classify_ctrl_shift_shortcut(special: i32, text: &str) -> CtrlShif
     }
 }
 
-/// P6.5: copy the focused pane's live selection to the OS clipboard
-/// (`Ctrl⇧C`). A no-op when nothing is selected — never overwrites the
-/// clipboard with an empty string. Does not clear the selection (pinned
-/// lifecycle rule: "copying does not clear").
-fn do_copy(state: &Rc<RefCell<State>>) {
-    let mut st = state.borrow_mut();
-    let active = st.active;
-    let Some(tab) = st.tabs.get(active) else {
-        return;
-    };
-    let focused = tab.pane_group.focused();
-    let text = if focused == 0 {
-        tab.last.as_ref().and_then(|snap| tab.sel.copy_text(snap))
-    } else {
-        tab.extra_panes
-            .get(focused - 1)
-            .and_then(|ep| ep.last.as_ref().and_then(|snap| ep.sel.copy_text(snap)))
-    };
-    if let Some(text) = text {
-        let replaced = st.sys_clipboard.submit_write(
-            crate::clipboard::ClipboardWritePurpose::TerminalSelectionCopy,
-            crate::clipboard::ClipboardWrite::Text(text),
-        );
-        if let Some(replaced) = replaced {
-            handle_replaced_clipboard_write(&mut st, &replaced);
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalClipboardAction {
+    CopyIfSelected,
+    Paste,
+    None,
+}
+
+/// Classify mainstream terminal clipboard aliases. The preference gates only
+/// plain Ctrl+C/V; Shift+Insert remains available, and Ctrl+Shift+C/V stay in
+/// the reserved shortcut layer above.
+fn classify_terminal_clipboard_shortcut(
+    special: i32,
+    text: &str,
+    mods: i32,
+    plain_aliases_enabled: bool,
+) -> TerminalClipboardAction {
+    match (special, text, mods) {
+        (0, "c" | "C" | "\u{3}", input::MOD_CTRL) if plain_aliases_enabled => {
+            TerminalClipboardAction::CopyIfSelected
         }
+        (0, "v" | "V" | "\u{16}", input::MOD_CTRL) if plain_aliases_enabled => {
+            TerminalClipboardAction::Paste
+        }
+        (13, _, input::MOD_SHIFT) => TerminalClipboardAction::Paste,
+        _ => TerminalClipboardAction::None,
     }
 }
 
-/// P6.5: paste the OS clipboard into the focused pane (`Ctrl⇧V`, and
-/// middle-click on Linux — see [`wire_pointer`]). Routed through
+/// P6.5: copy the focused pane's live selection to the OS clipboard
+/// (`Ctrl+C` with a selection, or `Ctrl⇧C`). A no-op when nothing is selected
+/// — never overwrites the clipboard with an empty string. The originating
+/// selection is cleared later, and only if this exact asynchronous write
+/// succeeds before the selection changes.
+fn do_copy(state: &Rc<RefCell<State>>) {
+    let mut st = state.borrow_mut();
+    let active = st.active;
+    let copy = {
+        let Some(tab) = st.tabs.get(active) else {
+            return;
+        };
+        let focused = tab.pane_group.focused();
+        if focused == 0 {
+            tab.last.as_ref().and_then(|snap| {
+                Some((
+                    tab.endpoint_id,
+                    tab.sel.selection_generation()?,
+                    tab.sel.copy_text(snap)?,
+                ))
+            })
+        } else {
+            tab.extra_panes.get(focused - 1).and_then(|ep| {
+                ep.last.as_ref().and_then(|snap| {
+                    Some((
+                        ep.endpoint_id,
+                        ep.sel.selection_generation()?,
+                        ep.sel.copy_text(snap)?,
+                    ))
+                })
+            })
+        }
+    };
+    if let Some((target, selection_generation, text)) = copy {
+        submit_terminal_selection_copy(&mut st, target, selection_generation, text);
+    }
+}
+
+fn submit_terminal_selection_copy(
+    st: &mut State,
+    target: cm_core::SessionEndpointId,
+    selection_generation: u64,
+    text: String,
+) {
+    let replaced = st.sys_clipboard.submit_write(
+        crate::clipboard::ClipboardWritePurpose::TerminalSelectionCopy {
+            target,
+            selection_generation,
+        },
+        crate::clipboard::ClipboardWrite::Text(text),
+    );
+    if let Some(replaced) = replaced {
+        handle_replaced_clipboard_write(st, &replaced);
+    }
+}
+
+/// P6.5: paste the OS clipboard into the focused pane (keyboard aliases, or
+/// a locally-owned right/middle click — see [`wire_pointer`]). Routed through
 /// `SessionInput::Paste` -> `TerminalSession::paste()`, which
 /// bracketed-paste-wraps at the engine/session layer when the app enabled
 /// DECSET 2004 (raw otherwise — see `cm_session::engine_owner::wrap_paste`).
@@ -380,11 +482,326 @@ fn do_paste(state: &Rc<RefCell<State>>) {
     let _ = st.sys_clipboard.request_terminal_text(target);
 }
 
-/// Mouse button discriminant for a middle-click (see `input::map_mouse`'s
-/// button encoding, mirrored here since this file, not `input.rs`, decides
-/// what a middle-click *does* on the terminal surface).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FocusedSessionKind {
+    None,
+    Terminal { has_selection: bool },
+    Rdp,
+}
+
+pub(super) fn focused_session_kind(st: &State) -> FocusedSessionKind {
+    let Some(tab) = st.tabs.get(st.active) else {
+        return FocusedSessionKind::None;
+    };
+    let focused = tab.pane_group.focused();
+    let (surface, has_selection) = if focused == 0 {
+        (tab.session.surface(), tab.sel.selection().is_some())
+    } else if let Some(pane) = tab.extra_panes.get(focused - 1) {
+        (pane.session.surface(), pane.sel.selection().is_some())
+    } else {
+        return FocusedSessionKind::None;
+    };
+    match surface {
+        Surface::TerminalGrid(_) => FocusedSessionKind::Terminal { has_selection },
+        Surface::Framebuffer(_) => FocusedSessionKind::Rdp,
+    }
+}
+
+fn wire_session_actions(ctx: &Ctx) {
+    ctx.ui.on_open_session_actions({
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let kind = focused_session_kind(&state.borrow());
+            ui.set_session_actions_terminal(matches!(kind, FocusedSessionKind::Terminal { .. }));
+            ui.set_session_actions_rdp(kind == FocusedSessionKind::Rdp);
+            ui.set_session_actions_has_selection(matches!(
+                kind,
+                FocusedSessionKind::Terminal {
+                    has_selection: true
+                }
+            ));
+            ui.set_session_actions_open(kind != FocusedSessionKind::None);
+        }
+    });
+    ctx.ui.on_session_copy_selection({
+        let state = ctx.state.clone();
+        move || do_copy(&state)
+    });
+    ctx.ui.on_session_copy_visible({
+        let state = ctx.state.clone();
+        move || copy_visible_screen(&state)
+    });
+    ctx.ui.on_session_copy_all({
+        let state = ctx.state.clone();
+        move || copy_all_scrollback(&state)
+    });
+    ctx.ui.on_session_paste({
+        let state = ctx.state.clone();
+        move || do_paste(&state)
+    });
+    ctx.ui.on_session_find({
+        let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade()
+                && matches!(
+                    focused_session_kind(&state.borrow()),
+                    FocusedSessionKind::Terminal { .. }
+                )
+            {
+                search::open_search(&ui, &state);
+            }
+        }
+    });
+    ctx.ui.on_session_rdp_ctrl_alt_delete({
+        let state = ctx.state.clone();
+        move || send_focused_rdp_action(&state, input::rdp_ctrl_alt_delete_sequence())
+    });
+    ctx.ui.on_session_rdp_windows_key({
+        let state = ctx.state.clone();
+        move || send_focused_rdp_action(&state, input::rdp_windows_key_sequence())
+    });
+    ctx.ui.on_session_rdp_alt_tab({
+        let state = ctx.state.clone();
+        move || send_focused_rdp_action(&state, input::rdp_alt_tab_sequence())
+    });
+    ctx.ui.on_session_rdp_release_modifiers({
+        let state = ctx.state.clone();
+        move || send_focused_rdp_action(&state, input::rdp_release_all_modifiers_sequence())
+    });
+}
+
+pub(super) fn send_focused_rdp_action(
+    state: &Rc<RefCell<State>>,
+    events: Vec<cm_core::RdpInputEvent>,
+) {
+    let st = state.borrow();
+    let Some(tab) = st.tabs.get(st.active) else {
+        return;
+    };
+    if focused_session_kind(&st) == FocusedSessionKind::Rdp {
+        send_to_focused_pane(tab, SessionInput::Rdp(events));
+    }
+}
+
+pub(super) fn copy_selection(state: &Rc<RefCell<State>>) {
+    do_copy(state);
+}
+
+pub(super) fn paste(state: &Rc<RefCell<State>>) {
+    do_paste(state);
+}
+
+pub(super) fn copy_visible_screen(state: &Rc<RefCell<State>>) {
+    let mut st = state.borrow_mut();
+    let Some(tab) = st.tabs.get(st.active) else {
+        return;
+    };
+    let focused = tab.pane_group.focused();
+    let snapshot = if focused == 0 {
+        matches!(tab.session.surface(), Surface::TerminalGrid(_))
+            .then(|| tab.last.as_ref())
+            .flatten()
+    } else {
+        tab.extra_panes.get(focused - 1).and_then(|pane| {
+            matches!(pane.session.surface(), Surface::TerminalGrid(_))
+                .then(|| pane.last.as_ref())
+                .flatten()
+        })
+    };
+    let Some(text) = snapshot.map(snapshot_text).filter(|text| !text.is_empty()) else {
+        return;
+    };
+    submit_ui_text_copy(&mut st, text);
+}
+
+pub(super) fn copy_all_scrollback(state: &Rc<RefCell<State>>) {
+    let mut st = state.borrow_mut();
+    let Some(tab) = st.tabs.get(st.active) else {
+        return;
+    };
+    let focused = tab.pane_group.focused();
+    let (target, session): (cm_core::SessionEndpointId, &dyn cm_session::Session) = if focused == 0
+    {
+        if !matches!(tab.session.surface(), Surface::TerminalGrid(_)) {
+            return;
+        }
+        (tab.endpoint_id, tab.session.as_ref())
+    } else {
+        let Some(pane) = tab.extra_panes.get(focused - 1) else {
+            return;
+        };
+        if !matches!(pane.session.surface(), Surface::TerminalGrid(_)) {
+            return;
+        }
+        (pane.endpoint_id, pane.session.as_ref())
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    session.request_search_text(tx);
+    st.pending_terminal_buffer_copies
+        .push(PendingTerminalBufferCopy { target, reply: rx });
+}
+
+fn snapshot_text(snapshot: &GridSnapshot) -> String {
+    let cols = usize::from(snapshot.size.cols);
+    if cols == 0 {
+        return String::new();
+    }
+    let mut lines = snapshot
+        .cells
+        .chunks(cols)
+        .map(|row| {
+            let mut line = String::new();
+            for cell in row {
+                line.push_str(&cell.grapheme);
+            }
+            line.trim_end().to_owned()
+        })
+        .collect::<Vec<_>>();
+    trim_trailing_empty_lines(&mut lines);
+    lines.join("\n")
+}
+
+fn buffer_lines_text(mut lines: Vec<String>) -> String {
+    for line in &mut lines {
+        *line = line.trim_end().to_owned();
+    }
+    trim_trailing_empty_lines(&mut lines);
+    lines.join("\n")
+}
+
+fn trim_trailing_empty_lines(lines: &mut Vec<String>) {
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+}
+
+fn submit_ui_text_copy(st: &mut State, text: String) {
+    let replaced = st.sys_clipboard.submit_write(
+        crate::clipboard::ClipboardWritePurpose::UiTextCopy,
+        crate::clipboard::ClipboardWrite::Text(text),
+    );
+    if let Some(replaced) = replaced {
+        handle_replaced_clipboard_write(st, &replaced);
+    }
+}
+
+fn poll_terminal_buffer_copies(st: &mut State) {
+    let mut idx = 0;
+    while idx < st.pending_terminal_buffer_copies.len() {
+        match st.pending_terminal_buffer_copies[idx].reply.try_recv() {
+            Ok(lines) => {
+                let request = st.pending_terminal_buffer_copies.remove(idx);
+                // Stable identity prevents a reply from a closed/replaced pane
+                // becoming an unrelated session's clipboard content.
+                if endpoint_exists(st, request.target) {
+                    let text = buffer_lines_text(lines);
+                    if !text.is_empty() {
+                        submit_ui_text_copy(st, text);
+                    }
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                st.pending_terminal_buffer_copies.remove(idx);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => idx += 1,
+        }
+    }
+}
+
+fn endpoint_exists(st: &State, endpoint: cm_core::SessionEndpointId) -> bool {
+    st.tabs.iter().any(|tab| {
+        tab.endpoint_id == endpoint
+            || tab
+                .extra_panes
+                .iter()
+                .any(|pane| pane.endpoint_id == endpoint)
+    }) || st
+        .detached
+        .iter()
+        .any(|detached| detached.endpoint_id == endpoint)
+}
+
+/// Mouse button discriminants mirrored from `input::map_mouse`; this file
+/// decides whether a click belongs to a mouse-tracking TUI or local paste.
 const BTN_MIDDLE: i32 = 3;
+const BTN_RIGHT: i32 = 2;
+const BTN_LEFT: i32 = 1;
+const KIND_CANCEL: i32 = 0;
 const KIND_PRESS: i32 = 1;
+const KIND_RELEASE: i32 = 2;
+
+fn pointer_pane_location(
+    st: &State,
+    endpoint: cm_core::SessionEndpointId,
+) -> Option<(usize, usize)> {
+    st.tabs.iter().enumerate().find_map(|(tab_idx, tab)| {
+        if tab.endpoint_id == endpoint {
+            return Some((tab_idx, 0));
+        }
+        tab.extra_panes
+            .iter()
+            .position(|pane| pane.endpoint_id == endpoint)
+            .map(|extra_idx| (tab_idx, extra_idx + 1))
+    })
+}
+
+/// Best-effort balancing release when the original pane disappeared or a new
+/// press superseded an unfinished gesture. A detached session remains
+/// addressable by endpoint; a shut-down one simply rejects the send.
+fn release_captured_pointer(st: &State, capture: PointerGestureCapture) {
+    match capture.surface {
+        PointerGestureSurface::Terminal {
+            forwarded_button: Some(button),
+            row,
+            col,
+            mods,
+        } => {
+            if let Some(event) = input::map_mouse(button, KIND_RELEASE, row, col, mods) {
+                send_to_endpoint(st, capture.endpoint, SessionInput::Mouse(event));
+            }
+        }
+        PointerGestureSurface::Rdp {
+            button,
+            surface_w,
+            surface_h,
+            rdp_w,
+            rdp_h,
+            x,
+            y,
+        } => {
+            let coords = input::RdpCoords {
+                surface_w,
+                surface_h,
+                rdp_w,
+                rdp_h,
+            };
+            let events = input::map_rdp_mouse(button, KIND_RELEASE, x, y, &coords);
+            if !events.is_empty() {
+                send_to_endpoint(st, capture.endpoint, SessionInput::Rdp(events));
+            }
+        }
+        PointerGestureSurface::Terminal {
+            forwarded_button: None,
+            ..
+        } => {}
+    }
+}
+
+pub(super) fn release_pointer_capture_for_endpoint(
+    st: &mut State,
+    endpoint: cm_core::SessionEndpointId,
+) {
+    if st
+        .pointer_gesture
+        .is_some_and(|capture| capture.endpoint == endpoint)
+    {
+        let capture = st.pointer_gesture.take().expect("matching capture");
+        release_captured_pointer(st, capture);
+    }
+}
 
 /// `special` codes for PageUp/PageDown (see `input::map_key`'s doc comment
 /// for the full table — these two are intercepted here, before
@@ -424,24 +841,6 @@ fn scroll_active_tab_by(state: &Rc<RefCell<State>>, delta: i64) {
         .send_input(SessionInput::Scroll(clamp_scroll(last, delta)));
 }
 
-/// Whether the pane currently focused in `tab` is a terminal surface (as
-/// opposed to an RDP framebuffer, which has no selection/paste concept).
-/// Extra panes are terminal-only in practice today (RDP-in-a-split-pane is a
-/// noted unimplemented edge case — see `tick_tab`'s framebuffer-drain
-/// comment), but this checks the real surface rather than assuming it.
-fn focused_surface_is_terminal(tab: &Tab) -> bool {
-    let focused = tab.pane_group.focused();
-    let surf = if focused == 0 {
-        tab.session.surface()
-    } else {
-        match tab.extra_panes.get(focused - 1) {
-            Some(ep) => ep.session.surface(),
-            None => tab.session.surface(),
-        }
-    };
-    matches!(surf, Surface::TerminalGrid(_))
-}
-
 fn wire_pointer(ctx: &Ctx) {
     ctx.ui.on_pointer({
         let state = ctx.state.clone();
@@ -449,31 +848,42 @@ fn wire_pointer(ctx: &Ctx) {
         move |button, kind, x, y, mods| {
             let now = Instant::now();
 
-            // P6.5: middle-click paste (Linux convenience — the regular OS
-            // clipboard, not the X11 PRIMARY selection; see the task report's
-            // note on that simplification). Checked read-only up front so it
-            // never fights the mutable pass below over the borrow.
-            if button == BTN_MIDDLE && kind == KIND_PRESS {
-                let is_terminal = {
-                    let st = state.borrow();
-                    st.tabs
-                        .get(st.active)
-                        .is_some_and(focused_surface_is_terminal)
+            let mut st = state.borrow_mut();
+            if kind == KIND_PRESS
+                && let Some(stale) = st.pointer_gesture.take()
+            {
+                release_captured_pointer(&st, stale);
+            }
+            let captured = st.pointer_gesture;
+            let current_location = st.tabs.get(st.active).map(|tab| {
+                let focused = tab.pane_group.focused();
+                let focused = if focused == 0 || tab.extra_panes.get(focused - 1).is_some() {
+                    focused
+                } else {
+                    0
                 };
-                if is_terminal {
-                    do_paste(&state);
-                }
+                (st.active, focused)
+            });
+            let captured_location =
+                captured.and_then(|capture| pointer_pane_location(&st, capture.endpoint));
+            if captured.is_some() && captured_location.is_none() {
+                let capture = st.pointer_gesture.take().expect("checked capture");
+                release_captured_pointer(&st, capture);
                 return;
             }
-
-            let mut st = state.borrow_mut();
-            let active = st.active;
-            let base_scale = st.scale;
+            let location = captured_location.or(current_location);
+            let Some((active, focused)) = location else {
+                if let Some(capture) = st.pointer_gesture.take() {
+                    release_captured_pointer(&st, capture);
+                }
+                return;
+            };
+            let base_scale = st.tabs[active].scale;
             let (surface_w, surface_h) = (st.surface_w, st.surface_h);
+            let copy_on_select = st.copy_on_select;
             let Some(tab) = st.tabs.get_mut(active) else {
                 return;
             };
-            let focused = tab.pane_group.focused();
             // P6.8 bundled fix (F-perf, P6.17 finding R1): only the
             // selection-highlight path below needs a forced render (the
             // engine's own output still drives the normal tick-loop redraw).
@@ -481,6 +891,10 @@ fn wire_pointer(ctx: &Ctx) {
             // means a plain button-less hover move -- no selection, no mouse
             // event forwarded -- no longer forces a full-grid raster.
             let mut selection_changed = false;
+            let mut paste_target = None;
+            let mut completed_copy = None;
+            let mut next_capture = captured;
+            let retain_capture = captured.is_some() || (kind == KIND_PRESS && button != 0);
 
             if focused == 0 || tab.extra_panes.get(focused - 1).is_none() {
                 // Primary pane (or an out-of-range focus index — defensive
@@ -489,25 +903,113 @@ fn wire_pointer(ctx: &Ctx) {
                     Surface::TerminalGrid(_) => {
                         let (row, col) = tab.renderer.cell_at(x * base_scale, y * base_scale);
                         let snap = tab.last.as_ref();
-                        let forward_event = tab.sel.mouse_event_for_forwarding(button, kind);
-                        selection_changed = tab.sel.on_pointer(button, kind, (row, col), snap, now);
-                        if let Some((forward_button, forward_kind)) = forward_event
-                            && let Some(ev) =
-                                input::map_mouse(forward_button, forward_kind, row, col, mods)
-                        {
-                            tab.session.send_input(SessionInput::Mouse(ev));
+                        let mouse_tracking = snap.is_some_and(|snapshot| snapshot.mouse_tracking);
+                        match tab.sel.route_pointer(
+                            mouse_tracking,
+                            mods & input::MOD_SHIFT != 0,
+                            button,
+                            kind,
+                        ) {
+                            crate::selection::PointerRoute::Terminal(
+                                routed_button,
+                                routed_kind,
+                            ) => {
+                                if let Some(ev) =
+                                    input::map_mouse(routed_button, routed_kind, row, col, mods)
+                                {
+                                    tab.session.send_input(SessionInput::Mouse(ev));
+                                }
+                                if retain_capture {
+                                    next_capture = Some(PointerGestureCapture {
+                                        endpoint: tab.endpoint_id,
+                                        surface: PointerGestureSurface::Terminal {
+                                            forwarded_button: Some(routed_button),
+                                            row,
+                                            col,
+                                            mods,
+                                        },
+                                    });
+                                }
+                            }
+                            crate::selection::PointerRoute::Local => {
+                                if retain_capture {
+                                    next_capture = Some(PointerGestureCapture {
+                                        endpoint: tab.endpoint_id,
+                                        surface: PointerGestureSurface::Terminal {
+                                            forwarded_button: None,
+                                            row,
+                                            col,
+                                            mods,
+                                        },
+                                    });
+                                }
+                                if kind == KIND_PRESS && matches!(button, BTN_RIGHT | BTN_MIDDLE) {
+                                    paste_target = Some(tab.endpoint_id);
+                                } else {
+                                    selection_changed =
+                                        tab.sel.on_pointer(button, kind, (row, col), snap, now);
+                                    if copy_on_select && kind == KIND_RELEASE && button == BTN_LEFT
+                                    {
+                                        completed_copy = tab.last.as_ref().and_then(|snapshot| {
+                                            Some((
+                                                tab.endpoint_id,
+                                                tab.sel.selection_generation()?,
+                                                tab.sel.copy_text(snapshot)?,
+                                            ))
+                                        });
+                                    }
+                                }
+                            }
+                            crate::selection::PointerRoute::Ignore => {}
                         }
                     }
                     Surface::Framebuffer(_) => {
+                        let (gesture_button, surface_w, surface_h, rdp_w, rdp_h) = match captured {
+                            Some(PointerGestureCapture {
+                                endpoint,
+                                surface:
+                                    PointerGestureSurface::Rdp {
+                                        button: gesture_button,
+                                        surface_w,
+                                        surface_h,
+                                        rdp_w,
+                                        rdp_h,
+                                        ..
+                                    },
+                            }) if endpoint == tab.endpoint_id => {
+                                (gesture_button, surface_w, surface_h, rdp_w, rdp_h)
+                            }
+                            _ => (button, surface_w, surface_h, tab.rdp_w, tab.rdp_h),
+                        };
                         let coords = input::RdpCoords {
                             surface_w,
                             surface_h,
-                            rdp_w: tab.rdp_w,
-                            rdp_h: tab.rdp_h,
+                            rdp_w,
+                            rdp_h,
                         };
-                        let events = input::map_rdp_mouse(button, kind, x, y, &coords);
+                        let routed_kind = if kind == KIND_CANCEL {
+                            KIND_RELEASE
+                        } else {
+                            kind
+                        };
+                        let events =
+                            input::map_rdp_mouse(gesture_button, routed_kind, x, y, &coords);
                         if !events.is_empty() {
                             tab.session.send_input(SessionInput::Rdp(events));
+                        }
+                        if retain_capture {
+                            next_capture = Some(PointerGestureCapture {
+                                endpoint: tab.endpoint_id,
+                                surface: PointerGestureSurface::Rdp {
+                                    button: gesture_button,
+                                    surface_w,
+                                    surface_h,
+                                    rdp_w,
+                                    rdp_h,
+                                    x,
+                                    y,
+                                },
+                            });
                         }
                     }
                 }
@@ -518,13 +1020,64 @@ fn wire_pointer(ctx: &Ctx) {
                     Surface::TerminalGrid(_) => {
                         let (row, col) = ep.renderer.cell_at(x * ep.scale, y * ep.scale);
                         let snap = ep.last.as_ref();
-                        let forward_event = ep.sel.mouse_event_for_forwarding(button, kind);
-                        selection_changed = ep.sel.on_pointer(button, kind, (row, col), snap, now);
-                        if let Some((forward_button, forward_kind)) = forward_event
-                            && let Some(ev) =
-                                input::map_mouse(forward_button, forward_kind, row, col, mods)
-                        {
-                            ep.session.send_input(SessionInput::Mouse(ev));
+                        let mouse_tracking = snap.is_some_and(|snapshot| snapshot.mouse_tracking);
+                        match ep.sel.route_pointer(
+                            mouse_tracking,
+                            mods & input::MOD_SHIFT != 0,
+                            button,
+                            kind,
+                        ) {
+                            crate::selection::PointerRoute::Terminal(
+                                routed_button,
+                                routed_kind,
+                            ) => {
+                                if let Some(ev) =
+                                    input::map_mouse(routed_button, routed_kind, row, col, mods)
+                                {
+                                    ep.session.send_input(SessionInput::Mouse(ev));
+                                }
+                                if retain_capture {
+                                    next_capture = Some(PointerGestureCapture {
+                                        endpoint: ep.endpoint_id,
+                                        surface: PointerGestureSurface::Terminal {
+                                            forwarded_button: Some(routed_button),
+                                            row,
+                                            col,
+                                            mods,
+                                        },
+                                    });
+                                }
+                            }
+                            crate::selection::PointerRoute::Local => {
+                                if retain_capture {
+                                    next_capture = Some(PointerGestureCapture {
+                                        endpoint: ep.endpoint_id,
+                                        surface: PointerGestureSurface::Terminal {
+                                            forwarded_button: None,
+                                            row,
+                                            col,
+                                            mods,
+                                        },
+                                    });
+                                }
+                                if kind == KIND_PRESS && matches!(button, BTN_RIGHT | BTN_MIDDLE) {
+                                    paste_target = Some(ep.endpoint_id);
+                                } else {
+                                    selection_changed =
+                                        ep.sel.on_pointer(button, kind, (row, col), snap, now);
+                                    if copy_on_select && kind == KIND_RELEASE && button == BTN_LEFT
+                                    {
+                                        completed_copy = ep.last.as_ref().and_then(|snapshot| {
+                                            Some((
+                                                ep.endpoint_id,
+                                                ep.sel.selection_generation()?,
+                                                ep.sel.copy_text(snapshot)?,
+                                            ))
+                                        });
+                                    }
+                                }
+                            }
+                            crate::selection::PointerRoute::Ignore => {}
                         }
                     }
                     // P6.11: RDP-in-pane pointer routing (lifts P6.10's
@@ -532,18 +1085,68 @@ fn wire_pointer(ctx: &Ctx) {
                     // for a primary-pane RDP surface, scoped to this pane's
                     // own reported size instead of the whole window's.
                     Surface::Framebuffer(_) => {
-                        let coords = input::RdpCoords {
-                            surface_w: ep.surface_w,
-                            surface_h: ep.surface_h,
-                            rdp_w: ep.rdp_w,
-                            rdp_h: ep.rdp_h,
+                        let (gesture_button, surface_w, surface_h, rdp_w, rdp_h) = match captured {
+                            Some(PointerGestureCapture {
+                                endpoint,
+                                surface:
+                                    PointerGestureSurface::Rdp {
+                                        button: gesture_button,
+                                        surface_w,
+                                        surface_h,
+                                        rdp_w,
+                                        rdp_h,
+                                        ..
+                                    },
+                            }) if endpoint == ep.endpoint_id => {
+                                (gesture_button, surface_w, surface_h, rdp_w, rdp_h)
+                            }
+                            _ => (button, ep.surface_w, ep.surface_h, ep.rdp_w, ep.rdp_h),
                         };
-                        let events = input::map_rdp_mouse(button, kind, x, y, &coords);
+                        let coords = input::RdpCoords {
+                            surface_w,
+                            surface_h,
+                            rdp_w,
+                            rdp_h,
+                        };
+                        let routed_kind = if kind == KIND_CANCEL {
+                            KIND_RELEASE
+                        } else {
+                            kind
+                        };
+                        let events =
+                            input::map_rdp_mouse(gesture_button, routed_kind, x, y, &coords);
                         if !events.is_empty() {
                             ep.session.send_input(SessionInput::Rdp(events));
                         }
+                        if retain_capture {
+                            next_capture = Some(PointerGestureCapture {
+                                endpoint: ep.endpoint_id,
+                                surface: PointerGestureSurface::Rdp {
+                                    button: gesture_button,
+                                    surface_w,
+                                    surface_h,
+                                    rdp_w,
+                                    rdp_h,
+                                    x,
+                                    y,
+                                },
+                            });
+                        }
                     }
                 }
+            }
+
+            st.pointer_gesture = if matches!(kind, KIND_RELEASE | KIND_CANCEL) {
+                None
+            } else {
+                next_capture
+            };
+
+            if let Some(target) = paste_target {
+                let _ = st.sys_clipboard.request_terminal_text(target);
+            }
+            if let Some((target, selection_generation, text)) = completed_copy {
+                submit_terminal_selection_copy(&mut st, target, selection_generation, text);
             }
 
             // P6.5: a selection change has no new `GridSnapshot` of its own
@@ -1150,7 +1753,15 @@ fn send_to_focused_pane(tab: &Tab, input: SessionInput) {
 fn wire_rdp_key_down(ctx: &Ctx) {
     ctx.ui.on_rdp_key_down({
         let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
         move |text, special, mods| {
+            let Some(ui) = weak.upgrade() else { return };
+            if close::guard_rdp_key_down(&state, &ui, text.as_str(), special) {
+                return;
+            }
+            if ui.get_session_actions_open() {
+                return;
+            }
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active) {
                 let events = input::map_rdp_key_down(text.as_str(), special, mods);
@@ -1165,7 +1776,18 @@ fn wire_rdp_key_down(ctx: &Ctx) {
 fn wire_rdp_key_up(ctx: &Ctx) {
     ctx.ui.on_rdp_key_up({
         let state = ctx.state.clone();
+        let weak = ctx.ui.as_weak();
         move |text, special, mods| {
+            let Some(ui) = weak.upgrade() else { return };
+            if close::guard_rdp_key_up(&state, &ui, text.as_str(), special) {
+                return;
+            }
+            if ui.get_session_actions_open() {
+                if special == 4 {
+                    ui.set_session_actions_open(false);
+                }
+                return;
+            }
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active) {
                 let events = input::map_rdp_key_up(text.as_str(), special, mods);
@@ -1830,7 +2452,11 @@ pub(super) fn render_frame(
     target: Option<(u32, u32)>,
 ) -> Image {
     let sel = tab.sel.selection().copied();
-    let (matches, current) = visible_search_highlights(&tab.search, snap);
+    let (matches, current) = if tab.search.applies_to(0) {
+        visible_search_highlights(&tab.search, snap)
+    } else {
+        (Vec::new(), None)
+    };
     let (w, h) = target.unwrap_or_else(|| tab.renderer.pixel_size(snap.size));
     let buf = tab
         .renderer
@@ -1843,7 +2469,7 @@ pub(super) fn render_frame(
 /// expects for `current_match` — `terminal_renderer::render_to_full`'s doc
 /// asks callers to pre-filter for exactly this reason (an unfiltered 10k-line
 /// match list would be scanned per-cell on every redraw).
-fn visible_search_highlights(
+pub(super) fn visible_search_highlights(
     search: &search::SearchState,
     snap: &GridSnapshot,
 ) -> (Vec<crate::terminal_renderer::SearchMatch>, Option<usize>) {
@@ -2389,6 +3015,9 @@ pub(super) fn open_ssh_tab(
     origin_connection_id: Option<i32>,
 ) {
     let size = state.borrow().current_grid();
+    let terminal_options = TerminalOptions {
+        max_scrollback: state.borrow().scrollback_limit,
+    };
     let identity = format!("{}@{}:{}", settings.username, settings.host, settings.port);
     let title = format!("SSH {}", settings.host);
     // P8.6-B item 4: the execute-scope launch gate. Covers every caller of
@@ -2419,7 +3048,7 @@ pub(super) fn open_ssh_tab(
         AuthProvenance::Credential(id) => SshAuthSource::Credential(id),
     };
     let provider = state.borrow().session_provider.clone();
-    match provider.connect_ssh(&settings, auth, verifier, size) {
+    match provider.connect_ssh(&settings, auth, verifier, size, terminal_options) {
         Ok(session) => {
             let ci = SshConnectInfo {
                 settings,
@@ -2487,6 +3116,9 @@ pub(super) fn open_telnet_tab(
     origin_connection_id: Option<i32>,
 ) {
     let size = state.borrow().current_grid();
+    let terminal_options = TerminalOptions {
+        max_scrollback: state.borrow().scrollback_limit,
+    };
     let identity = format!("{}:{}", settings.host, settings.port);
     let title = format!("TELNET {}", settings.host);
     if agent_mode_execute_blocked(&state.borrow().agent_mode) {
@@ -2509,7 +3141,7 @@ pub(super) fn open_telnet_tab(
     }
 
     let provider = state.borrow().session_provider.clone();
-    match provider.connect_telnet(&settings, size) {
+    match provider.connect_telnet(&settings, size, terminal_options) {
         Ok(session) => {
             tabs::push_tab(
                 state,
@@ -2819,6 +3451,9 @@ pub(super) fn reconnect_ssh_tab(
     verifier: Arc<dyn HostKeyVerifier>,
 ) {
     let size = state.borrow().current_grid();
+    let terminal_options = TerminalOptions {
+        max_scrollback: state.borrow().scrollback_limit,
+    };
     let endpoint_identity = format!("{}@{}:{}", settings.username, settings.host, settings.port);
     let display_label = reconnect_display_label(state, tab_idx, endpoint_identity.clone());
     // P8.6-B (Fable review fixup): see `reconnect_rdp_tab`'s identical
@@ -2842,7 +3477,7 @@ pub(super) fn reconnect_ssh_tab(
         AuthProvenance::Credential(id) => SshAuthSource::Credential(id),
     };
     let provider = state.borrow().session_provider.clone();
-    match provider.connect_ssh(&settings, auth, verifier, size) {
+    match provider.connect_ssh(&settings, auth, verifier, size, terminal_options) {
         Ok(new_session) => {
             let ci = SshConnectInfo {
                 settings,
@@ -2896,6 +3531,9 @@ pub(super) fn reconnect_telnet_tab(
     settings: TelnetSettings,
 ) {
     let size = state.borrow().current_grid();
+    let terminal_options = TerminalOptions {
+        max_scrollback: state.borrow().scrollback_limit,
+    };
     let endpoint_identity = format!("{}:{}", settings.host, settings.port);
     let display_label = reconnect_display_label(state, tab_idx, endpoint_identity.clone());
     if agent_mode_execute_blocked(&state.borrow().agent_mode) {
@@ -2914,7 +3552,7 @@ pub(super) fn reconnect_telnet_tab(
     }
 
     let provider = state.borrow().session_provider.clone();
-    match provider.connect_telnet(&settings, size) {
+    match provider.connect_telnet(&settings, size, terminal_options) {
         Ok(new_session) => {
             {
                 let mut st = state.borrow_mut();
@@ -2990,17 +3628,20 @@ fn tick_tab(
     // below so a single-pane tab (the common case) never pays for it.
     let mut panes_updated = false;
 
-    // P6.7: the search overlay only targets the active tab's primary pane;
-    // poll for a buffer-text reply every tick while it's open. A poll that
+    // Poll the focused-pane search request every tick while it's open. A poll that
     // (re)computes matches has no snapshot of its own to ride along with, so
     // force a render + refresh the overlay's match-count UI now (same
     // "no new GridSnapshot, but the highlight changed" situation
     // `wire_pointer`'s `selection_changed` handles for mouse selection).
     if i == active && st.tabs[i].search.is_open() && st.tabs[i].search.poll() {
         search::refresh_search_ui_from(ui, st);
-        if let Some(snap) = st.tabs[i].last.clone() {
-            let img = render_frame(&mut st.tabs[i], &snap, target);
-            ui.set_frame(img);
+        if st.tabs[i].search.target_pane() == 0 {
+            if let Some(snap) = st.tabs[i].last.clone() {
+                let img = render_frame(&mut st.tabs[i], &snap, target);
+                ui.set_frame(img);
+            }
+        } else {
+            panes_updated = true;
         }
     }
 
@@ -3229,6 +3870,43 @@ fn focused_pane_is_terminal(st: &State) -> bool {
     }
 }
 
+fn focused_pane_has_selection(st: &State) -> bool {
+    let Some(tab) = st.tabs.get(st.active) else {
+        return false;
+    };
+    let focused = tab.pane_group.focused();
+    if focused == 0 {
+        tab.sel.selection().is_some()
+    } else {
+        tab.extra_panes
+            .get(focused - 1)
+            .is_some_and(|pane| pane.sel.selection().is_some())
+    }
+}
+
+/// Resolve a completed terminal copy by stable endpoint, then clear only the
+/// selection generation captured by that request. Returns whether a visible
+/// selection changed and therefore needs a fresh render.
+fn clear_terminal_selection_if_generation(
+    st: &mut State,
+    target: cm_core::SessionEndpointId,
+    selection_generation: u64,
+) -> bool {
+    for tab in &mut st.tabs {
+        if tab.endpoint_id == target {
+            return tab.sel.clear_if_generation(selection_generation);
+        }
+        if let Some(pane) = tab
+            .extra_panes
+            .iter_mut()
+            .find(|pane| pane.endpoint_id == target)
+        {
+            return pane.sel.clear_if_generation(selection_generation);
+        }
+    }
+    false
+}
+
 fn send_to_endpoint(st: &State, endpoint: cm_core::SessionEndpointId, input: SessionInput) -> bool {
     for tab in &st.tabs {
         if tab.endpoint_id == endpoint {
@@ -3283,7 +3961,7 @@ fn collect_rdp_clipboard_events(
     events
 }
 
-fn handle_replaced_clipboard_write(
+pub(super) fn handle_replaced_clipboard_write(
     st: &mut State,
     request: &crate::clipboard::ClipboardWriteRequest,
 ) {
@@ -3556,7 +4234,11 @@ fn complete_local_advertisement(
     }
 }
 
-fn tick_clipboard(st: &mut State) {
+/// Pump clipboard work and report whether a terminal selection was cleared by
+/// a successful copy completion. The caller uses the signal to repaint even
+/// when no new terminal grid snapshot arrived in this tick.
+fn tick_clipboard(st: &mut State) -> bool {
+    let mut terminal_selection_cleared = false;
     let live_endpoints = st
         .tabs
         .iter()
@@ -3603,7 +4285,7 @@ fn tick_clipboard(st: &mut State) {
         }
         let Some(generation) = st.clipboard_demand_generation.checked_add(1) else {
             disable_clipboard_bridge(st);
-            return;
+            return terminal_selection_cleared;
         };
         st.clipboard_owner = owner;
         st.clipboard_demand_generation = generation;
@@ -3720,7 +4402,19 @@ fn tick_clipboard(st: &mut State) {
                     }
                 }
             }
-            crate::clipboard::ClipboardWritePurpose::TerminalSelectionCopy
+            crate::clipboard::ClipboardWritePurpose::TerminalSelectionCopy {
+                target,
+                selection_generation,
+            } if result.outcome == crate::clipboard::ClipboardWriteOutcome::Written => {
+                terminal_selection_cleared |=
+                    clear_terminal_selection_if_generation(st, target, selection_generation);
+                st.clipboard_remote_origin = None;
+                if let Some((_, path)) = st.clipboard_staged_lease.take() {
+                    cleanup_staging_path(st, &path);
+                }
+            }
+            crate::clipboard::ClipboardWritePurpose::TerminalSelectionCopy { .. } => {}
+            crate::clipboard::ClipboardWritePurpose::UiTextCopy
                 if result.outcome == crate::clipboard::ClipboardWriteOutcome::Written =>
             {
                 st.clipboard_remote_origin = None;
@@ -3728,7 +4422,7 @@ fn tick_clipboard(st: &mut State) {
                     cleanup_staging_path(st, &path);
                 }
             }
-            crate::clipboard::ClipboardWritePurpose::TerminalSelectionCopy => {}
+            crate::clipboard::ClipboardWritePurpose::UiTextCopy => {}
         }
     }
     if let Some(observation) = results.observation {
@@ -3736,13 +4430,13 @@ fn tick_clipboard(st: &mut State) {
             if let Some(path) = observation.source_staging_root {
                 cleanup_staging_path(st, &path);
             }
-            return;
+            return terminal_selection_cleared;
         };
         if observation.demand_generation != st.clipboard_demand_generation {
             if let Some(path) = observation.source_staging_root {
                 cleanup_staging_path(st, &path);
             }
-            return;
+            return terminal_selection_cleared;
         }
         tracing::trace!(
             sequence = observation.sequence,
@@ -3772,6 +4466,7 @@ fn tick_clipboard(st: &mut State) {
             publish_local_clipboard(st, owner, observation.snapshot);
         }
     }
+    terminal_selection_cleared
 }
 
 pub(super) fn tick(
@@ -3784,7 +4479,8 @@ pub(super) fn tick(
 ) {
     let mut st = state.borrow_mut();
     let active = st.active;
-    tick_clipboard(&mut st);
+    poll_terminal_buffer_copies(&mut st);
+    let terminal_selection_cleared = tick_clipboard(&mut st);
     let target = st.target_px();
     let mut to_close: Vec<usize> = Vec::new();
 
@@ -3837,6 +4533,9 @@ pub(super) fn tick(
         ) {
             to_close.push(i);
         }
+    }
+    if terminal_selection_cleared {
+        render_active(&mut st, ui);
     }
 
     // P5.1: Drain detached sessions to prevent channel saturation.
@@ -3893,9 +4592,9 @@ pub(super) fn tick(
     }
 }
 
-/// Re-push the light/dark terminal palette to every open renderer (primary pane +
-/// extra panes, across all tabs) on a live app theme switch (P6.8, gap 9 — closes
-/// P6.17 finding V1: "theme switch recolors both chrome and terminal").
+/// Re-push the application terminal palette to every open renderer (primary and
+/// extra panes across all tabs). The palette is currently fixed dark and is
+/// deliberately independent of the surrounding application-shell theme.
 ///
 /// Every renderer's `theme` field is updated so a *background* tab picks up the
 /// right palette the next time it renders (tab switch, new output); only the
@@ -3955,11 +4654,19 @@ pub(super) fn render_frame_ep(
     ep: &mut ExtraPaneState,
     snap: &GridSnapshot,
     target: Option<(u32, u32)>,
+    matches: &[crate::terminal_renderer::SearchMatch],
+    current: Option<usize>,
 ) -> Image {
     let sel = ep.sel.selection().copied();
     let buf = match target {
-        Some((w, h)) => ep.renderer.render_to_selected(snap, w, h, sel.as_ref()),
-        None => ep.renderer.render_selected(snap, sel.as_ref()),
+        Some((w, h)) => ep
+            .renderer
+            .render_to_full(snap, w, h, sel.as_ref(), matches, current),
+        None => {
+            let (w, h) = ep.renderer.pixel_size(snap.size);
+            ep.renderer
+                .render_to_full(snap, w, h, sel.as_ref(), matches, current)
+        }
     };
     Image::from_rgba8(buf)
 }
@@ -4020,8 +4727,8 @@ mod tests {
     use std::sync::mpsc;
 
     use cm_core::{
-        ConnectionId, ConnectionKind, Credential, CredentialError, CredentialId, CredentialKind,
-        CredentialRef, GroupId,
+        Cell, CellAttrs, Color, ConnectionId, ConnectionKind, Credential, CredentialError,
+        CredentialId, CredentialKind, CredentialRef, CursorShape, CursorState, GroupId,
     };
 
     #[test]
@@ -4033,6 +4740,48 @@ mod tests {
         tx.send(3).unwrap();
         assert_eq!(drain_latest(&rx), Some(3));
         assert_eq!(drain_latest(&rx), None);
+    }
+
+    #[test]
+    fn visible_copy_trims_row_padding_and_blank_tail() {
+        let size = cm_core::TerminalSize { rows: 3, cols: 4 };
+        let graphemes = ["a", "b", " ", " ", "c", " ", " ", " ", " ", " ", " ", " "];
+        let snapshot = GridSnapshot {
+            size,
+            cells: graphemes
+                .into_iter()
+                .map(|grapheme| Cell {
+                    grapheme: grapheme.to_owned(),
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    attrs: CellAttrs::empty(),
+                    width: 1,
+                })
+                .collect(),
+            cursor: CursorState {
+                row: 0,
+                col: 0,
+                visible: false,
+                shape: CursorShape::Block,
+            },
+            scrollback_len: 0,
+            scroll_offset: 0,
+            mouse_tracking: false,
+        };
+        assert_eq!(snapshot_text(&snapshot), "ab\nc");
+    }
+
+    #[test]
+    fn whole_buffer_copy_preserves_internal_blank_lines_only() {
+        assert_eq!(
+            buffer_lines_text(vec![
+                "first  ".to_owned(),
+                String::new(),
+                "last ".to_owned(),
+                "   ".to_owned(),
+            ]),
+            "first\n\nlast"
+        );
     }
 
     // ── P9.5 item 9/11: RDP black screen on the femtovg backend ─────────
@@ -4157,6 +4906,66 @@ mod tests {
         assert_eq!(classify_ctrl_shift_shortcut(0, "z"), CtrlShiftAction::None);
         assert_eq!(classify_ctrl_shift_shortcut(0, "\\"), CtrlShiftAction::None);
         assert_eq!(classify_ctrl_shift_shortcut(5, ""), CtrlShiftAction::None);
+    }
+
+    #[test]
+    fn plain_ctrl_c_and_ctrl_v_are_terminal_clipboard_aliases() {
+        assert_eq!(
+            classify_terminal_clipboard_shortcut(0, "c", input::MOD_CTRL, true),
+            TerminalClipboardAction::CopyIfSelected
+        );
+        assert_eq!(
+            classify_terminal_clipboard_shortcut(0, "\u{3}", input::MOD_CTRL, true),
+            TerminalClipboardAction::CopyIfSelected
+        );
+        assert_eq!(
+            classify_terminal_clipboard_shortcut(0, "V", input::MOD_CTRL, true),
+            TerminalClipboardAction::Paste
+        );
+        assert_eq!(
+            classify_terminal_clipboard_shortcut(0, "\u{16}", input::MOD_CTRL, true),
+            TerminalClipboardAction::Paste
+        );
+    }
+
+    #[test]
+    fn shift_insert_is_a_terminal_paste_alias() {
+        assert_eq!(
+            classify_terminal_clipboard_shortcut(13, "", input::MOD_SHIFT, false),
+            TerminalClipboardAction::Paste
+        );
+    }
+
+    #[test]
+    fn terminal_clipboard_aliases_require_exact_modifiers() {
+        assert_eq!(
+            classify_terminal_clipboard_shortcut(0, "c", input::MOD_CTRL | input::MOD_ALT, true,),
+            TerminalClipboardAction::None
+        );
+        assert_eq!(
+            classify_terminal_clipboard_shortcut(0, "c", input::MOD_CTRL | input::MOD_SHIFT, true,),
+            TerminalClipboardAction::None
+        );
+        assert_eq!(
+            classify_terminal_clipboard_shortcut(13, "", 0, true),
+            TerminalClipboardAction::None
+        );
+    }
+
+    #[test]
+    fn disabling_plain_aliases_preserves_shift_insert_only() {
+        assert_eq!(
+            classify_terminal_clipboard_shortcut(0, "c", input::MOD_CTRL, false),
+            TerminalClipboardAction::None
+        );
+        assert_eq!(
+            classify_terminal_clipboard_shortcut(0, "v", input::MOD_CTRL, false),
+            TerminalClipboardAction::None
+        );
+        assert_eq!(
+            classify_terminal_clipboard_shortcut(13, "", input::MOD_SHIFT, false),
+            TerminalClipboardAction::Paste
+        );
     }
 
     // -- P6.4: resolve_ssh_auth / resolve_rdp_auth ---------------------------

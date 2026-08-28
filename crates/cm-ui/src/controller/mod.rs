@@ -19,13 +19,14 @@
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cm_core::terminal::{GridSnapshot, TerminalSize};
 use cm_core::{
-    LocalSettings, RdpSettings, SessionProvider, SettingsService, SshSettings, TelnetSettings,
+    AppStateService, LocalSettings, RdpSettings, SessionProvider, SettingsService, SshSettings,
+    TelnetSettings,
 };
 use cm_session::{CertDecision, HostKeyDecision, PaneGroup, RdpAuthInput, Session, SshAuthInput};
 use slint::{ComponentHandle, Image, ModelRc, SharedString, Timer, VecModel};
@@ -39,6 +40,7 @@ use crate::{AppConfig, AppWindow, ConnRow, CredRow, PaletteAction, TabItem, Toas
 
 mod util;
 
+mod close;
 mod import_export;
 mod keys_ctl;
 mod launchpad;
@@ -186,6 +188,45 @@ struct ClipboardSourceLease {
     users: BTreeSet<(cm_core::SessionEndpointId, cm_core::LocalClipboardRevision)>,
 }
 
+/// One nonblocking "Copy All Scrollback" request awaiting the terminal
+/// engine-owner's existing full-buffer text reply.
+struct PendingTerminalBufferCopy {
+    target: cm_core::SessionEndpointId,
+    reply: Receiver<Vec<String>>,
+}
+
+/// Press-time owner of an in-flight pointer gesture. Slint keeps delivering
+/// captured moves/releases after focus or tab selection changes; retaining the
+/// stable endpoint here prevents the tail of a gesture from leaking into the
+/// newly focused session (and, for mouse-reporting TUIs, prevents a stuck
+/// remote button).
+#[derive(Debug, Clone, Copy)]
+struct PointerGestureCapture {
+    endpoint: cm_core::SessionEndpointId,
+    surface: PointerGestureSurface,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PointerGestureSurface {
+    Terminal {
+        /// `None` means ConMan owns a local selection/paste gesture. `Some`
+        /// is the normalized button forwarded to a mouse-reporting TUI.
+        forwarded_button: Option<i32>,
+        row: u16,
+        col: u16,
+        mods: i32,
+    },
+    Rdp {
+        button: i32,
+        surface_w: f32,
+        surface_h: f32,
+        rdp_w: u16,
+        rdp_h: u16,
+        x: f32,
+        y: f32,
+    },
+}
+
 impl ClipboardSourceLease {
     fn retain(
         &mut self,
@@ -266,8 +307,8 @@ struct Tab {
     /// tab): a "named group" here is a saved custom selection, not a new
     /// persisted entity (see the P6.11 task report for the reasoning).
     broadcast_saved_groups: Vec<(String, BTreeSet<usize>)>,
-    /// P6.7: whole-buffer search overlay state, targeting this tab's primary
-    /// pane (`session`) — see `search.rs`'s module doc for the scoping note.
+    /// Whole-buffer search overlay state, targeting the pane that was focused
+    /// when Find opened.
     search: search::SearchState,
     /// P9.5 #3: this tab's own `"user@host:port"` identity (or a local
     /// shell's title, e.g. `"shell 3"`), cached at connect/reconnect time.
@@ -325,6 +366,32 @@ struct State {
     font_size_px: f32,
     // P5.2: Persisted default local-shell settings, updated live from Settings.
     local_settings: LocalSettings,
+    /// Preferences consumed by terminal input/session creation paths.
+    plain_copy_paste_shortcuts: bool,
+    copy_on_select: bool,
+    confirm_close_active_tab: bool,
+    confirm_quit_active_connections: bool,
+    /// A destructive user action awaiting confirmation. Low-level close
+    /// executors never consult this field, so spontaneous termination and
+    /// explicit detach continue to bypass confirmation.
+    pending_close: Option<close::CloseIntent>,
+    /// Physical keys pressed while the modal owns the global Slint keyboard
+    /// boundary. Key-up remains swallowed even when Escape or a mouse action
+    /// closes the modal between the two phases.
+    close_modal_global_keys: BTreeSet<String>,
+    /// Same paired-phase guard for direct RDP callback entry points (including
+    /// introspection/automation calls that bypass Slint's global capture).
+    close_modal_rdp_keys: BTreeSet<(String, i32)>,
+    /// Set immediately before a confirmed quit hides the native window. A
+    /// second close request (some backends emit one while hiding) must not
+    /// reopen the confirmation dialog.
+    quit_confirmed: bool,
+    terminal_theme: cm_core::TerminalTheme,
+    scrollback_limit: usize,
+    pointer_gesture: Option<PointerGestureCapture>,
+    /// Machine-local state remains reachable from state-only tab lifecycle
+    /// helpers without mixing it into the connection repository.
+    app_state: Arc<dyn cm_core::AppStateRepository>,
     // P5.3b: Current filter text for the connection tree and keys tree.
     conn_filter: String,
     cred_filter: String,
@@ -364,6 +431,7 @@ struct State {
     clipboard_staged_lease: Option<(cm_core::ClipboardSnapshot, std::path::PathBuf)>,
     clipboard_source_leases: HashMap<std::path::PathBuf, ClipboardSourceLease>,
     clipboard_observed_source: Option<std::path::PathBuf>,
+    pending_terminal_buffer_copies: Vec<PendingTerminalBufferCopy>,
     secure_clipboard_root: Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>,
     /// P6.14: the Slint list-model backing `launchpad-recents`. Lives on
     /// `State` (like `io` above) so both the tab-lifecycle code that shows
@@ -494,6 +562,9 @@ pub(crate) struct Ctx {
     toast_model: Rc<VecModel<ToastEntry>>,
     toast_next_id: Rc<RefCell<i32>>,
     repo: Arc<dyn cm_core::ConnectionRepository>,
+    config_store: Arc<dyn cm_core::AppConfigStore>,
+    config_path: std::path::PathBuf,
+    app_state: Arc<dyn cm_core::AppStateRepository>,
     secrets: Arc<dyn cm_core::CredentialStore>,
     hk_pending: HkQueue,
     cert_pending: Arc<Mutex<Option<Sender<CertDecision>>>>,
@@ -549,13 +620,21 @@ pub(crate) fn terminal_selection_probe(ctx: &Ctx) -> Box<dyn Fn() -> bool> {
 /// [`Timer`] stops firing.
 fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::PlatformError> {
     let repo = config.repo;
+    let import_repo = config.import_repo;
+    let config_store = config.config_store;
+    let config_path = config.config_path;
+    let app_state = config.app_state;
     let secrets = config.secrets;
     let session_provider = config.session_provider;
     let secure_clipboard_root = config.secure_clipboard_root;
     let first_launch = config.first_launch;
     let agent_mode = config.agent_mode;
+    let build_identity = config.build_identity;
 
     let ui = AppWindow::new()?;
+    ui.set_settings_build_version(build_identity.version.into());
+    ui.set_settings_build_details(build_identity.details.into());
+    util::apply_platform_shell_placeholders(&ui);
     let scale = ui.window().scale_factor();
 
     // P6.8 (gap 10): push the real OS accent into `Theme.os-accent-color` before any
@@ -598,18 +677,35 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
 
     // -- Load persisted settings (P5.2) --------------------------------------
     let stored_settings = {
-        let svc = SettingsService::new(repo.as_ref());
-        match svc.load() {
-            Ok(s) => s,
+        let svc = SettingsService::new(config_store.as_ref());
+        match svc.load_with_warnings() {
+            Ok(loaded) => {
+                for warning in loaded.warnings {
+                    tracing::warn!(
+                        key = warning.key.as_str(),
+                        value = %warning.value,
+                        "invalid config value, using default: {}",
+                        warning.message
+                    );
+                }
+                loaded.settings
+            }
             Err(e) => {
                 tracing::warn!("failed to load settings: {e}");
                 cm_core::AppSettings::default()
             }
         }
     };
-    settings_ctl::apply_settings_to_ui(&stored_settings, &ui);
+    let stored_app_state = match AppStateService::new(app_state.as_ref()).load() {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!("failed to load application state: {error}");
+            cm_core::AppState::default()
+        }
+    };
+    settings_ctl::apply_settings_to_ui(&stored_settings, &stored_app_state, &ui);
     #[cfg(feature = "agent-mode")]
-    settings_ctl::apply_agent_mode_to_ui(repo.as_ref(), agent_mode.as_ref(), &ui);
+    settings_ctl::apply_agent_mode_to_ui(config_store.as_ref(), agent_mode.as_ref(), &ui);
     util::apply_early_env_overrides(&ui);
 
     // Load initial tree data.
@@ -647,12 +743,24 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         // P5.2: persist terminal rendering font size and local shell defaults.
         font_size_px: stored_settings.font_size as f32,
         local_settings: settings_ctl::local_settings_from_app(&stored_settings),
+        plain_copy_paste_shortcuts: stored_settings.plain_copy_paste_shortcuts,
+        copy_on_select: stored_settings.copy_on_select,
+        confirm_close_active_tab: stored_settings.confirm_close_active_tab,
+        confirm_quit_active_connections: stored_settings.confirm_quit_active_connections,
+        pending_close: None,
+        close_modal_global_keys: BTreeSet::new(),
+        close_modal_rdp_keys: BTreeSet::new(),
+        quit_confirmed: false,
+        terminal_theme: stored_settings.terminal_theme,
+        scrollback_limit: stored_settings.scrollback_limit,
+        app_state: app_state.clone(),
         // P5.3b: search/filter boxes start empty.
         conn_filter: String::new(),
         cred_filter: String::new(),
         // P6.6: see the `io` field doc comment.
         io: import_export::ImportExportHandles {
             repo: repo.clone(),
+            import_repo: import_repo.clone(),
             secrets: secrets.clone(),
             conn_model: conn_model.clone(),
             cred_model: cred_model.clone(),
@@ -675,6 +783,8 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         clipboard_staged_lease: None,
         clipboard_source_leases: HashMap::new(),
         clipboard_observed_source: None,
+        pending_terminal_buffer_copies: Vec::new(),
+        pointer_gesture: None,
         secure_clipboard_root,
         // P6.14: see the field doc comment.
         launchpad_recents_model: launchpad_recents_model.clone(),
@@ -709,8 +819,8 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
     // Launchpad-fronted empty/home tab instead of blindly opening a shell.
     let restore_snapshot = if first_launch {
         None
-    } else if stored_settings.startup_behavior == 1 {
-        match SettingsService::new(repo.as_ref()).load_session_tabs() {
+    } else if stored_settings.startup == cm_core::StartupBehavior::Restore {
+        match AppStateService::new(app_state.as_ref()).load_session_tabs() {
             Ok(snap) => snap,
             Err(e) => {
                 tracing::warn!("failed to load session-tab snapshot: {e}");
@@ -738,6 +848,9 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         toast_model: toast_model.clone(),
         toast_next_id: toast_next_id.clone(),
         repo: repo.clone(),
+        config_store: config_store.clone(),
+        config_path,
+        app_state: app_state.clone(),
         secrets: secrets.clone(),
         hk_pending: hk_pending.clone(),
         cert_pending: cert_pending.clone(),
@@ -748,6 +861,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         bc_draft: bc_draft.clone(),
     };
 
+    close::wire_close_confirmation(&ctx);
     tabs::wire_tabs(&ctx);
     sessions::wire_sessions(&ctx);
     search::wire_search(&ctx);

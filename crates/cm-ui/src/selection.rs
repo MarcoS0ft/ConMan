@@ -181,6 +181,11 @@ pub(crate) fn extract_text(snap: &GridSnapshot, sel: &Selection) -> String {
 #[derive(Debug, Default)]
 pub(crate) struct PaneSelectionState {
     selection: Option<Selection>,
+    /// Monotonic identity for the currently selected content. Clipboard
+    /// writes capture this value so an asynchronous completion can clear the
+    /// selection it copied without clearing a newer selection that happens
+    /// to belong to the same pane.
+    generation: u64,
     /// The selected cells' content as of the last time `selection` was set —
     /// compared against fresh snapshots to detect "the thing I selected
     /// changed under me" (scrolled away, overwritten, or a resize altered
@@ -191,11 +196,34 @@ pub(crate) struct PaneSelectionState {
     /// from `selection` prevents a plain click from becoming a visible,
     /// copyable one-cell selection.
     pending_anchor: Option<SelectionPoint>,
-    /// Slint reports `PointerEventButton.other` on every move, including
-    /// moves made while its `TouchArea` owns a left-button grab. Retain that
-    /// capture state so terminal mouse-reporting receives a coherent
-    /// press/move/release sequence without misclassifying ordinary hover.
-    left_button_held: bool,
+    /// Owner and concrete button of the pointer gesture currently captured
+    /// by Slint. Ownership is decided at press time and remains pinned until
+    /// release/cancel so changing Shift or DEC mouse mode mid-drag cannot
+    /// deliver an unmatched tail to either side.
+    pointer_capture: Option<PointerCapture>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PointerOwner {
+    Local,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PointerCapture {
+    owner: PointerOwner,
+    button: i32,
+}
+
+/// Routing decision for one terminal-surface pointer event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PointerRoute {
+    /// ConMan owns the gesture (selection or local paste behavior).
+    Local,
+    /// The terminal application owns the gesture through DEC mouse tracking.
+    Terminal(i32, i32),
+    /// No owner has meaningful work for this event.
+    Ignore,
 }
 
 /// Pointer button/kind discriminants shared with `crate::input`'s Slint
@@ -206,6 +234,10 @@ pub(crate) struct PaneSelectionState {
 /// for move events even while a `TouchArea` owns a left-button grab.
 const BTN_NONE: i32 = 0;
 const BTN_LEFT: i32 = 1;
+#[cfg(test)]
+const BTN_RIGHT: i32 = 2;
+#[cfg(test)]
+const BTN_MIDDLE: i32 = 3;
 const KIND_CANCEL: i32 = 0;
 const KIND_PRESS: i32 = 1;
 const KIND_RELEASE: i32 = 2;
@@ -217,33 +249,94 @@ impl PaneSelectionState {
         self.selection.as_ref()
     }
 
-    /// Normalize a Slint pointer event before forwarding it to the terminal
-    /// engine. Captured moves recover the held left button, while cancellation
-    /// becomes the matching release that prevents mouse-reporting applications
-    /// from retaining a stuck press. An inactive cancellation forwards nothing.
-    ///
-    /// Call this before [`on_pointer`](Self::on_pointer), which clears capture
-    /// state on release/cancellation.
-    #[must_use]
-    pub(crate) fn mouse_event_for_forwarding(&self, button: i32, kind: i32) -> Option<(i32, i32)> {
+    /// Identity of the live selection, if any.
+    pub(crate) fn selection_generation(&self) -> Option<u64> {
+        self.selection.as_ref().map(|_| self.generation)
+    }
+
+    /// Decide whether ConMan or the terminal application owns this pointer
+    /// event. DEC mouse tracking claims every button by default; Shift on the
+    /// initial press is the conventional terminal-emulator override for a
+    /// local gesture. The press-time decision is retained across captured
+    /// moves and release/cancel events.
+    pub(crate) fn route_pointer(
+        &mut self,
+        mouse_tracking: bool,
+        shift: bool,
+        button: i32,
+        kind: i32,
+    ) -> PointerRoute {
         if kind == KIND_CANCEL {
-            return self.left_button_held.then_some((BTN_LEFT, KIND_RELEASE));
+            return match self.pointer_capture.take() {
+                Some(PointerCapture {
+                    owner: PointerOwner::Terminal,
+                    button,
+                }) => PointerRoute::Terminal(button, KIND_RELEASE),
+                Some(PointerCapture {
+                    owner: PointerOwner::Local,
+                    ..
+                }) => PointerRoute::Local,
+                None => PointerRoute::Ignore,
+            };
         }
 
-        let button = if button == BTN_NONE && kind == KIND_MOVE && self.left_button_held {
-            BTN_LEFT
+        if kind == KIND_PRESS {
+            if button == BTN_NONE {
+                return PointerRoute::Ignore;
+            }
+            let owner = if mouse_tracking && !shift {
+                PointerOwner::Terminal
+            } else {
+                PointerOwner::Local
+            };
+            self.pointer_capture = Some(PointerCapture { owner, button });
+            return match owner {
+                PointerOwner::Local => PointerRoute::Local,
+                PointerOwner::Terminal => PointerRoute::Terminal(button, kind),
+            };
+        }
+
+        if let Some(capture) = self.pointer_capture {
+            let route = match capture.owner {
+                PointerOwner::Local => PointerRoute::Local,
+                PointerOwner::Terminal => PointerRoute::Terminal(capture.button, kind),
+            };
+            if kind == KIND_RELEASE {
+                self.pointer_capture = None;
+            }
+            return route;
+        }
+
+        // Hover motion is useful only to tracking modes that requested it;
+        // `input::map_mouse` decides whether the active protocol encodes a
+        // buttonless move. Stray releases are ignored to avoid fabricating an
+        // unmatched terminal gesture.
+        if kind == KIND_MOVE && mouse_tracking && !shift {
+            PointerRoute::Terminal(button, kind)
         } else {
-            button
-        };
-        Some((button, kind))
+            PointerRoute::Ignore
+        }
     }
 
     /// Drop the current selection (lifecycle: resize / new-output-scroll /
     /// focus-change per the module doc).
     pub(crate) fn clear(&mut self) {
-        self.selection = None;
+        if self.selection.take().is_some() {
+            self.advance_generation();
+        }
         self.baseline.clear();
         self.pending_anchor = None;
+    }
+
+    /// Clear only the selection represented by an asynchronous request.
+    /// Returns whether a live selection was cleared.
+    pub(crate) fn clear_if_generation(&mut self, generation: u64) -> bool {
+        if self.selection.is_some() && self.generation == generation {
+            self.clear();
+            true
+        } else {
+            false
+        }
     }
 
     /// Handle a terminal-surface pointer event for selection purposes:
@@ -281,7 +374,6 @@ impl PaneSelectionState {
         });
         match (button, kind) {
             (BTN_LEFT, KIND_PRESS) => {
-                self.left_button_held = true;
                 let n = self.click.register(cell, now);
                 match (n, snap) {
                     (2, Some(snap)) => {
@@ -297,6 +389,7 @@ impl PaneSelectionState {
                                 col: to,
                             },
                         ));
+                        self.advance_generation();
                         self.rebaseline(snap);
                         true
                     }
@@ -313,11 +406,15 @@ impl PaneSelectionState {
                                 col: to,
                             },
                         ));
+                        self.advance_generation();
                         self.rebaseline(snap);
                         true
                     }
                     _ => {
                         let changed = self.selection.take().is_some();
+                        if changed {
+                            self.advance_generation();
+                        }
                         self.baseline.clear();
                         self.pending_anchor = Some(SelectionPoint {
                             row: abs_row,
@@ -338,6 +435,9 @@ impl PaneSelectionState {
                 let next = Selection::new(anchor, new_cursor);
                 let changed = self.selection.as_ref() != Some(&next);
                 self.selection = Some(next);
+                if changed {
+                    self.advance_generation();
+                }
                 // A drag is not the first half of a later double-click.
                 self.click.reset();
                 if changed && let Some(snap) = snap {
@@ -347,14 +447,10 @@ impl PaneSelectionState {
             }
             (_, KIND_CANCEL) => {
                 self.pending_anchor = None;
-                self.left_button_held = false;
                 false
             }
             (_, KIND_RELEASE) => {
                 self.pending_anchor = None;
-                if button == BTN_LEFT {
-                    self.left_button_held = false;
-                }
                 false
             }
             _ => false,
@@ -365,6 +461,13 @@ impl PaneSelectionState {
         if let Some(sel) = &self.selection {
             self.baseline = selected_cells(snap, sel);
         }
+    }
+
+    fn advance_generation(&mut self) {
+        // Reuse would require 2^64 visible selection changes in one process.
+        // Wrapping keeps pointer handling fail-soft instead of making an
+        // impossible exhaustion case capable of panicking the UI thread.
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Clear the selection if the content it covers no longer matches what
@@ -681,6 +784,37 @@ mod tests {
         assert_eq!(s.copy_text(&snap), None);
     }
 
+    #[test]
+    fn asynchronous_clear_targets_exact_selection_generation() {
+        let snap = row_snap(&["abc"], 3);
+        let mut s = PaneSelectionState::default();
+        let t0 = Instant::now();
+        s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0);
+        s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 1), Some(&snap), t0);
+        let copied_generation = s.selection_generation().expect("first selection");
+
+        assert!(!s.clear_if_generation(copied_generation.wrapping_add(1)));
+        assert!(
+            s.selection().is_some(),
+            "mismatched completion preserves selection"
+        );
+
+        // A new gesture may recreate overlapping geometry, but it must have a
+        // different identity so the older clipboard result cannot clear it.
+        s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0);
+        s.on_pointer(BTN_LEFT, KIND_MOVE, (0, 2), Some(&snap), t0);
+        let newer_generation = s.selection_generation().expect("new selection");
+        assert_ne!(newer_generation, copied_generation);
+        assert!(!s.clear_if_generation(copied_generation));
+        assert!(
+            s.selection().is_some(),
+            "stale success preserves newer selection"
+        );
+
+        assert!(s.clear_if_generation(newer_generation));
+        assert!(s.selection().is_none());
+    }
+
     // ── P6.8 bundled fix (F-perf, P6.17 finding R1): on_pointer's "changed" ──
     // return value is exactly the render-gating signal `sessions.rs`'s
     // `wire_pointer` uses to skip the forced re-render on events that didn't
@@ -730,55 +864,13 @@ mod tests {
     }
 
     #[test]
-    fn mouse_forwarding_recovers_left_button_only_during_active_capture() {
-        let snap = row_snap(&["abcdef"], 6);
-        let mut s = PaneSelectionState::default();
-        let t0 = Instant::now();
-
-        assert_eq!(
-            s.mouse_event_for_forwarding(BTN_NONE, KIND_MOVE),
-            Some((BTN_NONE, KIND_MOVE)),
-            "plain hover must remain buttonless"
-        );
-
-        s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 1), Some(&snap), t0);
-        assert_eq!(
-            s.mouse_event_for_forwarding(BTN_NONE, KIND_MOVE),
-            Some((BTN_LEFT, KIND_MOVE)),
-            "Slint's buttonless captured move must be forwarded as a left drag"
-        );
-
-        s.on_pointer(BTN_LEFT, KIND_RELEASE, (0, 4), Some(&snap), t0);
-        assert_eq!(
-            s.mouse_event_for_forwarding(BTN_NONE, KIND_MOVE),
-            Some((BTN_NONE, KIND_MOVE)),
-            "hover after release must not remain a drag"
-        );
-    }
-
-    #[test]
     fn cancel_discards_pending_anchor_before_later_hover_move() {
         let snap = row_snap(&["abcdef"], 6);
         let mut s = PaneSelectionState::default();
         let t0 = Instant::now();
 
         s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 1), Some(&snap), t0);
-        assert_eq!(
-            s.mouse_event_for_forwarding(BTN_NONE, KIND_CANCEL),
-            Some((BTN_LEFT, KIND_RELEASE)),
-            "active cancel must release terminal mouse capture"
-        );
         assert!(!s.on_pointer(BTN_NONE, KIND_CANCEL, (0, 1), Some(&snap), t0));
-        assert_eq!(
-            s.mouse_event_for_forwarding(BTN_NONE, KIND_CANCEL),
-            None,
-            "inactive cancel must not fabricate another release"
-        );
-        assert_eq!(
-            s.mouse_event_for_forwarding(BTN_NONE, KIND_MOVE),
-            Some((BTN_NONE, KIND_MOVE)),
-            "cancel must also release terminal mouse capture"
-        );
         assert!(!s.on_pointer(BTN_NONE, KIND_MOVE, (0, 4), Some(&snap), t0));
         assert!(s.selection().is_none());
     }
@@ -790,6 +882,113 @@ mod tests {
         let t0 = Instant::now();
         s.on_pointer(BTN_LEFT, KIND_PRESS, (0, 0), Some(&snap), t0);
         assert!(!s.on_pointer(BTN_LEFT, KIND_RELEASE, (0, 0), Some(&snap), t0));
+    }
+
+    #[test]
+    fn mouse_tracking_owns_every_button_without_shift() {
+        let mut s = PaneSelectionState::default();
+
+        assert_eq!(
+            s.route_pointer(true, false, BTN_LEFT, KIND_PRESS),
+            PointerRoute::Terminal(BTN_LEFT, KIND_PRESS)
+        );
+        assert_eq!(
+            s.route_pointer(true, false, BTN_NONE, KIND_MOVE),
+            PointerRoute::Terminal(BTN_LEFT, KIND_MOVE)
+        );
+        assert_eq!(
+            s.route_pointer(true, false, BTN_LEFT, KIND_RELEASE),
+            PointerRoute::Terminal(BTN_LEFT, KIND_RELEASE)
+        );
+
+        assert_eq!(
+            s.route_pointer(true, false, BTN_RIGHT, KIND_PRESS),
+            PointerRoute::Terminal(BTN_RIGHT, KIND_PRESS)
+        );
+        assert_eq!(
+            s.route_pointer(true, false, BTN_RIGHT, KIND_RELEASE),
+            PointerRoute::Terminal(BTN_RIGHT, KIND_RELEASE)
+        );
+        assert_eq!(
+            s.route_pointer(true, false, BTN_MIDDLE, KIND_PRESS),
+            PointerRoute::Terminal(BTN_MIDDLE, KIND_PRESS)
+        );
+    }
+
+    #[test]
+    fn shift_at_press_pins_gesture_to_local_selection() {
+        let mut s = PaneSelectionState::default();
+
+        assert_eq!(
+            s.route_pointer(true, true, BTN_LEFT, KIND_PRESS),
+            PointerRoute::Local
+        );
+        // Releasing Shift during the drag must not leak a move/release tail to
+        // the TUI, which never received the matching press.
+        assert_eq!(
+            s.route_pointer(true, false, BTN_NONE, KIND_MOVE),
+            PointerRoute::Local
+        );
+        assert_eq!(
+            s.route_pointer(true, false, BTN_LEFT, KIND_RELEASE),
+            PointerRoute::Local
+        );
+    }
+
+    #[test]
+    fn local_mode_owns_right_and_middle_paste_gestures() {
+        let mut s = PaneSelectionState::default();
+        assert_eq!(
+            s.route_pointer(false, false, BTN_RIGHT, KIND_PRESS),
+            PointerRoute::Local
+        );
+        assert_eq!(
+            s.route_pointer(false, false, BTN_RIGHT, KIND_RELEASE),
+            PointerRoute::Local
+        );
+        assert_eq!(
+            s.route_pointer(true, true, BTN_MIDDLE, KIND_PRESS),
+            PointerRoute::Local,
+            "Shift overrides tracking for every locally-owned gesture"
+        );
+    }
+
+    #[test]
+    fn terminal_owned_gesture_stays_terminal_if_shift_changes_mid_drag() {
+        let mut s = PaneSelectionState::default();
+
+        assert_eq!(
+            s.route_pointer(true, false, BTN_LEFT, KIND_PRESS),
+            PointerRoute::Terminal(BTN_LEFT, KIND_PRESS)
+        );
+        assert_eq!(
+            s.route_pointer(true, true, BTN_NONE, KIND_MOVE),
+            PointerRoute::Terminal(BTN_LEFT, KIND_MOVE)
+        );
+        assert_eq!(
+            s.route_pointer(true, true, BTN_LEFT, KIND_RELEASE),
+            PointerRoute::Terminal(BTN_LEFT, KIND_RELEASE)
+        );
+    }
+
+    #[test]
+    fn cancel_releases_only_a_terminal_owned_capture() {
+        let mut s = PaneSelectionState::default();
+        s.route_pointer(true, false, BTN_RIGHT, KIND_PRESS);
+        assert_eq!(
+            s.route_pointer(true, false, BTN_NONE, KIND_CANCEL),
+            PointerRoute::Terminal(BTN_RIGHT, KIND_RELEASE)
+        );
+        assert_eq!(
+            s.route_pointer(true, false, BTN_NONE, KIND_CANCEL),
+            PointerRoute::Ignore
+        );
+
+        s.route_pointer(true, true, BTN_LEFT, KIND_PRESS);
+        assert_eq!(
+            s.route_pointer(true, false, BTN_NONE, KIND_CANCEL),
+            PointerRoute::Local
+        );
     }
 
     #[test]

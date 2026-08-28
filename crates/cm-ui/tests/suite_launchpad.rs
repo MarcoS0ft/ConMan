@@ -20,9 +20,17 @@ fn launchpad_suite() {
     i_slint_backend_testing::init_integration_test_with_mock_time();
 
     empty_tab_shows_launchpad_while_connected();
+    home_shows_the_branded_wordmark();
     launchpad_quick_connect_opens_the_real_dialog();
     new_tab_button_opens_a_live_shell_not_launchpad();
     empty_tab_is_titled_home_not_shell_n();
+}
+
+fn home_shows_the_branded_wordmark() {
+    let (h, _repo, _provider) = harness_with(false);
+    pump_ticks(1);
+    assert!(h.ui.get_launchpad_open());
+    find_by_id(&h.ui, "Launchpad::launchpad-wordmark");
 }
 
 /// J1/W10: a non-first-launch start with nothing to restore lands on the

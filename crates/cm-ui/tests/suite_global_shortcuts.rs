@@ -6,6 +6,8 @@ mod support;
 
 use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition};
+use std::cell::Cell;
+use std::rc::Rc;
 
 use cm_core::RdpInputEvent;
 
@@ -16,6 +18,7 @@ fn ctrl_k_is_global_across_settings_and_rdp_focus() {
     i_slint_backend_testing::init_integration_test_with_mock_time();
 
     let (settings, _repo, provider) = harness();
+    assert_shift_insert_is_mapped_to_the_terminal_paste_shortcut(&settings.ui);
     find_by_id(&settings.ui, "AppWindow::settings-panel-btn").invoke_accessible_default_action();
     find_by_id(&settings.ui, "SettingsPanel::settings-shell-path-field")
         .mock_single_click(PointerEventButton::Left);
@@ -99,6 +102,32 @@ fn ctrl_k_is_global_across_settings_and_rdp_focus() {
     assert!(
         settings.ui.get_palette_open(),
         "Ctrl+K must open the palette while an RDP surface owns focus"
+    );
+}
+
+fn assert_shift_insert_is_mapped_to_the_terminal_paste_shortcut(ui: &cm_ui::AppWindow) {
+    find_by_id(ui, "TerminalSurface::ta").mock_single_click(PointerEventButton::Left);
+    let observed = Rc::new(Cell::new(None));
+    ui.on_key_input({
+        let observed = Rc::clone(&observed);
+        move |_text, special, mods| observed.set(Some((special, mods)))
+    });
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Shift.into(),
+    });
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Insert.into(),
+    });
+    ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Insert.into(),
+    });
+    ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Shift.into(),
+    });
+    assert_eq!(
+        observed.get(),
+        Some((13, 4)),
+        "the real TerminalSurface boundary must encode Insert as special key 13 with Shift"
     );
 }
 

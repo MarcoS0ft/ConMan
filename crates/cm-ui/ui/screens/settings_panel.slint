@@ -14,7 +14,7 @@
 
 import { Theme } from "../theme.slint";
 import { SegmentedControl } from "../components.slint";
-import { CheckBox, ComboBox, LineEdit, Palette, ScrollView } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView } from "std-widgets.slint";
 
 // ── SectionHeader ────────────────────────────────────────────────────────────
 component SectionHeader inherits Rectangle {
@@ -139,12 +139,26 @@ export component SettingsPanel inherits Rectangle {
     in-out property <int> font-family-index: 0;
     // Terminal font size (pt). Default 13.
     in-out property <int>  font-size: 13;
+    // Terminal palette is independent of the application shell theme.
+    // 0 dark · 1 light.
+    in-out property <int> terminal-theme: 0;
+    // New-session scrollback line limit, represented as text so the Rust
+    // validation boundary handles the full 0..=1,000,000 range.
+    in-out property <string> scrollback-limit: "10000";
+    in-out property <bool> plain-copy-paste: true;
+    in-out property <bool> copy-on-select: false;
     // Default local shell executable path (empty = OS default: $SHELL / cmd.exe).
     in-out property <string> shell-path: "";
     // Extra arguments passed to the shell (space-separated).
     in-out property <string> shell-args: "";
     // Working directory for new local sessions (empty = home dir).
     in-out property <string> shell-cwd: "";
+    // Platform-aware empty-value hints supplied by Rust. These are display-only:
+    // an empty field still means "let the session layer choose the OS default".
+    in property <string> shell-path-hint: "OS default shell";
+    in property <string> shell-path-placeholder: "OS default";
+    in property <string> shell-args-placeholder: "No arguments";
+    in property <string> shell-cwd-placeholder: "Home directory";
 
     // ── Startup ────────────────────────────────────────────────────────────
     // 0 = clean start, 1 = restore last session
@@ -154,6 +168,10 @@ export component SettingsPanel inherits Rectangle {
     // 0 = Auto (probe each launch) · 1 = Software · 2 = Hardware (accelerated).
     // Takes effect on next launch (see the row hint below).
     in-out property <int>  render-backend: 0;
+    in-out property <bool> confirm-close-active-tab: true;
+    in-out property <bool> confirm-quit-active-connections: true;
+    in property <string> build-version: "";
+    in property <string> build-details: "";
 
     // ── Automation / Agent mode (P8.6-B) ─────────────────────────────────────
     // `agent-mode-available`: true only when this binary was actually built
@@ -180,11 +198,20 @@ export component SettingsPanel inherits Rectangle {
     callback accent-changed(int);          // idx into Theme.accent-presets
     callback font-family-changed(string);
     callback font-size-changed(int);
+    callback terminal-theme-changed(int);
+    callback scrollback-limit-changed(string);
+    callback plain-copy-paste-changed(bool);
+    callback copy-on-select-changed(bool);
     callback shell-path-changed(string);
     callback shell-args-changed(string);
     callback shell-cwd-changed(string);
     callback startup-behavior-changed(int);
     callback render-backend-changed(int);     // 0 auto · 1 software · 2 hardware
+    callback confirm-close-active-tab-changed(bool);
+    callback confirm-quit-active-connections-changed(bool);
+    callback open-config();
+    callback reload-config();
+    callback copy-build-info();
     callback agent-mode-enabled-changed(bool);
     callback agent-mode-scope-read-changed(bool);
     callback agent-mode-scope-write-changed(bool);
@@ -394,6 +421,31 @@ export component SettingsPanel inherits Rectangle {
                 padding-top: Theme.space-4;  padding-bottom: Theme.space-2;
                 spacing: Theme.space-4;
 
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    Text { text: "Color scheme"; color: Theme.color-text;
+                        font-size: Theme.font-base; font-family: Theme.font-family;
+                        font-weight: 600; }
+                    Text { text: "Independent from the application theme";
+                        color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                        font-family: Theme.font-family; wrap: word-wrap; }
+                    if !root.narrow-layout : settings-terminal-theme-control-wide := SegmentedControl {
+                        options: ["Dark terminal", "Light terminal"];
+                        selected <=> root.terminal-theme;
+                        changed(i) => { root.terminal-theme-changed(i); }
+                    }
+                    if root.narrow-layout : settings-terminal-theme-control-narrow := ComboBox {
+                        min-width: 0px;
+                        model: ["Dark terminal", "Light terminal"];
+                        current-index <=> root.terminal-theme;
+                        accessible-label: "Terminal color scheme";
+                        selected(value) => {
+                            root.terminal-theme = value == "Light terminal" ? 1 : 0;
+                            root.terminal-theme-changed(root.terminal-theme);
+                        }
+                    }
+                }
+
                 // Global family selection. The controller supplies only
                 // usable monospaced families and resolves stale persisted
                 // values before they reach this control.
@@ -503,13 +555,13 @@ export component SettingsPanel inherits Rectangle {
                     Text { text: "Default shell"; color: Theme.color-text;
                         font-size: Theme.font-base; font-family: Theme.font-family;
                         font-weight: 600; }
-                    Text { text: "Executable path — empty uses $SHELL or cmd.exe";
+                    Text { text: root.shell-path-hint;
                         color: Theme.color-text-secondary; font-size: Theme.font-sm;
                         font-family: Theme.font-family; wrap: word-wrap; }
                     settings-shell-path-field := LineEdit {
                         min-width: 0px;
                         text <=> root.shell-path;
-                        placeholder-text: "/bin/bash";
+                        placeholder-text: root.shell-path-placeholder;
                         font-size: Theme.font-base;
                         accessible-label: "Default shell";
                         accepted(t) => { root.shell-path-changed(t); }
@@ -525,7 +577,7 @@ export component SettingsPanel inherits Rectangle {
                     settings-shell-args-field := LineEdit {
                         min-width: 0px;
                         text <=> root.shell-args;
-                        placeholder-text: "--login";
+                        placeholder-text: root.shell-args-placeholder;
                         font-size: Theme.font-base;
                         accessible-label: "Shell arguments";
                         accepted(t) => { root.shell-args-changed(t); }
@@ -544,12 +596,51 @@ export component SettingsPanel inherits Rectangle {
                     settings-shell-cwd-field := LineEdit {
                         min-width: 0px;
                         text <=> root.shell-cwd;
-                        placeholder-text: "~";
+                        placeholder-text: root.shell-cwd-placeholder;
                         font-size: Theme.font-base;
                         accessible-label: "Working directory";
                         accepted(t) => { root.shell-cwd-changed(t); }
                         edited(t)   => { root.shell-cwd = t; root.shell-cwd-changed(t); }
                     }
+                }
+
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    Text { text: "Scrollback limit"; color: Theme.color-text;
+                        font-size: Theme.font-base; font-family: Theme.font-family;
+                        font-weight: 600; }
+                    Text { text: "Up to this many lines for new terminal sessions, also limited to 64 MiB per session (0 disables history)";
+                        color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                        font-family: Theme.font-family; wrap: word-wrap; }
+                    settings-scrollback-limit-field := LineEdit {
+                        min-width: 0px;
+                        text <=> root.scrollback-limit;
+                        input-type: number;
+                        accessible-label: "Scrollback line limit";
+                        accepted(value) => { root.scrollback-limit-changed(value); }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    settings-plain-copy-paste-check := CheckBox {
+                        min-width: 0px;
+                        text: "Enable Ctrl+C / Ctrl+V aliases";
+                        checked <=> root.plain-copy-paste;
+                        toggled => { root.plain-copy-paste-changed(self.checked); }
+                    }
+                    Text { text: "Ctrl+C copies only when text is selected; otherwise it remains the shell interrupt key.";
+                        color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                        font-family: Theme.font-family; wrap: word-wrap; }
+                    settings-copy-on-select-check := CheckBox {
+                        min-width: 0px;
+                        text: "Copy on selection";
+                        checked <=> root.copy-on-select;
+                        toggled => { root.copy-on-select-changed(self.checked); }
+                    }
+                    Text { text: "Copies when selection finishes and clears it only after the clipboard write succeeds.";
+                        color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                        font-family: Theme.font-family; wrap: word-wrap; }
                 }
             }
 
@@ -586,6 +677,32 @@ export component SettingsPanel inherits Rectangle {
                             root.startup-behavior-changed(root.startup-behavior);
                         }
                     }
+                }
+            }
+
+            // ════ CONFIRMATIONS ═════════════════════════════════════════
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+            SectionHeader { label: "CONFIRMATIONS"; }
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+
+            VerticalLayout {
+                padding-left: root.content-padding; padding-right: root.content-padding;
+                padding-top: Theme.space-4; padding-bottom: Theme.space-2;
+                spacing: Theme.space-3;
+                settings-confirm-close-tab-check := CheckBox {
+                    min-width: 0px;
+                    text: "Confirm closing active sessions";
+                    checked <=> root.confirm-close-active-tab;
+                    toggled => { root.confirm-close-active-tab-changed(self.checked); }
+                }
+                Text { text: "Ask before closing or disconnecting a tab or pane with an active connection.";
+                    color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                    font-family: Theme.font-family; wrap: word-wrap; }
+                settings-confirm-quit-check := CheckBox {
+                    min-width: 0px;
+                    text: "Confirm quitting with active connections";
+                    checked <=> root.confirm-quit-active-connections;
+                    toggled => { root.confirm-quit-active-connections-changed(self.checked); }
                 }
             }
 
@@ -730,6 +847,76 @@ export component SettingsPanel inherits Rectangle {
                             font-family: Theme.font-family; wrap: word-wrap;
                         }
                     }
+                }
+            }
+
+            // ════ CONFIGURATION FILE ═════════════════════════════════════
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+            SectionHeader { label: "CONFIGURATION FILE"; }
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+            VerticalLayout {
+                padding-left: root.content-padding; padding-right: root.content-padding;
+                padding-top: Theme.space-4; padding-bottom: Theme.space-2;
+                spacing: Theme.space-3;
+                Text {
+                    text: "Preferences are stored in an editable config.conman text file.";
+                    color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                    font-family: Theme.font-family; wrap: word-wrap;
+                }
+                if !root.narrow-layout : HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Button {
+                        text: "Open config";
+                        accessible-label: "Open configuration file";
+                        clicked => { root.open-config(); }
+                    }
+                    Button {
+                        text: "Reload";
+                        accessible-label: "Reload configuration file";
+                        clicked => { root.reload-config(); }
+                    }
+                }
+                if root.narrow-layout : VerticalLayout {
+                    spacing: Theme.space-2;
+                    Button {
+                        min-width: 0px;
+                        text: "Open config";
+                        accessible-label: "Open configuration file";
+                        clicked => { root.open-config(); }
+                    }
+                    Button {
+                        min-width: 0px;
+                        text: "Reload";
+                        accessible-label: "Reload configuration file";
+                        clicked => { root.reload-config(); }
+                    }
+                }
+            }
+
+            // ════ ABOUT ══════════════════════════════════════════════════
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+            SectionHeader { label: "ABOUT"; }
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+            VerticalLayout {
+                padding-left: root.content-padding; padding-right: root.content-padding;
+                padding-top: Theme.space-4; padding-bottom: Theme.space-2;
+                spacing: Theme.space-2;
+                Text {
+                    text: "Connection Manager " + root.build-version;
+                    color: Theme.color-text; font-size: Theme.font-base;
+                    font-family: Theme.font-family; font-weight: 600;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.build-details;
+                    color: Theme.color-text-secondary; font-size: Theme.font-xs;
+                    font-family: Theme.font-family-mono; wrap: word-wrap;
+                }
+                Button {
+                    min-width: 0px;
+                    text: "Copy build details";
+                    accessible-label: "Copy build details";
+                    clicked => { root.copy-build-info(); }
                 }
             }
 

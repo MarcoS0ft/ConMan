@@ -226,12 +226,15 @@ export component PrimaryButton {
   in property <string> text: "Connect";
   in property <bool>   enabled: true;
   in property <bool>   destructive: false;
+  in property <bool>   keyboard-focused: false;
   callback clicked();
+  out property <bool> has-focus: button-focus.has-focus;
 
   // P8.1: a button's accessible label is its own visible text (contract §3).
   accessible-role: button;
   accessible-label: root.text;
   accessible-action-default => { root.clicked(); }
+  forward-focus: button-focus;
 
   property <color> bg:
     !enabled    ? Theme.color-hover :
@@ -247,8 +250,10 @@ export component PrimaryButton {
     height: parent.height;
     border-radius: Theme.radius-sm;
     background: bg;
-    border-width: root.destructive ? 1px : 0px;
-    border-color: Theme.color-error.with-alpha(0.5);
+    border-width: root.destructive || root.has-focus || root.keyboard-focused ? 1px : 0px;
+    border-color: root.has-focus || root.keyboard-focused
+      ? Theme.color-accent
+      : Theme.color-error.with-alpha(0.5);
 
     Text {
       text: root.text;
@@ -269,6 +274,19 @@ export component PrimaryButton {
     enabled: root.enabled;
     clicked => { root.clicked(); }
   }
+
+  button-focus := FocusScope {
+    width: 0px;
+    enabled: root.enabled;
+    key-pressed(event) => {
+      if (event.text == Key.Space || event.text == Key.Return) {
+        root.clicked();
+        accept
+      } else {
+        reject
+      }
+    }
+  }
 }
 
 // ── SecondaryButton ───────────────────────────────────────────────────────────
@@ -276,12 +294,15 @@ export component PrimaryButton {
 export component SecondaryButton {
   in property <string> text: "Cancel";
   in property <bool>   enabled: true;
+  in property <bool>   keyboard-focused: false;
   callback clicked();
+  out property <bool> has-focus: button-focus.has-focus;
 
   // P8.1: a button's accessible label is its own visible text (contract §3).
   accessible-role: button;
   accessible-label: root.text;
   accessible-action-default => { root.clicked(); }
+  forward-focus: button-focus;
 
   preferred-height: Theme.control-height;
   preferred-width: 100px;
@@ -292,8 +313,8 @@ export component SecondaryButton {
     height: parent.height;
     border-radius: Theme.radius-sm;
     background: touch.has-hover ? Theme.color-hover : Theme.color-card;
-    border-width: 1px;
-    border-color: Theme.color-stroke;
+    border-width: root.has-focus || root.keyboard-focused ? 2px : 1px;
+    border-color: root.has-focus || root.keyboard-focused ? Theme.color-accent : Theme.color-stroke;
 
     Text {
       text: root.text;
@@ -311,6 +332,19 @@ export component SecondaryButton {
   touch := TouchArea {
     enabled: root.enabled;
     clicked => { root.clicked(); }
+  }
+
+  button-focus := FocusScope {
+    width: 0px;
+    enabled: root.enabled;
+    key-pressed(event) => {
+      if (event.text == Key.Space || event.text == Key.Return) {
+        root.clicked();
+        accept
+      } else {
+        reject
+      }
+    }
   }
 }
 

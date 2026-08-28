@@ -63,6 +63,7 @@ const TOAST_ERROR: i32 = 3;
 #[derive(Clone)]
 pub(super) struct ImportExportHandles {
     pub(super) repo: Arc<dyn ConnectionRepository>,
+    pub(super) import_repo: Arc<dyn cm_storage::AtomicImportRepository>,
     pub(super) secrets: Arc<dyn CredentialStore>,
     pub(super) conn_model: Rc<VecModel<ConnRow>>,
     pub(super) cred_model: Rc<VecModel<CredRow>>,
@@ -83,7 +84,7 @@ pub(super) struct ImportExportHandles {
 }
 
 impl ImportExportHandles {
-    fn push_toast(&self, message: String, kind: i32) {
+    pub(super) fn push_toast(&self, message: String, kind: i32) {
         let id = {
             let mut n = self.toast_next_id.borrow_mut();
             let id = *n;
@@ -202,7 +203,7 @@ fn map_storage_err(e: ImportExportError) -> ImportError {
 /// `ImportStats::secrets_imported`.
 pub(super) fn import_from_path(
     path: &Path,
-    repo: &dyn ConnectionRepository,
+    repo: &dyn cm_storage::AtomicImportRepository,
     secrets: &dyn CredentialStore,
 ) -> Result<ImportOutcome, ImportError> {
     let ext = path
@@ -252,7 +253,7 @@ pub(super) fn import_from_path(
 /// never the native `.json` branch.
 pub(super) fn import_from_path_with_password(
     path: &Path,
-    repo: &dyn ConnectionRepository,
+    repo: &dyn cm_storage::AtomicImportRepository,
     secrets: &dyn CredentialStore,
     password: &str,
 ) -> Result<ImportOutcome, ImportError> {
@@ -379,7 +380,7 @@ pub(super) fn run_import(
     ui: &AppWindow,
     path: &Path,
 ) {
-    match import_from_path(path, io.repo.as_ref(), io.secrets.as_ref()) {
+    match import_from_path(path, io.import_repo.as_ref(), io.secrets.as_ref()) {
         Ok(outcome) => {
             refresh_after_import(io, state, ui);
             io.push_toast(summary_message(&outcome), TOAST_SUCCESS);
@@ -437,7 +438,7 @@ fn wire_import_password_submit(ctx: &Ctx) {
             let Some(path) = path else { return };
             match import_from_path_with_password(
                 &path,
-                io.repo.as_ref(),
+                io.import_repo.as_ref(),
                 io.secrets.as_ref(),
                 &password,
             ) {
@@ -601,7 +602,6 @@ mod tests {
                 purpose: "password".to_string(),
                 secret_hex: "deadbeef".to_string(),
             }],
-            settings: vec![],
         };
         let json = serde_json::to_string(&envelope).expect("serialize envelope");
         let dir = tempfile::tempdir().expect("tmp dir");
@@ -789,9 +789,10 @@ mod tests {
 
     /// Builds an [`ImportExportHandles`] over an in-memory repo/mock keychain
     /// for `run_export`/`run_import`-level tests (P6.17 F3 / `CONMAN_AUTOEXPORT`).
-    fn handles_for(repo: Arc<dyn ConnectionRepository>) -> ImportExportHandles {
+    fn handles_for(repo: Arc<SqliteRepository>) -> ImportExportHandles {
         ImportExportHandles {
-            repo,
+            repo: repo.clone(),
+            import_repo: repo,
             secrets: Arc::new(MockStore::default()),
             conn_model: Rc::new(VecModel::default()),
             cred_model: Rc::new(VecModel::default()),
@@ -804,7 +805,7 @@ mod tests {
 
     #[test]
     fn run_export_writes_the_file_and_toasts_success() {
-        let repo: Arc<dyn ConnectionRepository> = Arc::new(repo_with_one_group_one_conn_one_cred());
+        let repo = Arc::new(repo_with_one_group_one_conn_one_cred());
         let io = handles_for(repo);
         let dir = tempfile::tempdir().expect("tmp dir");
         let path = dir.path().join("export.json");
@@ -820,7 +821,7 @@ mod tests {
 
     #[test]
     fn run_export_to_an_unwritable_path_toasts_an_error() {
-        let repo: Arc<dyn ConnectionRepository> = Arc::new(repo_with_one_group_one_conn_one_cred());
+        let repo = Arc::new(repo_with_one_group_one_conn_one_cred());
         let io = handles_for(repo);
         // A directory that doesn't exist -- `std::fs::write` fails.
         let bad_path = std::path::Path::new("/nonexistent-dir-for-conman-test/export.json");
@@ -841,7 +842,6 @@ mod tests {
             groups_imported: 1,
             connections_imported: 3,
             secrets_imported: 1,
-            settings_imported: 0,
         };
         let msg = summary_message(&ImportOutcome {
             stats: stats.clone(),
@@ -870,7 +870,6 @@ mod tests {
             groups_imported: 1,
             connections_imported: 2,
             secrets_imported: 1,
-            settings_imported: 0,
         };
         let msg = summary_message(&ImportOutcome {
             stats,

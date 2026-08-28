@@ -13,7 +13,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use cm_core::{ConnectionId, SessionTabEntry, SessionTabSnapshot, SettingsService};
+use cm_core::{AppStateService, ConnectionId, SessionTabEntry, SessionTabSnapshot};
 
 use super::*;
 
@@ -43,7 +43,7 @@ pub(super) fn persist_session_tabs(state: &Rc<RefCell<State>>) {
         .collect();
     let active = real.iter().position(|(i, _)| *i == st.active).unwrap_or(0);
     let snapshot = SessionTabSnapshot { tabs, active };
-    let svc = SettingsService::new(st.io.repo.as_ref());
+    let svc = AppStateService::new(st.app_state.as_ref());
     if let Err(e) = svc.save_session_tabs(&snapshot) {
         tracing::warn!("save session-tab snapshot: {e}");
     }

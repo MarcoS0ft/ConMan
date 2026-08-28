@@ -46,11 +46,18 @@ pub(crate) enum ClipboardWrite {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClipboardWritePurpose {
+    /// User explicitly copied non-session UI text such as build diagnostics.
+    UiTextCopy,
     RdpInstall {
         owner: SessionEndpointId,
         revision: RemoteClipboardRevision,
     },
-    TerminalSelectionCopy,
+    TerminalSelectionCopy {
+        /// Stable session endpoint that owned the copied selection.
+        target: SessionEndpointId,
+        /// Selection identity captured before the asynchronous OS write.
+        selection_generation: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -831,7 +838,10 @@ mod tests {
     fn unavailable_worker_is_nonblocking_and_fail_soft() {
         let mut handle = PlatformClipboardHandle::spawn(None);
         let _ = handle.submit_write(
-            ClipboardWritePurpose::TerminalSelectionCopy,
+            ClipboardWritePurpose::TerminalSelectionCopy {
+                target: SessionEndpointId(1),
+                selection_generation: 1,
+            },
             ClipboardWrite::Text("synthetic".into()),
         );
         handle.shutdown();
@@ -875,7 +885,10 @@ mod tests {
             .write
             .replace(ClipboardWriteRequest {
                 request_id: 2,
-                purpose: ClipboardWritePurpose::TerminalSelectionCopy,
+                purpose: ClipboardWritePurpose::TerminalSelectionCopy {
+                    target: SessionEndpointId(8),
+                    selection_generation: 4,
+                },
                 content: ClipboardWrite::Text("selection".into()),
             })
             .expect("first write is superseded");
@@ -896,6 +909,25 @@ mod tests {
         let queued = commands.terminal_reads.pop_front().expect("queued read");
         assert_eq!(queued.request_id, 3);
         assert_eq!(queued.target, target);
+    }
+
+    #[test]
+    fn terminal_write_result_retains_selection_target_identity() {
+        let purpose = ClipboardWritePurpose::TerminalSelectionCopy {
+            target: SessionEndpointId(44),
+            selection_generation: 17,
+        };
+        let result = ClipboardWriteResult {
+            request_id: 9,
+            purpose,
+            outcome: ClipboardWriteOutcome::Written,
+        };
+
+        // Focus and selection can both change while the worker owns the
+        // request; completion still identifies precisely what was copied.
+        let _later_focus = SessionEndpointId(99);
+        assert_eq!(result.purpose, purpose);
+        assert_eq!(result.request_id, 9);
     }
 
     #[test]

@@ -380,6 +380,17 @@ fn build_pane_cells(tab: &mut Tab, primary_target: Option<(u32, u32)>) -> Vec<cr
             }
         } else {
             let ep_idx = rect.pane - 1;
+            let search_highlights = tab
+                .search
+                .applies_to(rect.pane)
+                .then(|| {
+                    tab.extra_panes
+                        .get(ep_idx)
+                        .and_then(|pane| pane.last.as_ref())
+                        .map(|snap| sessions::visible_search_highlights(&tab.search, snap))
+                })
+                .flatten()
+                .unwrap_or_default();
             match tab.extra_panes.get_mut(ep_idx) {
                 Some(ep) => {
                     let ep_target = if ep.surface_w > 0.0 && ep.surface_h > 0.0 {
@@ -395,7 +406,13 @@ fn build_pane_cells(tab: &mut Tab, primary_target: Option<(u32, u32)>) -> Vec<cr
                             let img = match &ep.last {
                                 Some(snap) => {
                                     let snap = snap.clone();
-                                    sessions::render_frame_ep(ep, &snap, ep_target)
+                                    sessions::render_frame_ep(
+                                        ep,
+                                        &snap,
+                                        ep_target,
+                                        &search_highlights.0,
+                                        search_highlights.1,
+                                    )
                                 }
                                 None => Image::default(),
                             };
@@ -469,7 +486,7 @@ fn wire_close_pane(ctx: &Ctx) {
             let Some(pane_id) = focused_pane_id(&state) else {
                 return;
             };
-            do_close_pane(&state, &tab_model, &ui, pane_id, false);
+            close::request_pane_close(&state, &tab_model, &ui, pane_id);
         }
     });
 }
@@ -502,7 +519,7 @@ fn wire_pane_disconnect(ctx: &Ctx) {
         let weak = ctx.ui.as_weak();
         move |pane_id| {
             let Some(ui) = weak.upgrade() else { return };
-            do_close_pane(&state, &tab_model, &ui, pane_id as usize, false);
+            close::request_pane_close(&state, &tab_model, &ui, pane_id as usize);
         }
     });
 }
@@ -915,7 +932,10 @@ fn do_local_split(
         return;
     };
     let provider = state.borrow().session_provider.clone();
-    let session = match provider.spawn_local(&slot.local_settings, size) {
+    let options = cm_core::TerminalOptions {
+        max_scrollback: state.borrow().scrollback_limit,
+    };
+    let session = match provider.spawn_local(&slot.local_settings, size, options) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("split pane spawn failed: {e}");
@@ -1034,7 +1054,10 @@ pub(super) fn connect_in_split(
                 return;
             };
             let provider = state.borrow().session_provider.clone();
-            let session = match provider.connect_telnet(settings, size) {
+            let options = cm_core::TerminalOptions {
+                max_scrollback: state.borrow().scrollback_limit,
+            };
+            let session = match provider.connect_telnet(settings, size, options) {
                 Ok(session) => session,
                 Err(e) => {
                     tracing::warn!("connect-in-split Telnet connect failed: {e}");
@@ -1167,15 +1190,19 @@ pub(super) fn connect_in_split(
                 return;
             };
             let provider = state.borrow().session_provider.clone();
-            let session = match provider.connect_ssh(&effective_settings, auth, verifier, size) {
-                Ok(sess) => sess,
-                Err(e) => {
-                    tracing::warn!("connect-in-split SSH connect failed: {e}");
-                    rollback_split_slot(state);
-                    push_toast(toast_model, toast_next_id, format!("{}: {e}", conn.name));
-                    return;
-                }
+            let options = cm_core::TerminalOptions {
+                max_scrollback: state.borrow().scrollback_limit,
             };
+            let session =
+                match provider.connect_ssh(&effective_settings, auth, verifier, size, options) {
+                    Ok(sess) => sess,
+                    Err(e) => {
+                        tracing::warn!("connect-in-split SSH connect failed: {e}");
+                        rollback_split_slot(state);
+                        push_toast(toast_model, toast_next_id, format!("{}: {e}", conn.name));
+                        return;
+                    }
+                };
 
             commit_split_pane(
                 state,
@@ -1437,6 +1464,18 @@ pub(super) fn do_close_pane(
     let (closed_session, closed_label, new_layout, new_focused, tab_label) = {
         let mut st = state.borrow_mut();
         let active = st.active;
+        let closing_endpoint = st.tabs.get(active).and_then(|tab| {
+            if pane_id == 0 {
+                Some(tab.endpoint_id)
+            } else {
+                tab.extra_panes
+                    .get(pane_id - 1)
+                    .map(|pane| pane.endpoint_id)
+            }
+        });
+        if let Some(endpoint) = closing_endpoint {
+            sessions::release_pointer_capture_for_endpoint(&mut st, endpoint);
+        }
         let Some(tab) = st.tabs.get_mut(active) else {
             return;
         };

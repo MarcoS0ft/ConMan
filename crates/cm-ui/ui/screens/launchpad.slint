@@ -31,6 +31,17 @@ export component Launchpad inherits Rectangle {
         padding: Theme.space-6;
         spacing: Theme.space-4;
 
+        launchpad-wordmark := Image {
+            source: Theme.dark-mode
+                ? @image-url("../../../../resources/ConMan_Wordmark_DarkMode.svg")
+                : @image-url("../../../../resources/ConMan_Wordmark_LightMode.svg");
+            width: 192px;
+            height: 72px;
+            image-fit: contain;
+            accessible-role: image;
+            accessible-label: "Connection Manager";
+        }
+
         Text { text: greeting; color: Theme.color-text; font-size: Theme.font-xl;
             font-family: Theme.font-family; font-weight: 700; }
         Text { text: "Jump back in, or start something new."; color: Theme.color-text-secondary;

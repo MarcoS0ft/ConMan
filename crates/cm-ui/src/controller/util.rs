@@ -56,18 +56,60 @@ pub(super) fn rdp_auto_accept_certs() -> bool {
     false
 }
 
-/// The [`TerminalTheme`] a newly-constructed (or live-switched) terminal renderer
-/// should use, derived from the live `Theme.dark-mode` Slint global (P6.8, gap 9):
-/// dark chrome gets the dark terminal palette, light chrome gets the light one.
-/// Reading `ui.get_dark_mode()` at call time (rather than caching it) is what makes
-/// this correct for both "pick the initial theme at spawn" and "re-push on a live
-/// theme switch" call sites.
+/// The terminal palette is intentionally independent from the application-shell
+/// theme. Until user-visible terminal color schemes land, every terminal uses the
+/// established dark palette so switching the surrounding chrome to Light cannot
+/// silently change ANSI contrast or turn the terminal canvas white.
 pub(super) fn terminal_theme_for(ui: &AppWindow) -> TerminalTheme {
-    if ui.get_dark_mode() {
-        TerminalTheme::dark()
-    } else {
+    application_terminal_theme(ui.get_settings_terminal_theme())
+}
+
+fn application_terminal_theme(index: i32) -> TerminalTheme {
+    if index == 1 {
         TerminalTheme::light()
+    } else {
+        TerminalTheme::dark()
     }
+}
+
+/// Display-only hints for empty local-session settings. Empty values retain their
+/// existing semantics; these strings merely describe the default selected by the
+/// platform session provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LocalShellPlaceholders {
+    pub path_hint: &'static str,
+    pub path: &'static str,
+    pub args: &'static str,
+    pub cwd: &'static str,
+}
+
+pub(super) const fn local_shell_placeholders() -> LocalShellPlaceholders {
+    #[cfg(windows)]
+    {
+        LocalShellPlaceholders {
+            path_hint: "Executable path — empty uses cmd.exe",
+            path: "cmd.exe",
+            args: "No arguments",
+            cwd: "%USERPROFILE%",
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        LocalShellPlaceholders {
+            path_hint: "Executable path — empty uses $SHELL",
+            path: "$SHELL",
+            args: "No arguments",
+            cwd: "~",
+        }
+    }
+}
+
+pub(super) fn apply_platform_shell_placeholders(ui: &AppWindow) {
+    let placeholders = local_shell_placeholders();
+    ui.set_settings_shell_path_hint(placeholders.path_hint.into());
+    ui.set_settings_shell_path_placeholder(placeholders.path.into());
+    ui.set_settings_shell_args_placeholder(placeholders.args.into());
+    ui.set_settings_shell_cwd_placeholder(placeholders.cwd.into());
 }
 
 /// Push an OS-read accent color (P6.8, gap 10; see `cm_platform::accent`) into
@@ -486,6 +528,31 @@ fn wire_autoexport(ctx: &Ctx, hooks: &mut Vec<Timer>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_palette_uses_its_own_setting() {
+        let dark = application_terminal_theme(0);
+        let light = application_terminal_theme(1);
+        assert_eq!(dark.bg, TerminalTheme::dark().bg);
+        assert_eq!(light.bg, TerminalTheme::light().bg);
+    }
+
+    #[test]
+    fn local_shell_hints_name_this_platforms_default() {
+        let hints = local_shell_placeholders();
+        assert_eq!(hints.args, "No arguments");
+        #[cfg(windows)]
+        {
+            assert_eq!(hints.path, "cmd.exe");
+            assert_eq!(hints.cwd, "%USERPROFILE%");
+            assert!(!hints.path_hint.contains("/bin/bash"));
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(hints.path, "$SHELL");
+            assert_eq!(hints.cwd, "~");
+        }
+    }
 
     #[test]
     fn grid_for_divides_surface_by_cell() {

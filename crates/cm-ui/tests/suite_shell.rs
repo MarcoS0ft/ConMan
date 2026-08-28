@@ -14,14 +14,14 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use cm_core::{
-    Connection, ConnectionId, ConnectionKind, ConnectionRepository, ConnectionSettings,
-    CredentialSource, SessionStatus, SessionTabEntry, SessionTabSnapshot, SettingsService,
-    TelnetSettings,
+    AppConfigStore, AppStateRepository, AppStateService, Connection, ConnectionId, ConnectionKind,
+    ConnectionRepository, ConnectionSettings, CredentialSource, SessionStatus, SessionTabEntry,
+    SessionTabSnapshot, SettingKey, SettingsService, TelnetSettings,
 };
 use cm_storage::SqliteRepository;
 use i_slint_backend_testing::{ElementHandle, ElementRoot};
-use slint::platform::WindowEvent;
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use slint::platform::{Key, PointerEventButton, WindowEvent};
+use slint::{ComponentHandle, LogicalPosition, Model, ModelRc, VecModel};
 
 use support::{
     find_by_id, find_by_id_opt, find_descendant_by_label, find_singleton, harness, harness_with,
@@ -34,6 +34,9 @@ fn shell_suite() {
 
     palette_open_filter_dispatch();
     tabs_open_select_close_via_elements();
+    close_confirmation_cancel_and_dont_ask();
+    close_confirmation_owns_terminal_keyboard();
+    native_window_close_requests_confirmation();
     closing_remote_tab_terminates_instead_of_detaching();
     sidebar_collapse_toggles();
     status_pill_tracks_session_status();
@@ -124,6 +127,11 @@ fn tabs_open_select_close_via_elements() {
         .find_first()
         .expect("close button not found on tab 1");
     close_btn.invoke_accessible_default_action();
+    assert!(
+        h.ui.get_close_confirm_open(),
+        "closing a connected local tab must ask for confirmation"
+    );
+    h.ui.invoke_close_confirm_accept();
 
     assert_eq!(
         tab_count(&h.ui),
@@ -142,6 +150,17 @@ fn closing_remote_tab_terminates_instead_of_detaching() {
 
     h.ui.invoke_close_tab(remote_idx as i32);
 
+    assert!(
+        h.ui.get_close_confirm_open(),
+        "an active remote tab must not close without confirmation"
+    );
+    assert_eq!(
+        provider.shutdown_count(),
+        shutdowns_before,
+        "opening the confirmation must not terminate a session"
+    );
+    h.ui.invoke_close_confirm_accept();
+
     assert_eq!(
         provider.shutdown_count(),
         shutdowns_before + 2,
@@ -152,6 +171,239 @@ fn closing_remote_tab_terminates_instead_of_detaching() {
         0,
         "closing a tab must not implicitly detach its session"
     );
+}
+
+fn close_confirmation_cancel_and_dont_ask() {
+    let (h, _repo, _provider) = harness();
+
+    // The same callback Ctrl+Shift+W and the palette's Close pane use. In an
+    // unsplit tab, closing its only pane is a tab-close intent.
+    h.ui.invoke_close_pane();
+    assert!(h.ui.get_close_confirm_open());
+    let dialog = find_singleton(&h.ui, "CloseConfirmationDialog");
+    find_descendant_by_label(&dialog, "Don't ask again for this kind of close");
+    find_descendant_by_label(&dialog, "Cancel");
+    find_descendant_by_label(&dialog, "Close tab");
+
+    h.ui.set_close_confirm_dont_ask(true);
+    h.ui.invoke_close_confirm_cancel();
+    assert!(!h.ui.get_close_confirm_open());
+    assert!(
+        SettingsService::new(h.config_store.as_ref())
+            .load()
+            .expect("load settings after cancel")
+            .confirm_close_active_tab,
+        "Cancel must not persist Don't ask again"
+    );
+
+    h.ui.invoke_close_tab(0);
+    h.ui.set_close_confirm_dont_ask(true);
+    h.ui.invoke_close_confirm_accept();
+    assert!(
+        !h.ui.get_settings_confirm_close_active_tab(),
+        "the live Settings value must follow a confirmed Don't ask again"
+    );
+    assert!(
+        !SettingsService::new(h.config_store.as_ref())
+            .load()
+            .expect("load settings after confirm")
+            .confirm_close_active_tab,
+        "Confirm must persist Don't ask again"
+    );
+
+    // The preference takes effect immediately: the replacement Home tab has
+    // a live local session underneath, but its next close is unconditional.
+    h.ui.invoke_close_tab(0);
+    assert!(!h.ui.get_close_confirm_open());
+}
+
+fn native_window_close_requests_confirmation() {
+    let (h, _repo, _provider) = harness();
+    h.ui.window().dispatch_event(WindowEvent::CloseRequested);
+    assert!(
+        h.ui.get_close_confirm_open(),
+        "the native window close entry point must keep the window and ask"
+    );
+    assert_eq!(h.ui.get_close_confirm_action_label().as_str(), "Quit");
+    h.ui.set_close_confirm_dont_ask(true);
+    h.ui.invoke_close_confirm_cancel();
+    assert!(
+        SettingsService::new(h.config_store.as_ref())
+            .load()
+            .expect("load settings after quit cancel")
+            .confirm_quit_active_connections,
+        "cancelling native close must not alter the preference"
+    );
+
+    h.ui.window().dispatch_event(WindowEvent::CloseRequested);
+    h.ui.set_close_confirm_dont_ask(true);
+    h.ui.invoke_close_confirm_accept();
+    assert!(
+        !SettingsService::new(h.config_store.as_ref())
+            .load()
+            .expect("load settings after quit confirm")
+            .confirm_quit_active_connections,
+        "confirmed Don't ask again must persist for native window close"
+    );
+
+    // Some native backends issue a second close request while hiding. The
+    // confirmed-quit guard must not reopen the dialog.
+    h.ui.window().dispatch_event(WindowEvent::CloseRequested);
+    assert!(!h.ui.get_close_confirm_open());
+}
+
+fn close_confirmation_owns_terminal_keyboard() {
+    let (h, _repo, provider) = harness();
+    let terminal = find_by_id(&h.ui, "TerminalSurface::ta");
+    let origin = terminal.absolute_position();
+    let size = terminal.size();
+    let position = LogicalPosition::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
+    h.ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    h.ui.window().dispatch_event(WindowEvent::PointerPressed {
+        position,
+        button: PointerEventButton::Left,
+    });
+    h.ui.window().dispatch_event(WindowEvent::PointerReleased {
+        position,
+        button: PointerEventButton::Left,
+    });
+
+    h.ui.invoke_close_tab(0);
+    let before = provider.terminal_key_input_count();
+
+    // Automation/introspection can invoke the controller callback without a
+    // physical Slint event; that boundary must be guarded too.
+    h.ui.invoke_key_input("q".into(), 0, 0);
+    assert_eq!(provider.terminal_key_input_count(), before);
+
+    h.ui.window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "x".into() });
+    h.ui.window()
+        .dispatch_event(WindowEvent::KeyReleased { text: "x".into() });
+    assert!(h.ui.get_close_confirm_open());
+    assert_eq!(provider.terminal_key_input_count(), before);
+
+    // Modal traversal is explicit because its top-level capture owns every
+    // key before the focused terminal can see it. Cancel is the safe initial
+    // target, then Tab cycles Confirm -> checkbox -> Cancel.
+    assert_eq!(h.ui.get_close_confirm_focus_index(), 1);
+    h.ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Tab.into(),
+    });
+    h.ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Tab.into(),
+    });
+    assert_eq!(h.ui.get_close_confirm_focus_index(), 2);
+    h.ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Tab.into(),
+    });
+    h.ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Tab.into(),
+    });
+    assert_eq!(h.ui.get_close_confirm_focus_index(), 0);
+
+    h.ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Space.into(),
+    });
+    h.ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Space.into(),
+    });
+    assert!(h.ui.get_close_confirm_dont_ask());
+    h.ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Space.into(),
+    });
+    h.ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Space.into(),
+    });
+    assert!(!h.ui.get_close_confirm_dont_ask());
+
+    // Shift+Tab wraps backward to Confirm and owns both modifier phases.
+    h.ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Shift.into(),
+    });
+    h.ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Tab.into(),
+    });
+    h.ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Tab.into(),
+    });
+    h.ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Shift.into(),
+    });
+    assert_eq!(h.ui.get_close_confirm_focus_index(), 2);
+    assert_eq!(provider.terminal_key_input_count(), before);
+
+    // The shell-level Ctrl+K capture must also yield to the modal.
+    h.ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Control.into(),
+    });
+    h.ui.window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "k".into() });
+    h.ui.window()
+        .dispatch_event(WindowEvent::KeyReleased { text: "k".into() });
+    h.ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Control.into(),
+    });
+    assert!(!h.ui.get_palette_open());
+    assert_eq!(provider.terminal_key_input_count(), before);
+
+    // Return activates the focused Cancel button, but its release remains
+    // modal-owned after the callback closes the dialog.
+    h.ui.set_close_confirm_focus_index(1);
+    h.ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Return.into(),
+    });
+    assert!(!h.ui.get_close_confirm_open());
+    assert!(h.ui.get_close_confirm_key_guard_active());
+    h.ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Return.into(),
+    });
+    assert!(!h.ui.get_close_confirm_key_guard_active());
+    assert_eq!(provider.terminal_key_input_count(), before);
+
+    // Reopen for the Escape phase-pair contract.
+    h.ui.invoke_close_tab(0);
+
+    h.ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Escape.into(),
+    });
+    assert!(!h.ui.get_close_confirm_open());
+    assert!(
+        h.ui.get_close_confirm_key_guard_active(),
+        "Escape key-up must remain owned after its key-down cancels the modal"
+    );
+    h.ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Escape.into(),
+    });
+    assert!(!h.ui.get_close_confirm_key_guard_active());
+    assert_eq!(provider.terminal_key_input_count(), before);
+
+    // Prove the same focused terminal route resumes after the modal closes.
+    h.ui.window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "x".into() });
+    assert!(provider.terminal_key_input_count() > before);
+
+    // Confirm is independently keyboard-activatable and still owns its
+    // release after the destructive callback replaces the last tab.
+    let shutdowns_before = provider.shutdown_count();
+    h.ui.invoke_close_tab(0);
+    h.ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Tab.into(),
+    });
+    h.ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Tab.into(),
+    });
+    assert_eq!(h.ui.get_close_confirm_focus_index(), 2);
+    h.ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Return.into(),
+    });
+    assert!(!h.ui.get_close_confirm_open());
+    h.ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Return.into(),
+    });
+    assert!(!h.ui.get_close_confirm_key_guard_active());
+    assert_eq!(provider.shutdown_count(), shutdowns_before + 1);
 }
 
 // ── Sidebar collapse ─────────────────────────────────────────────────────────
@@ -659,6 +911,8 @@ fn tab_disconnect_keeps_the_tab_open_and_tab_reconnect_dials_again() {
     let tabs_before = tab_count(&h.ui);
 
     h.ui.invoke_tab_disconnect(idx);
+    assert!(h.ui.get_close_confirm_open());
+    h.ui.invoke_close_confirm_accept();
     pump_ticks(1);
 
     assert_eq!(
@@ -750,6 +1004,8 @@ fn telnet_quick_connect_reconnect_and_insecure_tab_state() {
     );
 
     h.ui.invoke_tab_disconnect(telnet_idx);
+    assert!(h.ui.get_close_confirm_open());
+    h.ui.invoke_close_confirm_accept();
     h.ui.invoke_tab_reconnect(telnet_idx);
     pump_ticks(1);
     assert_eq!(provider.telnet_connect_count(), 2);
@@ -775,6 +1031,8 @@ fn telnet_quick_connect_reconnect_and_insecure_tab_state() {
 
     let shutdowns_before_close = provider.shutdown_count();
     h.ui.invoke_close_tab(telnet_idx);
+    assert!(h.ui.get_close_confirm_open());
+    h.ui.invoke_close_confirm_accept();
     assert_eq!(
         provider.shutdown_count(),
         shutdowns_before_close + 1,
@@ -816,8 +1074,10 @@ fn telnet_saved_launch_dispatches_provider() {
 }
 
 fn telnet_session_restore_dispatches_provider() {
-    let repo: Arc<dyn ConnectionRepository> =
-        Arc::new(SqliteRepository::open_in_memory().expect("open repo"));
+    let sqlite = Arc::new(SqliteRepository::open_in_memory().expect("open repo"));
+    let repo: Arc<dyn ConnectionRepository> = sqlite.clone();
+    let app_state: Arc<dyn AppStateRepository> = sqlite.clone();
+    let config_store: Arc<dyn AppConfigStore> = Arc::new(support::MemoryConfigStore::default());
     let conn = Connection::new(
         ConnectionId::UNSAVED,
         None,
@@ -834,11 +1094,10 @@ fn telnet_session_restore_dispatches_provider() {
     )
     .expect("valid Telnet connection");
     let id = repo.upsert_connection(&conn).expect("save connection");
-    let settings = SettingsService::new(repo.as_ref());
-    settings
-        .save_startup_behavior(1)
+    SettingsService::new(config_store.as_ref())
+        .set(SettingKey::Startup, "restore")
         .expect("save startup setting");
-    settings
+    AppStateService::new(app_state.as_ref())
         .save_session_tabs(&SessionTabSnapshot {
             tabs: vec![SessionTabEntry::Connection(id)],
             active: 0,
@@ -848,6 +1107,11 @@ fn telnet_session_restore_dispatches_provider() {
     let provider = support::MockSessionProvider::new();
     let h = cm_ui::build_for_test(cm_ui::AppConfig {
         repo,
+        import_repo: sqlite,
+        config_store,
+        config_path: std::path::PathBuf::from("config.conman"),
+        app_state,
+        build_identity: cm_ui::BuildIdentity::default(),
         secrets: Arc::new(support::NullCredentialStore),
         session_provider: provider.clone(),
         secure_clipboard_root: None,
