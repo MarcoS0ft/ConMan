@@ -24,6 +24,14 @@ concurrency:
 jobs:
   build:
     name: ${{ matrix.name }}
+    env:
+      # The native UI/RDP dependency graph exhausts hosted-runner storage when
+      # Clippy and test profiles both retain incremental state and full debug
+      # symbols. CI diagnoses through textual output; release artifacts are
+      # built separately below and do not need dev/test symbols.
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     strategy:
       fail-fast: false
       matrix:
