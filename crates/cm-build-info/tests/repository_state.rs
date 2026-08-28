@@ -4,6 +4,7 @@ mod build_support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use build_support::RepositorySnapshot;
@@ -154,14 +155,7 @@ struct TempRepository {
 
 impl TempRepository {
     fn new() -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "conman-build-info-test-{}-{unique}",
-            std::process::id()
-        ));
+        let path = unique_temp_path("conman-build-info-test");
         fs::create_dir_all(&path).expect("create temporary repository");
         let repo = Self { path };
         repo.git(&["init", "-q"]);
@@ -279,9 +273,15 @@ impl Drop for LinkedWorktree<'_> {
 }
 
 fn unique_temp_path(prefix: &str) -> PathBuf {
-    let unique = SystemTime::now()
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock")
         .as_nanos();
-    std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()))
+    let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{timestamp}-{sequence}",
+        std::process::id()
+    ))
 }
