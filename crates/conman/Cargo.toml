@@ -46,6 +46,9 @@ cm-core = { path = "../cm-core" }
 cm-storage = { path = "../cm-storage" }
 cm-secrets = { path = "../cm-secrets" }
 cm-platform = { path = "../cm-platform" }
+# Blocking native error dialogs owned by the composition root. This is kept
+# independent of cm-ui so fatal storage/renderer/UI startup failures remain visible.
+rfd = "0.17"
 # P6.15 (gap 27): the composition root is the only place that names the
 # concrete `SessionProviderImpl` adapter, injected into `cm-ui` as
 # `Arc<dyn cm_core::SessionProvider>` (mirrors `cm-storage`/`cm-secrets` above).

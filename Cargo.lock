@@ -1213,6 +1213,7 @@ dependencies = [
  "cm-ui",
  "httparse",
  "libghostty-vt-sys",
+ "rfd",
  "serde_json",
  "slint",
  "tempfile",

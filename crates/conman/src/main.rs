@@ -39,6 +39,7 @@
 mod agent_mode;
 mod logging;
 mod render_backend;
+mod startup_error;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -58,6 +59,9 @@ use cm_secrets::KeyringStore;
 use cm_session::SessionProviderImpl;
 use cm_storage::SqliteRepository;
 use cm_ui::AppConfig;
+use startup_error::{
+    NativeStartupErrorPresenter, StartupFailureKind, StartupLocations, present_fatal,
+};
 
 // Pull the backend/renderer features into the shared `slint` build.
 use slint as _;
@@ -87,6 +91,7 @@ fn main() -> ExitCode {
     if std::env::var_os(render_backend::PROBE_ENV_VAR).is_some() {
         return render_backend::run_probe_child();
     }
+    let fatal_presenter = NativeStartupErrorPresenter;
 
     // Capture both CLI and environment-selected identities before the
     // single-instance responder thread starts. CLI values win. Keeping these
@@ -99,10 +104,16 @@ fn main() -> ExitCode {
     let startup_paths = match path_overrides.resolve() {
         Ok(paths) => paths,
         Err(error) => {
-            write_startup_error(format_args!(
-                "fatal: could not resolve configuration or database path: {error}"
-            ));
-            return ExitCode::FAILURE;
+            return present_fatal(
+                &fatal_presenter,
+                StartupFailureKind::PathResolution,
+                error,
+                StartupLocations::discovered(
+                    path_overrides.config_path.clone(),
+                    path_overrides.database_path.clone(),
+                ),
+                false,
+            );
         }
     };
     let instance_identity = match InstanceIdentity::from_paths(
@@ -111,10 +122,13 @@ fn main() -> ExitCode {
     ) {
         Ok(identity) => identity,
         Err(error) => {
-            write_startup_error(format_args!(
-                "fatal: could not derive the application instance identity: {error}"
-            ));
-            return ExitCode::FAILURE;
+            return present_fatal(
+                &fatal_presenter,
+                StartupFailureKind::PathResolution,
+                error,
+                startup_locations(&startup_paths),
+                false,
+            );
         }
     };
 
@@ -133,10 +147,15 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Err(PreflightExit::InstanceGuardUnavailable(reason)) => {
-            write_startup_error(format_args!(
-                "fatal: could not verify exclusive startup ({reason}); refusing to launch without the instance lock"
-            ));
-            return ExitCode::FAILURE;
+            return present_fatal(
+                &fatal_presenter,
+                StartupFailureKind::InstanceGuard,
+                format!(
+                    "Could not verify exclusive startup ({reason}); ConMan refused to launch without its instance lock."
+                ),
+                startup_locations(&startup_paths),
+                false,
+            );
         }
     };
 
@@ -146,21 +165,29 @@ fn main() -> ExitCode {
     // launch so a hand edit can never make the GUI unavailable. Genuine I/O
     // failures remain fatal because silently ignoring an unreadable config
     // would be surprising and could weaken automation policy.
-    let config_path = match prepare_app_config_path(startup_paths.config_path) {
+    let config_path = match prepare_app_config_path(startup_paths.config_path.clone()) {
         Ok(path) => path,
         Err(error) => {
-            write_startup_error(format_args!(
-                "fatal: could not prepare configuration path: {error}"
-            ));
-            return ExitCode::FAILURE;
+            return present_fatal(
+                &fatal_presenter,
+                StartupFailureKind::ConfigurationPath,
+                error,
+                startup_locations(&startup_paths),
+                false,
+            );
         }
     };
     let config_store = Arc::new(TextConfigStore::new(&config_path));
     let loaded_settings = match load_startup_settings(config_store.as_ref()) {
         Ok(settings) => settings,
         Err(error) => {
-            write_startup_error(format_args!("fatal: could not read configuration: {error}"));
-            return ExitCode::FAILURE;
+            return present_fatal(
+                &fatal_presenter,
+                StartupFailureKind::ConfigurationRead,
+                error,
+                startup_locations(&startup_paths),
+                false,
+            );
         }
     };
 
@@ -169,13 +196,16 @@ fn main() -> ExitCode {
     // `SqliteRepository::open()` do not add any further background work. The
     // only live worker is the deliberately environment-blind single-instance
     // responder; see `render_backend::force_software_backend`'s invariant.
-    let db_path = match prepare_app_db_path(startup_paths.database_path) {
+    let db_path = match prepare_app_db_path(startup_paths.database_path.clone()) {
         Ok(path) => path,
         Err(error) => {
-            write_startup_error(format_args!(
-                "fatal: could not prepare database path: {error}"
-            ));
-            return ExitCode::FAILURE;
+            return present_fatal(
+                &fatal_presenter,
+                StartupFailureKind::DatabasePath,
+                error,
+                startup_locations(&startup_paths),
+                false,
+            );
         }
     };
     let repo_result = SqliteRepository::open(&db_path);
@@ -241,8 +271,13 @@ fn main() -> ExitCode {
     let repo = match repo_result {
         Ok(r) => r,
         Err(e) => {
-            tracing::error!("fatal: failed to open storage: {e}");
-            return ExitCode::FAILURE;
+            return present_fatal(
+                &fatal_presenter,
+                StartupFailureKind::DatabaseOpen,
+                e,
+                startup_locations(&startup_paths),
+                true,
+            );
         }
     };
 
@@ -305,26 +340,32 @@ fn main() -> ExitCode {
     let config = match build_config(services, activation_rx, agent_mode_config) {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!("fatal: failed to initialise storage: {e}");
-            return ExitCode::FAILURE;
+            return present_fatal(
+                &fatal_presenter,
+                StartupFailureKind::ApplicationInitialization,
+                e,
+                startup_locations(&startup_paths),
+                true,
+            );
         }
     };
     match cm_ui::run(config) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            tracing::error!("fatal: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => present_fatal(
+            &fatal_presenter,
+            StartupFailureKind::UiRuntime,
+            e,
+            startup_locations(&startup_paths),
+            true,
+        ),
     }
 }
 
-fn write_startup_error(message: std::fmt::Arguments<'_>) {
-    let safe = sanitized_startup_message(message);
-    let _ = cm_platform::write_stderr_line(&safe);
-}
-
-fn sanitized_startup_message(message: std::fmt::Arguments<'_>) -> String {
-    cm_cli::neutralize_terminal_text(&message.to_string())
+fn startup_locations(paths: &StartupPaths) -> StartupLocations {
+    StartupLocations::discovered(
+        Some(paths.config_path.clone()),
+        Some(paths.database_path.clone()),
+    )
 }
 
 struct StartupPathOverrides {
@@ -354,14 +395,14 @@ impl StartupPathOverrides {
         }
     }
 
-    fn resolve(self) -> Result<StartupPaths, cm_platform::PlatformError> {
+    fn resolve(&self) -> Result<StartupPaths, cm_platform::PlatformError> {
         Ok(StartupPaths {
-            config_path: match self.config_path {
-                Some(path) => path,
+            config_path: match &self.config_path {
+                Some(path) => path.clone(),
                 None => app_config_path_candidate()?,
             },
-            database_path: match self.database_path {
-                Some(path) => path,
+            database_path: match &self.database_path {
+                Some(path) => path.clone(),
                 None => app_db_path_candidate()?,
             },
         })
@@ -878,15 +919,6 @@ mod demo_seed_gating_tests {
             Err(PreflightExit::InstanceGuardUnavailable(reason))
                 if reason == "handshake timed out"
         ));
-    }
-
-    #[test]
-    fn startup_diagnostics_neutralize_controls_osc_and_bidi() {
-        let hostile_path = "config\u{001b}]0;owned\u{0007}\u{0085}\u{202e}.conman";
-        let safe = sanitized_startup_message(format_args!("fatal: could not open {hostile_path}"));
-        assert!(!safe.chars().any(char::is_control));
-        assert!(!safe.contains('\u{202e}'));
-        assert!(safe.contains("fatal: could not open config�]0;owned���.conman"));
     }
 
     #[test]
