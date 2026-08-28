@@ -15,9 +15,9 @@
 //!
 //! [`SessionProvider`]: crate::session_ports::SessionProvider
 
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender};
+
+use std::path::PathBuf;
 
 use crate::terminal::{GridSnapshot, KeyEvent, MouseEvent};
 
@@ -133,8 +133,68 @@ pub enum SessionInput {
     Scroll(u32),
     /// RDP input events (keyboard / mouse / scroll).
     Rdp(Vec<RdpInputEvent>),
-    /// Paste text into the RDP session via the CLIPRDR channel.
-    RdpPaste(String),
+    /// Drive the RDP clipboard channel independently from keyboard input.
+    RdpClipboard(RdpClipboardCommand),
+}
+
+/// Process-local identity assigned by the UI before a session is constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SessionEndpointId(pub u64);
+
+/// Monotonic revision of clipboard content observed on the ConMan host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LocalClipboardRevision(pub u64);
+
+/// Monotonic revision of clipboard content announced by one live RDP backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RemoteClipboardRevision(pub u64);
+
+/// Clipboard content supported by the RDP bridge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardSnapshot {
+    Empty,
+    Text(String),
+    Files(Vec<PathBuf>),
+}
+
+/// Commands sent to an RDP session's CLIPRDR driver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RdpClipboardCommand {
+    SetActive(bool),
+    PublishLocal {
+        revision: LocalClipboardRevision,
+        snapshot: ClipboardSnapshot,
+    },
+}
+
+/// Result of advertising one local clipboard revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardPublishResult {
+    Advertised,
+    Rejected,
+}
+
+/// Remote clipboard content materialized by an RDP backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteClipboardContent {
+    Text(String),
+    Files {
+        staging_root: PathBuf,
+        paths: Vec<PathBuf>,
+    },
+}
+
+/// Events drained by the UI from an RDP session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RdpClipboardEvent {
+    LocalAdvertiseResult {
+        revision: LocalClipboardRevision,
+        result: ClipboardPublishResult,
+    },
+    RemoteContent {
+        revision: RemoteClipboardRevision,
+        content: RemoteClipboardContent,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -244,17 +304,9 @@ pub trait Session: Send {
     /// dropped, so the caller's receiver just never resolves).
     fn request_search_text(&self, _reply: Sender<Vec<String>>) {}
 
-    // ── P6.15 addition ────────────────────────────────────────────────────────
-
-    /// Remote-clipboard text slot, for sessions that support a CLIPRDR-style
-    /// remote→local sync (RDP only). Before P6.15 `cm-ui` read
-    /// `RdpSession::remote_clipboard` (a public field) directly; now that
-    /// `cm-ui` only ever holds `Box<dyn Session>` (obtained from
-    /// [`crate::session_ports::SessionProvider`]), that field is unreachable
-    /// through the trait object, so it becomes a trait method instead.
-    /// Default: no such slot (terminal sessions; RDP overrides).
-    fn remote_clipboard(&self) -> Option<Arc<Mutex<Option<String>>>> {
-        None
+    /// Drain clipboard events. Non-RDP sessions have no clipboard channel.
+    fn drain_rdp_clipboard_events(&self) -> Vec<RdpClipboardEvent> {
+        Vec::new()
     }
 }
 

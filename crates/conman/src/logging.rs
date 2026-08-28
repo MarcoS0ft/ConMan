@@ -28,6 +28,10 @@ const LOG_ENV_VAR: &str = "CONMAN_LOG";
 /// Default filter when `CONMAN_LOG` is unset.
 const DEFAULT_FILTER: &str = "info";
 
+fn payload_safe(metadata: &tracing::Metadata<'_>) -> bool {
+    metadata.target() != "ironrdp_cliprdr" && !metadata.target().starts_with("ironrdp_cliprdr::")
+}
+
 fn build_filter() -> EnvFilter {
     EnvFilter::try_from_env(LOG_ENV_VAR).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER))
 }
@@ -59,7 +63,10 @@ where
     let file_appender = tracing_appender::rolling::daily(log_dir, "conman.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     (
-        fmt::layer().with_ansi(false).with_writer(non_blocking),
+        fmt::layer()
+            .with_ansi(false)
+            .with_writer(non_blocking)
+            .with_filter(tracing_subscriber::filter::filter_fn(payload_safe)),
         guard,
     )
 }
@@ -80,7 +87,8 @@ pub(crate) fn init() -> LoggingGuard {
     let subscriber = subscriber.with(
         fmt::layer()
             .with_ansi(cm_platform::stderr_supports_ansi())
-            .with_writer(std::io::stderr),
+            .with_writer(std::io::stderr)
+            .with_filter(tracing_subscriber::filter::filter_fn(payload_safe)),
     );
 
     let _ = subscriber.try_init();
@@ -124,5 +132,33 @@ mod tests {
             found_line,
             "the file layer must receive events even without a debug-only cfg gate"
         );
+    }
+
+    #[test]
+    fn ironrdp_cliprdr_payload_target_is_never_written() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (layer, guard) = file_layer(dir.path());
+        let subscriber = Registry::default()
+            .with(EnvFilter::new("trace"))
+            .with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::event!(
+                target: "ironrdp_cliprdr",
+                tracing::Level::WARN,
+                file_name = "CLIPBOARD_SENTINEL_SECRET.txt",
+                "CLIPBOARD_SENTINEL_PAYLOAD"
+            );
+            tracing::info!(target: "conman::clipboard", "safe clipboard summary");
+        });
+        drop(guard);
+
+        let output = std::fs::read_dir(dir.path())
+            .expect("read temp log dir")
+            .filter_map(Result::ok)
+            .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
+            .collect::<String>();
+        assert!(output.contains("safe clipboard summary"));
+        assert!(!output.contains("CLIPBOARD_SENTINEL"));
     }
 }

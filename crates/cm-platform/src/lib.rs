@@ -21,6 +21,7 @@
 pub mod accent;
 pub mod console;
 mod error;
+pub mod secure_temp;
 pub mod single_instance;
 
 pub use console::stderr_supports_ansi;

@@ -17,7 +17,7 @@
 //! move: no behavior change. See `docs/devel/tasks/P6.1-controller-decomposition.md`.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -30,7 +30,7 @@ use cm_core::{
 use cm_session::{CertDecision, HostKeyDecision, PaneGroup, RdpAuthInput, Session, SshAuthInput};
 use slint::{ComponentHandle, Image, ModelRc, SharedString, Timer, VecModel};
 
-use crate::clipboard::Clipboard;
+use crate::clipboard::PlatformClipboardHandle;
 use crate::keys::KeysPanel;
 use crate::selection::PaneSelectionState;
 use crate::terminal_renderer::{TerminalFontSystem, TerminalRenderer, TerminalTheme};
@@ -120,6 +120,7 @@ enum ConnectInfo {
 
 /// State for an additional (non-primary) pane within a split tab.
 struct ExtraPaneState {
+    endpoint_id: cm_core::SessionEndpointId,
     session: Box<dyn Session>,
     renderer: TerminalRenderer,
     last: Option<GridSnapshot>,
@@ -140,9 +141,6 @@ struct ExtraPaneState {
     last_frame: Option<Image>,
     rdp_w: u16,
     rdp_h: u16,
-    /// RDP-only remote clipboard slot. This belongs to the session, so it
-    /// must follow an extra pane when that pane is promoted to primary.
-    rdp_clipboard: Option<Arc<Mutex<Option<String>>>>,
     /// Reconnect metadata for this pane. Connect-in-split only opens saved
     /// profiles, so SSH/RDP variants always retain a credential id and never
     /// resolved authentication material.
@@ -161,6 +159,7 @@ struct ExtraPaneState {
 /// The tick loop drains the session's output channel to prevent it from
 /// filling; `shutdown` is called when the session exits naturally.
 struct DetachedEntry {
+    endpoint_id: cm_core::SessionEndpointId,
     session: Box<dyn Session>,
     label: String,
     is_remote: bool,
@@ -168,7 +167,49 @@ struct DetachedEntry {
     kind: String,
 }
 
+#[derive(Debug, Default)]
+struct ClipboardEndpointSync {
+    inflight: Option<cm_core::LocalClipboardRevision>,
+    latest_pending: Option<(cm_core::LocalClipboardRevision, cm_core::ClipboardSnapshot)>,
+}
+
+#[derive(Debug)]
+struct PendingRemoteInstall {
+    snapshot: cm_core::ClipboardSnapshot,
+    staging_root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug)]
+struct ClipboardSourceLease {
+    snapshot: cm_core::ClipboardSnapshot,
+    still_observed: bool,
+    users: BTreeSet<(cm_core::SessionEndpointId, cm_core::LocalClipboardRevision)>,
+}
+
+impl ClipboardSourceLease {
+    fn retain(
+        &mut self,
+        endpoint: cm_core::SessionEndpointId,
+        revision: cm_core::LocalClipboardRevision,
+    ) {
+        self.users.insert((endpoint, revision));
+    }
+
+    fn release(
+        &mut self,
+        endpoint: cm_core::SessionEndpointId,
+        revision: cm_core::LocalClipboardRevision,
+    ) {
+        self.users.remove(&(endpoint, revision));
+    }
+
+    fn cleanup_ready(&self) -> bool {
+        !self.still_observed && self.users.is_empty()
+    }
+}
+
 struct Tab {
+    endpoint_id: cm_core::SessionEndpointId,
     session: Box<dyn Session>,
     // Terminal tabs:
     renderer: TerminalRenderer,
@@ -179,9 +220,6 @@ struct Tab {
     last_frame: Option<Image>,
     rdp_w: u16,
     rdp_h: u16,
-    /// RDP text clipboard slot: the drive thread writes remote-copied text here;
-    /// the tick loop polls it and writes to the OS clipboard (remote→local sync).
-    rdp_clipboard: Option<Arc<Mutex<Option<String>>>>,
     // Common:
     scale: f32,
     num: u32,
@@ -275,7 +313,7 @@ struct State {
     /// Shared OS clipboard handle (P6.5: factored out of the RDP-only P4.2
     /// field — used for both RDP CLIPRDR sync and terminal copy/paste). Fails
     /// soft internally if no clipboard is available (e.g. no display).
-    sys_clipboard: Clipboard,
+    sys_clipboard: PlatformClipboardHandle,
     // P5.1: Detached sessions (still running; drained in tick).
     detached: Vec<DetachedEntry>,
     /// P6.5 lifecycle: the active tab index observed on the last tick, so a
@@ -302,6 +340,31 @@ struct State {
     /// function — all of which already take `state: &Rc<RefCell<State>>`,
     /// not the wider `Ctx` — can reach it without widening their signatures.
     session_provider: Arc<dyn SessionProvider>,
+    /// Next process-local session endpoint identity. Zero is never issued.
+    next_endpoint_id: u64,
+    clipboard_owner: Option<cm_core::SessionEndpointId>,
+    clipboard_demand_generation: u64,
+    clipboard_bridge_disabled: bool,
+    next_local_clipboard_revision: u64,
+    /// Local advertisements are serialized per RDP endpoint because the
+    /// CLIPRDR acknowledgement has no request identifier.
+    clipboard_endpoint_sync: HashMap<cm_core::SessionEndpointId, ClipboardEndpointSync>,
+    /// Content waiting for an asynchronous OS clipboard install result.
+    clipboard_pending_remote: HashMap<
+        (cm_core::SessionEndpointId, cm_core::RemoteClipboardRevision),
+        PendingRemoteInstall,
+    >,
+    /// Exact remote content most recently installed in the host clipboard.
+    /// A matching worker observation must not echo to its source endpoint.
+    clipboard_remote_origin: Option<(
+        cm_core::SessionEndpointId,
+        cm_core::RemoteClipboardRevision,
+        cm_core::ClipboardSnapshot,
+    )>,
+    clipboard_staged_lease: Option<(cm_core::ClipboardSnapshot, std::path::PathBuf)>,
+    clipboard_source_leases: HashMap<std::path::PathBuf, ClipboardSourceLease>,
+    clipboard_observed_source: Option<std::path::PathBuf>,
+    secure_clipboard_root: Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>,
     /// P6.14: the Slint list-model backing `launchpad-recents`. Lives on
     /// `State` (like `io` above) so both the tab-lifecycle code that shows
     /// the Launchpad (`tabs::open_local_tab_inner`) and the Launchpad's own
@@ -330,7 +393,43 @@ struct State {
     agent_mode: Option<crate::AgentModeConfig>,
 }
 
+impl Drop for State {
+    fn drop(&mut self) {
+        self.sys_clipboard.shutdown();
+        let clipboard_results = self.sys_clipboard.drain_results();
+        let Some(root) = self.secure_clipboard_root.as_ref() else {
+            return;
+        };
+        let mut paths = BTreeSet::new();
+        if let Some(path) = clipboard_results
+            .observation
+            .and_then(|observation| observation.source_staging_root)
+        {
+            paths.insert(path);
+        }
+        paths.extend(clipboard_results.retired_source_roots);
+        if let Some((_, path)) = self.clipboard_staged_lease.take() {
+            paths.insert(path);
+        }
+        paths.extend(self.clipboard_source_leases.drain().map(|(path, _)| path));
+        for pending in self.clipboard_pending_remote.values() {
+            if let Some(path) = pending.staging_root.as_ref() {
+                paths.insert(path.clone());
+            }
+        }
+        for path in paths {
+            let _ = root.cleanup_staging_path(&path);
+        }
+    }
+}
+
 impl State {
+    fn allocate_endpoint_id(&mut self) -> Option<cm_core::SessionEndpointId> {
+        let value = self.next_endpoint_id;
+        self.next_endpoint_id = self.next_endpoint_id.checked_add(1)?;
+        Some(cm_core::SessionEndpointId(value))
+    }
+
     fn current_grid(&self) -> TerminalSize {
         if self.surface_w <= 0.0 || self.surface_h <= 0.0 {
             return INITIAL_SIZE;
@@ -452,6 +551,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
     let repo = config.repo;
     let secrets = config.secrets;
     let session_provider = config.session_provider;
+    let secure_clipboard_root = config.secure_clipboard_root;
     let first_launch = config.first_launch;
     let agent_mode = config.agent_mode;
 
@@ -541,7 +641,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         conn_tree,
         keys_panel,
         // Created lazily; fails soft if arboard has no clipboard (e.g. no display in CI).
-        sys_clipboard: Clipboard::new(),
+        sys_clipboard: PlatformClipboardHandle::spawn(secure_clipboard_root.clone()),
         detached: Vec::new(),
         last_active_tab: 0,
         // P5.2: persist terminal rendering font size and local shell defaults.
@@ -564,6 +664,18 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         },
         // P6.15: see the field doc comment.
         session_provider,
+        next_endpoint_id: 1,
+        clipboard_owner: None,
+        clipboard_demand_generation: 0,
+        clipboard_bridge_disabled: false,
+        next_local_clipboard_revision: 1,
+        clipboard_endpoint_sync: HashMap::new(),
+        clipboard_pending_remote: HashMap::new(),
+        clipboard_remote_origin: None,
+        clipboard_staged_lease: None,
+        clipboard_source_leases: HashMap::new(),
+        clipboard_observed_source: None,
+        secure_clipboard_root,
         // P6.14: see the field doc comment.
         launchpad_recents_model: launchpad_recents_model.clone(),
         // P6.11: see the field doc comment.

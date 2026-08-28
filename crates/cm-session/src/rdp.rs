@@ -57,8 +57,8 @@
 //! this crate).
 //!
 //! **Unified input (P4.2)**: `Session::send_input(SessionInput)` dispatches
-//! `SessionInput::Rdp(events)` to the wire and `SessionInput::RdpPaste(text)`
-//! to the CLIPRDR channel.  `RdpInputEvent` and `RdpMouseButton` are now
+//! `SessionInput::Rdp(events)` to the wire; CLIPRDR commands use the separate
+//! `SessionInput::RdpClipboard` path. `RdpInputEvent` and `RdpMouseButton` are now
 //! defined in `session.rs` (shared neutral types).
 //!
 //! **Cert store persistence (P4.2)**: `CertStore::new_persistent(path)` loads
@@ -118,12 +118,6 @@ use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-use ironrdp_cliprdr::backend::CliprdrBackend;
-use ironrdp_cliprdr::pdu::{
-    ClipboardFormat, ClipboardFormatId, ClipboardFormatName, ClipboardGeneralCapabilityFlags,
-    FileContentsRequest, FileContentsResponse, FormatDataRequest, FormatDataResponse, LockDataId,
-    OwnedFormatDataResponse,
-};
 use ironrdp_cliprdr::{CliprdrClient, CliprdrSvcMessages};
 use ironrdp_connector::connection_activation::{
     ConnectionActivationSequence, ConnectionActivationState,
@@ -154,6 +148,10 @@ use cm_core::RdpSettings;
 use crate::session::{
     FrameUpdate, RdpInputEvent, RdpMouseButton, Session, SessionInput, SessionStatus, Surface,
 };
+use cm_core::RdpClipboardCommand;
+
+mod clipboard;
+use clipboard::{ClipboardBackend, ClipboardEventMailbox, ClipboardWork};
 // P6.15: the auth-input and cert-verifier *contract* types moved to
 // `cm_core::rdp` (needed by the `SessionProvider` port, which must be
 // nameable from `cm-core` without a cm-core -> cm-session dependency). Only
@@ -319,11 +317,13 @@ enum RdpCmd {
     /// Neutral input events to encode and send to the server.
     Input(Vec<RdpInputEvent>),
     /// Resize request (desktop pixels).
-    Resize { width: u32, height: u32 },
+    Resize {
+        width: u32,
+        height: u32,
+    },
     /// Graceful shutdown.
     Shutdown,
-    /// Text to paste via CLIPRDR (sent as a remote copy announcement).
-    PasteText(String),
+    Clipboard(RdpClipboardCommand),
 }
 
 /// P9.9 §5: collapses a burst of pending resize sizes down to the latest one.
@@ -346,161 +346,6 @@ fn coalesce_latest_resize(sizes: impl Iterator<Item = (u32, u32)>) -> Option<(u3
 /// Whether a settled resize differs from the most recently requested target.
 fn is_new_resize_target(last: (u32, u32), requested: (u32, u32)) -> bool {
     last != requested
-}
-
-// ---------------------------------------------------------------------------
-// CLIPRDR text backend
-// ---------------------------------------------------------------------------
-
-/// Minimal CLIPRDR backend that supports bidirectional text clipboard.
-///
-/// **Remote → local** (remote copy):
-/// `on_remote_copy` sets `wants_paste_unicode` when CF_UNICODETEXT is
-/// available. The active loop polls this flag and calls `initiate_paste`
-/// to fetch the data. The response arrives in `on_format_data_response`,
-/// which also updates `remote_clipboard_out` (a shared Mutex for the UI thread).
-///
-/// **Local → remote** (paste into remote):
-/// `RdpCmd::PasteText(text)` calls `initiate_copy` announcing CF_UNICODETEXT.
-/// The server requests the data via a `FormatDataRequest`, which triggers
-/// `on_format_data_request` storing the request. The active loop then calls
-/// `submit_format_data` with the UTF-16LE encoded text.
-struct TextCliprdrBackend {
-    /// Text from the most recent remote copy (set by `on_format_data_response`).
-    remote_text: Option<String>,
-    /// Text queued to send to the remote.
-    local_text: Option<String>,
-    /// CF_UNICODETEXT format ID (per MS-RDPECLIP, always format 13 on Windows).
-    cf_unicode: ClipboardFormatId,
-    /// Set when the remote announces CF_UNICODETEXT; the active loop should
-    /// call `initiate_paste` to fetch the data.
-    wants_paste_unicode: bool,
-    /// Set when the server requests our clipboard data; the active loop should
-    /// call `submit_format_data` with the encoded local text.
-    pending_format_request: Option<ClipboardFormatId>,
-    /// Shared with [`RdpSession`] — updated when remote clipboard text arrives.
-    /// The UI thread polls this in the tick loop and writes to the system clipboard.
-    remote_clipboard_out: Arc<Mutex<Option<String>>>,
-}
-
-impl std::fmt::Debug for TextCliprdrBackend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TextCliprdrBackend")
-            .field("has_remote_text", &self.remote_text.is_some())
-            .field("has_local_text", &self.local_text.is_some())
-            .field("wants_paste_unicode", &self.wants_paste_unicode)
-            .field(
-                "has_pending_format_req",
-                &self.pending_format_request.is_some(),
-            )
-            .finish()
-    }
-}
-
-impl TextCliprdrBackend {
-    fn new(remote_clipboard_out: Arc<Mutex<Option<String>>>) -> Self {
-        Self {
-            remote_text: None,
-            local_text: None,
-            cf_unicode: ClipboardFormatId::new(13), // CF_UNICODETEXT
-            wants_paste_unicode: false,
-            pending_format_request: None,
-            remote_clipboard_out,
-        }
-    }
-
-    fn set_local_text(&mut self, text: String) {
-        self.local_text = Some(text);
-    }
-}
-
-ironrdp_core::impl_as_any!(TextCliprdrBackend);
-
-impl CliprdrBackend for TextCliprdrBackend {
-    fn temporary_directory(&self) -> &str {
-        "/tmp"
-    }
-
-    fn client_capabilities(&self) -> ClipboardGeneralCapabilityFlags {
-        ClipboardGeneralCapabilityFlags::empty()
-    }
-
-    fn on_ready(&mut self) {}
-
-    fn on_request_format_list(&mut self) {}
-
-    fn on_process_negotiated_capabilities(
-        &mut self,
-        _capabilities: ClipboardGeneralCapabilityFlags,
-    ) {
-    }
-
-    fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
-        // Set flag so the active loop initiates a paste request.
-        let has_text = available_formats.iter().any(|f| {
-            f.id == self.cf_unicode
-                || f.name
-                    .as_ref()
-                    .map(|n| n.value() == "CF_UNICODETEXT")
-                    .unwrap_or(false)
-        });
-        if has_text {
-            self.wants_paste_unicode = true;
-        }
-    }
-
-    fn on_format_data_request(&mut self, request: FormatDataRequest) {
-        // Store so the active loop can call submit_format_data with the text.
-        self.pending_format_request = Some(request.format);
-    }
-
-    fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
-        // Decode UTF-16-LE data from the remote clipboard (CF_UNICODETEXT).
-        if !response.is_error()
-            && let Some(text) = decode_utf16le(response.data())
-        {
-            self.remote_text = Some(text.clone());
-            // Notify the UI thread: overwrite with the latest remote text.
-            if let Ok(mut out) = self.remote_clipboard_out.lock() {
-                *out = Some(text);
-            }
-        }
-    }
-
-    fn on_file_contents_request(&mut self, _request: FileContentsRequest) {}
-
-    fn on_file_contents_response(&mut self, _response: FileContentsResponse<'_>) {}
-
-    fn on_lock(&mut self, _data_id: LockDataId) {}
-
-    fn on_unlock(&mut self, _data_id: LockDataId) {}
-}
-
-/// Decode a CF_UNICODETEXT buffer (UTF-16-LE, null-terminated).
-fn decode_utf16le(data: &[u8]) -> Option<String> {
-    if data.len() < 2 {
-        return None;
-    }
-    let u16_units: Vec<u16> = data
-        .chunks_exact(2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
-        .take_while(|&c| c != 0)
-        .collect();
-    String::from_utf16(&u16_units).ok()
-}
-
-/// Encode text as CF_UNICODETEXT (UTF-16-LE, null-terminated).
-fn encode_utf16le(text: &str) -> Vec<u8> {
-    let mut buf: Vec<u8> = text
-        .encode_utf16()
-        .chain(std::iter::once(0u16))
-        .flat_map(|c| c.to_le_bytes())
-        .collect();
-    // Ensure even length (should always be, but defence in depth).
-    if !buf.len().is_multiple_of(2) {
-        buf.push(0);
-    }
-    buf
 }
 
 // ---------------------------------------------------------------------------
@@ -640,12 +485,7 @@ pub struct RdpSession {
     status: Arc<Mutex<SessionStatus>>,
     cmd_tx: UnboundedSender<RdpCmd>,
     driver: Mutex<Option<JoinHandle<()>>>,
-    /// Remote clipboard text received via CLIPRDR (CF_UNICODETEXT).
-    ///
-    /// Set by the driver thread whenever the remote announces a copy.  The UI
-    /// thread polls this in the tick loop and writes to the system clipboard.
-    /// Publicly readable so the cm-ui controller can clone the Arc.
-    pub remote_clipboard: Arc<Mutex<Option<String>>>,
+    clipboard_events: Arc<ClipboardEventMailbox>,
 }
 
 impl RdpSession {
@@ -660,13 +500,14 @@ impl RdpSession {
         auth: RdpAuthInput,
         verifier: Arc<dyn CertVerifier>,
         cert_store: Arc<CertStore>,
+        endpoint_id: cm_core::SessionEndpointId,
+        clipboard_root: Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>,
     ) -> Result<Self, RdpError> {
         let (frame_tx, frame_rx) = mpsc::sync_channel::<FrameUpdate>(FRAME_CHANNEL_CAPACITY);
         let (cmd_tx, cmd_rx) = unbounded_channel::<RdpCmd>();
         let status = Arc::new(Mutex::new(SessionStatus::Connecting));
-        // Shared clipboard slot: driver writes, UI thread polls.
-        let remote_clipboard: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let driver_remote_clipboard = Arc::clone(&remote_clipboard);
+        let clipboard_events = Arc::new(ClipboardEventMailbox::new(clipboard_root.clone()));
+        let driver_clipboard_events = Arc::clone(&clipboard_events);
 
         let driver_cfg = cfg.clone();
         let driver_status = Arc::clone(&status);
@@ -695,9 +536,16 @@ impl RdpSession {
                         frame_tx,
                         cmd_rx,
                         status: driver_status,
-                        remote_clipboard: driver_remote_clipboard,
+                        clipboard_events: driver_clipboard_events,
+                        endpoint_id,
+                        clipboard_root,
                     },
                 ));
+                // Clipboard source paths may live on a wedged network
+                // filesystem. `spawn_blocking` work cannot be cancelled, so
+                // never let runtime teardown turn tab close into an unbounded
+                // driver-thread join.
+                rt.shutdown_timeout(std::time::Duration::from_secs(5));
             })
             .map_err(RdpError::Thread)?;
 
@@ -706,7 +554,7 @@ impl RdpSession {
             status,
             cmd_tx,
             driver: Mutex::new(Some(driver_handle)),
-            remote_clipboard,
+            clipboard_events,
         })
     }
 }
@@ -746,15 +594,15 @@ impl Session for RdpSession {
 
     /// Dispatch transport-neutral input.
     ///
-    /// Handles `SessionInput::Rdp(events)` and `SessionInput::RdpPaste(text)`;
+    /// Handles input and independent CLIPRDR commands.
     /// silently ignores terminal variants.
     fn send_input(&self, input: SessionInput) {
         match input {
             SessionInput::Rdp(events) => {
                 let _ = self.cmd_tx.send(RdpCmd::Input(events));
             }
-            SessionInput::RdpPaste(text) => {
-                let _ = self.cmd_tx.send(RdpCmd::PasteText(text));
+            SessionInput::RdpClipboard(command) => {
+                let _ = self.cmd_tx.send(RdpCmd::Clipboard(command));
             }
             // Terminal inputs are not applicable to RDP.
             SessionInput::Key(_) | SessionInput::Mouse(_) | SessionInput::Paste(_) => {}
@@ -763,11 +611,8 @@ impl Session for RdpSession {
         }
     }
 
-    /// P6.15: was a public field (`RdpSession::remote_clipboard`) `cm-ui`
-    /// read directly; now a trait method so it's reachable through
-    /// `Box<dyn Session>` (the `SessionProvider` port's return type).
-    fn remote_clipboard(&self) -> Option<Arc<Mutex<Option<String>>>> {
-        Some(Arc::clone(&self.remote_clipboard))
+    fn drain_rdp_clipboard_events(&self) -> Vec<cm_core::RdpClipboardEvent> {
+        self.clipboard_events.drain()
     }
 }
 
@@ -798,7 +643,9 @@ struct DriveCtx {
     frame_tx: SyncSender<FrameUpdate>,
     cmd_rx: UnboundedReceiver<RdpCmd>,
     status: Arc<Mutex<SessionStatus>>,
-    remote_clipboard: Arc<Mutex<Option<String>>>,
+    clipboard_events: Arc<ClipboardEventMailbox>,
+    endpoint_id: cm_core::SessionEndpointId,
+    clipboard_root: Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>,
 }
 
 /// The [`ironrdp_async::NetworkClient`] ConMan gives CredSSP for its
@@ -970,7 +817,15 @@ async fn drive_inner(
     //    attached. `ClientConnector::new` takes a local socket address used
     //    only for RDPDR client identification; "0.0.0.0:0" is the right
     //    value for clients that do not bind a fixed local port.
-    let cliprdr = CliprdrClient::new(Box::new(TextCliprdrBackend::new(ctx.remote_clipboard)));
+    tracing::debug!(
+        endpoint_id = ctx.endpoint_id.0,
+        "rdp: initializing clipboard channel"
+    );
+    let cliprdr = CliprdrClient::new(Box::new(ClipboardBackend::new(
+        ctx.clipboard_events,
+        ctx.clipboard_root,
+        ctx.endpoint_id,
+    )));
     // P9.9-FIX: DRDYNVC carrying the DisplayControl DVC -- without this,
     // `ActiveStage::encode_resize` always returns `None` (the DVC is simply
     // not there to ask), so `RdpCmd::Resize` never actually writes a resize
@@ -1427,9 +1282,36 @@ where
     // Start with the server-confirmed desktop size, so the UI's first settled
     // geometry callback does not send a no-op DisplayControl request.
     let mut last_resize_target = (u32::from(image.width()), u32::from(image.height()));
+    let mut clipboard_tick = tokio::time::interval(std::time::Duration::from_millis(50));
+    clipboard_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut clipboard_timeout_tick = tokio::time::interval(std::time::Duration::from_secs(5));
+    clipboard_timeout_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut clipboard_file_task: Option<ClipboardFileTask> = None;
 
     loop {
         tokio::select! {
+            _ = clipboard_tick.tick() => {
+                if let Some(backend) = active_stage
+                    .get_svc_processor_mut::<CliprdrClient>()
+                    .and_then(|client| client.downcast_backend_mut::<ClipboardBackend>())
+                {
+                    backend.tick();
+                }
+                drive_clipboard_work(framed, active_stage, &mut clipboard_file_task).await?;
+            }
+            _ = clipboard_timeout_tick.tick() => {
+                let messages = active_stage
+                    .get_svc_processor_mut::<CliprdrClient>()
+                    .ok_or_else(|| "CLIPRDR processor unavailable".to_owned())?
+                    .drive_timeouts()
+                    .map_err(|error| error.to_string())?;
+                let data = active_stage
+                    .process_svc_processor_messages(messages)
+                    .map_err(|error| error.to_string())?;
+                if !data.is_empty() {
+                    framed.write_all(&data).await.map_err(|error| error.to_string())?;
+                }
+            }
             // Incoming data from the server.
             pdu_result = framed.read_pdu() => {
                 let (action, frame) = pdu_result.map_err(|e| e.to_string())?;
@@ -1660,68 +1542,323 @@ where
         }
     }
 
-    // --- Clipboard state machine: remote → local ---
-    // After `process()`, the backend may have set `wants_paste_unicode`
-    // (triggered by on_remote_copy). We call initiate_paste to request
-    // the actual data; the response arrives in on_format_data_response.
-    let wants_paste = {
-        active_stage
-            .get_svc_processor_mut::<CliprdrClient>()
-            .and_then(|c| c.downcast_backend_mut::<TextCliprdrBackend>())
-            .map(|b| {
-                if b.wants_paste_unicode {
-                    b.wants_paste_unicode = false;
-                    true
-                } else {
-                    false
-                }
-            })
-            .unwrap_or(false)
-    };
-    if wants_paste {
-        let maybe_msgs = active_stage
-            .get_svc_processor_mut::<CliprdrClient>()
-            .and_then(|c| c.initiate_paste(ClipboardFormatId::new(13)).ok());
-        if let Some(msgs) = maybe_msgs {
-            let data = active_stage
-                .process_svc_processor_messages(msgs)
-                .map_err(|e| e.to_string())?;
-            framed.write_all(&data).await.map_err(|e| e.to_string())?;
-        }
-    }
-
-    // --- Clipboard state machine: local → remote ---
-    // The server may have called on_format_data_request (after we
-    // announced our text via initiate_copy). Respond with encoded text.
-    let pending_req = {
-        active_stage
-            .get_svc_processor_mut::<CliprdrClient>()
-            .and_then(|c| c.downcast_backend_mut::<TextCliprdrBackend>())
-            .and_then(|b| b.pending_format_request.take())
-    };
-    if pending_req.is_some() {
-        // Fetch local text (a separate borrow so NLL lets us proceed).
-        let local_text = active_stage
-            .get_svc_processor_mut::<CliprdrClient>()
-            .and_then(|c| c.downcast_backend_mut::<TextCliprdrBackend>())
-            .and_then(|b| b.local_text.clone());
-
-        let response: OwnedFormatDataResponse = match local_text {
-            Some(text) => FormatDataResponse::new_data(encode_utf16le(&text)),
-            None => FormatDataResponse::new_error(),
-        };
-        let maybe_msgs = active_stage
-            .get_svc_processor_mut::<CliprdrClient>()
-            .and_then(|c| c.submit_format_data(response).ok());
-        if let Some(msgs) = maybe_msgs {
-            let data = active_stage
-                .process_svc_processor_messages(msgs)
-                .map_err(|e| e.to_string())?;
-            framed.write_all(&data).await.map_err(|e| e.to_string())?;
-        }
-    }
-
     Ok(PduOutcome::Continue)
+}
+
+struct ClipboardFileTask {
+    handle: Option<tokio::task::JoinHandle<ClipboardFileCompletion>>,
+    started: std::time::Instant,
+    context: ClipboardFileTaskContext,
+}
+
+enum ClipboardFileTaskContext {
+    LocalPrepare {
+        kind: clipboard::AdvertiseKind,
+    },
+    Serve,
+    RemotePrepare {
+        revision: cm_core::RemoteClipboardRevision,
+    },
+    RemoteStore {
+        download: Arc<Mutex<clipboard::RemoteDownload>>,
+    },
+}
+
+impl Drop for ClipboardFileTask {
+    fn drop(&mut self) {
+        if let Some(task) = self.handle.as_ref() {
+            task.abort();
+        }
+    }
+}
+
+enum ClipboardFileCompletionData {
+    LocalCatalog(Result<Arc<clipboard::LocalFileCatalog>, ()>),
+    FileResponse(ironrdp_cliprdr::pdu::FileContentsResponse<'static>),
+    RemoteDownload(Result<Arc<Mutex<clipboard::RemoteDownload>>, ()>),
+    RemoteStore { succeeded: bool, written: u64 },
+}
+
+struct ClipboardFileCompletion {
+    work: ClipboardWork,
+    data: ClipboardFileCompletionData,
+}
+
+async fn drive_clipboard_work<S>(
+    framed: &mut TokioFramed<S>,
+    active_stage: &mut ActiveStage,
+    file_task: &mut Option<ClipboardFileTask>,
+) -> Result<(), String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin,
+{
+    if file_task.as_ref().is_some_and(|task| {
+        task.handle
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+    }) {
+        let mut task = file_task.take().expect("checked above");
+        match task.handle.take().expect("live task").await {
+            Ok(completion) => {
+                finish_clipboard_file_work(framed, active_stage, completion).await?;
+            }
+            Err(error) => {
+                fail_clipboard_file_task(active_stage, &task.context);
+                if !error.is_cancelled() {
+                    tracing::warn!(phase = "clipboard_file", "RDP clipboard file task failed");
+                }
+            }
+        }
+    } else if file_task
+        .as_ref()
+        .is_some_and(|task| task.started.elapsed() >= std::time::Duration::from_secs(60))
+    {
+        let task = file_task.take().expect("checked above");
+        fail_clipboard_file_task(active_stage, &task.context);
+        drop(task);
+    }
+
+    for _ in 0..4 {
+        if file_task.is_some() {
+            break;
+        }
+        let work = active_stage
+            .get_svc_processor_mut::<CliprdrClient>()
+            .and_then(|client| client.downcast_backend_mut::<ClipboardBackend>())
+            .and_then(ClipboardBackend::take_work);
+        let Some(work) = work else {
+            break;
+        };
+
+        if matches!(
+            work,
+            ClipboardWork::PrepareFileCopy { .. }
+                | ClipboardWork::ServeFile { .. }
+                | ClipboardWork::PrepareRemoteFiles { .. }
+                | ClipboardWork::StoreRemoteChunk { .. }
+        ) {
+            let context = clipboard_file_task_context(&work);
+            *file_task = Some(ClipboardFileTask {
+                handle: Some(tokio::spawn(run_clipboard_file_work(work))),
+                started: std::time::Instant::now(),
+                context,
+            });
+            break;
+        }
+        send_clipboard_protocol_work(framed, active_stage, work, None).await?;
+    }
+    Ok(())
+}
+
+fn clipboard_file_task_context(work: &ClipboardWork) -> ClipboardFileTaskContext {
+    match work {
+        ClipboardWork::PrepareFileCopy { kind, .. } => {
+            ClipboardFileTaskContext::LocalPrepare { kind: *kind }
+        }
+        ClipboardWork::ServeFile { .. } => ClipboardFileTaskContext::Serve,
+        ClipboardWork::PrepareRemoteFiles { revision, .. } => {
+            ClipboardFileTaskContext::RemotePrepare {
+                revision: *revision,
+            }
+        }
+        ClipboardWork::StoreRemoteChunk { download, .. } => ClipboardFileTaskContext::RemoteStore {
+            download: Arc::clone(download),
+        },
+        _ => unreachable!("only file work is isolated"),
+    }
+}
+
+fn fail_clipboard_file_task(active_stage: &mut ActiveStage, context: &ClipboardFileTaskContext) {
+    let Some(backend) = clipboard_backend_mut(active_stage) else {
+        return;
+    };
+    match context {
+        ClipboardFileTaskContext::LocalPrepare { kind } => backend.local_prepare_failed(*kind),
+        ClipboardFileTaskContext::Serve => {}
+        ClipboardFileTaskContext::RemotePrepare { revision } => {
+            backend.remote_prepare_failed(*revision);
+        }
+        ClipboardFileTaskContext::RemoteStore { download } => {
+            backend.remote_store_completed(download, false, 0);
+        }
+    }
+}
+
+async fn run_clipboard_file_work(work: ClipboardWork) -> ClipboardFileCompletion {
+    let data = match &work {
+        ClipboardWork::PrepareFileCopy {
+            revision, paths, ..
+        } => ClipboardFileCompletionData::LocalCatalog(
+            clipboard::prepare_local_catalog(*revision, paths).await,
+        ),
+        ClipboardWork::ServeFile { request, entry } => ClipboardFileCompletionData::FileResponse(
+            clipboard::serve_local_file(entry, request).await,
+        ),
+        ClipboardWork::PrepareRemoteFiles {
+            revision,
+            root,
+            endpoint,
+            descriptors,
+            clip_data_id,
+        } => ClipboardFileCompletionData::RemoteDownload(
+            clipboard::prepare_remote_download(
+                Arc::clone(root),
+                *endpoint,
+                *revision,
+                descriptors,
+                *clip_data_id,
+            )
+            .await,
+        ),
+        ClipboardWork::StoreRemoteChunk {
+            download,
+            entry,
+            offset,
+            data,
+            last,
+        } => {
+            let directory = download
+                .lock()
+                .ok()
+                .map(|state| Arc::clone(&state.directory));
+            let succeeded = if let Some(directory) = directory {
+                clipboard::store_remote_chunk(entry, &directory, *offset, data, *last)
+                    .await
+                    .is_ok()
+            } else {
+                false
+            };
+            ClipboardFileCompletionData::RemoteStore {
+                succeeded,
+                written: data.len() as u64,
+            }
+        }
+        _ => unreachable!("only file work is spawned"),
+    };
+    ClipboardFileCompletion { work, data }
+}
+
+async fn finish_clipboard_file_work<S>(
+    framed: &mut TokioFramed<S>,
+    active_stage: &mut ActiveStage,
+    completion: ClipboardFileCompletion,
+) -> Result<(), String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin,
+{
+    match completion.data {
+        ClipboardFileCompletionData::LocalCatalog(Ok(catalog)) => {
+            let (kind, revision) = match &completion.work {
+                ClipboardWork::PrepareFileCopy { kind, revision, .. } => (*kind, *revision),
+                _ => unreachable!(),
+            };
+            let accepted = clipboard_backend_mut(active_stage).is_some_and(|backend| {
+                backend.install_local_catalog(revision, Arc::clone(&catalog))
+            });
+            if !accepted {
+                if let Some(backend) = clipboard_backend_mut(active_stage) {
+                    backend.work_failed(&completion.work);
+                }
+                return Ok(());
+            }
+            send_clipboard_protocol_work(
+                framed,
+                active_stage,
+                ClipboardWork::InitiateFileCopy { kind, catalog },
+                None,
+            )
+            .await?;
+        }
+        ClipboardFileCompletionData::LocalCatalog(Err(()))
+        | ClipboardFileCompletionData::RemoteDownload(Err(())) => {
+            if let Some(backend) = clipboard_backend_mut(active_stage) {
+                backend.work_failed(&completion.work);
+            }
+        }
+        ClipboardFileCompletionData::FileResponse(response) => {
+            send_clipboard_protocol_work(framed, active_stage, completion.work, Some(response))
+                .await?;
+        }
+        ClipboardFileCompletionData::RemoteDownload(Ok(download)) => {
+            if let Some(backend) = clipboard_backend_mut(active_stage) {
+                backend.install_remote_download(download);
+            }
+        }
+        ClipboardFileCompletionData::RemoteStore { succeeded, written } => {
+            let ClipboardWork::StoreRemoteChunk { download, .. } = &completion.work else {
+                unreachable!();
+            };
+            if let Some(backend) = clipboard_backend_mut(active_stage) {
+                backend.remote_store_completed(download, succeeded, written);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn clipboard_backend_mut(active_stage: &mut ActiveStage) -> Option<&mut ClipboardBackend> {
+    active_stage
+        .get_svc_processor_mut::<CliprdrClient>()
+        .and_then(|client| client.downcast_backend_mut::<ClipboardBackend>())
+}
+
+async fn send_clipboard_protocol_work<S>(
+    framed: &mut TokioFramed<S>,
+    active_stage: &mut ActiveStage,
+    work: ClipboardWork,
+    file_response: Option<ironrdp_cliprdr::pdu::FileContentsResponse<'static>>,
+) -> Result<(), String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync + Unpin,
+{
+    use ironrdp_tokio::FramedWrite as _;
+    let messages: Result<CliprdrSvcMessages<ironrdp_cliprdr::Client>, _> = {
+        let client = active_stage
+            .get_svc_processor_mut::<CliprdrClient>()
+            .ok_or_else(|| "CLIPRDR processor unavailable".to_owned())?;
+        match &work {
+            ClipboardWork::InitiateCopy { formats, .. } => client.initiate_copy(formats),
+            ClipboardWork::InitiateFileCopy { catalog, .. } => {
+                client.initiate_file_copy(catalog.descriptors())
+            }
+            ClipboardWork::InitiatePaste(format) => client.initiate_paste(*format),
+            ClipboardWork::SubmitFormatData(response) => {
+                client.submit_format_data(response.clone())
+            }
+            ClipboardWork::ServeFile { .. } => client.submit_file_contents(
+                file_response.ok_or_else(|| "clipboard file response unavailable".to_owned())?,
+            ),
+            ClipboardWork::RequestRemoteFile(request) => {
+                client.request_file_contents(request.clone())
+            }
+            ClipboardWork::PrepareFileCopy { .. }
+            | ClipboardWork::PrepareRemoteFiles { .. }
+            | ClipboardWork::StoreRemoteChunk { .. } => {
+                unreachable!("file work is completed first")
+            }
+        }
+    };
+    match messages {
+        Ok(messages) => {
+            let data = active_stage
+                .process_svc_processor_messages(messages)
+                .map_err(|error| error.to_string())?;
+            framed
+                .write_all(&data)
+                .await
+                .map_err(|error| error.to_string())?;
+            if let Some(backend) = clipboard_backend_mut(active_stage) {
+                backend.work_succeeded(&work);
+            }
+        }
+        Err(_) => {
+            tracing::warn!(phase = "clipboard_work", "RDP clipboard operation rejected");
+            if let Some(backend) = clipboard_backend_mut(active_stage) {
+                backend.work_failed(&work);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Handles one non-`Resize` [`RdpCmd`] (see [`CmdOutcome`]). `Resize` is
@@ -1771,30 +1908,17 @@ where
         RdpCmd::Resize { .. } => {
             unreachable!("RdpCmd::Resize is handled directly in active_loop, never here")
         }
-        RdpCmd::PasteText(text) => {
-            // Announce text availability on the CLIPRDR channel.
-            let maybe_msgs: Option<CliprdrSvcMessages<ironrdp_cliprdr::Client>> = {
-                if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
-                    // Store the text for when the server requests it.
-                    if let Some(backend) = cliprdr.downcast_backend_mut::<TextCliprdrBackend>() {
-                        backend.set_local_text(text);
+        RdpCmd::Clipboard(command) => {
+            if let Some(backend) = active_stage
+                .get_svc_processor_mut::<CliprdrClient>()
+                .and_then(|client| client.downcast_backend_mut::<ClipboardBackend>())
+            {
+                match command {
+                    RdpClipboardCommand::SetActive(active) => backend.set_active(active),
+                    RdpClipboardCommand::PublishLocal { revision, snapshot } => {
+                        backend.publish_local(revision, snapshot);
                     }
-                    let cf_unicode = ClipboardFormatId::new(13);
-                    cliprdr
-                        .initiate_copy(&[ClipboardFormat {
-                            id: cf_unicode,
-                            name: Some(ClipboardFormatName::new("CF_UNICODETEXT")),
-                        }])
-                        .ok()
-                } else {
-                    None
                 }
-            };
-            if let Some(msgs) = maybe_msgs {
-                let data = active_stage
-                    .process_svc_processor_messages(msgs)
-                    .map_err(|e| e.to_string())?;
-                framed.write_all(&data).await.map_err(|e| e.to_string())?;
             }
             Ok(CmdOutcome::Continue)
         }
@@ -2112,6 +2236,28 @@ mod tests {
         assert!(is_new_resize_target((1280, 720), (1024, 768)));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_clipboard_file_task_does_not_block_driver_shutdown_progress() {
+        let task = ClipboardFileTask {
+            handle: Some(tokio::spawn(
+                std::future::pending::<ClipboardFileCompletion>(),
+            )),
+            started: std::time::Instant::now(),
+            context: ClipboardFileTaskContext::Serve,
+        };
+        assert!(!task.handle.as_ref().unwrap().is_finished());
+
+        // The active loop never awaits an unfinished clipboard task: command
+        // and network branches remain independently pollable. Model a ready
+        // shutdown command while file work is permanently blocked.
+        let shutdown = async { CmdOutcome::Shutdown };
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(50), shutdown)
+            .await
+            .expect("driver command remains live");
+        assert!(outcome == CmdOutcome::Shutdown);
+        drop(task); // Drop aborts the isolated file task.
+    }
+
     // ---------------------------------------------------------------------------
     // P9.9 §3: rdp_action_wants_reactivation (pure, dual-target branch decision)
     // ---------------------------------------------------------------------------
@@ -2191,32 +2337,6 @@ mod tests {
             situation: CertSituation::Unknown,
         };
         assert_eq!(v.decide(&info), CertDecision::Reject);
-    }
-
-    // ---------------------------------------------------------------------------
-    // Clipboard encode/decode round-trip
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn clipboard_utf16le_round_trip() {
-        let original = "Hello, 世界!";
-        let encoded = encode_utf16le(original);
-        let decoded = decode_utf16le(&encoded).expect("must decode");
-        assert_eq!(decoded, original);
-    }
-
-    #[test]
-    fn clipboard_utf16le_empty_string() {
-        let encoded = encode_utf16le("");
-        let decoded = decode_utf16le(&encoded);
-        // Empty string → null-only buffer → take_while stops immediately.
-        assert_eq!(decoded.as_deref(), Some(""));
-    }
-
-    #[test]
-    fn clipboard_decode_empty_slice_returns_none() {
-        assert!(decode_utf16le(&[]).is_none());
-        assert!(decode_utf16le(&[0x41]).is_none()); // odd length
     }
 
     // ---------------------------------------------------------------------------
@@ -2818,6 +2938,8 @@ mod tests {
             test_rdp_auth(),
             verifier,
             CertStore::new(),
+            cm_core::SessionEndpointId(1),
+            None,
         )
         .expect("spawn rdp session (connect failure is async)");
 
@@ -2845,6 +2967,8 @@ mod tests {
             test_rdp_auth(),
             verifier,
             CertStore::new(),
+            cm_core::SessionEndpointId(1),
+            None,
         )
         .expect("spawn rdp session");
 
@@ -2880,6 +3004,8 @@ mod tests {
             test_rdp_auth(),
             verifier,
             CertStore::new(),
+            cm_core::SessionEndpointId(1),
+            None,
         )
         .expect("spawn rdp session");
 
@@ -3049,8 +3175,15 @@ mod tests {
         ) -> Result<RdpSession, String> {
             let verifier = FixedCertVerifier::new(CertDecision::AcceptAndRemember);
             let store = CertStore::new();
-            let session = RdpSession::connect(cfg, auth, verifier, store)
-                .map_err(|e| format!("session construction failed: {e}"))?;
+            let session = RdpSession::connect(
+                cfg,
+                auth,
+                verifier,
+                store,
+                cm_core::SessionEndpointId(1),
+                None,
+            )
+            .map_err(|e| format!("session construction failed: {e}"))?;
 
             let deadline = std::time::Instant::now() + timeout;
             loop {

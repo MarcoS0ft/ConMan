@@ -113,6 +113,7 @@ fn stale_font_family_uses_effective_default() {
         repo,
         secrets: Arc::new(NullCredentialStore),
         session_provider: provider,
+        secure_clipboard_root: None,
         activation_rx: None,
         first_launch: true,
         agent_mode: None,

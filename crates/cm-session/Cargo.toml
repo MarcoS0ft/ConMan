@@ -28,6 +28,7 @@ engine-alacritty = []
 
 [dependencies]
 cm-core = { path = "../cm-core" }
+cm-platform = { path = "../cm-platform" }
 thiserror = "2"
 # Pinned to the exact versions validated in the P0.2 spike.
 libghostty-vt = { version = "=0.2.0", optional = true }
@@ -89,6 +90,7 @@ sha2 = "0.10"
 tokio = { version = "1", features = [
     "rt",
     "net",
+    "fs",
     "io-util",
     "sync",
     "time",
@@ -99,6 +101,7 @@ tokio = { version = "1", features = [
 serde_json = "1"
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
 # P9.9-FIX: rdp_connect_live_host captures its own driver-thread log output
 # (via a private in-memory MakeWriter) to assert the resize PDU was actually

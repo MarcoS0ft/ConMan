@@ -1,7 +1,6 @@
 //! Tab lifecycle: push/open/select/close, and the resize-tab debounce path.
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use std::thread;
 
 use cm_core::LocalSettings;
@@ -212,10 +211,9 @@ pub(super) fn lowest_free_number(used: &[u32]) -> u32 {
 
 pub(super) struct PushTabArgs {
     pub(super) session: Box<dyn Session>,
+    pub(super) endpoint_id: Option<cm_core::SessionEndpointId>,
     pub(super) connect_info: Option<ConnectInfo>,
     pub(super) is_remote: bool,
-    /// RDP only: Arc to the drive thread's remote-clipboard slot (for CLIPRDR sync).
-    pub(super) rdp_clipboard: Option<Arc<Mutex<Option<String>>>>,
     pub(super) title: String,
     pub(super) initial_status: &'static str,
     /// The stored connection id this tab was launched from, if any (P6.9 gap 16;
@@ -240,9 +238,9 @@ pub(super) fn push_tab(
 ) {
     let PushTabArgs {
         session,
+        endpoint_id,
         connect_info,
         is_remote,
-        rdp_clipboard,
         title,
         initial_status,
         origin_connection_id,
@@ -269,14 +267,19 @@ pub(super) fn push_tab(
     };
     let used: Vec<u32> = st.tabs.iter().map(|t| t.num).collect();
     let num = lowest_free_number(&used);
+    let Some(endpoint_id) = endpoint_id.or_else(|| st.allocate_endpoint_id()) else {
+        tracing::error!("session endpoint ID space exhausted");
+        session.shutdown();
+        return;
+    };
     st.tabs.push(Tab {
+        endpoint_id,
         session,
         renderer,
         last: None,
         last_frame: None,
         rdp_w: 0,
         rdp_h: 0,
-        rdp_clipboard,
         cols: size.cols,
         rows: size.rows,
         scale,
@@ -408,9 +411,9 @@ fn spawn_local_tab(
         ui,
         PushTabArgs {
             session,
+            endpoint_id: None,
             connect_info: None,
             is_remote: false,
-            rdp_clipboard: None,
             title,
             initial_status: "connected",
             origin_connection_id: None,

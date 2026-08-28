@@ -253,13 +253,6 @@ pub(crate) fn char_to_ps2_scancode(text: &str, special: i32) -> Option<(u8, bool
     }
 }
 
-#[must_use]
-pub(crate) fn rdp_text_matches_ascii_letter(text: &str, expected: char) -> bool {
-    text.chars()
-        .next()
-        .is_some_and(|ch| ch.eq_ignore_ascii_case(&expected))
-}
-
 /// PS/2 scancodes for modifier key variants.
 const SC_LCTRL: u8 = 0x1D;
 const SC_LSHIFT: u8 = 0x2A;
@@ -569,13 +562,6 @@ mod tests {
             MouseButton::ScrollDown
         );
         assert!(map_scroll(0.0, 0, 0, 0).is_none());
-    }
-
-    #[test]
-    fn rdp_clipboard_letter_matching_accepts_only_literal_ascii() {
-        assert!(rdp_text_matches_ascii_letter("v", 'v'));
-        assert!(rdp_text_matches_ascii_letter("V", 'v'));
-        assert!(!rdp_text_matches_ascii_letter("\u{16}", 'v'));
     }
 
     #[test]

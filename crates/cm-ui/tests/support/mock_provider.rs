@@ -231,6 +231,7 @@ impl SessionProvider for MockSessionProvider {
         _settings: &RdpSettings,
         _auth: RdpAuthInput,
         _verifier: Arc<dyn CertVerifier>,
+        _endpoint_id: cm_core::SessionEndpointId,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
         self.rdp_connect_calls.fetch_add(1, Ordering::SeqCst);
         let cell = self

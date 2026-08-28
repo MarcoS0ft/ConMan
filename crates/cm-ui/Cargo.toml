@@ -30,7 +30,7 @@ cosmic-text = { version = "=0.19.0", default-features = false, features = [
 unicode-script = "0.5"
 # arboard: cross-platform clipboard access for RDP CLIPRDR bidirectional sync (P4.2).
 # See docs/devel/memos/p4.2-clipboard-dep.md for the rationale.
-arboard = "3"
+arboard = { version = "3", features = ["wayland-data-control"] }
 # Structured logging facade (P6.3). The composition root (`conman`) installs
 # the actual subscriber; libraries only ever call the `tracing::*` macros.
 tracing = "0.1"
@@ -44,6 +44,18 @@ serde_json = "1"
 # `wayland` on Linux) talk to the desktop portal via a bundled blocking mini-executor;
 # no GTK3 linkage and no dependency on the workspace's `tokio` runtime.
 rfd = "0.17"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_UI_Shell",
+] }
 
 [features]
 # P8.1: off by default, no dependency changes of its own. When enabled, build.rs compiles

@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use cm_core::rdp::{CertVerifier, RdpAuthInput};
 use cm_core::session::Session;
+use cm_core::session::SessionEndpointId;
 use cm_core::session_ports::{SessionProvider, SessionSetupError};
 use cm_core::ssh::{HostKeyVerifier, SshAuthInput};
 use cm_core::terminal::TerminalSize;
@@ -26,15 +27,17 @@ use crate::telnet::TelnetTerminalSession;
 /// its own trust-store defaults, exactly as the pre-P6.15 `cm-ui` call sites
 /// did inline (`KnownHosts::with_defaults()`,
 /// `CertStore::new_persistent(<app-data dir>/conman/cert_trust.json)`).
-#[derive(Debug, Default)]
-pub struct SessionProviderImpl;
+#[derive(Debug)]
+pub struct SessionProviderImpl {
+    clipboard_root: Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>,
+}
 
 impl SessionProviderImpl {
     /// Construct the provider. No setup performed here — trust stores are
     /// resolved per-connect, matching the pre-P6.15 behavior.
     #[must_use]
-    pub fn new() -> Self {
-        Self
+    pub fn new(clipboard_root: Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>) -> Self {
+        Self { clipboard_root }
     }
 }
 
@@ -87,9 +90,17 @@ impl SessionProvider for SessionProviderImpl {
         settings: &RdpSettings,
         auth: RdpAuthInput,
         verifier: Arc<dyn CertVerifier>,
+        endpoint_id: SessionEndpointId,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
-        RdpSession::connect(settings, auth, verifier, default_cert_store())
-            .map(|s| Box::new(s) as Box<dyn Session>)
-            .map_err(|e| SessionSetupError::new(e.to_string()))
+        RdpSession::connect(
+            settings,
+            auth,
+            verifier,
+            default_cert_store(),
+            endpoint_id,
+            self.clipboard_root.clone(),
+        )
+        .map(|s| Box::new(s) as Box<dyn Session>)
+        .map_err(|e| SessionSetupError::new(e.to_string()))
     }
 }

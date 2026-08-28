@@ -329,7 +329,7 @@ impl Session for LocalTerminalSession {
                 <Self as TerminalSession>::set_scroll(self, offset);
             }
             // RDP inputs are not applicable to terminal sessions.
-            SessionInput::Rdp(_) | SessionInput::RdpPaste(_) => {}
+            SessionInput::Rdp(_) | SessionInput::RdpClipboard(_) => {}
         }
     }
 

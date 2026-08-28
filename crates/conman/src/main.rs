@@ -309,17 +309,48 @@ fn build_config(
     let repo = repo.with_credential_store(Arc::clone(&secrets));
     let repo: Arc<dyn cm_core::ConnectionRepository> = Arc::new(repo);
 
+    // Clipboard staging is bootstrapped once and shared with the UI worker and
+    // concrete RDP provider. Failure disables file transfer only.
+    let (secure_clipboard_root, provider_clipboard_root) =
+        compose_clipboard_dependencies(cm_platform::secure_temp::SecureClipboardRoot::bootstrap);
+
     // ── Session provider (P6.15, gap 27) ────────────────────────────────────
-    let session_provider: Arc<dyn cm_core::SessionProvider> = Arc::new(SessionProviderImpl::new());
+    let session_provider: Arc<dyn cm_core::SessionProvider> =
+        Arc::new(SessionProviderImpl::new(provider_clipboard_root));
 
     Ok(AppConfig {
         repo,
         secrets,
         session_provider,
+        secure_clipboard_root,
         activation_rx,
         first_launch,
         agent_mode,
     })
+}
+
+fn compose_clipboard_dependencies<F>(
+    bootstrap: F,
+) -> (
+    Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>,
+    Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>,
+)
+where
+    F: FnOnce() -> Result<
+        cm_platform::secure_temp::SecureClipboardRoot,
+        cm_platform::secure_temp::SecureTempError,
+    >,
+{
+    match bootstrap() {
+        Ok(root) => {
+            let root = Arc::new(root);
+            (Some(Arc::clone(&root)), Some(root))
+        }
+        Err(error) => {
+            tracing::warn!(reason = ?error, "clipboard file staging unavailable");
+            (None, None)
+        }
+    }
 }
 
 /// Populate the in-memory database with demo groups, connections, credential
@@ -477,6 +508,32 @@ fn seed_demo_data(repo: &SqliteRepository) -> Result<(), Box<dyn std::error::Err
 #[cfg(test)]
 mod demo_seed_gating_tests {
     use super::*;
+
+    #[test]
+    fn clipboard_composition_bootstraps_once_and_shares_one_root() {
+        let calls = std::cell::Cell::new(0);
+        let (ui, provider) = compose_clipboard_dependencies(|| {
+            calls.set(calls.get() + 1);
+            cm_platform::secure_temp::SecureClipboardRoot::bootstrap()
+        });
+        assert_eq!(calls.get(), 1);
+        assert!(Arc::ptr_eq(
+            ui.as_ref().expect("UI root"),
+            provider.as_ref().expect("provider root")
+        ));
+    }
+
+    #[test]
+    fn clipboard_composition_failure_is_single_attempt_and_disables_files() {
+        let calls = std::cell::Cell::new(0);
+        let (ui, provider) = compose_clipboard_dependencies(|| {
+            calls.set(calls.get() + 1);
+            Err(cm_platform::secure_temp::SecureTempError::Unavailable)
+        });
+        assert_eq!(calls.get(), 1);
+        assert!(ui.is_none());
+        assert!(provider.is_none());
+    }
 
     /// Default build (feature OFF, the release posture): first launch on a
     /// brand-new DB must leave the groups list empty -- no demo seed -- while

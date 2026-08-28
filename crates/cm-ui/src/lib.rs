@@ -140,6 +140,9 @@ pub struct AppConfig {
     /// adapters directly — the binary builds `cm_session::
     /// SessionProviderImpl` and injects it here, mirroring `repo`/`secrets`.
     pub session_provider: Arc<dyn SessionProvider>,
+    /// Process-private CLIPRDR staging root. `None` disables file clipboard
+    /// while leaving text clipboard available.
+    pub secure_clipboard_root: Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>,
     /// P6.16: receives a `()` for every activation request from a second
     /// `conman` launch (delivered by `cm_platform::single_instance`). `run`
     /// spawns a small listener thread that brings the window forward on the

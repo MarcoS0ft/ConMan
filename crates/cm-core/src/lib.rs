@@ -43,7 +43,9 @@ pub use ids::{ConnectionId, CredentialFolderId, CredentialId, GroupId};
 pub use kind::ConnectionKind;
 pub use ports::{ConnectionRepository, CredentialStore};
 pub use session::{
-    ExitStatus, FailedSession, FrameUpdate, RdpInputEvent, RdpMouseButton, Session, SessionInput,
+    ClipboardPublishResult, ClipboardSnapshot, ExitStatus, FailedSession, FrameUpdate,
+    LocalClipboardRevision, RdpClipboardCommand, RdpClipboardEvent, RdpInputEvent, RdpMouseButton,
+    RemoteClipboardContent, RemoteClipboardRevision, Session, SessionEndpointId, SessionInput,
     SessionStatus, Surface,
 };
 pub use session_ports::{SessionProvider, SessionSetupError};

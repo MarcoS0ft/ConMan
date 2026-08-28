@@ -401,7 +401,7 @@ impl Session for TelnetTerminalSession {
             SessionInput::Mouse(event) => <Self as TerminalSession>::send_mouse(self, event),
             SessionInput::Paste(bytes) => <Self as TerminalSession>::paste(self, bytes),
             SessionInput::Scroll(offset) => <Self as TerminalSession>::set_scroll(self, offset),
-            SessionInput::Rdp(_) | SessionInput::RdpPaste(_) => {}
+            SessionInput::Rdp(_) | SessionInput::RdpClipboard(_) => {}
         }
     }
 

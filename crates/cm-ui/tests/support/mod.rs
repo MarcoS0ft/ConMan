@@ -100,6 +100,7 @@ pub(crate) fn harness_with_agent_mode(
         repo: repo.clone(),
         secrets: Arc::new(NullCredentialStore),
         session_provider: provider.clone(),
+        secure_clipboard_root: None,
         activation_rx: None,
         first_launch,
         agent_mode,

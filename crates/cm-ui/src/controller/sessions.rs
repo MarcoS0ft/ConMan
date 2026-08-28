@@ -144,12 +144,12 @@ fn wire_key_input(ctx: &Ctx) {
                         return;
                     }
                     // Ctrl+Shift+C → copy the focused pane's selection (P6.5).
-                    (0, "c" | "C") => {
+                    (0, "c" | "C") if focused_pane_is_terminal(&state.borrow()) => {
                         do_copy(&state);
                         return;
                     }
                     // Ctrl+Shift+V → paste the OS clipboard (P6.5).
-                    (0, "v" | "V") => {
+                    (0, "v" | "V") if focused_pane_is_terminal(&state.borrow()) => {
                         do_paste(&state);
                         return;
                     }
@@ -348,7 +348,13 @@ fn do_copy(state: &Rc<RefCell<State>>) {
             .and_then(|ep| ep.last.as_ref().and_then(|snap| ep.sel.copy_text(snap)))
     };
     if let Some(text) = text {
-        st.sys_clipboard.set_text(text);
+        let replaced = st.sys_clipboard.submit_write(
+            crate::clipboard::ClipboardWritePurpose::TerminalSelectionCopy,
+            crate::clipboard::ClipboardWrite::Text(text),
+        );
+        if let Some(replaced) = replaced {
+            handle_replaced_clipboard_write(&mut st, &replaced);
+        }
     }
 }
 
@@ -359,25 +365,19 @@ fn do_copy(state: &Rc<RefCell<State>>) {
 /// DECSET 2004 (raw otherwise — see `cm_session::engine_owner::wrap_paste`).
 fn do_paste(state: &Rc<RefCell<State>>) {
     let mut st = state.borrow_mut();
-    let Some(text) = st.sys_clipboard.get_text() else {
-        return;
-    };
-    if text.is_empty() {
-        return;
-    }
     let active = st.active;
     let Some(tab) = st.tabs.get(active) else {
         return;
     };
     let focused = tab.pane_group.focused();
-    let bytes = text.into_bytes();
-    if focused == 0 {
-        tab.session.send_input(SessionInput::Paste(bytes));
-    } else if let Some(ep) = tab.extra_panes.get(focused - 1) {
-        ep.session.send_input(SessionInput::Paste(bytes));
+    let target = if focused == 0 {
+        tab.endpoint_id
     } else {
-        tab.session.send_input(SessionInput::Paste(bytes));
-    }
+        tab.extra_panes
+            .get(focused - 1)
+            .map_or(tab.endpoint_id, |pane| pane.endpoint_id)
+    };
+    let _ = st.sys_clipboard.request_terminal_text(target);
 }
 
 /// Mouse button discriminant for a middle-click (see `input::map_mouse`'s
@@ -1151,20 +1151,6 @@ fn wire_rdp_key_down(ctx: &Ctx) {
     ctx.ui.on_rdp_key_down({
         let state = ctx.state.clone();
         move |text, special, mods| {
-            // Local→remote clipboard sync: intercept Ctrl+V, announce our clipboard.
-            if mods & input::MOD_CTRL != 0
-                && input::rdp_text_matches_ascii_letter(text.as_str(), 'v')
-            {
-                let paste_text = state.borrow_mut().sys_clipboard.get_text();
-                if let Some(text_to_paste) = paste_text {
-                    let st = state.borrow();
-                    if let Some(tab) = st.tabs.get(st.active) {
-                        send_to_focused_pane(tab, SessionInput::RdpPaste(text_to_paste));
-                    }
-                }
-                // Fall through: also send the Ctrl+V scancodes so the remote app triggers
-                // a clipboard request after we've announced our content.
-            }
             let st = state.borrow();
             if let Some(tab) = st.tabs.get(st.active) {
                 let events = input::map_rdp_key_down(text.as_str(), special, mods);
@@ -2320,9 +2306,9 @@ fn push_failed_remote_tab(
         ui,
         tabs::PushTabArgs {
             session: Box::new(FailedSession::new(reason.clone())),
+            endpoint_id: None,
             connect_info: None,
             is_remote: true,
-            rdp_clipboard: None,
             title,
             initial_status: "error",
             origin_connection_id,
@@ -2445,9 +2431,9 @@ pub(super) fn open_ssh_tab(
                 ui,
                 tabs::PushTabArgs {
                     session,
+                    endpoint_id: None,
                     connect_info: Some(ConnectInfo::Ssh(ci)),
                     is_remote: true,
-                    rdp_clipboard: None,
                     title,
                     initial_status: "connecting",
                     origin_connection_id,
@@ -2531,9 +2517,9 @@ pub(super) fn open_telnet_tab(
                 ui,
                 tabs::PushTabArgs {
                     session,
+                    endpoint_id: None,
                     connect_info: Some(ConnectInfo::Telnet(settings)),
                     is_remote: true,
-                    rdp_clipboard: None,
                     title,
                     initial_status: "connecting",
                     origin_connection_id,
@@ -2645,7 +2631,11 @@ pub(super) fn open_rdp_tab(
         AuthProvenance::Credential(id) => RdpAuthSource::Credential(id),
     };
     let provider = state.borrow().session_provider.clone();
-    let session = match provider.connect_rdp(&settings, auth, verifier) {
+    let Some(endpoint_id) = state.borrow_mut().allocate_endpoint_id() else {
+        tracing::error!("session endpoint ID space exhausted");
+        return;
+    };
+    let session = match provider.connect_rdp(&settings, auth, verifier, endpoint_id) {
         Ok(s) => s,
         Err(e) => {
             // P6.12: mirrors open_ssh_tab's synchronous-setup-error handling
@@ -2664,8 +2654,6 @@ pub(super) fn open_rdp_tab(
             return;
         }
     };
-    // Retain a reference to the drive thread's clipboard slot for remote→local sync.
-    let rdp_clipboard = session.remote_clipboard();
     let ci = RdpConnectInfo {
         settings,
         auth_source,
@@ -2676,9 +2664,9 @@ pub(super) fn open_rdp_tab(
         ui,
         tabs::PushTabArgs {
             session,
+            endpoint_id: Some(endpoint_id),
             connect_info: Some(ConnectInfo::Rdp(ci)),
             is_remote: true,
-            rdp_clipboard,
             title,
             initial_status: "connecting",
             origin_connection_id,
@@ -2750,9 +2738,18 @@ pub(super) fn reconnect_rdp_tab(
         AuthProvenance::Credential(id) => RdpAuthSource::Credential(id),
     };
     let provider = state.borrow().session_provider.clone();
-    match provider.connect_rdp(&settings, auth, verifier) {
+    let Some(endpoint_id) = state.borrow_mut().allocate_endpoint_id() else {
+        fail_reconnect_in_place(
+            state,
+            tab_model,
+            ui,
+            tab_idx,
+            "Session identity space exhausted".to_owned(),
+        );
+        return;
+    };
+    match provider.connect_rdp(&settings, auth, verifier, endpoint_id) {
         Ok(new_session) => {
-            let rdp_clipboard = new_session.remote_clipboard();
             let ci = RdpConnectInfo {
                 settings,
                 auth_source,
@@ -2760,10 +2757,10 @@ pub(super) fn reconnect_rdp_tab(
             {
                 let mut st = state.borrow_mut();
                 if let Some(tab) = st.tabs.get_mut(tab_idx) {
+                    tab.endpoint_id = endpoint_id;
                     tab.session = new_session;
                     tab.connect_info = Some(ConnectInfo::Rdp(ci));
                     tab.last_frame = None;
-                    tab.rdp_clipboard = rdp_clipboard;
                     // P9.5 #3: keep the cached identity/kind (select_tab
                     // re-pushes these on every switch) in step with a
                     // reconnect, same as the fresh-connect path.
@@ -3033,13 +3030,6 @@ fn tick_tab(
                 st.tabs[i].rdp_w = frame.width;
                 st.tabs[i].rdp_h = frame.height;
             }
-            // Remote→local clipboard sync: poll slot written by the drive thread.
-            if let Some(ref arc) = st.tabs[i].rdp_clipboard.clone()
-                && let Ok(mut slot) = arc.try_lock()
-                && let Some(text) = slot.take()
-            {
-                st.sys_clipboard.set_text(text);
-            }
         }
     }
 
@@ -3214,6 +3204,576 @@ fn tick_tab(
     !st.tabs[i].is_remote && matches!(status, SessionStatus::Exited(_))
 }
 
+fn focused_rdp_owner(st: &State) -> Option<cm_core::SessionEndpointId> {
+    let tab = st.tabs.get(st.active)?;
+    let focused = tab.pane_group.focused();
+    if focused == 0 {
+        matches!(tab.session.surface(), Surface::Framebuffer(_)).then_some(tab.endpoint_id)
+    } else {
+        let pane = tab.extra_panes.get(focused - 1)?;
+        matches!(pane.session.surface(), Surface::Framebuffer(_)).then_some(pane.endpoint_id)
+    }
+}
+
+fn focused_pane_is_terminal(st: &State) -> bool {
+    let Some(tab) = st.tabs.get(st.active) else {
+        return false;
+    };
+    let focused = tab.pane_group.focused();
+    if focused == 0 {
+        matches!(tab.session.surface(), Surface::TerminalGrid(_))
+    } else {
+        tab.extra_panes
+            .get(focused - 1)
+            .is_some_and(|pane| matches!(pane.session.surface(), Surface::TerminalGrid(_)))
+    }
+}
+
+fn send_to_endpoint(st: &State, endpoint: cm_core::SessionEndpointId, input: SessionInput) -> bool {
+    for tab in &st.tabs {
+        if tab.endpoint_id == endpoint {
+            tab.session.send_input(input);
+            return true;
+        }
+        for pane in &tab.extra_panes {
+            if pane.endpoint_id == endpoint {
+                pane.session.send_input(input);
+                return true;
+            }
+        }
+    }
+    for detached in &st.detached {
+        if detached.endpoint_id == endpoint {
+            detached.session.send_input(input);
+            return true;
+        }
+    }
+    false
+}
+
+fn collect_rdp_clipboard_events(
+    st: &State,
+) -> Vec<(cm_core::SessionEndpointId, cm_core::RdpClipboardEvent)> {
+    let mut events = Vec::new();
+    for tab in &st.tabs {
+        events.extend(
+            tab.session
+                .drain_rdp_clipboard_events()
+                .into_iter()
+                .map(|event| (tab.endpoint_id, event)),
+        );
+        for pane in &tab.extra_panes {
+            events.extend(
+                pane.session
+                    .drain_rdp_clipboard_events()
+                    .into_iter()
+                    .map(|event| (pane.endpoint_id, event)),
+            );
+        }
+    }
+    for detached in &st.detached {
+        events.extend(
+            detached
+                .session
+                .drain_rdp_clipboard_events()
+                .into_iter()
+                .map(|event| (detached.endpoint_id, event)),
+        );
+    }
+    events
+}
+
+fn handle_replaced_clipboard_write(
+    st: &mut State,
+    request: &crate::clipboard::ClipboardWriteRequest,
+) {
+    if let crate::clipboard::ClipboardWritePurpose::RdpInstall { owner, revision } = request.purpose
+        && let Some(pending) = st.clipboard_pending_remote.remove(&(owner, revision))
+        && let Some(path) = pending.staging_root
+    {
+        cleanup_staging_path(st, &path);
+    }
+}
+
+fn cleanup_staging_path(st: &State, path: &std::path::Path) {
+    if let Some(root) = st.secure_clipboard_root.as_ref()
+        && let Err(error) = root.cleanup_staging_path(path)
+    {
+        tracing::debug!(reason = ?error, "clipboard staging cleanup rejected");
+    }
+}
+
+fn update_installed_file_lease(
+    lease: &mut Option<(cm_core::ClipboardSnapshot, std::path::PathBuf)>,
+    installed: cm_core::ClipboardSnapshot,
+    new_staging: Option<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    let mut cleanup = Vec::new();
+    if lease
+        .as_ref()
+        .is_some_and(|(snapshot, _)| *snapshot != installed)
+        && let Some((_, old_path)) = lease.take()
+    {
+        cleanup.push(old_path);
+    }
+    if let Some(path) = new_staging
+        && let Some((_, old_path)) = lease.replace((installed, path.clone()))
+        && old_path != path
+    {
+        cleanup.push(old_path);
+    }
+    cleanup
+}
+
+fn observation_needs_publication(
+    origin: Option<&(
+        cm_core::SessionEndpointId,
+        cm_core::RemoteClipboardRevision,
+        cm_core::ClipboardSnapshot,
+    )>,
+    owner: cm_core::SessionEndpointId,
+    snapshot: &cm_core::ClipboardSnapshot,
+) -> bool {
+    !origin.is_some_and(|(origin_owner, _, origin_snapshot)| {
+        *origin_owner == owner && origin_snapshot == snapshot
+    })
+}
+
+fn cleanup_unused_source_leases(st: &mut State) {
+    let paths = st
+        .clipboard_source_leases
+        .iter()
+        .filter_map(|(path, lease)| lease.cleanup_ready().then_some(path.clone()))
+        .collect::<Vec<_>>();
+    for path in paths {
+        st.clipboard_source_leases.remove(&path);
+        cleanup_staging_path(st, &path);
+    }
+}
+
+fn mark_source_unobserved(st: &mut State) {
+    if let Some(path) = st.clipboard_observed_source.take()
+        && let Some(lease) = st.clipboard_source_leases.get_mut(&path)
+    {
+        lease.still_observed = false;
+    }
+    cleanup_unused_source_leases(st);
+}
+
+fn observe_source_staging(
+    st: &mut State,
+    snapshot: &cm_core::ClipboardSnapshot,
+    source_root: Option<std::path::PathBuf>,
+) {
+    if st.clipboard_observed_source != source_root {
+        mark_source_unobserved(st);
+    }
+    let Some(path) = source_root else {
+        return;
+    };
+    let lease = st
+        .clipboard_source_leases
+        .entry(path.clone())
+        .or_insert_with(|| ClipboardSourceLease {
+            snapshot: snapshot.clone(),
+            still_observed: true,
+            users: BTreeSet::new(),
+        });
+    lease.snapshot = snapshot.clone();
+    lease.still_observed = true;
+    st.clipboard_observed_source = Some(path);
+}
+
+fn retire_source_staging(st: &mut State, path: &std::path::Path) {
+    if st.clipboard_observed_source.as_deref() == Some(path) {
+        st.clipboard_observed_source = None;
+    }
+    if let Some(lease) = st.clipboard_source_leases.get_mut(path) {
+        lease.still_observed = false;
+        cleanup_unused_source_leases(st);
+    } else {
+        cleanup_staging_path(st, path);
+    }
+}
+
+fn retain_source_for_publication(
+    st: &mut State,
+    endpoint: cm_core::SessionEndpointId,
+    revision: cm_core::LocalClipboardRevision,
+    snapshot: &cm_core::ClipboardSnapshot,
+) {
+    if let Some(path) = st.clipboard_observed_source.as_ref()
+        && let Some(lease) = st.clipboard_source_leases.get_mut(path)
+        && lease.still_observed
+        && lease.snapshot == *snapshot
+    {
+        lease.retain(endpoint, revision);
+    }
+}
+
+fn release_source_publication(
+    st: &mut State,
+    endpoint: cm_core::SessionEndpointId,
+    revision: cm_core::LocalClipboardRevision,
+) {
+    for lease in st.clipboard_source_leases.values_mut() {
+        lease.release(endpoint, revision);
+    }
+    cleanup_unused_source_leases(st);
+}
+
+fn release_source_endpoint(st: &mut State, endpoint: cm_core::SessionEndpointId) {
+    for lease in st.clipboard_source_leases.values_mut() {
+        lease.users.retain(|(user, _)| *user != endpoint);
+    }
+    cleanup_unused_source_leases(st);
+}
+
+fn allocate_local_clipboard_revision(next: &mut u64) -> Option<cm_core::LocalClipboardRevision> {
+    let revision = cm_core::LocalClipboardRevision(*next);
+    *next = next.checked_add(1)?;
+    Some(revision)
+}
+
+fn begin_terminal_clipboard_disable(
+    disabled: &mut bool,
+    owner: &mut Option<cm_core::SessionEndpointId>,
+) -> Option<cm_core::SessionEndpointId> {
+    *disabled = true;
+    owner.take()
+}
+
+fn focused_clipboard_owner(
+    disabled: bool,
+    focused: Option<cm_core::SessionEndpointId>,
+) -> Option<cm_core::SessionEndpointId> {
+    if disabled { None } else { focused }
+}
+
+fn disable_clipboard_bridge(st: &mut State) {
+    let old_owner = begin_terminal_clipboard_disable(
+        &mut st.clipboard_bridge_disabled,
+        &mut st.clipboard_owner,
+    );
+    if let Some(old_owner) = old_owner {
+        let _ = send_to_endpoint(
+            st,
+            old_owner,
+            SessionInput::RdpClipboard(cm_core::RdpClipboardCommand::SetActive(false)),
+        );
+    }
+    st.sys_clipboard.set_rdp_demand(None);
+
+    // No acknowledgement can make a publication usable after the bridge has
+    // failed closed. Retire every source user now so a late result cannot
+    // retain staging indefinitely.
+    st.clipboard_endpoint_sync.clear();
+    st.clipboard_observed_source = None;
+    for lease in st.clipboard_source_leases.values_mut() {
+        lease.still_observed = false;
+        lease.users.clear();
+    }
+    cleanup_unused_source_leases(st);
+    st.clipboard_remote_origin = None;
+
+    // Do not eagerly remove `clipboard_pending_remote`: a platform write may
+    // already be executing. Its bounded result path remains responsible for
+    // adopting or cleaning that staging root without racing the OS call.
+}
+
+fn publish_local_clipboard(
+    st: &mut State,
+    owner: cm_core::SessionEndpointId,
+    snapshot: cm_core::ClipboardSnapshot,
+) {
+    if st.clipboard_bridge_disabled {
+        return;
+    }
+    let Some(revision) = allocate_local_clipboard_revision(&mut st.next_local_clipboard_revision)
+    else {
+        disable_clipboard_bridge(st);
+        return;
+    };
+    retain_source_for_publication(st, owner, revision, &snapshot);
+    let sync = st.clipboard_endpoint_sync.entry(owner).or_default();
+    if sync.inflight.is_some() {
+        if let Some((replaced, _)) = sync.latest_pending.replace((revision, snapshot)) {
+            release_source_publication(st, owner, replaced);
+        }
+        return;
+    }
+    if send_to_endpoint(
+        st,
+        owner,
+        SessionInput::RdpClipboard(cm_core::RdpClipboardCommand::PublishLocal {
+            revision,
+            snapshot,
+        }),
+    ) {
+        st.clipboard_endpoint_sync
+            .entry(owner)
+            .or_default()
+            .inflight = Some(revision);
+    } else {
+        st.clipboard_endpoint_sync.remove(&owner);
+        release_source_publication(st, owner, revision);
+    }
+}
+
+fn complete_local_advertisement(
+    st: &mut State,
+    endpoint: cm_core::SessionEndpointId,
+    revision: cm_core::LocalClipboardRevision,
+) {
+    let pending = {
+        let Some(sync) = st.clipboard_endpoint_sync.get_mut(&endpoint) else {
+            return;
+        };
+        if sync.inflight != Some(revision) {
+            return;
+        }
+        sync.inflight = None;
+        sync.latest_pending.take()
+    };
+    release_source_publication(st, endpoint, revision);
+    if let Some((next_revision, snapshot)) = pending {
+        if send_to_endpoint(
+            st,
+            endpoint,
+            SessionInput::RdpClipboard(cm_core::RdpClipboardCommand::PublishLocal {
+                revision: next_revision,
+                snapshot,
+            }),
+        ) {
+            st.clipboard_endpoint_sync
+                .entry(endpoint)
+                .or_default()
+                .inflight = Some(next_revision);
+        } else {
+            st.clipboard_endpoint_sync.remove(&endpoint);
+            release_source_publication(st, endpoint, next_revision);
+        }
+    }
+}
+
+fn tick_clipboard(st: &mut State) {
+    let live_endpoints = st
+        .tabs
+        .iter()
+        .flat_map(|tab| {
+            std::iter::once(tab.endpoint_id)
+                .chain(tab.extra_panes.iter().map(|pane| pane.endpoint_id))
+        })
+        .chain(st.detached.iter().map(|entry| entry.endpoint_id))
+        .collect::<std::collections::BTreeSet<_>>();
+    let stale_sync = st
+        .clipboard_endpoint_sync
+        .keys()
+        .filter(|endpoint| !live_endpoints.contains(endpoint))
+        .copied()
+        .collect::<Vec<_>>();
+    for endpoint in stale_sync {
+        st.clipboard_endpoint_sync.remove(&endpoint);
+        release_source_endpoint(st, endpoint);
+    }
+    let stale_installs = st
+        .clipboard_pending_remote
+        .keys()
+        .filter(|(endpoint, _)| !live_endpoints.contains(endpoint))
+        .copied()
+        .collect::<Vec<_>>();
+    for key in stale_installs {
+        if let Some(pending) = st.clipboard_pending_remote.remove(&key)
+            && let Some(path) = pending.staging_root
+        {
+            cleanup_staging_path(st, &path);
+        }
+    }
+    if st.clipboard_bridge_disabled {
+        disable_clipboard_bridge(st);
+    }
+    let owner = focused_clipboard_owner(st.clipboard_bridge_disabled, focused_rdp_owner(st));
+    if owner != st.clipboard_owner {
+        if let Some(old) = st.clipboard_owner.take() {
+            let _ = send_to_endpoint(
+                st,
+                old,
+                SessionInput::RdpClipboard(cm_core::RdpClipboardCommand::SetActive(false)),
+            );
+        }
+        let Some(generation) = st.clipboard_demand_generation.checked_add(1) else {
+            disable_clipboard_bridge(st);
+            return;
+        };
+        st.clipboard_owner = owner;
+        st.clipboard_demand_generation = generation;
+        if let Some(new_owner) = owner {
+            let _ = send_to_endpoint(
+                st,
+                new_owner,
+                SessionInput::RdpClipboard(cm_core::RdpClipboardCommand::SetActive(true)),
+            );
+            st.sys_clipboard
+                .set_rdp_demand(Some(st.clipboard_demand_generation));
+        } else {
+            st.sys_clipboard.set_rdp_demand(None);
+            mark_source_unobserved(st);
+        }
+    }
+
+    let events = collect_rdp_clipboard_events(st);
+    for (endpoint, event) in events {
+        match event {
+            cm_core::RdpClipboardEvent::RemoteContent { revision, content }
+                if Some(endpoint) == st.clipboard_owner =>
+            {
+                let (write, snapshot, staging_root) = match content {
+                    cm_core::RemoteClipboardContent::Text(text) => {
+                        let snapshot = cm_core::ClipboardSnapshot::Text(text.clone());
+                        (crate::clipboard::ClipboardWrite::Text(text), snapshot, None)
+                    }
+                    cm_core::RemoteClipboardContent::Files {
+                        staging_root,
+                        paths,
+                    } => {
+                        let snapshot = cm_core::ClipboardSnapshot::Files(paths.clone());
+                        (
+                            crate::clipboard::ClipboardWrite::Files(paths),
+                            snapshot,
+                            Some(staging_root),
+                        )
+                    }
+                };
+                st.clipboard_pending_remote.insert(
+                    (endpoint, revision),
+                    PendingRemoteInstall {
+                        snapshot,
+                        staging_root,
+                    },
+                );
+                let replaced = st.sys_clipboard.submit_write(
+                    crate::clipboard::ClipboardWritePurpose::RdpInstall {
+                        owner: endpoint,
+                        revision,
+                    },
+                    write,
+                );
+                if let Some(replaced) = replaced {
+                    handle_replaced_clipboard_write(st, &replaced);
+                }
+            }
+            cm_core::RdpClipboardEvent::RemoteContent {
+                content: cm_core::RemoteClipboardContent::Files { staging_root, .. },
+                ..
+            } => cleanup_staging_path(st, &staging_root),
+            cm_core::RdpClipboardEvent::RemoteContent { .. } => {}
+            cm_core::RdpClipboardEvent::LocalAdvertiseResult { revision, .. } => {
+                complete_local_advertisement(st, endpoint, revision);
+            }
+        }
+    }
+
+    let results = st.sys_clipboard.drain_results();
+    for path in results.retired_source_roots {
+        retire_source_staging(st, &path);
+    }
+    for result in results.terminal_reads {
+        tracing::trace!(
+            request_id = result.request_id,
+            "terminal clipboard read completed"
+        );
+        if let Ok(Some(text)) = result.text
+            && !text.is_empty()
+        {
+            let _ = send_to_endpoint(st, result.target, SessionInput::Paste(text.into_bytes()));
+        }
+    }
+    for result in results.write_results {
+        tracing::trace!(request_id = result.request_id, purpose = ?result.purpose, "clipboard write completed");
+        if let crate::clipboard::ClipboardWriteOutcome::Failed(reason) = result.outcome {
+            tracing::debug!(
+                request_id = result.request_id,
+                ?reason,
+                "clipboard write failed"
+            );
+        }
+        match result.purpose {
+            crate::clipboard::ClipboardWritePurpose::RdpInstall { owner, revision } => {
+                if let Some(pending) = st.clipboard_pending_remote.remove(&(owner, revision)) {
+                    if result.outcome == crate::clipboard::ClipboardWriteOutcome::Written {
+                        if st.clipboard_bridge_disabled {
+                            st.clipboard_remote_origin = None;
+                        } else {
+                            st.clipboard_remote_origin =
+                                Some((owner, revision, pending.snapshot.clone()));
+                        }
+                        let cleanup = update_installed_file_lease(
+                            &mut st.clipboard_staged_lease,
+                            pending.snapshot,
+                            pending.staging_root,
+                        );
+                        for path in cleanup {
+                            cleanup_staging_path(st, &path);
+                        }
+                    } else if let Some(path) = pending.staging_root {
+                        cleanup_staging_path(st, &path);
+                    }
+                }
+            }
+            crate::clipboard::ClipboardWritePurpose::TerminalSelectionCopy
+                if result.outcome == crate::clipboard::ClipboardWriteOutcome::Written =>
+            {
+                st.clipboard_remote_origin = None;
+                if let Some((_, path)) = st.clipboard_staged_lease.take() {
+                    cleanup_staging_path(st, &path);
+                }
+            }
+            crate::clipboard::ClipboardWritePurpose::TerminalSelectionCopy => {}
+        }
+    }
+    if let Some(observation) = results.observation {
+        let Some(owner) = st.clipboard_owner else {
+            if let Some(path) = observation.source_staging_root {
+                cleanup_staging_path(st, &path);
+            }
+            return;
+        };
+        if observation.demand_generation != st.clipboard_demand_generation {
+            if let Some(path) = observation.source_staging_root {
+                cleanup_staging_path(st, &path);
+            }
+            return;
+        }
+        tracing::trace!(
+            sequence = observation.sequence,
+            "host clipboard revision observed"
+        );
+        observe_source_staging(st, &observation.snapshot, observation.source_staging_root);
+        if st
+            .clipboard_staged_lease
+            .as_ref()
+            .is_some_and(|(snapshot, _)| *snapshot != observation.snapshot)
+            && let Some((_, path)) = st.clipboard_staged_lease.take()
+        {
+            cleanup_staging_path(st, &path);
+        }
+        if observation_needs_publication(
+            st.clipboard_remote_origin.as_ref(),
+            owner,
+            &observation.snapshot,
+        ) {
+            if st
+                .clipboard_remote_origin
+                .as_ref()
+                .is_none_or(|(_, _, snapshot)| *snapshot != observation.snapshot)
+            {
+                st.clipboard_remote_origin = None;
+            }
+            publish_local_clipboard(st, owner, observation.snapshot);
+        }
+    }
+}
+
 pub(super) fn tick(
     state: &Rc<RefCell<State>>,
     tab_model: &Rc<VecModel<TabItem>>,
@@ -3224,6 +3784,7 @@ pub(super) fn tick(
 ) {
     let mut st = state.borrow_mut();
     let active = st.active;
+    tick_clipboard(&mut st);
     let target = st.target_px();
     let mut to_close: Vec<usize> = Vec::new();
 
@@ -4486,5 +5047,115 @@ mod tests {
         // actually in flight right now.
         let cfg = agent_mode_fixture(1, true, true, false);
         assert!(agent_mode_execute_blocked(&Some(cfg)));
+    }
+
+    #[test]
+    fn source_file_lease_survives_observation_replacement_until_backend_result() {
+        let endpoint = cm_core::SessionEndpointId(4);
+        let revision = cm_core::LocalClipboardRevision(12);
+        let mut lease = ClipboardSourceLease {
+            snapshot: cm_core::ClipboardSnapshot::Files(vec!["/synthetic/a".into()]),
+            still_observed: true,
+            users: BTreeSet::new(),
+        };
+        lease.retain(endpoint, revision);
+        lease.still_observed = false;
+        assert!(
+            !lease.cleanup_ready(),
+            "backend publication still owns staging"
+        );
+        lease.release(endpoint, revision);
+        assert!(
+            lease.cleanup_ready(),
+            "ACK/rejection releases the last user"
+        );
+    }
+
+    #[test]
+    fn superseded_pending_source_publication_releases_only_its_revision() {
+        let endpoint = cm_core::SessionEndpointId(5);
+        let first = cm_core::LocalClipboardRevision(1);
+        let latest = cm_core::LocalClipboardRevision(2);
+        let mut lease = ClipboardSourceLease {
+            snapshot: cm_core::ClipboardSnapshot::Files(vec!["/synthetic/b".into()]),
+            still_observed: false,
+            users: BTreeSet::new(),
+        };
+        lease.retain(endpoint, first);
+        lease.retain(endpoint, latest);
+        lease.release(endpoint, latest);
+        assert!(!lease.cleanup_ready());
+        lease.release(endpoint, first);
+        assert!(lease.cleanup_ready());
+    }
+
+    #[test]
+    fn successful_text_install_retires_old_file_lease_but_failure_preserves_it() {
+        let old = std::path::PathBuf::from("/synthetic/old-stage");
+        let mut lease = Some((
+            cm_core::ClipboardSnapshot::Files(vec!["/synthetic/old-stage/a".into()]),
+            old.clone(),
+        ));
+
+        // A failed write never calls the successful-update helper.
+        assert_eq!(lease.as_ref().map(|(_, path)| path), Some(&old));
+        let cleanup = update_installed_file_lease(
+            &mut lease,
+            cm_core::ClipboardSnapshot::Text("replacement".into()),
+            None,
+        );
+        assert_eq!(cleanup, vec![old]);
+        assert!(lease.is_none());
+    }
+
+    #[test]
+    fn remote_origin_suppression_is_same_endpoint_only() {
+        let snapshot = cm_core::ClipboardSnapshot::Text("synthetic".into());
+        let origin = (
+            cm_core::SessionEndpointId(1),
+            cm_core::RemoteClipboardRevision(8),
+            snapshot.clone(),
+        );
+        assert!(!observation_needs_publication(
+            Some(&origin),
+            cm_core::SessionEndpointId(1),
+            &snapshot
+        ));
+        assert!(observation_needs_publication(
+            Some(&origin),
+            cm_core::SessionEndpointId(2),
+            &snapshot
+        ));
+        assert!(observation_needs_publication(
+            Some(&origin),
+            cm_core::SessionEndpointId(1),
+            &cm_core::ClipboardSnapshot::Text("changed".into())
+        ));
+    }
+
+    #[test]
+    fn local_revision_exhaustion_permanently_disables_owner_reactivation() {
+        let active = cm_core::SessionEndpointId(7);
+        let later_focus = cm_core::SessionEndpointId(8);
+        let mut next_revision = u64::MAX;
+        let mut disabled = false;
+        let mut owner = Some(active);
+
+        assert_eq!(
+            allocate_local_clipboard_revision(&mut next_revision),
+            None,
+            "the terminal counter value is never issued or wrapped"
+        );
+        let deactivated = begin_terminal_clipboard_disable(&mut disabled, &mut owner);
+
+        assert_eq!(deactivated, Some(active));
+        assert!(disabled);
+        assert_eq!(owner, None);
+        assert_eq!(next_revision, u64::MAX);
+        assert_eq!(
+            focused_clipboard_owner(disabled, Some(later_focus)),
+            None,
+            "later focus changes cannot restart a failed-closed bridge"
+        );
     }
 }

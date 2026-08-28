@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use crate::rdp::{CertVerifier, RdpAuthInput};
-use crate::session::Session;
+use crate::session::{Session, SessionEndpointId};
 use crate::settings::{LocalSettings, RdpSettings, SshSettings, TelnetSettings};
 use crate::ssh::{HostKeyVerifier, SshAuthInput};
 use crate::terminal::TerminalSize;
@@ -91,5 +91,6 @@ pub trait SessionProvider: Send + Sync {
         settings: &RdpSettings,
         auth: RdpAuthInput,
         verifier: Arc<dyn CertVerifier>,
+        endpoint_id: SessionEndpointId,
     ) -> Result<Box<dyn Session>, SessionSetupError>;
 }

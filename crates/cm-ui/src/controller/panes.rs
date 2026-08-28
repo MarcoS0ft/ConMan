@@ -604,8 +604,8 @@ struct SplitSlot {
 /// profile id used to re-resolve credentials; resolved secrets are never
 /// stored here.
 struct SplitPaneMetadata {
+    endpoint_id: cm_core::SessionEndpointId,
     connect_info: Option<ConnectInfo>,
-    rdp_clipboard: Option<Arc<Mutex<Option<String>>>>,
     is_remote: bool,
     origin_connection_id: Option<i32>,
     identity: String,
@@ -662,6 +662,19 @@ fn rollback_split_slot(state: &Rc<RefCell<State>>) {
     let active = st.active;
     if let Some(tab) = st.tabs.get_mut(active) {
         let _ = tab.pane_group.close_focused();
+    }
+}
+
+fn endpoint_or_rollback(
+    endpoint: Option<cm_core::SessionEndpointId>,
+    rollback: impl FnOnce(),
+) -> Option<cm_core::SessionEndpointId> {
+    match endpoint {
+        Some(endpoint) => Some(endpoint),
+        None => {
+            rollback();
+            None
+        }
     }
 }
 
@@ -794,6 +807,7 @@ fn commit_split_pane(
                 scale,
             );
             let ep = ExtraPaneState {
+                endpoint_id: metadata.endpoint_id,
                 session,
                 renderer,
                 last: None,
@@ -806,7 +820,6 @@ fn commit_split_pane(
                 last_frame: None,
                 rdp_w: 0,
                 rdp_h: 0,
-                rdp_clipboard: metadata.rdp_clipboard,
                 connect_info: metadata.connect_info,
                 is_remote: metadata.is_remote,
                 origin_connection_id: metadata.origin_connection_id,
@@ -896,6 +909,11 @@ fn do_local_split(
         INITIAL_SIZE
     };
 
+    let Some(endpoint_id) = state.borrow_mut().allocate_endpoint_id() else {
+        tracing::error!("session endpoint ID space exhausted");
+        rollback_split_slot(state);
+        return;
+    };
     let provider = state.borrow().session_provider.clone();
     let session = match provider.spawn_local(&slot.local_settings, size) {
         Ok(s) => s,
@@ -920,8 +938,8 @@ fn do_local_split(
         pane_h,
         slot.scale,
         SplitPaneMetadata {
+            endpoint_id,
             connect_info: None,
-            rdp_clipboard: None,
             is_remote: false,
             origin_connection_id: None,
             identity: saved_name.unwrap_or("local shell").to_owned(),
@@ -1010,6 +1028,11 @@ pub(super) fn connect_in_split(
                 return;
             }
 
+            let Some(endpoint_id) = state.borrow_mut().allocate_endpoint_id() else {
+                tracing::error!("session endpoint ID space exhausted");
+                rollback_split_slot(state);
+                return;
+            };
             let provider = state.borrow().session_provider.clone();
             let session = match provider.connect_telnet(settings, size) {
                 Ok(session) => session,
@@ -1034,8 +1057,8 @@ pub(super) fn connect_in_split(
                 pane_h,
                 slot.scale,
                 SplitPaneMetadata {
+                    endpoint_id,
                     connect_info: Some(ConnectInfo::Telnet(settings.clone())),
-                    rdp_clipboard: None,
                     is_remote: true,
                     origin_connection_id: Some(conn.id.get() as i32),
                     identity: conn.name.clone(),
@@ -1138,6 +1161,11 @@ pub(super) fn connect_in_split(
                 return;
             }
 
+            let Some(endpoint_id) = state.borrow_mut().allocate_endpoint_id() else {
+                tracing::error!("session endpoint ID space exhausted");
+                rollback_split_slot(state);
+                return;
+            };
             let provider = state.borrow().session_provider.clone();
             let session = match provider.connect_ssh(&effective_settings, auth, verifier, size) {
                 Ok(sess) => sess,
@@ -1163,6 +1191,7 @@ pub(super) fn connect_in_split(
                 pane_h,
                 slot.scale,
                 SplitPaneMetadata {
+                    endpoint_id,
                     connect_info: Some(ConnectInfo::Ssh(SshConnectInfo {
                         settings: effective_settings.clone(),
                         // Connect-in-split only accepts saved profiles. Keep
@@ -1170,7 +1199,6 @@ pub(super) fn connect_in_split(
                         // the resolved `auth` value used above.
                         auth_source: SshAuthSource::Credential(conn.id),
                     })),
-                    rdp_clipboard: None,
                     is_remote: true,
                     origin_connection_id: Some(conn.id.get() as i32),
                     identity: conn.name.clone(),
@@ -1273,7 +1301,14 @@ pub(super) fn connect_in_split(
             }
 
             let provider = state.borrow().session_provider.clone();
-            let session = match provider.connect_rdp(&s, auth, verifier) {
+            let endpoint_id = state.borrow_mut().allocate_endpoint_id();
+            let Some(endpoint_id) =
+                endpoint_or_rollback(endpoint_id, || rollback_split_slot(state))
+            else {
+                tracing::error!("session endpoint ID space exhausted");
+                return;
+            };
+            let session = match provider.connect_rdp(&s, auth, verifier, endpoint_id) {
                 Ok(sess) => sess,
                 Err(e) => {
                     tracing::warn!("connect-in-split RDP connect failed: {e}");
@@ -1282,7 +1317,6 @@ pub(super) fn connect_in_split(
                     return;
                 }
             };
-            let rdp_clipboard = session.remote_clipboard();
 
             commit_split_pane(
                 state,
@@ -1298,13 +1332,13 @@ pub(super) fn connect_in_split(
                 pane_h,
                 slot.scale,
                 SplitPaneMetadata {
+                    endpoint_id,
                     connect_info: Some(ConnectInfo::Rdp(RdpConnectInfo {
                         settings: s.clone(),
                         // As with SSH above, only the profile id persists;
                         // the resolved password moved into `connect_rdp`.
                         auth_source: RdpAuthSource::Credential(conn.id),
                     })),
-                    rdp_clipboard,
                     is_remote: true,
                     origin_connection_id: Some(conn.id.get() as i32),
                     identity: conn.name.clone(),
@@ -1351,6 +1385,7 @@ fn push_toast(
 /// long-lived pane metadata.
 fn promote_extra_to_primary(tab: &mut Tab, ep_idx: usize, primary_title: &mut String) {
     let ep = &mut tab.extra_panes[ep_idx];
+    std::mem::swap(&mut tab.endpoint_id, &mut ep.endpoint_id);
     std::mem::swap(&mut tab.session, &mut ep.session);
     std::mem::swap(&mut tab.renderer, &mut ep.renderer);
     std::mem::swap(&mut tab.last, &mut ep.last);
@@ -1365,7 +1400,6 @@ fn promote_extra_to_primary(tab: &mut Tab, ep_idx: usize, primary_title: &mut St
     // payload instead of parking a possible quick-connect secret in the
     // outgoing ExtraPaneState. The promoted split pane only ever contains a
     // saved-profile id for SSH/RDP authentication re-resolution.
-    tab.rdp_clipboard = ep.rdp_clipboard.take();
     tab.connect_info = ep.connect_info.take();
     std::mem::swap(&mut tab.is_remote, &mut ep.is_remote);
     std::mem::swap(&mut tab.origin_connection_id, &mut ep.origin_connection_id);
@@ -1459,6 +1493,7 @@ pub(super) fn do_close_pane(
             )
         {
             st.detached.push(DetachedEntry {
+                endpoint_id: ep.endpoint_id,
                 session: ep.session,
                 label: closed_label,
                 is_remote: ep.is_remote,
@@ -1521,6 +1556,7 @@ pub(super) fn reattach_session(
     entry: DetachedEntry,
 ) {
     let DetachedEntry {
+        endpoint_id,
         session,
         label,
         is_remote,
@@ -1556,13 +1592,13 @@ pub(super) fn reattach_session(
         let used: Vec<u32> = st.tabs.iter().map(|t| t.num).collect();
         let num = tabs::lowest_free_number(&used);
         st.tabs.push(Tab {
+            endpoint_id,
             session,
             renderer,
             last: None,
             last_frame: None,
             rdp_w: 0,
             rdp_h: 0,
-            rdp_clipboard: None,
             cols: INITIAL_SIZE.cols,
             rows: INITIAL_SIZE.rows,
             scale,
@@ -1736,6 +1772,7 @@ mod tests {
             let (ep_session, ep_sink) = RecordingSession::new();
             sinks.push(ep_sink);
             extra_panes.push(ExtraPaneState {
+                endpoint_id: cm_core::SessionEndpointId(sinks.len() as u64 + 1),
                 session: Box::new(ep_session),
                 renderer: mk_renderer(),
                 last: None,
@@ -1748,7 +1785,6 @@ mod tests {
                 last_frame: None,
                 rdp_w: 0,
                 rdp_h: 0,
-                rdp_clipboard: None,
                 connect_info: None,
                 is_remote: false,
                 origin_connection_id: None,
@@ -1761,13 +1797,13 @@ mod tests {
         }
 
         let tab = Tab {
+            endpoint_id: cm_core::SessionEndpointId(1),
             session: Box::new(primary),
             renderer: mk_renderer(),
             last: None,
             last_frame: None,
             rdp_w: 0,
             rdp_h: 0,
-            rdp_clipboard: None,
             cols: 80,
             rows: 24,
             scale: 1.0,
@@ -2005,5 +2041,17 @@ mod tests {
             (1280, 720),
         );
         assert_eq!((width, height), (200, 200));
+    }
+
+    #[test]
+    fn rdp_split_endpoint_exhaustion_rolls_back_the_reserved_slot() {
+        let mut rolled_back = false;
+        let endpoint = endpoint_or_rollback(None, || rolled_back = true);
+
+        assert_eq!(endpoint, None);
+        assert!(
+            rolled_back,
+            "allocation failure must release the already-reserved split slot"
+        );
     }
 }

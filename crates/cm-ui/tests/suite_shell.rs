@@ -850,6 +850,7 @@ fn telnet_session_restore_dispatches_provider() {
         repo,
         secrets: Arc::new(support::NullCredentialStore),
         session_provider: provider.clone(),
+        secure_clipboard_root: None,
         activation_rx: None,
         first_launch: false,
         agent_mode: None,
