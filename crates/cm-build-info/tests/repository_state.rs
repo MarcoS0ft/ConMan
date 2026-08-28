@@ -126,6 +126,12 @@ fn linked_worktree_watches_per_worktree_and_common_git_paths() {
     let common_tags = linked.git_path("refs/tags");
     let common_refs = linked.git_path("refs");
     let linked_branch = linked.git_path("refs/heads/conman-build-info-linked");
+    let canonical_common_git =
+        fs::canonicalize(repo.path().join(".git")).expect("canonicalize common Git directory");
+    let canonical_common_tags =
+        fs::canonicalize(&common_tags).expect("canonicalize common tag refs");
+    let canonical_linked_branch =
+        fs::canonicalize(&linked_branch).expect("canonicalize linked branch ref");
 
     assert!(watched.contains(&linked_head));
     assert!(watched.contains(&linked_index));
@@ -133,7 +139,7 @@ fn linked_worktree_watches_per_worktree_and_common_git_paths() {
     assert!(watched.contains(&common_refs));
     assert!(watched.contains(&linked_branch));
     assert!(
-        common_tags.starts_with(repo.path().join(".git")),
+        canonical_common_tags.starts_with(&canonical_common_git),
         "tag refs must resolve through the common Git directory: {}",
         common_tags.display()
     );
@@ -143,7 +149,7 @@ fn linked_worktree_watches_per_worktree_and_common_git_paths() {
         "linked HEAD must be watched in the per-worktree Git directory"
     );
     assert!(
-        linked_branch.starts_with(repo.path().join(".git")),
+        canonical_linked_branch.starts_with(&canonical_common_git),
         "linked branch ref must resolve through the common Git directory: {}",
         linked_branch.display()
     );
