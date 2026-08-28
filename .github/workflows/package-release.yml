@@ -75,17 +75,33 @@ jobs:
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libfontconfig1-dev \
-            libgl1-mesa-dev \
-            libwayland-dev \
-            libx11-xcb-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxkbcommon-dev \
-            openssh-client
+          set -eu
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends \
+              pkg-config \
+              libfontconfig1-dev \
+              libgl1-mesa-dev \
+              libwayland-dev \
+              libx11-xcb-dev \
+              libxcb-shape0-dev \
+              libxcb-xfixes0-dev \
+              libxkbcommon-dev \
+              openssh-client
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y \
+              pkgconf-pkg-config \
+              fontconfig-devel \
+              mesa-libGL-devel \
+              wayland-devel \
+              libX11-devel \
+              libxcb-devel \
+              libxkbcommon-devel \
+              openssh-clients
+          else
+            echo "Unsupported Linux package manager" >&2
+            exit 1
+          fi
 
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.96.0 --profile minimal
