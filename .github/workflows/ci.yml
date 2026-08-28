@@ -3,7 +3,8 @@
 # Keep action revisions pinned, matching the supply-chain posture used by the
 # sibling SafeTunnel project. Successful, uncompressed release binaries are
 # retained briefly for diagnostics; publishing and UPX finalization happen only
-# in the release workflows after this gate succeeds.
+# in the release workflows after this gate succeeds. The three platform jobs
+# use the shared MarcoS0ft organization runner pool.
 
 name: CI
 
@@ -24,6 +25,9 @@ concurrency:
 jobs:
   build:
     name: ${{ matrix.name }}
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     env:
       # The native UI/RDP dependency graph exhausts hosted-runner storage when
       # Clippy and test profiles both retain incremental state and full debug
@@ -37,16 +41,19 @@ jobs:
       matrix:
         include:
           - name: Linux x86_64
-            os: ubuntu-latest
+            os: Linux
+            arch: X64
             platform: linux-x86_64
           - name: macOS arm64
-            os: macos-14
+            os: macOS
+            arch: ARM64
             platform: macos-arm64
           - name: Windows x86_64
-            os: windows-latest
+            os: Windows
+            arch: X64
             platform: windows-x86_64
 
-    runs-on: ${{ matrix.os }}
+    runs-on: [self-hosted, "${{ matrix.os }}", "${{ matrix.arch }}"]
     timeout-minutes: 60
 
     steps:
@@ -55,6 +62,12 @@ jobs:
         with:
           # BuildInfo uses the monotonic repository commit count.
           fetch-depth: 0
+          clean: false
+
+      - name: Clean workspace while preserving compiler caches
+        run: |
+          git reset --hard
+          git clean -ffdx -e target/ -e .zig/
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'

@@ -28,8 +28,8 @@ jobs:
   package:
     name: ${{ matrix.name }}
     env:
-      # Keep test intermediates within hosted-runner disk limits before the
-      # separately optimized release build is staged.
+      # Avoid retaining multiple debug variants before the separately optimized
+      # release build is staged on the persistent organization runners.
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
@@ -38,16 +38,19 @@ jobs:
       matrix:
         include:
           - name: Linux x86_64
-            os: ubuntu-latest
+            os: Linux
+            arch: X64
             platform: linux-x86_64
           - name: macOS arm64
-            os: macos-14
+            os: macOS
+            arch: ARM64
             platform: macos-arm64
           - name: Windows x86_64
-            os: windows-latest
+            os: Windows
+            arch: X64
             platform: windows-x86_64
 
-    runs-on: ${{ matrix.os }}
+    runs-on: [self-hosted, "${{ matrix.os }}", "${{ matrix.arch }}"]
     timeout-minutes: 75
 
     steps:
@@ -56,6 +59,12 @@ jobs:
         with:
           ref: ${{ inputs.source_ref }}
           fetch-depth: 0
+          clean: false
+
+      - name: Clean workspace while preserving compiler caches
+        run: |
+          git reset --hard
+          git clean -ffdx -e target/ -e .zig/
 
       - name: Verify exact checkout
         shell: bash
