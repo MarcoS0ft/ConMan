@@ -136,7 +136,7 @@ jobs:
         if: runner.os == 'Linux' && inputs.run_tests
         env:
           PYTHONDONTWRITEBYTECODE: '1'
-        run: python -m unittest discover -s scripts/dist -p 'test_*.py' -v
+        run: python3 -m unittest discover -s scripts/dist -p 'test_*.py' -v
 
       - name: Build release executables
         run: cargo build --locked --workspace --release --bins
@@ -148,11 +148,12 @@ jobs:
           EXPECTED_VERSION: ${{ inputs.expected_version }}
         run: |
           set -eu
+          python_bin="$(command -v python3 || command -v python)"
           expected_args=()
           if [[ -n "$EXPECTED_VERSION" ]]; then
             expected_args=(--expected-version "$EXPECTED_VERSION")
           fi
-          python scripts/dist/prepare_release.py \
+          "$python_bin" scripts/dist/prepare_release.py \
             --target-dir target/release \
             --stage-dir dist/stage \
             --platform '${{ matrix.platform }}' \
@@ -169,7 +170,8 @@ jobs:
         id: archive
         shell: bash
         run: |
-          python scripts/dist/package_release.py \
+          python_bin="$(command -v python3 || command -v python)"
+          "$python_bin" scripts/dist/package_release.py \
             --stage-dir dist/stage \
             --output-dir dist/packages \
             --github-output "$GITHUB_OUTPUT"

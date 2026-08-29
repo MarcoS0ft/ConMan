@@ -139,7 +139,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           PYTHONDONTWRITEBYTECODE: '1'
-        run: python -m unittest discover -s scripts/dist -p 'test_*.py' -v
+        run: python3 -m unittest discover -s scripts/dist -p 'test_*.py' -v
 
       - name: Build release executables
         run: cargo build --locked --workspace --release --bins
@@ -147,7 +147,8 @@ jobs:
       - name: Stage uncompressed diagnostic artifact
         id: stage
         run: |
-          python scripts/dist/prepare_release.py \
+          python_bin="$(command -v python3 || command -v python)"
+          "$python_bin" scripts/dist/prepare_release.py \
             --target-dir target/release \
             --stage-dir dist/raw \
             --platform ${{ matrix.platform }} \
