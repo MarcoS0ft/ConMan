@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -226,7 +227,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Explicit local troubleshooting escape hatch; official builds must not use it.",
     )
-    parser.add_argument("--github-output", type=Path)
+    parser.add_argument(
+        "--github-output",
+        type=Path,
+        default=(
+            Path(os.environ["GITHUB_OUTPUT"])
+            if os.environ.get("GITHUB_OUTPUT")
+            else None
+        ),
+    )
     return parser.parse_args()
 
 

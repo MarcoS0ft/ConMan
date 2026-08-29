@@ -41,14 +41,17 @@ jobs:
             os: Linux
             arch: X64
             platform: linux-x86_64
+            python: python3
           - name: macOS arm64
             os: macOS
             arch: ARM64
             platform: macos-arm64
+            python: python3
           - name: Windows x86_64
             os: Windows
             arch: X64
             platform: windows-x86_64
+            python: python
 
     runs-on: [self-hosted, "${{ matrix.os }}", "${{ matrix.arch }}"]
     timeout-minutes: 75
@@ -67,10 +70,9 @@ jobs:
           git clean -ffdx -e target/ -e .zig/
 
       - name: Verify exact checkout
-        shell: bash
-        run: |
-          set -eu
-          test "$(git rev-parse HEAD)" = "$(git rev-parse '${{ inputs.source_ref }}^{commit}')"
+        run: >-
+          ${{ matrix.python }} scripts/dist/verify_checkout.py
+          '${{ inputs.source_ref }}'
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -143,38 +145,24 @@ jobs:
 
       - name: Stage, compress, and verify release executables
         id: prepare
-        shell: bash
-        env:
-          EXPECTED_VERSION: ${{ inputs.expected_version }}
-        run: |
-          set -eu
-          python_bin="$(command -v python3 || command -v python)"
-          expected_args=()
-          if [[ -n "$EXPECTED_VERSION" ]]; then
-            expected_args=(--expected-version "$EXPECTED_VERSION")
-          fi
-          "$python_bin" scripts/dist/prepare_release.py \
-            --target-dir target/release \
-            --stage-dir dist/stage \
-            --platform '${{ matrix.platform }}' \
-            --github-output "$GITHUB_OUTPUT" \
-            "${expected_args[@]}"
+        run: >-
+          ${{ matrix.python }} scripts/dist/prepare_release.py
+          --target-dir target/release
+          --stage-dir dist/stage
+          --platform '${{ matrix.platform }}'
+          --expected-version '${{ inputs.expected_version }}'
 
       # Future platform signing belongs here: UPX has completed and passed its
       # integrity/smoke tests, while no archive or checksum exists yet.
       - name: Signing boundary
-        shell: bash
         run: echo "Unsigned build; platform signing will run at this boundary."
 
       - name: Archive and checksum staged files
         id: archive
-        shell: bash
-        run: |
-          python_bin="$(command -v python3 || command -v python)"
-          "$python_bin" scripts/dist/package_release.py \
-            --stage-dir dist/stage \
-            --output-dir dist/packages \
-            --github-output "$GITHUB_OUTPUT"
+        run: >-
+          ${{ matrix.python }} scripts/dist/package_release.py
+          --stage-dir dist/stage
+          --output-dir dist/packages
 
       - name: Upload packed release artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

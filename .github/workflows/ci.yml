@@ -44,14 +44,17 @@ jobs:
             os: Linux
             arch: X64
             platform: linux-x86_64
+            python: python3
           - name: macOS arm64
             os: macOS
             arch: ARM64
             platform: macos-arm64
+            python: python3
           - name: Windows x86_64
             os: Windows
             arch: X64
             platform: windows-x86_64
+            python: python
 
     runs-on: [self-hosted, "${{ matrix.os }}", "${{ matrix.arch }}"]
     timeout-minutes: 60
@@ -146,15 +149,12 @@ jobs:
 
       - name: Stage uncompressed diagnostic artifact
         id: stage
-        run: |
-          python_bin="$(command -v python3 || command -v python)"
-          "$python_bin" scripts/dist/prepare_release.py \
-            --target-dir target/release \
-            --stage-dir dist/raw \
-            --platform ${{ matrix.platform }} \
-            --skip-upx \
-            --github-output "$GITHUB_OUTPUT"
-        shell: bash
+        run: >-
+          ${{ matrix.python }} scripts/dist/prepare_release.py
+          --target-dir target/release
+          --stage-dir dist/raw
+          --platform '${{ matrix.platform }}'
+          --skip-upx
 
       - name: Upload uncompressed diagnostic artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

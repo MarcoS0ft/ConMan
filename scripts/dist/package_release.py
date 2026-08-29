@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import tarfile
 import zipfile
@@ -23,7 +24,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage-dir", type=Path, default=Path("dist/stage"))
     parser.add_argument("--output-dir", type=Path, default=Path("dist/packages"))
-    parser.add_argument("--github-output", type=Path)
+    parser.add_argument(
+        "--github-output",
+        type=Path,
+        default=(
+            Path(os.environ["GITHUB_OUTPUT"])
+            if os.environ.get("GITHUB_OUTPUT")
+            else None
+        ),
+    )
     return parser.parse_args()
 
 
