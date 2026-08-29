@@ -56,7 +56,7 @@ jobs:
             platform: windows-x86_64
             python: py -3
 
-    runs-on: [self-hosted, "${{ matrix.os }}", "${{ matrix.arch }}"]
+    runs-on: [self-hosted, local-ci, "${{ matrix.os }}", "${{ matrix.arch }}"]
     timeout-minutes: 60
 
     steps:
