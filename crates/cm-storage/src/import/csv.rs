@@ -874,7 +874,11 @@ mod tests {
 
     #[test]
     fn warning_source_lines_are_identical_for_lf_and_crlf() {
-        for fixture in [FIXTURE.to_string(), FIXTURE.replace('\n', "\r\n")] {
+        // Git may check the fixture out with CRLF on Windows. Canonicalize it
+        // before constructing the two variants so the CRLF case never becomes
+        // the invalid `\r\r\n` sequence.
+        let lf_fixture = FIXTURE.replace("\r\n", "\n");
+        for fixture in [lf_fixture.clone(), lf_fixture.replace('\n', "\r\n")] {
             let (_, warnings) = parse(&fixture).expect("fixture should parse");
             assert!(
                 warnings
