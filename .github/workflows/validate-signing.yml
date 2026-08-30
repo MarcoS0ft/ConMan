@@ -1,0 +1,22 @@
+name: Validate release signing
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    uses: ./.github/workflows/package-release.yml
+    with:
+      source_ref: ${{ github.sha }}
+      expected_version: ''
+      run_tests: false
+      sign_macos: true
+    secrets:
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      NOTARIZE_API_KEY_ID: ${{ secrets.NOTARIZE_API_KEY_ID }}
+      NOTARIZE_API_KEY_ISSUER: ${{ secrets.NOTARIZE_API_KEY_ISSUER }}
+      NOTARIZE_API_KEY_P8_BASE64: ${{ secrets.NOTARIZE_API_KEY_P8_BASE64 }}
