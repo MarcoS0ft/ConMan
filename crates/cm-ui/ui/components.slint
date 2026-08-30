@@ -12,6 +12,18 @@ import { Theme } from "theme.slint";
 // InputType is a Slint 1.17 builtin — no import needed.
 import { LineEdit } from "std-widgets.slint";
 
+// One focus signal for editable application fields that live below the
+// global shortcut capture. Controls report their own focus transitions;
+// shortcut code never needs to know which screen or field is active.
+export global EditableFocus {
+  out property <bool> active: self.owner-count > 0;
+  property <int> owner-count: 0;
+  callback report(bool);
+  report(focused) => {
+    self.owner-count = max(0, self.owner-count + (focused ? 1 : -1));
+  }
+}
+
 // ── StatusDot ───────────────────────────────────────────────────────────────
 // Filled circle whose color reflects a session-state string. The single source of
 // truth for status → color (tab dot, tree row, status bar all use this).

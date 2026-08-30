@@ -15,7 +15,7 @@
 import { Theme } from "theme.slint";
 import {
     StatusDot, StatusPill, IconButton, ActivityBarButton,
-    PrimaryButton, SecondaryButton, EmptyState, Toast
+    PrimaryButton, SecondaryButton, EmptyState, Toast, EditableFocus
 } from "components.slint";
 import { CheckBox, ListView, Palette, LineEdit } from "std-widgets.slint";
 import { Modal, QuickConnectForm, HostKeyDialog, CertDialog, KbdInteractiveDialog, KbdPromptRow, ImportPasswordDialog, DeleteConfirmationDialog } from "screens/dialogs.slint";
@@ -111,6 +111,7 @@ component TerminalSurface inherits Rectangle {
     callback pointer(int, int, length, length, int);
     callback scroll(length, length);
     callback resized(length, length);
+    in property <int> focus-request: 0;
 
     pure function mods(c: bool, a: bool, s: bool, m: bool) -> int {
         (c ? 1 : 0) + (a ? 2 : 0) + (s ? 4 : 0) + (m ? 8 : 0)
@@ -118,6 +119,11 @@ component TerminalSurface inherits Rectangle {
 
     background: Theme.color-terminal-canvas-bg;
     forward-focus: fs;
+    init => {
+        if (root.focus-request > 0) {
+            fs.focus();
+        }
+    }
 
     fs := FocusScope {
         width: 100%;
@@ -183,6 +189,14 @@ component TerminalSurface inherits Rectangle {
         }
     }
 
+    changed focus-request => {
+        // Split panes pass zero to every inactive surface. Never let an
+        // inactive pane steal focus when the active pane's request changes.
+        if (root.focus-request > 0) {
+            fs.focus();
+        }
+    }
+
     changed width => { root.resized(self.width, self.height); }
     changed height => { root.resized(self.width, self.height); }
 }
@@ -208,6 +222,7 @@ component RdpSurface inherits Rectangle {
     // rdp-scroll: passes actual pointer position (carry-over fix c).
     callback rdp-scroll(length /* x */, length /* y */, length /* dx */, length /* dy */);
     callback resized(length /* w */, length /* h */);
+    in property <int> focus-request: 0;
 
     pure function mods(c: bool, a: bool, s: bool, m: bool) -> int {
         (c ? 1 : 0) + (a ? 2 : 0) + (s ? 4 : 0) + (m ? 8 : 0)
@@ -255,6 +270,11 @@ component RdpSurface inherits Rectangle {
 
     background: Theme.color-terminal-canvas-bg;
     forward-focus: rdp-fs;
+    init => {
+        if (root.focus-request > 0) {
+            rdp-fs.focus();
+        }
+    }
 
     rdp-fs := FocusScope {
         width: 100%;
@@ -317,6 +337,14 @@ component RdpSurface inherits Rectangle {
         }
     }
 
+    changed focus-request => {
+        // Split panes pass zero to every inactive surface. Never let an
+        // inactive pane steal focus when the active pane's request changes.
+        if (root.focus-request > 0) {
+            rdp-fs.focus();
+        }
+    }
+
     changed width  => { root.resized(self.width, self.height); }
     changed height => { root.resized(self.width, self.height); }
 }
@@ -336,6 +364,10 @@ component Tab inherits Rectangle {
     // label suffixes (the contract's rule).
     in property <int>    item-index: 0;
     in property <int>    item-count: 1;
+    in property <length> item-stride: 180px;
+    in property <bool> home-pinned: false;
+    in property <int> drag-source-index: -1;
+    in property <int> drag-target-index: -1;
     // P9.10 #1: whether "Duplicate" has a target to relaunch -- see
     // `TabItem::can_duplicate`'s doc comment (Rust side) for the exact rule.
     in property <bool>   can-duplicate: false;
@@ -348,6 +380,10 @@ component Tab inherits Rectangle {
     callback reconnect-clicked();
     callback disconnect-clicked();
     callback duplicate-clicked();
+    callback reordered(int);
+    callback drag-began();
+    callback drag-preview(int);
+    callback drag-cancelled();
 
     // P8.1: one tab per session; label is the (dynamic) tab title.
     accessible-role: tab;
@@ -364,9 +400,70 @@ component Tab inherits Rectangle {
 
     height: Theme.tab-height;
     border-radius: Theme.radius-sm + 0px;
-    background: active ? Theme.color-card : (touch.has-hover ? Theme.color-hover : transparent);
+    background: root.drag-source-index == root.item-index
+        ? Theme.color-accent-subtle
+        : active ? Theme.color-card : (touch.has-hover ? Theme.color-hover : transparent);
+    border-width: root.drag-source-index == root.item-index ? 2px : 0px;
+    border-color: Theme.color-accent;
 
-    touch := TouchArea { clicked => { root.clicked(); } }
+    // Active state remains visible independently of hover/drag backgrounds.
+    if root.active : tab-active-indicator := Rectangle {
+        x: 0px;
+        y: parent.height - 2px;
+        width: parent.width;
+        height: 2px;
+        background: Theme.color-accent;
+    }
+
+    // Live insertion boundary. Moving right inserts after the hovered target;
+    // moving left inserts before it, matching Vec::remove/insert semantics.
+    if root.drag-target-index == root.item-index
+        && root.drag-source-index >= 0
+        && root.drag-source-index != root.drag-target-index : tab-drop-marker := Rectangle {
+        x: root.drag-target-index > root.drag-source-index ? parent.width - 3px : 0px;
+        y: 2px;
+        width: 3px;
+        height: parent.height - 4px;
+        background: Theme.color-accent;
+    }
+
+    property <bool> drag-started: false;
+    touch := TouchArea {
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root.drag-started = false;
+                if (!root.is-home) {
+                    root.drag-began();
+                }
+            } else if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) {
+                if (root.drag-started) {
+                    root.reordered(clamp(
+                        root.item-index
+                            + round((touch.mouse-x - touch.pressed-x) / root.item-stride),
+                        root.home-pinned ? 1 : 0,
+                        root.item-count - 1));
+                } else {
+                    root.clicked();
+                }
+                root.drag-started = false;
+                root.drag-cancelled();
+            } else if (e.kind == PointerEventKind.cancel) {
+                root.drag-started = false;
+                root.drag-cancelled();
+            }
+        }
+        moved => {
+            if (!root.is-home && (touch.mouse-x - touch.pressed-x > 8px
+                || touch.mouse-x - touch.pressed-x < -8px)) {
+                root.drag-started = true;
+                root.drag-preview(clamp(
+                    root.item-index
+                        + round((touch.mouse-x - touch.pressed-x) / root.item-stride),
+                    root.home-pinned ? 1 : 0,
+                    root.item-count - 1));
+            }
+        }
+    }
 
     // P9.10 #1: right-click menu, mirroring the connection tree row's
     // ContextMenuArea/Menu/MenuItem shape (app.slint's ConnectionRow,
@@ -1108,6 +1205,7 @@ component PaneSlot inherits Rectangle {
     in property <bool>   is-focused;
     in property <int>    pane-index;
     in property <bool>   is-rdp;
+    in property <int>    focus-request: 0;
     // P9.10 #2: true only when this pane is one of several in a split (the
     // repeater sets it from `pane-cells.length > 1`) -- a single-pane tab has
     // nothing to "disconnect FROM" without closing the whole tab, so there is
@@ -1149,6 +1247,7 @@ component PaneSlot inherits Rectangle {
         if !root.is-rdp : TerminalSurface {
             width: 100%; height: 100%;
             frame: root.frame;
+            focus-request: root.is-focused ? root.focus-request : 0;
             key-input(t, s, m) => { root.key-input(t, s, m); }
             pointer(b, k, x, y, m) => {
                 root.pane-focused(root.pane-index);
@@ -1161,6 +1260,7 @@ component PaneSlot inherits Rectangle {
         if root.is-rdp : RdpSurface {
             width: 100%; height: 100%;
             frame: root.frame;
+            focus-request: root.is-focused ? root.focus-request : 0;
             key-down(t, s, m) => { root.key-down(t, s, m); }
             key-up(t, s, m)   => { root.key-up(t, s, m); }
             release-keys => { root.rdp-release-keys(); }
@@ -1205,6 +1305,7 @@ component CloseConfirmationDialog inherits Rectangle {
     in property <string> message: "";
     in property <string> action-label: "Disconnect";
     in-out property <bool> dont-ask: false;
+    in property <bool> allow-dont-ask: true;
     in property <int> focus-index: 1;
     callback confirm();
     callback cancel();
@@ -1262,7 +1363,7 @@ component CloseConfirmationDialog inherits Rectangle {
                 font-family: Theme.font-family;
                 wrap: word-wrap;
             }
-            checkbox-focus-ring := Rectangle {
+            if root.allow-dont-ask : checkbox-focus-ring := Rectangle {
                 height: Theme.control-height;
                 border-radius: Theme.radius-sm;
                 border-width: root.focus-index == 0 ? 2px : 0px;
@@ -1568,9 +1669,55 @@ export component AppWindow inherits Window {
     in property <string> close-confirm-message: "";
     in property <string> close-confirm-action-label: "Disconnect";
     in-out property <bool> close-confirm-dont-ask: false;
+    in property <bool> close-confirm-allow-dont-ask: true;
     // Remains true between a modal-owned key-down and its matching key-up,
     // even if Escape/mouse closes the modal between those phases.
     in-out property <bool> close-confirm-key-guard-active: false;
+    // One owner for every global tab-navigation chord. The delayed switch
+    // avoids removing a focused conditional session surface during its own
+    // key event; ownership lasts through the final Ctrl release.
+    property <bool> tab-shortcut-chord-active: false;
+    property <int> session-focus-request: 0;
+    property <int> tab-drag-source: -1;
+    property <int> tab-drag-target: -1;
+    callback tab-navigation-key(KeyEvent) -> EventResult;
+    tab-navigation-key(e) => {
+        if (EditableFocus.active || !e.modifiers.control
+            || e.modifiers.alt || e.modifiers.meta) {
+            reject
+        } else if (e.text == Key.Tab || e.text == Key.Backtab) {
+            if (root.tabs.length > 0) {
+                root.tab-shortcut-chord-active = true;
+                root.defer-tab-select((e.text == Key.Backtab || e.modifiers.shift)
+                    ? Math.mod(root.active-tab - 1, root.tabs.length)
+                    : Math.mod(root.active-tab + 1, root.tabs.length));
+            }
+            accept
+        } else if (!e.modifiers.shift && e.text >= "0" && e.text <= "9") {
+            root.tab-shortcut-chord-active = true;
+            if (e.text == "0") {
+                if (root.tabs.length > 0 && root.tabs[0].is-home) {
+                    root.defer-tab-select(0);
+                }
+            } else {
+                root.defer-tab-select(
+                    (root.tabs.length > 0 && root.tabs[0].is-home ? 1 : 0)
+                    + (e.text == "1" ? 0 : e.text == "2" ? 1
+                        : e.text == "3" ? 2 : e.text == "4" ? 3 : e.text == "5" ? 4
+                        : e.text == "6" ? 5 : e.text == "7" ? 6 : e.text == "8" ? 7 : 8));
+            }
+            accept
+        } else {
+            reject
+        }
+    }
+    callback close-palette();
+    close-palette => {
+        root.palette-open = false;
+        root.palette-query = "";
+        root.palette-selected = 0;
+        global-shortcuts.focus();
+    }
     // 0 = Don't ask again, 1 = Cancel, 2 = destructive action. The modal
     // explicitly owns traversal because the top-level capture must prevent
     // terminal/RDP key leakage.
@@ -1661,6 +1808,15 @@ export component AppWindow inherits Window {
 
     // ── Shell callbacks ───────────────────────────────────────────────
     callback select-tab(int);
+    callback request-tab-select(int);
+    callback defer-tab-select(int);
+    callback focus-active-session();
+    focus-active-session => {
+        // The active conditional surface observes this after tab selection
+        // has settled. Its init/changed handler owns the actual FocusScope.
+        root.session-focus-request += 1;
+    }
+    callback move-tab(int, int);
     callback close-tab(int);
     // P9.10 #1: the tab strip's right-click context menu (mirrors the
     // connection tree row's ContextMenuArea/MenuItem shape). Home suppresses
@@ -1783,6 +1939,10 @@ export component AppWindow inherits Window {
                 (e.text == "k" || e.text == "K" || e.text == "\u{b}")) {
                 root.open-palette();
                 accept
+            } else if (root.tab-navigation-key(e) == accept) {
+                accept
+            } else if (root.tab-shortcut-chord-active) {
+                accept
             } else {
                 reject
             }
@@ -1793,6 +1953,11 @@ export component AppWindow inherits Window {
                 accept
             } else if (e.modifiers.control &&
                 (e.text == "k" || e.text == "K" || e.text == "\u{b}")) {
+                accept
+            } else if (root.tab-shortcut-chord-active) {
+                if (e.text == Key.Control || e.text == Key.ControlR) {
+                    root.tab-shortcut-chord-active = false;
+                }
                 accept
             } else {
                 reject
@@ -1892,6 +2057,7 @@ export component AppWindow inherits Window {
                             horizontal-stretch: 1;
                             accessible-label: "Filter connections";
                             edited(t) => { root.conn-filter-changed(t); }
+                            changed has-focus => { EditableFocus.report(self.has-focus); }
                         }
                     }
 
@@ -2083,6 +2249,7 @@ export component AppWindow inherits Window {
                             horizontal-stretch: 1;
                             accessible-label: "Filter credentials";
                             edited(t) => { root.cred-filter-changed(t); }
+                            changed has-focus => { EditableFocus.report(self.has-focus); }
                         }
                     }
 
@@ -2297,7 +2464,7 @@ export component AppWindow inherits Window {
                     glyph: "\u{EAB5}";
                     tooltip: "Previous tab";
                     clicked => {
-                        root.select-tab(max(0, root.active-tab - 1));
+                        root.request-tab-select(max(0, root.active-tab - 1));
                     }
                 }
 
@@ -2335,7 +2502,21 @@ export component AppWindow inherits Window {
                                 can-duplicate: tab.can-duplicate;
                                 item-index: idx;
                                 item-count: tabs.length;
-                                clicked => { root.select-tab(idx); }
+                                item-stride: 180px + Theme.space-1;
+                                home-pinned: tabs.length > 0 && tabs[0].is-home;
+                                drag-source-index: root.tab-drag-source;
+                                drag-target-index: root.tab-drag-target;
+                                clicked => { root.request-tab-select(idx); }
+                                reordered(target) => { root.move-tab(idx, target); }
+                                drag-began => {
+                                    root.tab-drag-source = idx;
+                                    root.tab-drag-target = idx;
+                                }
+                                drag-preview(target) => { root.tab-drag-target = target; }
+                                drag-cancelled => {
+                                    root.tab-drag-source = -1;
+                                    root.tab-drag-target = -1;
+                                }
                                 closed => { root.close-tab(idx); }
                                 reconnect-clicked => { root.tab-reconnect(idx); }
                                 disconnect-clicked => { root.tab-disconnect(idx); }
@@ -2351,7 +2532,7 @@ export component AppWindow inherits Window {
                     glyph: "\u{EAB6}";
                     tooltip: "Next tab";
                     clicked => {
-                        root.select-tab(min(tabs.length - 1, root.active-tab + 1));
+                        root.request-tab-select(min(tabs.length - 1, root.active-tab + 1));
                     }
                 }
 
@@ -2390,6 +2571,7 @@ export component AppWindow inherits Window {
                 if !rdp-active && pane-cells.length <= 1 : TerminalSurface {
                     vertical-stretch: 1;
                     frame: root.frame;
+                    focus-request: root.session-focus-request;
                     key-input(t, s, m) => { root.key-input(t, s, m); }
                     pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
                     scroll(dx, dy) => { root.scroll(dx, dy); }
@@ -2402,6 +2584,7 @@ export component AppWindow inherits Window {
                 if rdp-active && pane-cells.length <= 1 : RdpSurface {
                     vertical-stretch: 1;
                     frame: root.rdp-frame;
+                    focus-request: root.session-focus-request;
                     key-down(t, s, m) => { root.rdp-key-down(t, s, m); }
                     key-up(t, s, m)   => { root.rdp-key-up(t, s, m); }
                     release-keys => { root.rdp-release-keys(); }
@@ -2427,6 +2610,7 @@ export component AppWindow inherits Window {
                         frame: cell.frame;
                         is-rdp: cell.is-rdp;
                         is-focused: root.active-pane == cell.pane;
+                        focus-request: root.session-focus-request;
                         pane-index: cell.pane;
                         // P9.10 #2: a split (more than one cell) is the only
                         // time there's another pane to fall back to.
@@ -2621,6 +2805,7 @@ export component AppWindow inherits Window {
                         broadcast-group-name-field := LineEdit {
                             placeholder-text: "Save selection as…";
                             text <=> root.broadcast-group-name-draft;
+                            changed has-focus => { EditableFocus.report(self.has-focus); }
                             accessible-label: "Save selection as";
                             accepted => { root.save-broadcast-group(); }
                         }
@@ -3028,10 +3213,7 @@ export component AppWindow inherits Window {
 
     palette-modal := Modal {
         open: root.palette-open;
-        dismissed => {
-            root.palette-open = false;
-            root.palette-selected = 0;
-        }
+        dismissed => { root.close-palette(); }
         command-palette-dialog := CommandPalette {
             open: root.palette-open;
             query <=> root.palette-query;
@@ -3040,8 +3222,7 @@ export component AppWindow inherits Window {
             edited(q) => { root.palette-edited(q); }
             dismissed => { palette-modal.dismissed(); }
             activated(idx) => {
-                root.palette-open = false;
-                root.palette-selected = 0;
+                root.close-palette();
                 root.palette-activated(idx);
             }
         }
@@ -3058,6 +3239,7 @@ export component AppWindow inherits Window {
             message: root.close-confirm-message;
             action-label: root.close-confirm-action-label;
             dont-ask <=> root.close-confirm-dont-ask;
+            allow-dont-ask: root.close-confirm-allow-dont-ask;
             focus-index: root.close-confirm-focus-index;
             key-down(text, command) => { root.close-confirm-key-down(text, command); }
             key-up(text) => { root.close-confirm-key-up(text); }

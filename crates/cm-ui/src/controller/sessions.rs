@@ -169,20 +169,6 @@ fn wire_key_input(ctx: &Ctx) {
                         ui.invoke_toggle_sidebar();
                         return;
                     }
-                    CtrlShiftAction::NextTab => {
-                        let n = tab_model_kb.row_count();
-                        if n > 0 {
-                            let next = (ui.get_active_tab() as usize + 1) % n;
-                            tabs::select_tab(&state, &ui, next as i32);
-                        }
-                        return;
-                    }
-                    CtrlShiftAction::JumpToTab(idx) => {
-                        if idx < tab_model_kb.row_count() {
-                            tabs::select_tab(&state, &ui, idx as i32);
-                        }
-                        return;
-                    }
                     CtrlShiftAction::None => {}
                 }
             }
@@ -330,11 +316,6 @@ pub(super) enum CtrlShiftAction {
     NewTab,
     /// Ctrl+Shift+E — toggle the side panel.
     ToggleSidebar,
-    /// Ctrl+Shift+Tab — switch to the next tab (wraps around).
-    NextTab,
-    /// Ctrl+Shift+1..9 — jump directly to the Nth tab (0-based index here;
-    /// the shortcut itself is 1-based, i.e. Ctrl+Shift+1 -> `JumpToTab(0)`).
-    JumpToTab(usize),
     /// Not one of this layer's direct shortcuts (falls through to the older
     /// P5.1 split/broadcast/close/detach/focus-move arms, or to the session).
     None,
@@ -344,20 +325,6 @@ pub(super) fn classify_ctrl_shift_shortcut(special: i32, text: &str) -> CtrlShif
     match (special, text) {
         (0, "t" | "T") => CtrlShiftAction::NewTab,
         (0, "e" | "E") => CtrlShiftAction::ToggleSidebar,
-        (2, _) => CtrlShiftAction::NextTab,
-        (0, digit)
-            if digit.len() == 1
-                && digit.chars().next().is_some_and(|c| c.is_ascii_digit())
-                && digit != "0" =>
-        {
-            // Safe: guarded above to be exactly one ASCII digit '1'..='9'.
-            let d = digit
-                .chars()
-                .next()
-                .and_then(|c| c.to_digit(10))
-                .unwrap_or(1);
-            CtrlShiftAction::JumpToTab((d as usize).saturating_sub(1))
-        }
         _ => CtrlShiftAction::None,
     }
 }
@@ -4860,32 +4827,14 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_tab_is_next_tab() {
-        // special == 2 is the Tab key (see `input::map_key`'s special-code table);
-        // the text payload is irrelevant for this arm.
-        assert_eq!(
-            classify_ctrl_shift_shortcut(2, ""),
-            CtrlShiftAction::NextTab
-        );
-    }
-
-    #[test]
-    fn ctrl_shift_digits_1_to_9_jump_to_zero_based_index() {
-        for d in 1..=9 {
-            let text = d.to_string();
+    fn tab_and_digits_are_not_terminal_ctrl_shift_shortcuts() {
+        assert_eq!(classify_ctrl_shift_shortcut(2, ""), CtrlShiftAction::None);
+        for digit in '0'..='9' {
             assert_eq!(
-                classify_ctrl_shift_shortcut(0, &text),
-                CtrlShiftAction::JumpToTab(d - 1),
-                "Ctrl+Shift+{d} should jump to 0-based index {}",
-                d - 1
+                classify_ctrl_shift_shortcut(0, &digit.to_string()),
+                CtrlShiftAction::None
             );
         }
-    }
-
-    #[test]
-    fn ctrl_shift_0_is_not_a_tab_jump() {
-        // "0" is deliberately excluded -- there is no "tab 0" in 1-based UI counting.
-        assert_eq!(classify_ctrl_shift_shortcut(0, "0"), CtrlShiftAction::None);
     }
 
     #[test]

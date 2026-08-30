@@ -5,7 +5,7 @@ use std::thread;
 
 use cm_core::LocalSettings;
 use cm_session::{PaneGroup, Session, SessionStatus, Surface};
-use slint::{ComponentHandle, SharedString, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, SharedString, TimerMode, VecModel};
 
 use crate::selection::PaneSelectionState;
 use crate::terminal_renderer::TerminalRenderer;
@@ -16,11 +16,61 @@ use super::*;
 pub(super) fn wire_tabs(ctx: &Ctx) {
     wire_new_tab(ctx);
     wire_select_tab(ctx);
+    wire_request_tab_select(ctx);
+    wire_defer_tab_select(ctx);
+    wire_move_tab(ctx);
     wire_close_tab(ctx);
     wire_tab_reconnect(ctx);
     wire_tab_disconnect(ctx);
     wire_tab_duplicate(ctx);
     wire_surface_resized(ctx);
+}
+
+fn wire_request_tab_select(ctx: &Ctx) {
+    ctx.ui.on_request_tab_select({
+        let weak = ctx.ui.as_weak();
+        move |idx| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.invoke_select_tab(idx);
+            let weak = ui.as_weak();
+            // Let the selector's frame/conditional-surface bindings settle
+            // before focusing the newly active surface or pane.
+            slint::Timer::single_shot(std::time::Duration::from_millis(1), move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_focus_active_session();
+                }
+            });
+        }
+    });
+}
+
+fn wire_defer_tab_select(ctx: &Ctx) {
+    ctx.ui.on_defer_tab_select({
+        let weak = ctx.ui.as_weak();
+        move |idx| {
+            let weak = weak.clone();
+            // Keyboard capture cannot remove its focused conditional surface
+            // while that surface's key event is still unwinding.
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_request_tab_select(idx);
+                }
+            });
+        }
+    });
+}
+
+fn wire_move_tab(ctx: &Ctx) {
+    ctx.ui.on_move_tab({
+        let state = ctx.state.clone();
+        let tab_model = ctx.tab_model.clone();
+        let weak = ctx.ui.as_weak();
+        move |from, to| {
+            if let Some(ui) = weak.upgrade() {
+                move_tab(&state, &tab_model, &ui, from as usize, to as usize);
+            }
+        }
+    });
 }
 
 fn wire_new_tab(ctx: &Ctx) {
@@ -472,6 +522,125 @@ pub(super) fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
     startup::persist_session_tabs(state);
 }
 
+/// Moves one visual tab while keeping the controller vector, Slint model,
+/// active tab, and tick-time active identity in lockstep.
+fn move_tab(
+    state: &Rc<RefCell<State>>,
+    tab_model: &Rc<VecModel<TabItem>>,
+    ui: &AppWindow,
+    from: usize,
+    to: usize,
+) {
+    if from == to {
+        return;
+    }
+
+    // Snapshot and validate every cross-model invariant before either owner
+    // is mutated. A stale UI/controller seam is recoverable: log and ignore
+    // the drag instead of crashing or leaving half the state reordered.
+    let rows = (0..tab_model.row_count())
+        .map(|idx| tab_model.row_data(idx))
+        .collect::<Option<Vec<_>>>();
+    let plan = {
+        let st = state.borrow();
+        let state_tabs = st
+            .tabs
+            .iter()
+            .map(|tab| i32::try_from(tab.num).ok().map(|id| (id, tab.is_empty)))
+            .collect::<Option<Vec<_>>>();
+        match (state_tabs, rows.as_deref()) {
+            (Some(state_tabs), Some(rows)) => {
+                validated_move_plan(&state_tabs, rows, st.active, st.last_active_tab, from, to)
+            }
+            _ => None,
+        }
+    };
+    let (Some(mut rows), Some(plan)) = (rows, plan) else {
+        tracing::warn!(
+            from,
+            to,
+            "tab reorder ignored because state/model invariants drifted"
+        );
+        return;
+    };
+
+    let row = rows.remove(from);
+    rows.insert(to, row);
+    {
+        let mut st = state.borrow_mut();
+        let tab = st.tabs.remove(from);
+        st.tabs.insert(to, tab);
+        st.active = plan.active;
+        st.last_active_tab = plan.last_active;
+    }
+    tab_model.set_vec(rows);
+    select_tab(state, ui, plan.active as i32);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MovePlan {
+    active: usize,
+    last_active: usize,
+}
+
+fn validated_move_plan(
+    state_tabs: &[(i32, bool)],
+    model_tabs: &[TabItem],
+    active: usize,
+    last_active: usize,
+    from: usize,
+    to: usize,
+) -> Option<MovePlan> {
+    let len = state_tabs.len();
+    if len == 0
+        || model_tabs.len() != len
+        || from >= len
+        || to >= len
+        || active >= len
+        || last_active >= len
+        || state_tabs
+            .iter()
+            .zip(model_tabs)
+            .any(|(&(id, home), row)| id != row.id || home != row.is_home)
+    {
+        return None;
+    }
+
+    let mut ids = state_tabs.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    ids.sort_unstable();
+    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return None;
+    }
+
+    let home_positions = state_tabs
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (_, home))| home.then_some(idx))
+        .collect::<Vec<_>>();
+    if home_positions.len() > 1
+        || home_positions.first().is_some_and(|idx| *idx != 0)
+        || (home_positions == [0] && (from == 0 || to == 0))
+    {
+        return None;
+    }
+
+    let remap = |index: usize| {
+        if index == from {
+            to
+        } else if from < to && (from + 1..=to).contains(&index) {
+            index - 1
+        } else if to < from && (to..from).contains(&index) {
+            index + 1
+        } else {
+            index
+        }
+    };
+    Some(MovePlan {
+        active: remap(active),
+        last_active: remap(last_active),
+    })
+}
+
 /// What to do with a tab's session when its tab is closed.
 enum Disposition {
     /// Connected, disconnected, or already stopped; shut down synchronously.
@@ -687,6 +856,42 @@ mod tests {
         assert_eq!(lowest_free_number(&[1, 3]), 2);
         assert_eq!(lowest_free_number(&[3, 1]), 2);
         assert_eq!(lowest_free_number(&[2, 3]), 1);
+    }
+
+    fn row(id: i32, home: bool) -> TabItem {
+        TabItem {
+            id,
+            is_home: home,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn move_plan_remaps_active_indices_without_identity_lookups() {
+        let state = [(1, false), (2, false), (3, false)];
+        let model = [row(1, false), row(2, false), row(3, false)];
+        assert_eq!(
+            validated_move_plan(&state, &model, 1, 2, 0, 2),
+            Some(MovePlan {
+                active: 0,
+                last_active: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn move_plan_rejects_drift_and_home_displacement() {
+        let state = [(1, true), (2, false), (3, false)];
+        let model = [row(1, true), row(2, false), row(3, false)];
+        assert!(validated_move_plan(&state, &model, 0, 0, 0, 2).is_none());
+        assert!(validated_move_plan(&state, &model, 0, 0, 2, 0).is_none());
+
+        let drifted_ids = [row(1, true), row(9, false), row(3, false)];
+        assert!(validated_move_plan(&state, &drifted_ids, 0, 0, 1, 2).is_none());
+        let duplicate_state = [(1, false), (1, false), (3, false)];
+        let duplicate_model = [row(1, false), row(1, false), row(3, false)];
+        assert!(validated_move_plan(&duplicate_state, &duplicate_model, 0, 0, 1, 2).is_none());
+        assert!(validated_move_plan(&state, &model, 3, 0, 1, 2).is_none());
     }
 
     /// P7.6 (fixes P7.3-b): a `Connecting` session must abort, never detach

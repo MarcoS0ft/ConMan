@@ -1676,7 +1676,7 @@ pub(super) fn reattach_session(
         let tab_title = format!("[r] {label}");
         tab_model.push(TabItem {
             title: SharedString::from(tab_title),
-            id: 0,
+            id: num as i32,
             status: SharedString::from(initial_status),
             pane_count: 1,
             // A reattached detached session is always a real connection --

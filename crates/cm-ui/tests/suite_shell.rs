@@ -34,6 +34,8 @@ fn shell_suite() {
 
     palette_open_filter_dispatch();
     tabs_open_select_close_via_elements();
+    home_close_uses_home_specific_confirmation();
+    home_only_does_not_trigger_active_connection_quit_warning();
     close_confirmation_cancel_and_dont_ask();
     close_confirmation_owns_terminal_keyboard();
     native_window_close_requests_confirmation();
@@ -54,6 +56,46 @@ fn shell_suite() {
     telnet_reconnect_respects_execute_gate();
     tab_accessible_value_tracks_status_and_pane_count();
     activity_bar_accessible_checked_tracks_active_panel_and_sidebar();
+}
+
+fn home_only_does_not_trigger_active_connection_quit_warning() {
+    let (h, _repo, _provider) = harness_with(false);
+    h.ui.window().dispatch_event(WindowEvent::CloseRequested);
+    assert!(
+        !h.ui.get_close_confirm_open(),
+        "Home's implementation shell is not an active user connection"
+    );
+}
+
+fn home_close_uses_home_specific_confirmation() {
+    let (h, _repo, _provider) = harness_with(false);
+    h.ui.invoke_new_tab();
+    assert_eq!(tab_count(&h.ui), 2);
+
+    h.ui.invoke_close_tab(0);
+    assert!(h.ui.get_close_confirm_open());
+    assert_eq!(h.ui.get_close_confirm_title().as_str(), "Close Home tab?");
+    assert_eq!(h.ui.get_close_confirm_action_label().as_str(), "Close Home");
+    assert!(
+        !h.ui
+            .get_close_confirm_message()
+            .to_ascii_lowercase()
+            .contains("connection"),
+        "Home must not be described as an active connection"
+    );
+    assert!(
+        ElementHandle::find_by_element_id(&h.ui, "CloseConfirmationDialog::close-confirm-dont-ask")
+            .next()
+            .is_none(),
+        "Home close is a distinct decision and must not disable active-connection warnings"
+    );
+
+    h.ui.invoke_close_confirm_accept();
+    assert_eq!(tab_count(&h.ui), 1);
+    assert!(
+        !h.ui.get_tabs().row_data(0).expect("remaining tab").is_home,
+        "closing Home must preserve the connection tab"
+    );
 }
 
 fn tab_count(ui: &cm_ui::AppWindow) -> usize {
@@ -211,10 +253,12 @@ fn close_confirmation_cancel_and_dont_ask() {
         "Confirm must persist Don't ask again"
     );
 
-    // The preference takes effect immediately: the replacement Home tab has
-    // a live local session underneath, but its next close is unconditional.
+    // Home is not an active connection. Its distinct confirmation remains
+    // enabled and cannot alter the active-connection preference.
     h.ui.invoke_close_tab(0);
-    assert!(!h.ui.get_close_confirm_open());
+    assert!(h.ui.get_close_confirm_open());
+    assert_eq!(h.ui.get_close_confirm_title().as_str(), "Close Home tab?");
+    h.ui.invoke_close_confirm_cancel();
 }
 
 fn native_window_close_requests_confirmation() {

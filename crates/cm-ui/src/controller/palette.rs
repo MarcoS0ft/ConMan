@@ -298,7 +298,9 @@ pub(super) fn dispatch_palette_action(
                     .unwrap_or(false)
             });
             if let Some(idx) = pos {
-                tabs::select_tab(state, ui, idx as i32);
+                // User-triggered selection shares the same deferred focus
+                // settlement as tab clicks and keyboard shortcuts.
+                ui.invoke_request_tab_select(idx as i32);
             }
         }
         // ── SESSIONS (dynamic) ────────────────────────────────────────────────

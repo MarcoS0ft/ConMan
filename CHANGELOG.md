@@ -18,6 +18,8 @@ All notable user-facing changes to Connection Manager are documented here.
   display, and commit-derived development versions.
 - Add versioned Linux, macOS, and Windows release packaging with verified UPX
   compression for Linux and Windows executables.
+- Add mouse tab reordering, Ctrl+Tab switching, Ctrl+0 for Home, and Ctrl+1
+  through Ctrl+9 for direct access to connection tabs.
 
 ### Changed
 
@@ -32,6 +34,9 @@ All notable user-facing changes to Connection Manager are documented here.
 
 ### Fixed
 
+- Unify tab keyboard and mouse activation so repeated shortcuts retain focus,
+  palette dismissal can reopen immediately, Home remains pinned, and tab
+  dragging clearly previews its source and destination.
 - Restore command-palette keyboard ownership so Ctrl+K focuses its search,
   Escape dismisses it without leaking input to a session, and every reopen
   starts with an empty query and reset selection.

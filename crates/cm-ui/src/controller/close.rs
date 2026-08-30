@@ -14,6 +14,7 @@ use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CloseAction {
+    CloseHome,
     CloseTab,
     DisconnectTab,
     ClosePane,
@@ -53,6 +54,9 @@ fn is_active(status: SessionStatus) -> bool {
 }
 
 fn tab_active_count(tab: &Tab) -> usize {
+    if tab.is_empty {
+        return 0;
+    }
     usize::from(is_active(tab.session.status()))
         + tab
             .extra_panes
@@ -95,6 +99,7 @@ fn show_confirmation(
     title: &str,
     message: String,
     action_label: &str,
+    allow_dont_ask: bool,
 ) {
     let mut st = state.borrow_mut();
     // A modal close decision is atomic. Do not silently replace its stable
@@ -109,6 +114,7 @@ fn show_confirmation(
     ui.set_close_confirm_message(message.into());
     ui.set_close_confirm_action_label(action_label.into());
     ui.set_close_confirm_dont_ask(false);
+    ui.set_close_confirm_allow_dont_ask(allow_dont_ask);
     // A modifier may already be down in an RDP destination when the user
     // opens this modal with the mouse. Balance it before the modal starts
     // owning keyboard input; subsequent modal-time presses are swallowed by
@@ -186,9 +192,31 @@ pub(super) fn request_tab_close(
     let target = {
         let st = state.borrow();
         let Some(tab) = st.tabs.get(idx) else { return };
-        (tab.num, tab_active_count(tab), st.confirm_close_active_tab)
+        (
+            tab.num,
+            tab.is_empty,
+            tab_active_count(tab),
+            st.confirm_close_active_tab,
+        )
     };
-    if target.1 == 0 || !target.2 {
+    if target.1 {
+        show_confirmation(
+            state,
+            ui,
+            CloseIntent {
+                action: CloseAction::CloseHome,
+                tab_num: Some(target.0),
+                endpoint_id: None,
+            },
+            "Close Home tab?",
+            "Close the Home tab? It will return automatically when no other tabs remain."
+                .to_owned(),
+            "Close Home",
+            false,
+        );
+        return;
+    }
+    if target.2 == 0 || !target.3 {
         tabs::close_tab(state, tab_model, ui, idx);
         return;
     }
@@ -207,11 +235,12 @@ pub(super) fn request_tab_close(
         "Close active connection?",
         format!(
             "\"{label}\" has {} active {}. Closing the tab will disconnect {}.",
-            target.1,
-            plural_connections(target.1),
-            if target.1 == 1 { "it" } else { "them" }
+            target.2,
+            plural_connections(target.2),
+            if target.2 == 1 { "it" } else { "them" }
         ),
         "Close tab",
+        true,
     );
 }
 
@@ -224,9 +253,17 @@ pub(super) fn request_tab_disconnect(
     let target = {
         let st = state.borrow();
         let Some(tab) = st.tabs.get(idx) else { return };
-        (tab.num, tab_active_count(tab), st.confirm_close_active_tab)
+        (
+            tab.num,
+            tab.is_empty,
+            tab_active_count(tab),
+            st.confirm_close_active_tab,
+        )
     };
-    if target.1 == 0 || !target.2 {
+    if target.1 {
+        return;
+    }
+    if target.2 == 0 || !target.3 {
         sessions::disconnect_tab(state, tab_model, ui, idx);
         return;
     }
@@ -245,11 +282,12 @@ pub(super) fn request_tab_disconnect(
         "Disconnect active connection?",
         format!(
             "\"{label}\" has {} active {}. Disconnect {} now?",
-            target.1,
-            plural_connections(target.1),
-            if target.1 == 1 { "it" } else { "them" }
+            target.2,
+            plural_connections(target.2),
+            if target.2 == 1 { "it" } else { "them" }
         ),
         "Disconnect",
+        true,
     );
 }
 
@@ -309,6 +347,7 @@ pub(super) fn request_pane_close(
         "Disconnect active connection?",
         "Closing this pane will terminate its active connection.".to_owned(),
         "Disconnect",
+        true,
     );
 }
 
@@ -335,6 +374,7 @@ fn request_quit(state: &Rc<RefCell<State>>, ui: &AppWindow) -> CloseRequestRespo
             if active == 1 { "it" } else { "them" }
         ),
         "Quit",
+        true,
     );
     CloseRequestResponse::KeepWindowShown
 }
@@ -356,14 +396,26 @@ pub(super) fn wire_close_confirmation(ctx: &Ctx) {
             }
             match command {
                 MODAL_KEY_ESCAPE => ui.invoke_close_confirm_cancel(),
-                MODAL_KEY_TAB_FORWARD => ui.set_close_confirm_focus_index(
-                    (ui.get_close_confirm_focus_index() + 1).rem_euclid(MODAL_CONTROL_COUNT),
-                ),
-                MODAL_KEY_TAB_BACKWARD => ui.set_close_confirm_focus_index(
-                    (ui.get_close_confirm_focus_index() - 1).rem_euclid(MODAL_CONTROL_COUNT),
-                ),
+                MODAL_KEY_TAB_FORWARD | MODAL_KEY_TAB_BACKWARD => {
+                    let current = ui.get_close_confirm_focus_index();
+                    let next = if ui.get_close_confirm_allow_dont_ask() {
+                        let delta = if command == MODAL_KEY_TAB_FORWARD {
+                            1
+                        } else {
+                            -1
+                        };
+                        (current + delta).rem_euclid(MODAL_CONTROL_COUNT)
+                    } else if current == 1 {
+                        2
+                    } else {
+                        1
+                    };
+                    ui.set_close_confirm_focus_index(next);
+                }
                 MODAL_KEY_ACTIVATE => match ui.get_close_confirm_focus_index() {
-                    0 => ui.set_close_confirm_dont_ask(!ui.get_close_confirm_dont_ask()),
+                    0 if ui.get_close_confirm_allow_dont_ask() => {
+                        ui.set_close_confirm_dont_ask(!ui.get_close_confirm_dont_ask());
+                    }
                     1 => ui.invoke_close_confirm_cancel(),
                     2 => ui.invoke_close_confirm_accept(),
                     _ => {}
@@ -409,11 +461,17 @@ pub(super) fn wire_close_confirmation(ctx: &Ctx) {
 
             // Construct only the narrow handles the synchronous continuation
             // needs; callback registration has already completed.
-            if ui.get_close_confirm_dont_ask() {
-                let (key, is_quit) = match intent.action {
-                    CloseAction::Quit => (SettingKey::ConfirmQuitActiveConnections, true),
-                    _ => (SettingKey::ConfirmCloseActiveTab, false),
-                };
+            let preference = (ui.get_close_confirm_allow_dont_ask()
+                && ui.get_close_confirm_dont_ask())
+            .then_some(match intent.action {
+                CloseAction::Quit => Some((SettingKey::ConfirmQuitActiveConnections, true)),
+                CloseAction::CloseTab | CloseAction::DisconnectTab | CloseAction::ClosePane => {
+                    Some((SettingKey::ConfirmCloseActiveTab, false))
+                }
+                CloseAction::CloseHome => None,
+            })
+            .flatten();
+            if let Some((key, is_quit)) = preference {
                 {
                     let mut st = state.borrow_mut();
                     if is_quit {
@@ -435,7 +493,7 @@ pub(super) fn wire_close_confirmation(ctx: &Ctx) {
             }
 
             match intent.action {
-                CloseAction::CloseTab | CloseAction::DisconnectTab => {
+                CloseAction::CloseHome | CloseAction::CloseTab | CloseAction::DisconnectTab => {
                     let Some(tab_num) = intent.tab_num else { return };
                     let idx = state
                         .borrow()
@@ -443,7 +501,7 @@ pub(super) fn wire_close_confirmation(ctx: &Ctx) {
                         .iter()
                         .position(|tab| tab.num == tab_num);
                     let Some(idx) = idx else { return };
-                    if intent.action == CloseAction::CloseTab {
+                    if matches!(intent.action, CloseAction::CloseHome | CloseAction::CloseTab) {
                         tabs::close_tab(&state, &tab_model, &ui, idx);
                     } else {
                         tabs::select_tab(&state, &ui, idx as i32);

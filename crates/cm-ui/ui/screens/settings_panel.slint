@@ -13,7 +13,7 @@
 //   import { SettingsPanel } from "screens/settings_panel.slint";
 
 import { Theme } from "../theme.slint";
-import { SegmentedControl } from "../components.slint";
+import { SegmentedControl, EditableFocus } from "../components.slint";
 import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView } from "std-widgets.slint";
 
 // ── SectionHeader ────────────────────────────────────────────────────────────
@@ -566,6 +566,7 @@ export component SettingsPanel inherits Rectangle {
                         accessible-label: "Default shell";
                         accepted(t) => { root.shell-path-changed(t); }
                         edited(t)   => { root.shell-path = t; root.shell-path-changed(t); }
+                        changed has-focus => { EditableFocus.report(self.has-focus); }
                     }
                 }
 
@@ -582,6 +583,7 @@ export component SettingsPanel inherits Rectangle {
                         accessible-label: "Shell arguments";
                         accepted(t) => { root.shell-args-changed(t); }
                         edited(t)   => { root.shell-args = t; root.shell-args-changed(t); }
+                        changed has-focus => { EditableFocus.report(self.has-focus); }
                     }
                 }
 
@@ -601,6 +603,7 @@ export component SettingsPanel inherits Rectangle {
                         accessible-label: "Working directory";
                         accepted(t) => { root.shell-cwd-changed(t); }
                         edited(t)   => { root.shell-cwd = t; root.shell-cwd-changed(t); }
+                        changed has-focus => { EditableFocus.report(self.has-focus); }
                     }
                 }
 
@@ -618,6 +621,7 @@ export component SettingsPanel inherits Rectangle {
                         input-type: number;
                         accessible-label: "Scrollback line limit";
                         accepted(value) => { root.scrollback-limit-changed(value); }
+                        changed has-focus => { EditableFocus.report(self.has-focus); }
                     }
                 }
 
@@ -949,10 +953,8 @@ export component SettingsPanel inherits Rectangle {
             ShortcutRow { keys: "Ctrl ⇧ B";    action: "Toggle broadcast to all panes"; }
             ShortcutRow { keys: "Ctrl ⇧ ←/→";  action: "Focus prev / next pane (H-split)"; }
             ShortcutRow { keys: "Ctrl ⇧ ↑/↓";  action: "Focus prev / next pane (V-split)"; }
-            // P6.9 (gap 17): direct shortcuts on the same reserved Ctrl⇧ layer.
+            // Direct shortcuts on the reserved Ctrl⇧ layer.
             ShortcutRow { keys: "Ctrl ⇧ T";    action: "Open new local tab"; }
-            ShortcutRow { keys: "Ctrl ⇧ Tab";  action: "Switch to next tab"; }
-            ShortcutRow { keys: "Ctrl ⇧ 1-9";  action: "Jump to tab N"; }
             ShortcutRow { keys: "Ctrl ⇧ E";    action: "Toggle the side panel"; }
 
             // Sub-header: global shortcuts
@@ -973,6 +975,10 @@ export component SettingsPanel inherits Rectangle {
             }
 
             global-ctrl-k-shortcut := ShortcutRow { keys: "Ctrl K"; action: "Open command palette"; }
+            ShortcutRow { keys: "Ctrl Tab"; action: "Switch to next tab"; }
+            ShortcutRow { keys: "Ctrl ⇧ Tab"; action: "Switch to previous tab"; }
+            ShortcutRow { keys: "Ctrl 0"; action: "Jump to Home"; }
+            ShortcutRow { keys: "Ctrl 1-9"; action: "Jump to connection N"; }
 
             Rectangle { vertical-stretch: 1; }
             }
