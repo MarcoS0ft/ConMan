@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.marcos0ft.conman</id>
+  <name>Connection Manager</name>
+  <summary>Manage terminal and remote desktop connections</summary>
+  <developer id="com.marcos0ft">
+    <name>MarcoS0ft</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <description>
+    <p>ConMan is a desktop connection manager for terminal, SSH, Telnet, and RDP sessions.</p>
+  </description>
+  <launchable type="desktop-id">com.marcos0ft.conman.desktop</launchable>
+  <url type="homepage">https://github.com/MarcoS0ft</url>
+  <provides>
+    <binary>conman</binary>
+    <binary>conmanctl</binary>
+  </provides>
+  <content_rating type="oars-1.1" />
+</component>

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Connection Manager
+Comment=Manage terminal and remote desktop connections
+Exec=conman
+Icon=com.marcos0ft.conman
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=SSH;RDP;Telnet;Terminal;Remote;
+StartupNotify=true

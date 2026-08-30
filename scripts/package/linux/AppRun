@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+HERE=$(CDPATH='' cd -- "$(dirname -- "$(readlink -f "$0")")" && pwd)
+export LD_LIBRARY_PATH="${HERE}/usr/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+case "${1:-}" in
+    --conmanctl)
+        shift
+        exec "${HERE}/usr/bin/conmanctl" "$@"
+        ;;
+    --install-cli)
+        shift
+        destination=${1:-"${HOME}/.local/bin"}
+        mkdir -p "$destination"
+        install -m 0755 "${HERE}/usr/bin/conmanctl" "${destination}/conmanctl"
+        printf 'Installed conmanctl to %s\n' "${destination}/conmanctl"
+        case ":${PATH}:" in
+            *":${destination}:"*) ;;
+            *) printf 'Add %s to PATH to invoke conmanctl directly.\n' "$destination" ;;
+        esac
+        exit 0
+        ;;
+    --uninstall-cli)
+        shift
+        destination=${1:-"${HOME}/.local/bin"}
+        rm -f "${destination}/conmanctl"
+        printf 'Removed %s\n' "${destination}/conmanctl"
+        exit 0
+        ;;
+esac
+
+exec "${HERE}/usr/bin/conman" "$@"
