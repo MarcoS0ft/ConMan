@@ -73,10 +73,20 @@ build_version=$(printf '%s\n' "$version" | sed -nE 's/.*-dev\.([0-9]+).*/\1/p')
 mkdir -p "$output_dir"
 app="$output_dir/ConMan.app"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" \
+    "$app/Contents/Resources/Licenses"
 install -m 0755 "$conman" "$app/Contents/MacOS/conman"
 install -m 0755 "$conmanctl" "$app/Contents/Helpers/conmanctl"
 install -m 0644 "$repo_root/packaging/macos/Info.plist" "$app/Contents/Info.plist"
+for license in \
+    "$repo_root/LICENSE-MIT" \
+    "$repo_root/LICENSE-APACHE" \
+    "$repo_root/crates/cm-ui/assets/fonts/NOTICE.md" \
+    "$repo_root/crates/cm-ui/assets/fonts/JetBrainsMono-OFL.txt" \
+    "$repo_root/crates/cm-ui/assets/fonts/SymbolsNerdFont-LICENSE-MIT.txt"
+do
+    install -m 0644 "$license" "$app/Contents/Resources/Licenses/$(basename "$license")"
+done
 plutil -replace CFBundleShortVersionString -string "$short_version" "$app/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$build_version" "$app/Contents/Info.plist"
 

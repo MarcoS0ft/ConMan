@@ -16,6 +16,7 @@ Set-StrictMode -Version Latest
 
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
 $installRoot = [System.IO.Path]::GetFullPath($InstallDir)
+$repo = (Resolve-Path (Join-Path $PSScriptRoot "../../..")).Path
 if (Test-Path -LiteralPath $installRoot) {
     throw "Refusing to reuse an existing installer smoke directory: $installRoot"
 }
@@ -65,10 +66,35 @@ try {
     }
     $installed = $true
 
-    foreach ($name in @("conman.exe", "ghostty-vt.dll", "bin\conmanctl.exe", "update-path.ps1", "Uninstall.exe")) {
+    foreach ($name in @(
+        "conman.exe",
+        "ghostty-vt.dll",
+        "bin\conmanctl.exe",
+        "update-path.ps1",
+        "licenses\LICENSE-MIT",
+        "licenses\LICENSE-APACHE",
+        "licenses\NOTICE.md",
+        "licenses\JetBrainsMono-OFL.txt",
+        "licenses\SymbolsNerdFont-LICENSE-MIT.txt",
+        "Uninstall.exe"
+    )) {
         $path = Join-Path $installRoot $name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Installed file missing: $path"
+        }
+    }
+    $licenseSources = @{
+        "licenses\LICENSE-MIT" = Join-Path $repo "LICENSE-MIT"
+        "licenses\LICENSE-APACHE" = Join-Path $repo "LICENSE-APACHE"
+        "licenses\NOTICE.md" = Join-Path $repo "crates/cm-ui/assets/fonts/NOTICE.md"
+        "licenses\JetBrainsMono-OFL.txt" = Join-Path $repo "crates/cm-ui/assets/fonts/JetBrainsMono-OFL.txt"
+        "licenses\SymbolsNerdFont-LICENSE-MIT.txt" = Join-Path $repo "crates/cm-ui/assets/fonts/SymbolsNerdFont-LICENSE-MIT.txt"
+    }
+    foreach ($relative in $licenseSources.Keys) {
+        $installedHash = (Get-FileHash -LiteralPath (Join-Path $installRoot $relative) -Algorithm SHA256).Hash
+        $sourceHash = (Get-FileHash -LiteralPath $licenseSources[$relative] -Algorithm SHA256).Hash
+        if ($installedHash -ne $sourceHash) {
+            throw "Installed license differs from its authoritative source: $relative"
         }
     }
     if (-not (Test-Path -LiteralPath $uninstallKey)) {

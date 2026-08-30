@@ -64,14 +64,44 @@ foreach ($pair in @(
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
 try {
-    $members = @($zip.Entries | ForEach-Object { $_.FullName })
+    $entries = @($zip.Entries)
+    $members = @($entries | ForEach-Object { $_.FullName })
+
+    $licenseSources = @{
+        "$base/licenses/LICENSE-MIT" = Join-Path $repo "LICENSE-MIT"
+        "$base/licenses/LICENSE-APACHE" = Join-Path $repo "LICENSE-APACHE"
+        "$base/licenses/NOTICE.md" = Join-Path $repo "crates/cm-ui/assets/fonts/NOTICE.md"
+        "$base/licenses/JetBrainsMono-OFL.txt" = Join-Path $repo "crates/cm-ui/assets/fonts/JetBrainsMono-OFL.txt"
+        "$base/licenses/SymbolsNerdFont-LICENSE-MIT.txt" = Join-Path $repo "crates/cm-ui/assets/fonts/SymbolsNerdFont-LICENSE-MIT.txt"
+    }
+    foreach ($member in $licenseSources.Keys) {
+        $entry = $entries | Where-Object FullName -CEQ $member | Select-Object -First 1
+        if (-not $entry) { throw "Portable ZIP license missing: $member" }
+        $entryStream = $entry.Open()
+        try {
+            $archiveHash = [Convert]::ToHexString(
+                [Security.Cryptography.SHA256]::HashData($entryStream)
+            ).ToLowerInvariant()
+        } finally {
+            $entryStream.Dispose()
+        }
+        $sourceHash = (Get-FileHash -LiteralPath $licenseSources[$member] -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($archiveHash -ne $sourceHash) {
+            throw "Portable ZIP license content differs from its authoritative source: $member"
+        }
+    }
 } finally {
     $zip.Dispose()
 }
 $expected = @(
     "$base/conman.exe",
     "$base/conmanctl.exe",
-    "$base/ghostty-vt.dll"
+    "$base/ghostty-vt.dll",
+    "$base/licenses/LICENSE-MIT",
+    "$base/licenses/LICENSE-APACHE",
+    "$base/licenses/NOTICE.md",
+    "$base/licenses/JetBrainsMono-OFL.txt",
+    "$base/licenses/SymbolsNerdFont-LICENSE-MIT.txt"
 )
 $difference = Compare-Object -ReferenceObject $expected -DifferenceObject $members
 if ($difference) {

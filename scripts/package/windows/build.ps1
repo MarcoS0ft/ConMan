@@ -7,9 +7,6 @@ param(
     [string] $OutputDir = "dist/packages",
 
     [Parameter()]
-    [string] $Python = "py",
-
-    [Parameter()]
     [string] $MakeNsis
 )
 
@@ -59,17 +56,57 @@ foreach ($name in @("conman.exe", "conmanctl.exe", "ghostty-vt.dll")) {
 
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 
-# Keep the portable archive format and checksum single-sourced in the existing
-# cross-platform distribution script.
-$packageScript = Join-Path $repo "scripts/dist/package_release.py"
-if ($Python -eq "py") {
-    & $Python -3 $packageScript --stage-dir $stage --output-dir $output
-} else {
-    & $Python $packageScript --stage-dir $stage --output-dir $output
+$base = "conman-$($metadata.sanitized_version)-windows-x86_64"
+$portableFiles = [ordered]@{
+    "conman.exe" = Join-Path $stage "conman.exe"
+    "conmanctl.exe" = Join-Path $stage "conmanctl.exe"
+    "ghostty-vt.dll" = Join-Path $stage "ghostty-vt.dll"
+    "licenses/LICENSE-MIT" = Join-Path $repo "LICENSE-MIT"
+    "licenses/LICENSE-APACHE" = Join-Path $repo "LICENSE-APACHE"
+    "licenses/NOTICE.md" = Join-Path $repo "crates/cm-ui/assets/fonts/NOTICE.md"
+    "licenses/JetBrainsMono-OFL.txt" = Join-Path $repo "crates/cm-ui/assets/fonts/JetBrainsMono-OFL.txt"
+    "licenses/SymbolsNerdFont-LICENSE-MIT.txt" = Join-Path $repo "crates/cm-ui/assets/fonts/SymbolsNerdFont-LICENSE-MIT.txt"
 }
-if ($LASTEXITCODE -ne 0) {
-    throw "Portable ZIP creation failed with exit code $LASTEXITCODE"
+foreach ($source in $portableFiles.Values) {
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "Required portable-package file not found: $source"
+    }
 }
+
+$archive = Join-Path $output "$base.zip"
+if (Test-Path -LiteralPath $archive) {
+    [System.IO.File]::Delete($archive)
+}
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$stream = [System.IO.File]::Open($archive, [System.IO.FileMode]::CreateNew)
+$zip = [System.IO.Compression.ZipArchive]::new(
+    $stream,
+    [System.IO.Compression.ZipArchiveMode]::Create
+)
+try {
+    foreach ($relative in @($portableFiles.Keys | Sort-Object)) {
+        $source = $portableFiles[$relative]
+        $entry = $zip.CreateEntry(
+            "$base/$relative",
+            [System.IO.Compression.CompressionLevel]::Optimal
+        )
+        $entry.LastWriteTime = (Get-Item -LiteralPath $source).LastWriteTime
+        $sourceStream = [System.IO.File]::OpenRead($source)
+        $entryStream = $entry.Open()
+        try {
+            $sourceStream.CopyTo($entryStream)
+        } finally {
+            $entryStream.Dispose()
+            $sourceStream.Dispose()
+        }
+    }
+} finally {
+    $zip.Dispose()
+    $stream.Dispose()
+}
+$archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+Set-Content -LiteralPath "$archive.sha256" -Encoding utf8 -NoNewline `
+    -Value "$archiveHash  $(Split-Path $archive -Leaf)`n"
 
 if (-not $MakeNsis) {
     $command = Get-Command makensis.exe -ErrorAction SilentlyContinue
@@ -89,7 +126,7 @@ if (-not $MakeNsis -or -not (Test-Path -LiteralPath $MakeNsis -PathType Leaf)) {
     throw "makensis was not found; install NSIS 3 or pass -MakeNsis"
 }
 
-$installer = Join-Path $output "conman-$($metadata.sanitized_version)-windows-x86_64-setup.exe"
+$installer = Join-Path $output "$base-setup.exe"
 $definition = Join-Path $repo "packaging/windows/conman.nsi"
 & $MakeNsis "/DPRODUCT_VERSION=$($metadata.version)" "/DSTAGE_DIR=$stage" "/DOUTPUT_FILE=$installer" $definition
 if ($LASTEXITCODE -ne 0) {

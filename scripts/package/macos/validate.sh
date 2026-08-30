@@ -3,6 +3,8 @@
 
 set -euo pipefail
 
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+repo_root=$(cd "$script_dir/../../.." && pwd -P)
 app=""
 dmg=""
 version=""
@@ -39,6 +41,24 @@ for path in "$main" "$ctl"; do
     "$path" --version | grep -Fq "$version" || { echo "Version check failed: $path" >&2; exit 1; }
 done
 [[ -s "$icon" ]] || { echo "App icon is missing" >&2; exit 1; }
+license_dir="$app/Contents/Resources/Licenses"
+[[ -d "$license_dir" ]] || { echo "App license directory is missing" >&2; exit 1; }
+license_count=$(find "$license_dir" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d '[:space:]')
+[[ "$license_count" == 5 ]] || {
+    echo "App must contain exactly five license files; found $license_count" >&2
+    exit 1
+}
+for license in \
+    "$repo_root/LICENSE-MIT" \
+    "$repo_root/LICENSE-APACHE" \
+    "$repo_root/crates/cm-ui/assets/fonts/NOTICE.md" \
+    "$repo_root/crates/cm-ui/assets/fonts/JetBrainsMono-OFL.txt" \
+    "$repo_root/crates/cm-ui/assets/fonts/SymbolsNerdFont-LICENSE-MIT.txt"
+do
+    bundled="$license_dir/$(basename "$license")"
+    [[ -f "$bundled" ]] || { echo "Bundled license is missing: $bundled" >&2; exit 1; }
+    cmp -s "$license" "$bundled" || { echo "Bundled license differs from source: $bundled" >&2; exit 1; }
+done
 if [[ "$require_signature" -eq 1 ]]; then
     codesign --verify --deep --strict --verbose=2 "$app"
 fi
@@ -63,6 +83,17 @@ attached=1
 [[ -f "$mount_point/README.txt" ]]
 cmp -s "$app/Contents/MacOS/conman" "$mount_point/ConMan.app/Contents/MacOS/conman"
 cmp -s "$app/Contents/Helpers/conmanctl" "$mount_point/ConMan.app/Contents/Helpers/conmanctl"
-"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/test-installer.sh"
+mounted_license_dir="$mount_point/ConMan.app/Contents/Resources/Licenses"
+mounted_license_count=$(find "$mounted_license_dir" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d '[:space:]')
+[[ "$mounted_license_count" == 5 ]] || {
+    echo "DMG app must contain exactly five license files; found $mounted_license_count" >&2
+    exit 1
+}
+for license in "$license_dir"/*; do
+    cmp -s "$license" \
+        "$mounted_license_dir/$(basename "$license")" \
+        || { echo "DMG license differs from app: $(basename "$license")" >&2; exit 1; }
+done
+"$script_dir/test-installer.sh"
 
 echo "Validated ConMan.app and $(basename "$dmg") for version $version"
