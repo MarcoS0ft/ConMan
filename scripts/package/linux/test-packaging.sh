@@ -27,6 +27,10 @@ elif command -v rpm >/dev/null 2>&1; then
     [ "$(rpm --eval '%{lua: print(rpm.vercmp("0.1.0~dev.1", "0.1.0"))}')" = -1 ] || \
         die "RPM prerelease does not sort before stable"
 fi
+ldd_reports_static "$(printf '\t/lib/ld-musl-x86_64.so.1 (0x7f0123456000)')"
+if ldd_reports_static $'libc.so.6 => /lib/libc.so.6 (0x7f0123456000)'; then
+    die "static ldd classifier accepted a resolved dependency"
+fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/conman-package-test.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT INT TERM

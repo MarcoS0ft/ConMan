@@ -133,6 +133,14 @@ verify_sha256() {
         die "checksum mismatch for $path: expected $expected, got $actual"
 }
 
+ldd_reports_static() {
+    local output=$1
+    printf '%s\n' "$output" | grep -qiE \
+        'not a dynamic executable|not a valid dynamic program|statically linked' \
+        || printf '%s\n' "$output" | grep -qEx \
+        '[[:space:]]*/lib/ld-musl-[^[:space:]]+ \(0x[0-9a-fA-F]+\)'
+}
+
 assert_fully_static_elf() {
     local binary=$1 ldd_output
     need_command readelf
@@ -143,15 +151,15 @@ assert_fully_static_elf() {
     if readelf -dW "$binary" 2>/dev/null | grep -q '(NEEDED)'; then
         die "$binary has DT_NEEDED dependencies and is not fully static"
     fi
-    # glibc ldd returns success for static PIE and prints "statically linked";
-    # musl commonly returns failure with "Not a valid dynamic program".
-    # Accept either exact static diagnosis, but never a resolved dependency.
+    # glibc ldd returns success for static PIE and prints "statically linked".
+    # Depending on the musl release, ldd either rejects static PIE or prints one
+    # loader self-mapping even though the ELF has neither PT_INTERP nor NEEDED.
+    # Accept only those bounded diagnoses; never accept a resolved dependency.
     ldd_output=$(ldd "$binary" 2>&1 || true)
     if printf '%s\n' "$ldd_output" | grep -q '=>'; then
         die "$binary has dependencies according to ldd"
     fi
-    if ! printf '%s\n' "$ldd_output" | \
-        grep -qiE 'not a dynamic executable|not a valid dynamic program|statically linked'; then
+    if ! ldd_reports_static "$ldd_output"; then
         printf '%s\n' "$ldd_output" >&2
         die "could not prove that $binary is fully static"
     fi
