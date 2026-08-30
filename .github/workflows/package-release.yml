@@ -20,6 +20,22 @@ on:
         required: false
         default: false
         type: boolean
+      sign_macos:
+        description: Require Developer ID signing and Apple notarization for macOS
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      MACOS_CERTIFICATE_P12:
+        required: false
+      MACOS_CERTIFICATE_PASSWORD:
+        required: false
+      NOTARIZE_API_KEY_ID:
+        required: false
+      NOTARIZE_API_KEY_ISSUER:
+        required: false
+      NOTARIZE_API_KEY_P8_BASE64:
+        required: false
 
 permissions:
   contents: read
@@ -54,7 +70,7 @@ jobs:
             python: py -3
 
     runs-on: [self-hosted, local-ci, "${{ matrix.os }}", "${{ matrix.arch }}"]
-    timeout-minutes: 75
+    timeout-minutes: 180
 
     steps:
       - name: Checkout exact source revision
@@ -81,6 +97,8 @@ jobs:
           if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update -qq
             sudo apt-get install -y --no-install-recommends \
+              binutils \
+              desktop-file-utils \
               pkg-config \
               libfontconfig1-dev \
               libgl1-mesa-dev \
@@ -89,9 +107,13 @@ jobs:
               libxcb-shape0-dev \
               libxcb-xfixes0-dev \
               libxkbcommon-dev \
-              openssh-client
+              openssh-client \
+              podman \
+              rpm
           elif command -v dnf >/dev/null 2>&1; then
             sudo dnf install -y \
+              binutils \
+              desktop-file-utils \
               pkgconf-pkg-config \
               fontconfig-devel \
               mesa-libGL-devel \
@@ -99,7 +121,9 @@ jobs:
               libX11-devel \
               libxcb-devel \
               libxkbcommon-devel \
-              openssh-clients
+              openssh-clients \
+              podman \
+              rpm-build
           else
             echo "Unsupported Linux package manager" >&2
             exit 1
@@ -140,10 +164,51 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 -m unittest discover -s scripts/dist -p 'test_*.py' -v
 
+      - name: Test Linux packaging contracts
+        if: runner.os == 'Linux'
+        run: scripts/package/linux/test-packaging.sh
+
+      - name: Test macOS CLI installer contract
+        if: runner.os == 'macOS'
+        shell: bash
+        run: scripts/package/macos/test-installer.sh
+
+      - name: Require NSIS 3
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $candidate = Get-Command makensis.exe -ErrorAction SilentlyContinue
+          if (-not $candidate) {
+            $candidate = Get-Command makensis -ErrorAction SilentlyContinue
+          }
+          if (-not $candidate) {
+            $known = @(
+              "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
+              "$env:ProgramFiles\NSIS\makensis.exe"
+            ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+            if ($known) { $candidate = Get-Item -LiteralPath $known }
+          }
+          if (-not $candidate) {
+            throw "NSIS 3 is required on the Windows packaging runner"
+          }
+          $makeNsis = if ($candidate.Source) { $candidate.Source } else { $candidate.FullName }
+          & $makeNsis /VERSION
+
+      - name: Test Windows packaging contracts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          ./scripts/package/windows/test-update-path.ps1
+          py -3 -m unittest scripts/package/windows/test_windows_packaging.py -v
+
       - name: Build release executables
+        if: runner.os != 'Linux'
         run: cargo build --locked --workspace --release --bins
 
       - name: Stage, compress, and verify release executables
+        if: runner.os != 'Linux'
         id: prepare
         run: >-
           ${{ matrix.python }} scripts/dist/prepare_release.py
@@ -152,24 +217,120 @@ jobs:
           --platform '${{ matrix.platform }}'
           --expected-version '${{ inputs.expected_version }}'
 
-      # Future platform signing belongs here: UPX has completed and passed its
-      # integrity/smoke tests, while no archive or checksum exists yet.
-      - name: Signing boundary
-        run: echo "Unsigned build; platform signing will run at this boundary."
+      - name: Build Linux native and portable packages
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+        run: |
+          scripts/package/linux/build-portable-container.sh dist/packages
+          scripts/package/linux/build-static-container.sh dist/packages
 
-      - name: Archive and checksum staged files
-        id: archive
-        run: >-
-          ${{ matrix.python }} scripts/dist/package_release.py
-          --stage-dir dist/stage
-          --output-dir dist/packages
+      - name: Build ad-hoc-signed macOS app and DMG
+        if: runner.os == 'macOS' && !inputs.sign_macos
+        shell: bash
+        run: |
+          scripts/package/macos/release.sh \
+            --target-dir dist/stage \
+            --output-dir dist/macos-build \
+            --version '${{ steps.prepare.outputs.version }}' \
+            --sign-identity -
 
-      - name: Upload packed release artifact
+      - name: Build signed and notarized macOS app and DMG
+        if: runner.os == 'macOS' && inputs.sign_macos
+        shell: bash
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_KEY_BASE64: ${{ secrets.NOTARIZE_API_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARIZE_API_KEY_ID }}
+          NOTARY_KEY_ISSUER: ${{ secrets.NOTARIZE_API_KEY_ISSUER }}
+        run: |
+          set -euo pipefail
+          for name in CERTIFICATE_P12_BASE64 CERTIFICATE_PASSWORD NOTARY_KEY_BASE64 NOTARY_KEY_ID NOTARY_KEY_ISSUER; do
+            if [[ -z "${!name}" ]]; then
+              echo "Required macOS release secret is missing: $name" >&2
+              exit 1
+            fi
+          done
+
+          release_state="$(mktemp -d "${TMPDIR:-/tmp}/conman-signing.XXXXXX")"
+          keychain="$release_state/build.keychain-db"
+          keychain_password="$(uuidgen)"
+          cleanup_signing() {
+            original_status=$?
+            trap - EXIT
+            cleanup_status=0
+            if [[ -f "$release_state/original-keychains.txt" ]]; then
+              original=()
+              while IFS= read -r existing; do
+                [[ -n "$existing" ]] && original+=("$existing")
+              done < "$release_state/original-keychains.txt"
+              if [[ "${#original[@]}" -gt 0 ]]; then
+                security list-keychains -d user -s "${original[@]}" || cleanup_status=1
+              fi
+            fi
+            if [[ -e "$keychain" ]]; then
+              security delete-keychain "$keychain" || cleanup_status=1
+            fi
+            rm -rf -- "$release_state" || cleanup_status=1
+            if [[ "$cleanup_status" -ne 0 ]]; then
+              echo "Failed to remove temporary macOS signing state" >&2
+              exit 1
+            fi
+            exit "$original_status"
+          }
+          trap cleanup_signing EXIT
+
+          printf '%s' "$CERTIFICATE_P12_BASE64" | /usr/bin/base64 -D > "$release_state/certificate.p12"
+          printf '%s' "$NOTARY_KEY_BASE64" | /usr/bin/base64 -D > "$release_state/notary.p8"
+          security list-keychains -d user \
+            | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//' \
+            > "$release_state/original-keychains.txt"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$release_state/certificate.p12" \
+            -k "$keychain" -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" \
+            | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' \
+            | head -n 1)"
+          if [[ -z "$identity" ]]; then
+            echo "Imported certificate contains no Developer ID Application identity" >&2
+            exit 1
+          fi
+
+          scripts/package/macos/release.sh \
+            --target-dir dist/stage \
+            --output-dir dist/macos-build \
+            --version '${{ steps.prepare.outputs.version }}' \
+            --sign-identity "$identity" \
+            --notary-key "$release_state/notary.p8" \
+            --notary-key-id "$NOTARY_KEY_ID" \
+            --notary-issuer "$NOTARY_KEY_ISSUER"
+
+      - name: Collect macOS release assets
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p dist/packages
+          cp dist/macos-build/*.dmg dist/macos-build/*.dmg.sha256 dist/packages/
+
+      # Authenticode signing belongs between prepare_release.py and this step.
+      # UPX has already finalized and verified the staged Windows executables.
+      - name: Build Windows installer and portable ZIP
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/package/windows/build.ps1 -StageDir dist/stage -OutputDir dist/packages
+
+      - name: Upload native release packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-${{ steps.prepare.outputs.sanitized_version }}-${{ matrix.platform }}
-          path: |
-            ${{ steps.archive.outputs.archive }}
-            ${{ steps.archive.outputs.checksum }}
+          name: release-${{ matrix.platform }}
+          path: dist/packages/*
           if-no-files-found: error
           retention-days: 14

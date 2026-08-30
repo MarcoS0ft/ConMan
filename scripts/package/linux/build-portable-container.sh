@@ -25,6 +25,7 @@ mkdir -p "$CARGO_CACHE_DIR"
     -e CARGO_HOME=/cargo \
     -e CARGO_TARGET_DIR=/work/target/package-bookworm \
     -e APPIMAGE_EXTRACT_AND_RUN=1 \
+    -e EXPECTED_VERSION="${EXPECTED_VERSION:-}" \
     -e LIBGHOSTTY_VT_SYS_CPU="${LIBGHOSTTY_VT_SYS_CPU:-x86_64_v2}" \
     -v "${REPO_ROOT}:/work:Z" \
     -v "${CARGO_CACHE_DIR}:/cargo:Z" \
@@ -38,10 +39,15 @@ mkdir -p "$CARGO_CACHE_DIR"
           libfontconfig1-dev libxkbcommon-dev pkg-config python3 xz-utils
         eval "$(scripts/bootstrap-zig.sh --export)"
         cargo build --locked --release -p conman -p conmanctl
-        python3 scripts/dist/prepare_release.py \
-          --target-dir /work/target/package-bookworm/release \
-          --stage-dir /work/dist/linux-stage \
+        prepare_args=(
+          --target-dir /work/target/package-bookworm/release
+          --stage-dir /work/dist/linux-stage
           --platform linux-x86_64
+        )
+        if [ -n "$EXPECTED_VERSION" ]; then
+          prepare_args+=(--expected-version "$EXPECTED_VERSION")
+        fi
+        python3 scripts/dist/prepare_release.py "${prepare_args[@]}"
         . scripts/package/linux/common.sh
         install_distribution_notices /work /work/dist/linux-stage/licenses
         PACKAGE_DEPENDENCY_BINARY_DIR=/work/target/package-bookworm/release \

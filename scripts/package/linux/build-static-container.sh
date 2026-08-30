@@ -25,6 +25,7 @@ mkdir -p "$CARGO_CACHE_DIR"
 "$ENGINE" run --rm \
     -e CARGO_HOME=/cargo \
     -e CARGO_TARGET_DIR=/work/target/static-musl \
+    -e EXPECTED_VERSION="${EXPECTED_VERSION:-}" \
     -e LIBGHOSTTY_VT_SYS_CPU="${LIBGHOSTTY_VT_SYS_CPU:-x86_64_v2}" \
     -v "${REPO_ROOT}:/work:Z" \
     -v "${CARGO_CACHE_DIR}:/cargo:Z" \

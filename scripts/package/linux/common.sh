@@ -70,6 +70,13 @@ binary_version() {
     printf '%s\n' "$conman_version"
 }
 
+require_expected_version() {
+    local actual=$1 expected=${EXPECTED_VERSION:-}
+    if [ -n "$expected" ] && [ "$actual" != "$expected" ]; then
+        die "binary version mismatch: expected ${expected}, got ${actual}"
+    fi
+}
+
 artifact_version() {
     printf '%s' "$1" | sed 's/[^0-9A-Za-z._-]/-/g'
 }

@@ -16,6 +16,10 @@ grep -q '<id>com.marcos0ft.conman</id>' \
 [ "$(artifact_version '0.1.0-dev.2+gabc')" = '0.1.0-dev.2-gabc' ]
 [ "$(deb_version '0.1.0-dev.2+gabc')" = '0.1.0~dev.2+gabc' ]
 [ "$(rpm_version '0.1.0-dev.2+gabc')" = '0.1.0~dev.2.gabc' ]
+EXPECTED_VERSION=0.1.0 require_expected_version 0.1.0
+if (EXPECTED_VERSION=0.1.0 require_expected_version 0.1.1) >/dev/null 2>&1; then
+    die "expected-version validation accepted a mismatched binary"
+fi
 if command -v rpmdev-vercmp >/dev/null 2>&1; then
     if rpmdev-vercmp '0.1.0~dev.1-1' '0.1.0-1' >/dev/null; then rpm_cmp=0; else rpm_cmp=$?; fi
     [ "$rpm_cmp" -eq 12 ] || die "RPM prerelease does not sort before stable"

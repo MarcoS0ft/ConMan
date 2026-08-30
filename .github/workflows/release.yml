@@ -49,6 +49,13 @@ jobs:
       source_ref: ${{ github.sha }}
       expected_version: ${{ needs.validate.outputs.version }}
       run_tests: true
+      sign_macos: true
+    secrets:
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      NOTARIZE_API_KEY_ID: ${{ secrets.NOTARIZE_API_KEY_ID }}
+      NOTARIZE_API_KEY_ISSUER: ${{ secrets.NOTARIZE_API_KEY_ISSUER }}
+      NOTARIZE_API_KEY_P8_BASE64: ${{ secrets.NOTARIZE_API_KEY_P8_BASE64 }}
 
   publish:
     name: Publish stable release

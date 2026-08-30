@@ -16,8 +16,10 @@ All notable user-facing changes to Connection Manager are documented here.
   contextual terminal and RDP session actions.
 - Add application branding, platform-aware local-shell hints, build identity
   display, and commit-derived development versions.
-- Add versioned Linux, macOS, and Windows release packaging with verified UPX
-  compression for Linux and Windows executables.
+- Add native Linux DEB, RPM, AppImage, portable, and static distributions;
+  macOS app/DMG packaging with a `conmanctl` installer; and Windows per-user or
+  all-users NSIS and portable ZIP packages. Linux and Windows executables use
+  verified UPX compression, and every format carries project/font notices.
 - Add mouse tab reordering, Ctrl+Tab switching, Ctrl+0 for Home, and Ctrl+1
   through Ctrl+9 for direct access to connection tabs.
 

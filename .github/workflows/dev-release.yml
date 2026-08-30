@@ -56,7 +56,8 @@ jobs:
             echo "- Tested by CI run: ${{ github.event.workflow_run.html_url }}"
             echo "- Release run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
-            echo "Windows and Linux application executables are compressed with checksum-verified UPX 5.2.0. macOS is not UPX-compressed."
+            echo "Packages include Linux DEB/RPM/AppImage/portable/static formats, a macOS DMG, and Windows NSIS/portable formats."
+            echo "Windows and dynamic Linux executables are compressed with checksum-verified UPX 5.2.0. The macOS app is ad-hoc signed and is not notarized; stable releases require Developer ID signing and notarization."
           } > release-notes.md
 
       - name: Remove previous rolling release and tag

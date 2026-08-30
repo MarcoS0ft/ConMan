@@ -17,6 +17,7 @@ require_release_binaries "$BINARY_DIR"
 assert_fully_static_elf "${BINARY_DIR}/conman"
 assert_fully_static_elf "${BINARY_DIR}/conmanctl"
 VERSION=$(binary_version "$BINARY_DIR")
+require_expected_version "$VERSION"
 NAME="conman-$(artifact_version "$VERSION")-linux-${ARCH}-static"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/conman-static.XXXXXX")
