@@ -10,9 +10,10 @@ addresses, account names, or machine-specific paths.
 - Linux x86_64: DEB, RPM, AppImage, UPX-compressed portable archive, and a
   separately built static-musl archive containing `conman` and `conmanctl`.
 - macOS arm64: a signed `ConMan.app` inside a DMG, with an opt-in installer for
-  `/usr/local/bin/conmanctl`. Rolling builds use an explicit ad-hoc signature.
-  Stable tags require the organization Developer ID and notarization secrets;
-  packaging fails rather than publishing an unsigned stable DMG.
+  `/usr/local/bin/conmanctl`. Downloadable rolling builds and stable tags use
+  the organization Developer ID and notarization secrets; packaging fails
+  rather than publishing an unsigned or unnotarized DMG. Local and disposable
+  validation builds may continue to use an explicit ad-hoc signature.
 - Windows x86_64: an NSIS installer supporting per-user and all-users installs,
   plus a portable ZIP. Both include `conmanctl`; the installer adds its scoped
   `bin` directory to the matching `PATH` and removes only its own entry.
@@ -20,6 +21,10 @@ addresses, account names, or machine-specific paths.
 Every format includes the project licenses and notices for bundled fonts.
 Linux and Windows release executables are compressed with the pinned UPX build
 and verified before packaging. macOS executables are never UPX-compressed.
+The macOS distribution path signs the nested executables and app with hardened
+runtime and secure timestamps, signs the final DMG, submits only that outermost
+container to Apple's notary service, staples its ticket, and requires the final
+Gatekeeper assessment to pass before the asset can be published.
 
 ## Local entrypoints
 

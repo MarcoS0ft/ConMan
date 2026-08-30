@@ -26,6 +26,13 @@ jobs:
     with:
       source_ref: ${{ github.event.workflow_run.head_sha }}
       run_tests: false
+      sign_macos: true
+    secrets:
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      NOTARIZE_API_KEY_ID: ${{ secrets.NOTARIZE_API_KEY_ID }}
+      NOTARIZE_API_KEY_ISSUER: ${{ secrets.NOTARIZE_API_KEY_ISSUER }}
+      NOTARIZE_API_KEY_P8_BASE64: ${{ secrets.NOTARIZE_API_KEY_P8_BASE64 }}
 
   publish:
     name: Publish rolling dev prerelease
@@ -57,7 +64,7 @@ jobs:
             echo "- Release run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
             echo "Packages include Linux DEB/RPM/AppImage/portable/static formats, a macOS DMG, and Windows NSIS/portable formats."
-            echo "Windows and dynamic Linux executables are compressed with checksum-verified UPX 5.2.0. The macOS app is ad-hoc signed and is not notarized; stable releases require Developer ID signing and notarization."
+            echo "Windows and dynamic Linux executables are compressed with checksum-verified UPX 5.2.0. The macOS app and DMG are Developer ID signed; the final DMG is notarized, stapled, and Gatekeeper-validated."
           } > release-notes.md
 
       - name: Remove previous rolling release and tag

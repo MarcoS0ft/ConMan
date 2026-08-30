@@ -61,9 +61,10 @@ do
 done
 if [[ "$require_signature" -eq 1 ]]; then
     codesign --verify --deep --strict --verbose=2 "$app"
+    codesign --verify --verbose=2 "$dmg"
 fi
 if [[ "$require_gatekeeper" -eq 1 ]]; then
-    spctl --assess --type execute --verbose=2 "$app"
+    spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 fi
 
 mount_point=$(mktemp -d "${TMPDIR:-/tmp}/conman-mount.XXXXXX")

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a macOS app and DMG, optionally signing and notarizing an official release.
+# Build a macOS app and DMG, optionally signing and notarizing a distribution.
 
 set -euo pipefail
 
@@ -67,22 +67,27 @@ notarize() {
         --issuer "$notary_issuer" --wait --timeout 30m
 }
 
-if [[ "$notary_count" -eq 3 ]]; then
-    [[ -f "$notary_key" ]] || { echo "Notary API key not found: $notary_key" >&2; exit 1; }
-    zip_path=$(mktemp "${TMPDIR:-/tmp}/ConMan.XXXXXX.zip")
-    trap 'rm -f "$zip_path"' EXIT
-    ditto -c -k --keepParent "$app" "$zip_path"
-    notarize "$zip_path"
-    xcrun stapler staple "$app"
-    xcrun stapler validate "$app"
-fi
-
 dmg_result=$("$script_dir/build-dmg.sh" --app "$app" --output-dir "$output_dir" --version "$version")
 printf '%s\n' "$dmg_result"
 dmg=$(printf '%s\n' "$dmg_result" | sed -n 's/^DMG=//p')
 [[ -f "$dmg" ]] || { echo "build-dmg.sh returned invalid metadata" >&2; exit 1; }
 
+if [[ -n "$identity" ]]; then
+    dmg_sign_args=(--force --sign "$identity")
+    if [[ "$identity" == "-" ]]; then
+        dmg_sign_args+=(--timestamp=none)
+    else
+        dmg_sign_args+=(--timestamp)
+    fi
+    codesign "${dmg_sign_args[@]}" "$dmg"
+    codesign --verify --verbose=2 "$dmg"
+fi
+
 if [[ "$notary_count" -eq 3 ]]; then
+    [[ -f "$notary_key" ]] || { echo "Notary API key not found: $notary_key" >&2; exit 1; }
+    # The DMG is the product users download, so submit only this outermost
+    # distribution container. Its signed app and nested executables are
+    # inspected as part of the same notarization submission.
     notarize "$dmg"
     xcrun stapler staple "$dmg"
     xcrun stapler validate "$dmg"
