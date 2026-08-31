@@ -18,7 +18,7 @@ fn version_is_machine_clean_and_uses_embedded_build_identity() {
 #[test]
 fn config_validation_json_has_no_decorative_output() {
     let directory = tempfile::tempdir().unwrap();
-    let config = directory.path().join("config.conman");
+    let config = directory.path().join("conman.ini");
     std::fs::write(&config, "theme = dark\n").unwrap();
     let output = conmanctl()
         .args(["--format", "json", "config", "validate"])
@@ -105,7 +105,7 @@ fn config_import_help_warns_about_automation_and_documents_acknowledgement() {
 #[test]
 fn automation_sensitive_config_requires_acknowledgement_before_mutation() {
     let directory = tempfile::tempdir().unwrap();
-    let selected = directory.path().join("config.conman");
+    let selected = directory.path().join("conman.ini");
     let source = directory.path().join("incoming.conman");
     std::fs::write(&selected, "theme = dark\n").unwrap();
     std::fs::write(&source, "theme = light\nautomation-enabled = true\n").unwrap();
@@ -147,7 +147,7 @@ fn automation_sensitive_config_requires_acknowledgement_before_mutation() {
 #[test]
 fn ordinary_config_import_does_not_require_yes() {
     let directory = tempfile::tempdir().unwrap();
-    let selected = directory.path().join("config.conman");
+    let selected = directory.path().join("conman.ini");
     let source = directory.path().join("incoming.conman");
     std::fs::write(&selected, "theme = dark\n").unwrap();
     std::fs::write(&source, "theme = light\n").unwrap();

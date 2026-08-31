@@ -131,7 +131,7 @@ pub const fn gui_help() -> &'static str {
     "Connection Manager\n\n\
 Usage: conman [--config PATH] [--database PATH]\n\n\
 Options:\n  \
---config PATH    Use an alternate config.conman file.\n  \
+--config PATH    Use an alternate conman.ini file.\n  \
 --database PATH  Use an alternate SQLite database.\n  \
 -h, --help       Show this help and exit.\n  \
 -V, --version    Show the version and exit."

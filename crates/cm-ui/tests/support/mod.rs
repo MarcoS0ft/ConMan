@@ -147,7 +147,7 @@ pub(crate) fn harness_with_agent_mode(
         repo: repo.clone(),
         import_repo,
         config_store,
-        config_path: std::path::PathBuf::from("config.conman"),
+        config_path: std::path::PathBuf::from("conman.ini"),
         app_state,
         build_identity: cm_ui::BuildIdentity {
             version: "0.1.0-dev.test".to_owned(),

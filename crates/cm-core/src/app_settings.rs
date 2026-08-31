@@ -1,6 +1,6 @@
 //! Typed application preferences and machine-local state.
 //!
-//! User preferences are stored in the editable `config.conman` document via
+//! User preferences are stored in the editable `conman.ini` document via
 //! [`AppConfigStore`]. Machine/runtime state is deliberately separate and is
 //! stored via [`AppStateRepository`]. Connection data and credentials do not
 //! cross either boundary.
@@ -114,7 +114,7 @@ pub struct AutomationSettings {
     pub scopes: ScopeSet,
 }
 
-/// Canonical known keys in `config.conman`.
+/// Canonical known keys in `conman.ini`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettingKey {
     Theme,
@@ -133,6 +133,8 @@ pub enum SettingKey {
     CopyOnSelect,
     ConfirmCloseActiveTab,
     ConfirmQuitActiveConnections,
+    AutoAcceptSshHostKeys,
+    AutoAcceptRdpCertificates,
     AutomationEnabled,
     AutomationScopes,
 }
@@ -154,6 +156,8 @@ pub const ALL_SETTING_KEYS: &[SettingKey] = &[
     SettingKey::CopyOnSelect,
     SettingKey::ConfirmCloseActiveTab,
     SettingKey::ConfirmQuitActiveConnections,
+    SettingKey::AutoAcceptSshHostKeys,
+    SettingKey::AutoAcceptRdpCertificates,
     SettingKey::AutomationEnabled,
     SettingKey::AutomationScopes,
 ];
@@ -177,6 +181,8 @@ impl SettingKey {
             Self::CopyOnSelect => "copy-on-select",
             Self::ConfirmCloseActiveTab => "confirm-close-active-tab",
             Self::ConfirmQuitActiveConnections => "confirm-quit-active-connections",
+            Self::AutoAcceptSshHostKeys => "auto-accept-ssh-host-keys",
+            Self::AutoAcceptRdpCertificates => "auto-accept-rdp-certificates",
             Self::AutomationEnabled => "automation-enabled",
             Self::AutomationScopes => "automation-scopes",
         }
@@ -200,6 +206,8 @@ impl SettingKey {
             | Self::CopyOnSelect
             | Self::ConfirmCloseActiveTab
             | Self::ConfirmQuitActiveConnections
+            | Self::AutoAcceptSshHostKeys
+            | Self::AutoAcceptRdpCertificates
             | Self::AutomationEnabled => parse_bool(value),
             Self::AutomationScopes => ScopeSet::validate(value).map_err(str::to_owned),
             Self::FontFamily | Self::Command | Self::CommandArgs | Self::WorkingDirectory => Ok(()),
@@ -269,6 +277,8 @@ pub struct AppSettings {
     pub copy_on_select: bool,
     pub confirm_close_active_tab: bool,
     pub confirm_quit_active_connections: bool,
+    pub auto_accept_ssh_host_keys: bool,
+    pub auto_accept_rdp_certificates: bool,
     pub automation: AutomationSettings,
 }
 
@@ -291,6 +301,8 @@ impl Default for AppSettings {
             copy_on_select: false,
             confirm_close_active_tab: true,
             confirm_quit_active_connections: true,
+            auto_accept_ssh_host_keys: false,
+            auto_accept_rdp_certificates: false,
             automation: AutomationSettings::default(),
         }
     }
@@ -379,6 +391,16 @@ impl<'a> SettingsService<'a> {
         s.confirm_quit_active_connections = self.read_bool(
             SettingKey::ConfirmQuitActiveConnections,
             s.confirm_quit_active_connections,
+            &mut warnings,
+        )?;
+        s.auto_accept_ssh_host_keys = self.read_bool(
+            SettingKey::AutoAcceptSshHostKeys,
+            s.auto_accept_ssh_host_keys,
+            &mut warnings,
+        )?;
+        s.auto_accept_rdp_certificates = self.read_bool(
+            SettingKey::AutoAcceptRdpCertificates,
+            s.auto_accept_rdp_certificates,
             &mut warnings,
         )?;
         s.automation.enabled = self.read_bool(
@@ -557,6 +579,14 @@ fn serialize_settings(settings: &AppSettings) -> Vec<(SettingKey, String)> {
         (
             SettingKey::ConfirmQuitActiveConnections,
             bool_wire(settings.confirm_quit_active_connections).to_owned(),
+        ),
+        (
+            SettingKey::AutoAcceptSshHostKeys,
+            bool_wire(settings.auto_accept_ssh_host_keys).to_owned(),
+        ),
+        (
+            SettingKey::AutoAcceptRdpCertificates,
+            bool_wire(settings.auto_accept_rdp_certificates).to_owned(),
         ),
         (
             SettingKey::AutomationEnabled,
@@ -771,6 +801,8 @@ mod tests {
         assert!(!settings.copy_on_select);
         assert!(settings.confirm_close_active_tab);
         assert!(settings.confirm_quit_active_connections);
+        assert!(!settings.auto_accept_ssh_host_keys);
+        assert!(!settings.auto_accept_rdp_certificates);
         assert_eq!(settings.renderer_backend, RendererBackend::Auto);
         assert_eq!(settings.automation, AutomationSettings::default());
     }
@@ -796,6 +828,8 @@ mod tests {
             copy_on_select: true,
             confirm_close_active_tab: false,
             confirm_quit_active_connections: false,
+            auto_accept_ssh_host_keys: true,
+            auto_accept_rdp_certificates: true,
             automation: AutomationSettings {
                 enabled: true,
                 scopes: ScopeSet {
@@ -914,7 +948,7 @@ mod tests {
 
     #[test]
     fn strict_validation_is_case_sensitive_and_checks_ranges() {
-        assert_eq!(ALL_SETTING_KEYS.len(), 18);
+        assert_eq!(ALL_SETTING_KEYS.len(), 20);
         for key in ALL_SETTING_KEYS {
             key.validate_value("").unwrap();
         }
@@ -930,12 +964,38 @@ mod tests {
         assert!(SettingKey::Theme.validate_value("Dark").is_err());
         assert!(SettingKey::CopyOnSelect.validate_value("1").is_err());
         assert!(
+            SettingKey::AutoAcceptSshHostKeys
+                .validate_value("yes")
+                .is_err()
+        );
+        assert!(
+            SettingKey::AutoAcceptRdpCertificates
+                .validate_value("1")
+                .is_err()
+        );
+        assert!(
             SettingKey::AutomationScopes
                 .validate_value("read,admin")
                 .is_err()
         );
         assert_eq!("renderer-backend".parse(), Ok(SettingKey::RendererBackend));
         assert!("Renderer-Backend".parse::<SettingKey>().is_err());
+    }
+
+    #[test]
+    fn configuration_reference_documents_every_setting_key() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/configuration.md");
+        let reference = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
+
+        for key in ALL_SETTING_KEYS {
+            let documented = format!("| `{}` |", key.as_str());
+            assert!(
+                reference.contains(&documented),
+                "configuration reference is missing {documented}"
+            );
+        }
     }
 
     #[test]

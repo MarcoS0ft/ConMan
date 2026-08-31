@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn store_reads_missing_as_empty_and_updates_atomically() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("nested").join("config.conman");
+        let path = directory.path().join("nested").join("conman.ini");
         let store = TextConfigStore::new(&path);
         assert_eq!(store.document_text().unwrap(), "");
         assert_eq!(store.get_value("theme").unwrap(), None);
@@ -723,7 +723,7 @@ mod tests {
     #[test]
     fn batch_update_is_all_or_nothing() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.conman");
+        let path = directory.path().join("conman.ini");
         fs::write(&path, "theme = dark\n").unwrap();
         let store = TextConfigStore::new(&path);
 
@@ -738,7 +738,7 @@ mod tests {
 
         const WRITERS: usize = 12;
         let directory = tempfile::tempdir().unwrap();
-        let path = Arc::new(directory.path().join("config.conman"));
+        let path = Arc::new(directory.path().join("conman.ini"));
         let barrier = Arc::new(Barrier::new(WRITERS));
         let mut threads = Vec::new();
         for index in 0..WRITERS {
@@ -771,7 +771,7 @@ mod tests {
         const ROUNDS: usize = 10;
         const WRITERS_PER_ROUND: usize = 16;
         let directory = tempfile::tempdir().unwrap();
-        let path = Arc::new(directory.path().join("config.conman"));
+        let path = Arc::new(directory.path().join("conman.ini"));
 
         for round in 0..ROUNDS {
             let barrier = Arc::new(Barrier::new(WRITERS_PER_ROUND));
@@ -817,7 +817,7 @@ mod tests {
     #[test]
     fn writer_lock_wait_is_bounded() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.conman");
+        let path = directory.path().join("conman.ini");
         let first = ConfigWriterLock::acquire_with_timeout(&path, Duration::from_secs(1)).unwrap();
 
         let started = Instant::now();
@@ -830,7 +830,7 @@ mod tests {
     #[test]
     fn persistent_lock_file_has_no_stale_ownership_after_guard_drop() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.conman");
+        let path = directory.path().join("conman.ini");
         let lock_path = writer_lock_path(&path).unwrap();
         let first =
             ConfigWriterLock::acquire_with_timeout(&path, Duration::from_millis(100)).unwrap();
@@ -846,7 +846,7 @@ mod tests {
     #[test]
     fn ancient_lockfile_contents_never_steal_a_live_os_lock() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.conman");
+        let path = directory.path().join("conman.ini");
         let lock_path = writer_lock_path(&path).unwrap();
         fs::write(&lock_path, "created-unix-ms=0\n").unwrap();
         let first =
@@ -878,7 +878,7 @@ mod tests {
         use std::process::{Command, Stdio};
 
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.conman");
+        let path = directory.path().join("conman.ini");
         let ready = directory.path().join("child-ready");
         let mut child = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
@@ -914,7 +914,7 @@ mod tests {
     #[test]
     fn replacement_rejects_invalid_syntax_without_changing_file() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.conman");
+        let path = directory.path().join("conman.ini");
         fs::write(&path, "theme = dark\n").unwrap();
         let store = TextConfigStore::new(&path);
         assert!(matches!(
@@ -939,8 +939,8 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("real-config.conman");
-        let link = directory.path().join("config.conman");
+        let target = directory.path().join("real-conman.ini");
+        let link = directory.path().join("conman.ini");
         fs::write(&target, "theme = dark\n").unwrap();
         symlink(&target, &link).unwrap();
         let store = TextConfigStore::new(&link);
@@ -965,7 +965,7 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let target = directory.path().join("victim");
-        let path = directory.path().join("config.conman");
+        let path = directory.path().join("conman.ini");
         fs::write(&target, "do not touch\n").unwrap();
 
         let result = atomic_write_with_pre_persist(&path, "theme = light\n", true, || {
@@ -989,7 +989,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.conman");
+        let config_path = directory.path().join("conman.ini");
         let lock_path = writer_lock_path(&config_path).unwrap();
         let target = directory.path().join("victim");
         fs::write(&target, "do not touch\n").unwrap();
@@ -1005,7 +1005,7 @@ mod tests {
     #[test]
     fn lockfile_identity_check_rejects_a_regular_file_swap_after_open() {
         let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.conman");
+        let config_path = directory.path().join("conman.ini");
         let lock_path = writer_lock_path(&config_path).unwrap();
         let displaced = directory.path().join("displaced-lock");
         fs::write(&lock_path, b"original").unwrap();

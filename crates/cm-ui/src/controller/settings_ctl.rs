@@ -27,6 +27,8 @@ pub(super) fn wire_settings_ctl(ctx: &Ctx) {
     wire_copy_on_select_changed(ctx);
     wire_confirm_close_active_tab_changed(ctx);
     wire_confirm_quit_active_connections_changed(ctx);
+    wire_auto_accept_ssh_host_keys_changed(ctx);
+    wire_auto_accept_rdp_certificates_changed(ctx);
     wire_startup_behavior_changed(ctx);
     wire_render_backend_changed(ctx);
     wire_open_config(ctx);
@@ -464,6 +466,18 @@ wire_bool_setting!(
     SettingKey::ConfirmQuitActiveConnections,
     confirm_quit_active_connections
 );
+wire_bool_setting!(
+    wire_auto_accept_ssh_host_keys_changed,
+    on_settings_auto_accept_ssh_host_keys_changed,
+    SettingKey::AutoAcceptSshHostKeys,
+    auto_accept_ssh_host_keys
+);
+wire_bool_setting!(
+    wire_auto_accept_rdp_certificates_changed,
+    on_settings_auto_accept_rdp_certificates_changed,
+    SettingKey::AutoAcceptRdpCertificates,
+    auto_accept_rdp_certificates
+);
 
 fn wire_startup_behavior_changed(ctx: &Ctx) {
     ctx.ui.on_startup_behavior_changed({
@@ -588,6 +602,8 @@ pub(super) fn apply_settings_to_ui(settings: &AppSettings, state: &AppState, ui:
     ui.set_settings_copy_on_select(settings.copy_on_select);
     ui.set_settings_confirm_close_active_tab(settings.confirm_close_active_tab);
     ui.set_settings_confirm_quit_active_connections(settings.confirm_quit_active_connections);
+    ui.set_settings_auto_accept_ssh_host_keys(settings.auto_accept_ssh_host_keys);
+    ui.set_settings_auto_accept_rdp_certificates(settings.auto_accept_rdp_certificates);
     ui.set_startup_behavior(startup_index(settings.startup));
     ui.set_render_backend(render_backend_index(settings.renderer_backend));
     ui.set_active_panel(state.active_panel);
@@ -611,6 +627,8 @@ fn apply_settings_to_runtime(state: &Rc<RefCell<State>>, ui: &AppWindow, setting
         state.copy_on_select = settings.copy_on_select;
         state.confirm_close_active_tab = settings.confirm_close_active_tab;
         state.confirm_quit_active_connections = settings.confirm_quit_active_connections;
+        state.auto_accept_ssh_host_keys = settings.auto_accept_ssh_host_keys;
+        state.auto_accept_rdp_certificates = settings.auto_accept_rdp_certificates;
         state.terminal_theme = settings.terminal_theme;
         state.scrollback_limit = settings.scrollback_limit;
 

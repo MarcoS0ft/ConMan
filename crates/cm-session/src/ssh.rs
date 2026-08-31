@@ -12,18 +12,19 @@
 //! conscious override on mismatch (warn, never hard-refuse), and a **read-only**
 //! consult of the user's OpenSSH `~/.ssh/known_hosts`. See [`KnownHosts`].
 
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use cm_core::Secret;
 use cm_core::TerminalOptions;
 use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalSize};
-use russh::keys::known_hosts::{
-    check_known_hosts_path, known_host_keys_path, learn_known_hosts_path,
-};
+#[cfg(test)]
+use russh::keys::known_hosts::learn_known_hosts_path;
+use russh::keys::known_hosts::{check_known_hosts_path, known_host_keys_path};
 use russh::keys::ssh_key::{HashAlg, PublicKey};
 use russh::keys::{PrivateKeyWithHashAlg, decode_secret_key, load_secret_key};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -201,9 +202,16 @@ impl KnownHosts {
         match verifier.decide(&info) {
             HostKeyDecision::Accept => {
                 // Store/replace in ConMan's store only — never the user file.
-                let _ = learn_known_hosts_path(host, port, key, &self.conman_path);
-                tracing::info!(host, port, algorithm = %algorithm, fingerprint = %fp, "ssh: host key accepted and stored");
-                true
+                match replace_conman_host_key(host, port, key, &self.conman_path) {
+                    Ok(()) => {
+                        tracing::info!(host, port, algorithm = %algorithm, fingerprint = %fp, "ssh: host key accepted and stored");
+                        true
+                    }
+                    Err(error) => {
+                        tracing::error!(host, port, algorithm = %algorithm, fingerprint = %fp, %error, "ssh: accepted host key could not be persisted; connection rejected");
+                        false
+                    }
+                }
             }
             HostKeyDecision::Reject => false,
         }
@@ -222,6 +230,69 @@ impl KnownHosts {
             })
             .unwrap_or_else(|| "<unknown>".to_owned())
     }
+}
+
+/// Process-wide serialization for ConMan's owned known-hosts document. Each
+/// session gets its own [`KnownHosts`] value, so a field-local mutex would not
+/// prevent two simultaneous accepts from losing one another's update.
+fn known_hosts_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Atomically store exactly one identity for `host:port` in ConMan's trust
+/// document. russh's `learn_known_hosts_path` only appends; after a key change
+/// its checker encounters the stale same-algorithm entry first and reports a
+/// mismatch forever. ConMan owns this file, so replacing every entry for the
+/// endpoint is both simpler and unambiguous. The user's OpenSSH file is never
+/// passed here and remains read-only.
+fn replace_conman_host_key(
+    host: &str,
+    port: u16,
+    key: &PublicKey,
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _guard = known_hosts_write_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+
+    let endpoint = if port == 22 {
+        host.to_owned()
+    } else {
+        format!("[{host}]:{port}")
+    };
+    let existing = match std::fs::read_to_string(path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let mut document = existing
+        .lines()
+        .filter(|line| line.split_whitespace().next() != Some(endpoint.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !document.is_empty() {
+        document.push('\n');
+    }
+    document.push_str(&endpoint);
+    document.push(' ');
+    document.push_str(&key.to_openssh()?);
+    document.push('\n');
+
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.write_all(document.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 /// SHA256 fingerprint string (`SHA256:...`).
@@ -1104,6 +1175,52 @@ mod tests {
             other => panic!("expected mismatch, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accepted_conman_mismatch_replaces_old_key_and_is_silent_next_time() {
+        let key_a = pubkey(PUBKEY_A);
+        let key_b = pubkey(PUBKEY_B);
+        let dir = tempfile::tempdir().unwrap();
+        let conman = dir.path().join("known_hosts");
+        let user = dir.path().join("user_known_hosts");
+        std::fs::write(&user, format!("host.test {PUBKEY_A}\n")).unwrap();
+        learn_known_hosts_path("host.test", 22, &key_a, &conman).unwrap();
+
+        let kh = KnownHosts::with_paths(conman.clone(), Some(user.clone()));
+        let accept = FixedVerifier::new(HostKeyDecision::Accept);
+        assert!(kh.verify("host.test", 22, &key_b, &*accept));
+
+        let reject = FixedVerifier::new(HostKeyDecision::Reject);
+        assert!(
+            kh.verify("host.test", 22, &key_b, &*reject),
+            "the replacement in ConMan's store must win before the read-only user mismatch"
+        );
+        assert!(reject.seen.lock().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&user).unwrap(),
+            format!("host.test {PUBKEY_A}\n"),
+            "ConMan must never rewrite the user's OpenSSH trust store"
+        );
+
+        let stored = std::fs::read_to_string(&conman).unwrap();
+        assert!(stored.contains(PUBKEY_B));
+        assert!(!stored.contains(PUBKEY_A));
+    }
+
+    #[test]
+    fn accepted_host_key_is_rejected_when_conman_store_cannot_persist_it() {
+        let key = pubkey(PUBKEY_A);
+        let dir = tempfile::tempdir().unwrap();
+        let blocked_parent = dir.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, "occupied").unwrap();
+        let kh = KnownHosts::with_paths(blocked_parent.join("known_hosts"), None);
+        let accept = FixedVerifier::new(HostKeyDecision::Accept);
+
+        assert!(
+            !kh.verify("host.test", 22, &key, &*accept),
+            "Accept means accept and remember; storage failure must not be reported as trusted"
+        );
     }
 
     // -- P6.13: keyboard-interactive prompt-collection model ----------------

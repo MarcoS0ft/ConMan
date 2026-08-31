@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn path_identity_is_stable_and_does_not_touch_targets() {
         let directory = tempfile::tempdir().unwrap();
-        let config = directory.path().join("absent-config").join("config.conman");
+        let config = directory.path().join("absent-config").join("conman.ini");
         let database = directory.path().join("absent-db").join("conman.sqlite");
         let first = InstanceIdentity::from_paths(&config, &database).unwrap();
         assert_eq!(
@@ -515,7 +515,7 @@ mod tests {
         )
         .unwrap();
         let lower = InstanceIdentity::from_paths(
-            Path::new(r"c:\users\alice\conman\config.conman"),
+            Path::new(r"c:\users\alice\conman\conman.ini"),
             Path::new(r"c:\users\alice\conman\conman.sqlite"),
         )
         .unwrap();

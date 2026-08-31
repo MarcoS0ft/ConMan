@@ -9,7 +9,7 @@
 //! - [`app_db_path`] / [`app_log_dir`]: OS-standard per-user data directory
 //!   resolution (P1.5, extended for logging in P6.3).
 //! - [`app_config_path`] / [`TextConfigStore`]: the user-editable
-//!   `config.conman` document and its line-preserving persistence adapter.
+//!   `conman.ini` document and its line-preserving persistence adapter.
 //! - [`single_instance`]: an identity-scoped OS advisory lock plus a loopback
 //!   activation handshake (P6.16); see the module docs for the protocol.
 //! - [`accent`]: OS accent-color read + best-effort live watch (P6.8, gap 10).
@@ -55,11 +55,11 @@ fn conman_data_dir() -> Result<PathBuf, PlatformError> {
     Ok(dir)
 }
 
-/// Returns the path to ConMan's user-editable `config.conman` file.
+/// Returns the path to ConMan's user-editable `conman.ini` file.
 ///
 /// Resolution order:
 /// 1. `CONMAN_CONFIG_PATH`, when set.
-/// 2. `<OS config dir>/conman/config.conman`.
+/// 2. `<OS config dir>/conman/conman.ini`.
 ///
 /// The parent directory is created before the path is returned.
 pub fn app_config_path() -> Result<PathBuf, PlatformError> {
@@ -75,7 +75,7 @@ pub fn app_config_path_candidate() -> Result<PathBuf, PlatformError> {
         return Ok(PathBuf::from(path));
     }
     let base = dirs::config_dir().ok_or(PlatformError::NoConfigDir)?;
-    Ok(base.join("conman").join("config.conman"))
+    Ok(base.join("conman").join("conman.ini"))
 }
 
 /// Create the parent directory for a previously resolved config candidate.
@@ -140,7 +140,7 @@ fn resolve_config_path(config_path_override: Option<PathBuf>) -> Result<PathBuf,
     std::fs::create_dir_all(&dir)
         .map_err(|error| PlatformError::ConfigDirCreate(dir.clone(), error.to_string()))?;
     restrict_directory_permissions(&dir);
-    Ok(dir.join("config.conman"))
+    Ok(dir.join("conman.ini"))
 }
 
 fn ensure_parent_dir(path: &std::path::Path) -> Result<(), PlatformError> {
@@ -280,15 +280,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_config_path_defaults_to_config_conman() {
+    fn resolve_config_path_defaults_to_conman_ini() {
         let resolved = resolve_config_path(None).expect("default path should resolve");
-        assert_eq!(resolved.file_name().unwrap(), "config.conman");
+        assert_eq!(resolved.file_name().unwrap(), "conman.ini");
         assert_eq!(resolved.parent().unwrap().file_name().unwrap(), "conman");
     }
 
     #[test]
     fn platform_open_command_passes_path_as_one_argument() {
-        let path = PathBuf::from("a path").join("config.conman");
+        let path = PathBuf::from("a path").join("conman.ini");
         let command = platform_open_command(&path);
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),

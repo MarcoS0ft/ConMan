@@ -170,6 +170,8 @@ export component SettingsPanel inherits Rectangle {
     in-out property <int>  render-backend: 0;
     in-out property <bool> confirm-close-active-tab: true;
     in-out property <bool> confirm-quit-active-connections: true;
+    in-out property <bool> auto-accept-ssh-host-keys: false;
+    in-out property <bool> auto-accept-rdp-certificates: false;
     in property <string> build-version: "";
     in property <string> build-details: "";
 
@@ -209,6 +211,8 @@ export component SettingsPanel inherits Rectangle {
     callback render-backend-changed(int);     // 0 auto · 1 software · 2 hardware
     callback confirm-close-active-tab-changed(bool);
     callback confirm-quit-active-connections-changed(bool);
+    callback auto-accept-ssh-host-keys-changed(bool);
+    callback auto-accept-rdp-certificates-changed(bool);
     callback open-config();
     callback reload-config();
     callback copy-build-info();
@@ -710,6 +714,44 @@ export component SettingsPanel inherits Rectangle {
                 }
             }
 
+            // ════ SECURITY ══════════════════════════════════════════════
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+            SectionHeader { label: "SECURITY"; }
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+
+            VerticalLayout {
+                padding-left: root.content-padding; padding-right: root.content-padding;
+                padding-top: Theme.space-4; padding-bottom: Theme.space-2;
+                spacing: Theme.space-3;
+                settings-auto-accept-ssh-check := CheckBox {
+                    min-width: 0px;
+                    text: "Auto-accept SSH host keys";
+                    checked <=> root.auto-accept-ssh-host-keys;
+                    toggled => { root.auto-accept-ssh-host-keys-changed(self.checked); }
+                }
+                Text {
+                    text: "Automatically trust and remember unknown or changed SSH host keys. Use only on controlled networks.";
+                    color: Theme.color-connecting-foreground; font-size: Theme.font-sm;
+                    font-family: Theme.font-family; wrap: word-wrap;
+                }
+                settings-auto-accept-rdp-check := CheckBox {
+                    min-width: 0px;
+                    text: "Auto-accept RDP certificates";
+                    checked <=> root.auto-accept-rdp-certificates;
+                    toggled => { root.auto-accept-rdp-certificates-changed(self.checked); }
+                }
+                Text {
+                    text: "Automatically trust and remember untrusted, invalid-for-host, expired, or changed RDP certificates. Use only on controlled networks.";
+                    color: Theme.color-connecting-foreground; font-size: Theme.font-sm;
+                    font-family: Theme.font-family; wrap: word-wrap;
+                }
+                Text {
+                    text: "Turning these options off does not remove identities that were already trusted.";
+                    color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                    font-family: Theme.font-family; wrap: word-wrap;
+                }
+            }
+
             // ════ RENDERING ═════════════════════════════════════════════
             Rectangle { height: 1px; background: Theme.color-stroke; }
             SectionHeader { label: "RENDERING"; }
@@ -863,7 +905,7 @@ export component SettingsPanel inherits Rectangle {
                 padding-top: Theme.space-4; padding-bottom: Theme.space-2;
                 spacing: Theme.space-3;
                 Text {
-                    text: "Preferences are stored in an editable config.conman text file.";
+                    text: "Preferences are stored in an editable conman.ini text file.";
                     color: Theme.color-text-secondary; font-size: Theme.font-sm;
                     font-family: Theme.font-family; wrap: word-wrap;
                 }

@@ -153,6 +153,8 @@ pub(crate) struct MockSessionProvider {
     tagged_inputs: Arc<Mutex<Vec<(usize, SessionInput)>>>,
     search_requests: Arc<AtomicUsize>,
     search_request_sessions: Arc<Mutex<Vec<usize>>>,
+    ssh_verifiers: Mutex<Vec<Arc<dyn HostKeyVerifier>>>,
+    rdp_verifiers: Mutex<Vec<Arc<dyn CertVerifier>>>,
 }
 
 impl MockSessionProvider {
@@ -180,6 +182,8 @@ impl MockSessionProvider {
             tagged_inputs: Arc::new(Mutex::new(Vec::new())),
             search_requests: Arc::new(AtomicUsize::new(0)),
             search_request_sessions: Arc::new(Mutex::new(Vec::new())),
+            ssh_verifiers: Mutex::new(Vec::new()),
+            rdp_verifiers: Mutex::new(Vec::new()),
         })
     }
 
@@ -207,6 +211,24 @@ impl MockSessionProvider {
 
     pub(crate) fn telnet_connect_count(&self) -> usize {
         self.telnet_connect_calls.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn latest_ssh_verifier(&self) -> Arc<dyn HostKeyVerifier> {
+        self.ssh_verifiers
+            .lock()
+            .expect("MockSessionProvider SSH verifiers poisoned")
+            .last()
+            .expect("an SSH connection must have supplied a verifier")
+            .clone()
+    }
+
+    pub(crate) fn latest_rdp_verifier(&self) -> Arc<dyn CertVerifier> {
+        self.rdp_verifiers
+            .lock()
+            .expect("MockSessionProvider RDP verifiers poisoned")
+            .last()
+            .expect("an RDP connection must have supplied a verifier")
+            .clone()
     }
 
     pub(crate) fn shutdown_count(&self) -> usize {
@@ -384,11 +406,15 @@ impl SessionProvider for MockSessionProvider {
         &self,
         _settings: &SshSettings,
         _auth: SshAuthInput,
-        _verifier: Arc<dyn HostKeyVerifier>,
+        verifier: Arc<dyn HostKeyVerifier>,
         _size: TerminalSize,
         _options: cm_core::TerminalOptions,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
         self.ssh_connect_calls.fetch_add(1, Ordering::SeqCst);
+        self.ssh_verifiers
+            .lock()
+            .expect("MockSessionProvider SSH verifiers poisoned")
+            .push(verifier);
         let cell = self
             .next_remote_status
             .lock()
@@ -428,10 +454,14 @@ impl SessionProvider for MockSessionProvider {
         &self,
         _settings: &RdpSettings,
         _auth: RdpAuthInput,
-        _verifier: Arc<dyn CertVerifier>,
+        verifier: Arc<dyn CertVerifier>,
         _endpoint_id: cm_core::SessionEndpointId,
     ) -> Result<Box<dyn Session>, SessionSetupError> {
         self.rdp_connect_calls.fetch_add(1, Ordering::SeqCst);
+        self.rdp_verifiers
+            .lock()
+            .expect("MockSessionProvider RDP verifiers poisoned")
+            .push(verifier);
         let cell = self
             .next_remote_status
             .lock()

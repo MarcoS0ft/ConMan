@@ -1156,12 +1156,7 @@ pub(super) fn connect_in_split(
                 INITIAL_SIZE
             };
 
-            let auto_accept = util::ssh_auto_accept_keys();
-            let verifier = Arc::new(sessions::UiHostKeyVerifier {
-                weak_ui: weak.clone(),
-                pending: hk_pending.clone(),
-                auto_accept,
-            });
+            let verifier = sessions::ssh_host_key_verifier(state, weak, hk_pending);
 
             // P8.6-B (Fable review fixup): "Connect in split" establishes a
             // live session with stored credentials exactly like a fresh
@@ -1304,12 +1299,7 @@ pub(super) fn connect_in_split(
             s.width = width;
             s.height = height;
 
-            let auto_accept = util::rdp_auto_accept_certs();
-            let verifier = Arc::new(sessions::UiCertVerifier {
-                weak_ui: weak.clone(),
-                pending: cert_pending.clone(),
-                auto_accept,
-            });
+            let verifier = sessions::rdp_certificate_verifier(state, weak, cert_pending);
 
             // P8.6-B (Fable review fixup): see the SSH arm's identical
             // comment, above.

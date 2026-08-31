@@ -6,7 +6,7 @@
 //! `conman` — the application binary and composition root.
 //!
 //! Opens a file-backed SQLite database resolved by `cm-platform::app_db_path`
-//! for connections and machine-local state, plus an editable `config.conman`
+//! for connections and machine-local state, plus an editable `conman.ini`
 //! resolved by `cm-platform::app_config_path` for user preferences.
 //!
 //! Dev-only convenience: behind the off-by-default `demo-seed` cargo feature,
@@ -769,7 +769,7 @@ mod demo_seed_gating_tests {
     #[test]
     fn prepared_startup_path_creates_its_parent_without_changing_the_path() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("nested").join("config.conman");
+        let path = directory.path().join("nested").join("conman.ini");
         let resolved = prepare_app_config_path(path.clone()).expect("prepare explicit config path");
         assert_eq!(resolved, path);
         assert!(resolved.parent().expect("parent").is_dir());
@@ -779,7 +779,7 @@ mod demo_seed_gating_tests {
     fn gui_parser_preserves_both_startup_path_overrides() {
         let outcome = cm_cli::parse_gui_args([
             "--config",
-            "alternate/config.conman",
+            "alternate/conman.ini",
             "--database",
             "alternate/conman.sqlite",
         ])
@@ -789,7 +789,7 @@ mod demo_seed_gating_tests {
         };
         assert_eq!(
             invocation.config_path,
-            Some(std::path::PathBuf::from("alternate/config.conman"))
+            Some(std::path::PathBuf::from("alternate/conman.ini"))
         );
         assert_eq!(
             invocation.database_path,
@@ -852,7 +852,7 @@ mod demo_seed_gating_tests {
     #[test]
     fn environment_path_overrides_form_identity_before_either_path_is_touched() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let config_path = directory.path().join("config-absent").join("config.conman");
+        let config_path = directory.path().join("config-absent").join("conman.ini");
         let database_path = directory
             .path()
             .join("database-absent")
@@ -894,7 +894,7 @@ mod demo_seed_gating_tests {
     #[test]
     fn ordinary_second_launch_requests_activation() {
         let identity = InstanceIdentity::from_paths(
-            std::path::Path::new("config.conman"),
+            std::path::Path::new("conman.ini"),
             std::path::Path::new("conman.sqlite"),
         )
         .expect("derive identity");
@@ -907,7 +907,7 @@ mod demo_seed_gating_tests {
     #[test]
     fn ordinary_launch_never_proceeds_without_verified_instance_lock() {
         let identity = InstanceIdentity::from_paths(
-            std::path::Path::new("config.conman"),
+            std::path::Path::new("conman.ini"),
             std::path::Path::new("conman.sqlite"),
         )
         .expect("derive identity");
@@ -947,7 +947,7 @@ mod demo_seed_gating_tests {
     #[test]
     fn startup_config_uses_defaults_for_syntax_errors() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("config.conman");
+        let path = directory.path().join("conman.ini");
         std::fs::write(&path, "not an assignment").expect("write malformed config");
         let store = TextConfigStore::new(path);
 
@@ -959,7 +959,7 @@ mod demo_seed_gating_tests {
     #[test]
     fn startup_config_keeps_per_key_value_warnings() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("config.conman");
+        let path = directory.path().join("conman.ini");
         std::fs::write(&path, "font-size = enormous\nscrollback-limit = 42\n")
             .expect("write config");
         let store = TextConfigStore::new(path);
@@ -1009,7 +1009,7 @@ mod demo_seed_gating_tests {
         directory: &tempfile::TempDir,
     ) -> Result<AppConfig, Box<dyn std::error::Error>> {
         let db_path = directory.path().join("ds-test.sqlite");
-        let config_path = directory.path().join("config.conman");
+        let config_path = directory.path().join("conman.ini");
         let secrets: Arc<dyn cm_core::CredentialStore> = Arc::new(KeyringStore::new());
         let repo =
             Arc::new(SqliteRepository::open(&db_path)?.with_credential_store(Arc::clone(&secrets)));
@@ -1059,7 +1059,7 @@ mod demo_seed_gating_tests {
         let alternate_path = directory
             .path()
             .join("must-remain-absent")
-            .join("config.conman");
+            .join("conman.ini");
         let identity = InstanceIdentity::from_paths(&alternate_path, &directory.path().join("db"))
             .expect("derive identity");
         let result = preflight_single_instance(&identity, |_| {

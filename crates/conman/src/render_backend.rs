@@ -43,7 +43,7 @@
 //! process, which still has its one-and-only `set_platform` call unused.
 //!
 //! An explicit user-set `SLINT_BACKEND` always wins, followed by an explicit
-//! `config.conman` preference. Either skips the probe entirely, so xvfb/QA
+//! `conman.ini` preference. Either skips the probe entirely, so xvfb/QA
 //! gates (which set `winit-femtovg` / `software`) are unaffected.
 //!
 //! [`resolve`] (which may call `force_software_backend`'s `unsafe
@@ -172,7 +172,7 @@ fn force_software_backend() {
 pub(crate) enum RendererDecision {
     /// The user set `SLINT_BACKEND` themselves; honored verbatim.
     ExplicitEnv(String),
-    /// An explicit `renderer-backend` preference from `config.conman`.
+    /// An explicit `renderer-backend` preference from `conman.ini`.
     Configured(RendererBackend),
     /// A previously-persisted backend was honored from machine-local state, so
     /// the probe was skipped this launch (P7.1 cont.). Carries the backend
@@ -201,7 +201,7 @@ pub(crate) enum RendererDecision {
 /// [`log_decision`] to report once logging is up.
 ///
 /// Precedence: an explicit `SLINT_BACKEND` environment value wins, followed
-/// by an explicit `renderer-backend` preference in `config.conman`, the
+/// by an explicit `renderer-backend` preference in `conman.ini`, the
 /// machine-local probe cache, and finally a fresh probe. Setting
 /// `CONMAN_RENDER_REPROBE` ignores only the automatic cache; it never
 /// overrides an explicit user preference.
@@ -313,7 +313,7 @@ pub(crate) fn log_decision(decision: &RendererDecision) {
             tracing::info!(
                 renderer = configured.as_str(),
                 configured = true,
-                "startup renderer: honoring config.conman preference"
+                "startup renderer: honoring conman.ini preference"
             );
         }
         RendererDecision::Cached(v) => {

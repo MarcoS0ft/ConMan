@@ -145,7 +145,7 @@ pub struct AppConfig {
     pub repo: Arc<dyn ConnectionRepository>,
     /// The same SQLite adapter viewed through its atomic import capability.
     pub import_repo: Arc<dyn cm_storage::AtomicImportRepository>,
-    /// The user-editable `config.conman` preferences store.
+    /// The user-editable `conman.ini` preferences store.
     pub config_store: Arc<dyn AppConfigStore>,
     /// Resolved path backing `config_store`, used by Settings' Open action.
     pub config_path: std::path::PathBuf,

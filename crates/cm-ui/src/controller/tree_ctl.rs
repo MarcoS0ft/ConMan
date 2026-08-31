@@ -667,6 +667,8 @@ fn wire_profile_save(ctx: &Ctx) {
         let cred_model = ctx.cred_model.clone();
         let repo_ps = ctx.repo.clone();
         let secrets_ps = ctx.secrets.clone();
+        let toast_model = ctx.toast_model.clone();
+        let toast_next_id = ctx.toast_next_id.clone();
         let weak = ctx.ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -780,6 +782,12 @@ fn wire_profile_save(ctx: &Ctx) {
                 let key_ref = CredentialRef::for_connection(saved_id, CredentialPurpose::Password);
                 if let Err(e) = secrets_ps.store(&key_ref, &Secret::from_string(typed_password)) {
                     tracing::warn!("inline keychain store failed: {e}");
+                    push_error_toast(
+                        &toast_model,
+                        &toast_next_id,
+                        format!("Could not save connection password: {e}"),
+                    );
+                    return;
                 }
             }
             // Item (d): switching AWAY from Inline deletes its keychain entry.

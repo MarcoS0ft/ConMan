@@ -1,6 +1,5 @@
 //! Small shared helpers: the pixel-grid sizing math, and the CONMAN_*
 //! headless test-hook env vars.
-use std::sync::Arc;
 use std::time::Duration;
 
 use cm_core::terminal::{Key, KeyEvent, KeyModifiers, TerminalSize};
@@ -220,12 +219,8 @@ fn wire_ssh_autoinit(ctx: &Ctx) {
                 auth_method: SshAuthMethod::Password,
             };
             let auth = SshAuthInput::Password(Secret::from_string(password));
-            let auto_accept = ssh_auto_accept_keys();
-            let verifier = Arc::new(sessions::UiHostKeyVerifier {
-                weak_ui: ctx.ui.as_weak(),
-                pending: ctx.hk_pending.clone(),
-                auto_accept,
-            });
+            let verifier =
+                sessions::ssh_host_key_verifier(&ctx.state, &ctx.ui.as_weak(), &ctx.hk_pending);
             sessions::open_ssh_tab(
                 &ctx.state,
                 &ctx.tab_model,
@@ -294,12 +289,11 @@ fn wire_rdp_autoinit(ctx: &Ctx) {
                 .get(3)
                 .and_then(|p| p.parse::<u16>().ok())
                 .unwrap_or(3389);
-            let auto_accept = rdp_auto_accept_certs();
-            let verifier = Arc::new(sessions::UiCertVerifier {
-                weak_ui: ctx.ui.as_weak(),
-                pending: ctx.cert_pending.clone(),
-                auto_accept,
-            });
+            let verifier = sessions::rdp_certificate_verifier(
+                &ctx.state,
+                &ctx.ui.as_weak(),
+                &ctx.cert_pending,
+            );
             let settings = RdpSettings {
                 host,
                 port,

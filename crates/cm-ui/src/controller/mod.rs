@@ -371,6 +371,8 @@ struct State {
     copy_on_select: bool,
     confirm_close_active_tab: bool,
     confirm_quit_active_connections: bool,
+    auto_accept_ssh_host_keys: bool,
+    auto_accept_rdp_certificates: bool,
     /// A destructive user action awaiting confirmation. Low-level close
     /// executors never consult this field, so spontaneous termination and
     /// explicit detach continue to bypass confirmation.
@@ -580,6 +582,27 @@ pub(crate) struct Ctx {
     bc_draft: Rc<RefCell<BTreeSet<usize>>>,
 }
 
+/// Surface an operation failure without exposing secret material. Credential
+/// backends can legitimately require an unlocked desktop keyring or reject an
+/// improperly signed build, so logging alone is not sufficient UX.
+pub(super) fn push_error_toast(
+    toast_model: &Rc<VecModel<ToastEntry>>,
+    toast_next_id: &Rc<RefCell<i32>>,
+    message: impl Into<SharedString>,
+) {
+    let id = {
+        let mut next = toast_next_id.borrow_mut();
+        let id = *next;
+        *next += 1;
+        id
+    };
+    toast_model.push(ToastEntry {
+        id,
+        message: message.into(),
+        kind: 3,
+    });
+}
+
 /// Test-only observation seam for real pointer-boundary tests. The returned
 /// closure reads the same active pane selection that rendering/copy consume;
 /// callers still have to create it through the wired Slint surface.
@@ -758,6 +781,8 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         copy_on_select: stored_settings.copy_on_select,
         confirm_close_active_tab: stored_settings.confirm_close_active_tab,
         confirm_quit_active_connections: stored_settings.confirm_quit_active_connections,
+        auto_accept_ssh_host_keys: stored_settings.auto_accept_ssh_host_keys,
+        auto_accept_rdp_certificates: stored_settings.auto_accept_rdp_certificates,
         pending_close: None,
         close_modal_global_keys: BTreeSet::new(),
         close_modal_rdp_keys: BTreeSet::new(),
@@ -992,4 +1017,24 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
 #[cfg(any(test, feature = "ui-introspection"))]
 pub(crate) fn build_for_test(config: AppConfig) -> (AppWindow, Ctx, Timer) {
     assemble(config).expect("cm_ui::build_for_test: AppWindow::new() failed")
+}
+
+#[cfg(test)]
+mod toast_tests {
+    use super::*;
+    use slint::Model;
+
+    #[test]
+    fn credential_backend_failure_is_user_visible_and_numbered() {
+        let model = Rc::new(VecModel::default());
+        let next = Rc::new(RefCell::new(7));
+
+        push_error_toast(&model, &next, "Keychain access denied");
+
+        let toast = model.row_data(0).expect("error toast");
+        assert_eq!(toast.id, 7);
+        assert_eq!(toast.kind, 3);
+        assert_eq!(toast.message.as_str(), "Keychain access denied");
+        assert_eq!(*next.borrow(), 8);
+    }
 }

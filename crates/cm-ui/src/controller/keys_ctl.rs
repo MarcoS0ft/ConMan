@@ -206,6 +206,8 @@ fn wire_cred_save(ctx: &Ctx) {
         let cred_model = ctx.cred_model.clone();
         let repo_cs = ctx.repo.clone();
         let secrets_cs = ctx.secrets.clone();
+        let toast_model = ctx.toast_model.clone();
+        let toast_next_id = ctx.toast_next_id.clone();
         let weak = ctx.ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -257,12 +259,24 @@ fn wire_cred_save(ctx: &Ctx) {
                 let key_ref = CredentialRef::new(upserted_id, purpose);
                 if let Err(e) = secrets_cs.store(&key_ref, &Secret::from_string(secret_text)) {
                     tracing::warn!("keychain store failed: {e}");
+                    push_error_toast(
+                        &toast_model,
+                        &toast_next_id,
+                        format!("Could not save credential secret: {e}"),
+                    );
+                    return;
                 }
             }
             if kind == CredentialKind::SshKeyWithPassphrase && !passphrase_text.is_empty() {
                 let pp_ref = CredentialRef::new(upserted_id, CredentialPurpose::SshPassphrase);
                 if let Err(e) = secrets_cs.store(&pp_ref, &Secret::from_string(passphrase_text)) {
                     tracing::warn!("keychain passphrase store failed: {e}");
+                    push_error_toast(
+                        &toast_model,
+                        &toast_next_id,
+                        format!("Could not save credential passphrase: {e}"),
+                    );
+                    return;
                 }
             }
 

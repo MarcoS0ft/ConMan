@@ -1153,7 +1153,7 @@ fn telnet_session_restore_dispatches_provider() {
         repo,
         import_repo: sqlite,
         config_store,
-        config_path: std::path::PathBuf::from("config.conman"),
+        config_path: std::path::PathBuf::from("conman.ini"),
         app_state,
         build_identity: cm_ui::BuildIdentity::default(),
         secrets: Arc::new(support::NullCredentialStore),

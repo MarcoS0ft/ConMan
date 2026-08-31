@@ -1774,6 +1774,8 @@ export component AppWindow inherits Window {
     // the close dialog writes these live when "Don't ask again" is confirmed.
     in-out property <bool> settings-confirm-close-active-tab: true;
     in-out property <bool> settings-confirm-quit-active-connections: true;
+    in-out property <bool> settings-auto-accept-ssh-host-keys: false;
+    in-out property <bool> settings-auto-accept-rdp-certificates: false;
     in property <string> settings-build-version: "";
     in property <string> settings-build-details: "";
 
@@ -1867,6 +1869,8 @@ export component AppWindow inherits Window {
     callback settings-copy-on-select-changed(bool);
     callback settings-confirm-close-active-tab-changed(bool);
     callback settings-confirm-quit-active-connections-changed(bool);
+    callback settings-auto-accept-ssh-host-keys-changed(bool);
+    callback settings-auto-accept-rdp-certificates-changed(bool);
     callback settings-open-config();
     callback settings-reload-config();
     callback settings-copy-build-info();
@@ -2362,6 +2366,8 @@ export component AppWindow inherits Window {
                     render-backend      <=> root.render-backend;
                     confirm-close-active-tab <=> root.settings-confirm-close-active-tab;
                     confirm-quit-active-connections <=> root.settings-confirm-quit-active-connections;
+                    auto-accept-ssh-host-keys <=> root.settings-auto-accept-ssh-host-keys;
+                    auto-accept-rdp-certificates <=> root.settings-auto-accept-rdp-certificates;
                     build-version       : root.settings-build-version;
                     build-details       : root.settings-build-details;
                     agent-mode-available            : root.agent-mode-available;
@@ -2388,6 +2394,8 @@ export component AppWindow inherits Window {
                     render-backend-changed(v)    => { root.render-backend-changed(v); }
                     confirm-close-active-tab-changed(v) => { root.settings-confirm-close-active-tab-changed(v); }
                     confirm-quit-active-connections-changed(v) => { root.settings-confirm-quit-active-connections-changed(v); }
+                    auto-accept-ssh-host-keys-changed(v) => { root.settings-auto-accept-ssh-host-keys-changed(v); }
+                    auto-accept-rdp-certificates-changed(v) => { root.settings-auto-accept-rdp-certificates-changed(v); }
                     open-config() => { root.settings-open-config(); }
                     reload-config() => { root.settings-reload-config(); }
                     copy-build-info() => { root.settings-copy-build-info(); }

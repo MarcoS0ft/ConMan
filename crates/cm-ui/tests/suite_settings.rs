@@ -37,6 +37,7 @@ fn settings_suite() {
     settings_content_does_not_scroll_horizontally();
     render_backend_toggle_persists();
     terminal_and_confirmation_preferences_persist_and_reload();
+    security_identity_preferences_are_secure_by_default_and_reload_live();
     build_identity_is_exposed();
     #[cfg(feature = "agent-mode")]
     agent_mode_section_toggles_persist();
@@ -151,7 +152,7 @@ fn stale_font_family_uses_effective_default() {
         repo,
         import_repo,
         config_store,
-        config_path: std::path::PathBuf::from("config.conman"),
+        config_path: std::path::PathBuf::from("conman.ini"),
         app_state,
         build_identity: cm_ui::BuildIdentity::default(),
         secrets: Arc::new(NullCredentialStore),
@@ -542,6 +543,74 @@ fn terminal_and_confirmation_preferences_persist_and_reload() {
         "7000",
         "invalid UI edits must be rejected and normalized"
     );
+}
+
+fn security_identity_preferences_are_secure_by_default_and_reload_live() {
+    use cm_core::rdp::{CertDecision, CertInfo, CertSituation};
+    use cm_core::ssh::{HostKeyDecision, HostKeyInfo, HostKeySituation};
+    use cm_core::{SettingKey, SettingsService};
+
+    let (h, _repo, _provider) = harness();
+    assert!(!h.ui.get_settings_auto_accept_ssh_host_keys());
+    assert!(!h.ui.get_settings_auto_accept_rdp_certificates());
+
+    h.ui.invoke_settings_auto_accept_ssh_host_keys_changed(true);
+    h.ui.invoke_settings_auto_accept_rdp_certificates_changed(true);
+    let saved = SettingsService::new(h.config_store.as_ref())
+        .load()
+        .expect("load security settings");
+    assert!(saved.auto_accept_ssh_host_keys);
+    assert!(saved.auto_accept_rdp_certificates);
+
+    h.ui.invoke_quick_connect();
+    h.ui.set_qc_kind(0);
+    h.ui.set_qc_host("lab-ssh.example.invalid".into());
+    h.ui.set_qc_username("operator".into());
+    h.ui.set_qc_auth_method(2); // Agent; no secret required by the mock.
+    h.ui.invoke_qc_connect();
+    assert_eq!(
+        _provider.latest_ssh_verifier().decide(&HostKeyInfo {
+            host: "lab-ssh.example.invalid".into(),
+            port: 22,
+            algorithm: "ssh-ed25519".into(),
+            fingerprint: "SHA256:test".into(),
+            situation: HostKeySituation::Mismatch {
+                stored_fingerprint: "SHA256:old".into(),
+                source: cm_core::ssh::KnownHostSource::ConManStore,
+            },
+        }),
+        HostKeyDecision::Accept
+    );
+
+    h.ui.invoke_quick_connect();
+    h.ui.set_qc_kind(1);
+    h.ui.set_qc_host("lab-rdp.example.invalid".into());
+    h.ui.set_qc_username("operator".into());
+    h.ui.set_qc_secret("synthetic-password".into());
+    h.ui.invoke_qc_connect();
+    assert_eq!(
+        _provider.latest_rdp_verifier().decide(&CertInfo {
+            host: "lab-rdp.example.invalid".into(),
+            port: 3389,
+            fingerprint: "SHA256:test".into(),
+            subject: "CN=lab-rdp".into(),
+            situation: CertSituation::Mismatch {
+                stored_fingerprint: "SHA256:old".into(),
+                source: cm_core::rdp::KnownCertSource::ConManStore,
+            },
+        }),
+        CertDecision::AcceptAndRemember
+    );
+
+    h.config_store
+        .set_values(&[
+            (SettingKey::AutoAcceptSshHostKeys.as_str(), "false"),
+            (SettingKey::AutoAcceptRdpCertificates.as_str(), "false"),
+        ])
+        .expect("edit security config externally");
+    h.ui.invoke_settings_reload_config();
+    assert!(!h.ui.get_settings_auto_accept_ssh_host_keys());
+    assert!(!h.ui.get_settings_auto_accept_rdp_certificates());
 }
 
 fn build_identity_is_exposed() {

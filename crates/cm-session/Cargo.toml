@@ -99,9 +99,9 @@ tokio = { version = "1", features = [
 # serde_json: used by CertStore for persistent JSON cert storage (P4.2).
 # Promoted from dev-dep to dep so the production code can load/save the cert store.
 serde_json = "1"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
 # P9.9-FIX: rdp_connect_live_host captures its own driver-thread log output
 # (via a private in-memory MakeWriter) to assert the resize PDU was actually

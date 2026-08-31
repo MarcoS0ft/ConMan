@@ -114,6 +114,7 @@
 //! after connect, so this is not expected to matter in practice; not worth
 //! buffering unless a live test shows a real first-resize miss.
 
+use std::io::Write as _;
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -264,13 +265,18 @@ impl CertStore {
     }
 
     /// Store / replace a fingerprint; persists to disk if a path was configured.
-    pub fn store(&self, host: &str, port: u16, fingerprint: &str) {
-        if let Ok(mut m) = self.entries.lock() {
-            m.insert(Self::key(host, port), fingerprint.to_owned());
-            if let Some(path) = &self.save_path {
-                let _ = Self::write_json(&m, path);
-            }
+    pub fn store(&self, host: &str, port: u16, fingerprint: &str) -> std::io::Result<()> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| std::io::Error::other("certificate trust store lock is poisoned"))?;
+        let mut updated = entries.clone();
+        updated.insert(Self::key(host, port), fingerprint.to_owned());
+        if let Some(path) = &self.save_path {
+            Self::write_json(&updated, path)?;
         }
+        *entries = updated;
+        Ok(())
     }
 
     /// Serialize `map` as pretty JSON and write to `path` atomically.
@@ -281,14 +287,24 @@ impl CertStore {
         map: &std::collections::HashMap<String, String>,
         path: &std::path::Path,
     ) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        std::fs::create_dir_all(parent)?;
         let json = serde_json::to_string_pretty(map).map_err(std::io::Error::other)?;
-        // Write to a temp file in the same directory, then rename atomically.
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &json)?;
-        std::fs::rename(&tmp, path)
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            temporary
+                .as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        temporary.write_all(json.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(path).map_err(|error| error.error)?;
+        Ok(())
     }
 }
 
@@ -1141,11 +1157,18 @@ fn verify_cert(
     );
 
     match verifier.decide(&info) {
-        CertDecision::AcceptAndRemember => {
-            store.store(host, port, &fingerprint);
-            tracing::info!(host, port, fingerprint = %fingerprint, "rdp: certificate accepted and pinned");
-            Ok(public_key)
-        }
+        CertDecision::AcceptAndRemember => match store.store(host, port, &fingerprint) {
+            Ok(()) => {
+                tracing::info!(host, port, fingerprint = %fingerprint, "rdp: certificate accepted and pinned");
+                Ok(public_key)
+            }
+            Err(error) => {
+                tracing::error!(host, port, fingerprint = %fingerprint, %error, "rdp: accepted certificate could not be persisted; connection rejected");
+                Err(RdpError::Protocol(format!(
+                    "could not remember the accepted certificate for {host}:{port}: {error}"
+                )))
+            }
+        },
         CertDecision::Reject => {
             tracing::warn!(host, port, fingerprint = %fingerprint, "rdp: certificate rejected by user");
             Err(RdpError::CertRejected(format!(
@@ -2374,7 +2397,7 @@ mod tests {
     fn cert_store_unknown_then_accept_stores_entry() {
         let store = CertStore::new();
         assert!(store.lookup("10.0.0.1", 3389).is_none());
-        store.store("10.0.0.1", 3389, "SHA256:aabbcc");
+        store.store("10.0.0.1", 3389, "SHA256:aabbcc").unwrap();
         assert_eq!(
             store.lookup("10.0.0.1", 3389).as_deref(),
             Some("SHA256:aabbcc")
@@ -2384,16 +2407,16 @@ mod tests {
     #[test]
     fn cert_store_replaces_on_update() {
         let store = CertStore::new();
-        store.store("host", 3389, "SHA256:old");
-        store.store("host", 3389, "SHA256:new");
+        store.store("host", 3389, "SHA256:old").unwrap();
+        store.store("host", 3389, "SHA256:new").unwrap();
         assert_eq!(store.lookup("host", 3389).as_deref(), Some("SHA256:new"));
     }
 
     #[test]
     fn cert_store_keys_are_host_and_port_specific() {
         let store = CertStore::new();
-        store.store("host", 3389, "SHA256:aaa");
-        store.store("host", 3390, "SHA256:bbb");
+        store.store("host", 3389, "SHA256:aaa").unwrap();
+        store.store("host", 3390, "SHA256:bbb").unwrap();
         assert_eq!(store.lookup("host", 3389).as_deref(), Some("SHA256:aaa"));
         assert_eq!(store.lookup("host", 3390).as_deref(), Some("SHA256:bbb"));
         assert!(store.lookup("other", 3389).is_none());
@@ -2597,7 +2620,9 @@ mod tests {
         install_ring_provider();
         let cert = parse_test_cert(TEST_CERT_A_DER);
         let store = CertStore::new();
-        store.store("host.test", 3389, &cert_fingerprint(&cert));
+        store
+            .store("host.test", 3389, &cert_fingerprint(&cert))
+            .unwrap();
         let verifier = RecordingCertVerifier::new(CertDecision::Reject); // would fail the test if consulted
 
         let key = verify_cert(&cert, "host.test", 3389, &verifier, &store).expect("silent accept");
@@ -2615,7 +2640,9 @@ mod tests {
         let cert_a = parse_test_cert(TEST_CERT_A_DER);
         let cert_b = parse_test_cert(TEST_CERT_B_DER);
         let store = CertStore::new();
-        store.store("host.test", 3389, &cert_fingerprint(&cert_a));
+        store
+            .store("host.test", 3389, &cert_fingerprint(&cert_a))
+            .unwrap();
         let verifier = RecordingCertVerifier::new(CertDecision::Reject);
 
         let err = verify_cert(&cert_b, "host.test", 3389, &verifier, &store).unwrap_err();
@@ -2644,7 +2671,9 @@ mod tests {
         let cert_a = parse_test_cert(TEST_CERT_A_DER);
         let cert_b = parse_test_cert(TEST_CERT_B_DER);
         let store = CertStore::new();
-        store.store("host.test", 3389, &cert_fingerprint(&cert_a));
+        store
+            .store("host.test", 3389, &cert_fingerprint(&cert_a))
+            .unwrap();
         let verifier = RecordingCertVerifier::new(CertDecision::AcceptAndRemember);
 
         verify_cert(&cert_b, "host.test", 3389, &verifier, &store).expect("accept mismatch");
@@ -2652,6 +2681,24 @@ mod tests {
         assert_eq!(
             store.lookup("host.test", 3389).as_deref(),
             Some(cert_fingerprint(&cert_b).as_str())
+        );
+    }
+
+    #[test]
+    fn verify_cert_accept_fails_honestly_when_pin_cannot_be_persisted() {
+        install_ring_provider();
+        let cert = parse_test_cert(TEST_CERT_A_DER);
+        let dir = tempfile::tempdir().unwrap();
+        let blocked_parent = dir.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, "occupied").unwrap();
+        let store = CertStore::new_persistent(blocked_parent.join("cert_trust.json"));
+        let verifier = RecordingCertVerifier::new(CertDecision::AcceptAndRemember);
+
+        let error = verify_cert(&cert, "host.test", 3389, &verifier, &store).unwrap_err();
+        assert!(error.to_string().contains("could not remember"));
+        assert!(
+            store.lookup("host.test", 3389).is_none(),
+            "a failed disk write must not leave a process-only pin that looks persistent"
         );
     }
 

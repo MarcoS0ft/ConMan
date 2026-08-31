@@ -95,10 +95,7 @@ fn root_group(slot: &InvocationSlot) -> Group {
                 ))
                 .build(),
         )
-        .option(path_option(
-            "--config",
-            "Use an alternate config.conman file.",
-        ))
+        .option(path_option("--config", "Use an alternate conman.ini file."))
         .option(path_option(
             "--database",
             "Use an alternate SQLite database.",

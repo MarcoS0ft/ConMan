@@ -1330,12 +1330,7 @@ fn qc_connect_ssh(
         _ => SshAuthInput::Agent,
     };
     close_and_clear_qc_secrets(ui);
-    let auto_accept = util::ssh_auto_accept_keys();
-    let verifier = Arc::new(UiHostKeyVerifier {
-        weak_ui: weak.clone(),
-        pending: hk_pending.clone(),
-        auto_accept,
-    });
+    let verifier = ssh_host_key_verifier(state, weak, hk_pending);
     // Quick-connect has no originating stored profile to edit on failure.
     open_ssh_tab(
         state,
@@ -1421,12 +1416,7 @@ fn qc_connect_rdp(
         domain: settings.domain.clone(),
     };
     close_and_clear_qc_secrets(ui);
-    let auto_accept = util::rdp_auto_accept_certs();
-    let verifier = Arc::new(UiCertVerifier {
-        weak_ui: weak.clone(),
-        pending: cert_pending.clone(),
-        auto_accept,
-    });
+    let verifier = rdp_certificate_verifier(state, weak, cert_pending);
     // Quick-connect has no originating stored profile to edit on failure.
     open_rdp_tab(
         state,
@@ -1909,12 +1899,7 @@ pub(super) fn launch_saved_connection(
                             st.keys_panel.credentials(),
                         );
                     }
-                    let auto_accept = util::ssh_auto_accept_keys();
-                    let verifier = Arc::new(UiHostKeyVerifier {
-                        weak_ui: weak.clone(),
-                        pending: hk_pending.clone(),
-                        auto_accept,
-                    });
+                    let verifier = ssh_host_key_verifier(state, weak, hk_pending);
                     open_ssh_tab(
                         state,
                         tab_model,
@@ -1959,12 +1944,7 @@ pub(super) fn launch_saved_connection(
                             st.keys_panel.credentials(),
                         );
                     }
-                    let auto_accept = util::rdp_auto_accept_certs();
-                    let verifier = Arc::new(UiCertVerifier {
-                        weak_ui: weak.clone(),
-                        pending: cert_pending.clone(),
-                        auto_accept,
-                    });
+                    let verifier = rdp_certificate_verifier(state, weak, cert_pending);
                     open_rdp_tab(
                         state,
                         tab_model,
@@ -2245,12 +2225,7 @@ pub(super) fn reconnect_tab(
     match plan {
         ReconnectPlan::Ssh(settings, provenance, auth_result) => match auth_result {
             Ok(auth) => {
-                let auto_accept = util::ssh_auto_accept_keys();
-                let verifier = Arc::new(UiHostKeyVerifier {
-                    weak_ui: weak.clone(),
-                    pending: hk_pending.clone(),
-                    auto_accept,
-                });
+                let verifier = ssh_host_key_verifier(state, weak, hk_pending);
                 reconnect_ssh_tab(
                     state, tab_model, ui, tab_idx, settings, auth, provenance, verifier,
                 );
@@ -2261,12 +2236,7 @@ pub(super) fn reconnect_tab(
         },
         ReconnectPlan::Rdp(settings, provenance, auth_result) => match auth_result {
             Ok(auth) => {
-                let auto_accept = util::rdp_auto_accept_certs();
-                let verifier = Arc::new(UiCertVerifier {
-                    weak_ui: weak.clone(),
-                    pending: cert_pending.clone(),
-                    auto_accept,
-                });
+                let verifier = rdp_certificate_verifier(state, weak, cert_pending);
                 reconnect_rdp_tab(
                     state, tab_model, ui, tab_idx, settings, auth, provenance, verifier,
                 );
@@ -2309,6 +2279,37 @@ pub(super) fn disconnect_tab(
     fail_reconnect_in_place(state, tab_model, ui, tab_idx, "Disconnected".to_string());
 }
 
+/// One construction path for every SSH launch surface. The persisted setting
+/// is live runtime state; the environment hook remains a debug-only QA aid.
+pub(super) fn ssh_host_key_verifier(
+    state: &Rc<RefCell<State>>,
+    weak_ui: &slint::Weak<AppWindow>,
+    pending: &HkQueue,
+) -> Arc<dyn HostKeyVerifier> {
+    let auto_accept = state.borrow().auto_accept_ssh_host_keys || util::ssh_auto_accept_keys();
+    Arc::new(UiHostKeyVerifier {
+        weak_ui: weak_ui.clone(),
+        pending: pending.clone(),
+        auto_accept,
+    })
+}
+
+/// One construction path for every RDP launch surface. Keeping this beside
+/// the SSH factory prevents Quick Connect, saved profiles, reconnects, and
+/// split panes from drifting into different trust policies.
+pub(super) fn rdp_certificate_verifier(
+    state: &Rc<RefCell<State>>,
+    weak_ui: &slint::Weak<AppWindow>,
+    pending: &Arc<Mutex<Option<Sender<CertDecision>>>>,
+) -> Arc<dyn CertVerifier> {
+    let auto_accept = state.borrow().auto_accept_rdp_certificates || util::rdp_auto_accept_certs();
+    Arc::new(UiCertVerifier {
+        weak_ui: weak_ui.clone(),
+        pending: pending.clone(),
+        auto_accept,
+    })
+}
+
 pub(super) struct UiHostKeyVerifier {
     pub(super) weak_ui: slint::Weak<AppWindow>,
     pub(super) pending: HkQueue,
@@ -2318,12 +2319,22 @@ pub(super) struct UiHostKeyVerifier {
 impl HostKeyVerifier for UiHostKeyVerifier {
     fn decide(&self, info: &HostKeyInfo) -> HostKeyDecision {
         if self.auto_accept {
+            tracing::warn!(
+                host = %info.host,
+                port = info.port,
+                algorithm = %info.algorithm,
+                fingerprint = %info.fingerprint,
+                situation = ?info.situation,
+                decision = "automatic",
+                "ssh: host key automatically accepted by user setting"
+            );
             return HostKeyDecision::Accept;
         }
         let (tx, rx) = std::sync::mpsc::channel::<HostKeyDecision>();
         if let Ok(mut q) = self.pending.lock() {
             q.push_back(tx);
         }
+        let decision_info = info.clone();
         let info = info.clone();
         let weak = self.weak_ui.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -2348,18 +2359,30 @@ impl HostKeyVerifier for UiHostKeyVerifier {
             ui.set_host_key_stored_fp(stored_fp.into());
             ui.set_host_key_open(true);
         });
-        rx.recv().unwrap_or(HostKeyDecision::Reject)
+        let (decision, decision_source) = match rx.recv() {
+            Ok(decision) => (decision, "user"),
+            Err(_) => (HostKeyDecision::Reject, "dialog-unavailable"),
+        };
+        tracing::info!(
+            host = %decision_info.host,
+            port = decision_info.port,
+            algorithm = %decision_info.algorithm,
+            fingerprint = %decision_info.fingerprint,
+            situation = ?decision_info.situation,
+            decision = ?decision,
+            decision_source,
+            "ssh: host-key trust decision completed"
+        );
+        decision
     }
 }
 
 /// Shows the cert-accept dialog (P4.2 slint UI) and blocks the RDP connection
 /// thread until the user accepts or rejects.
 ///
-/// When `auto_accept` is `true` (debug builds only, set via
-/// `CONMAN_RDP_AUTO_ACCEPT_CERTS=1` — see `util::rdp_auto_accept_certs`,
-/// P6.3 gap 24) the verifier immediately returns `AcceptAndRemember` without
-/// showing the dialog — useful for headless CI / screenshot tests. Always
-/// `false` in release.
+/// When `auto_accept` is true, the verifier immediately returns
+/// `AcceptAndRemember` without showing the dialog. The value comes from the
+/// secure-default application setting (or the debug-only QA environment hook).
 pub(super) struct UiCertVerifier {
     pub(super) weak_ui: slint::Weak<AppWindow>,
     pub(super) pending: Arc<Mutex<Option<Sender<CertDecision>>>>,
@@ -2369,12 +2392,22 @@ pub(super) struct UiCertVerifier {
 impl CertVerifier for UiCertVerifier {
     fn decide(&self, info: &CertInfo) -> CertDecision {
         if self.auto_accept {
+            tracing::warn!(
+                host = %info.host,
+                port = info.port,
+                fingerprint = %info.fingerprint,
+                subject = %info.subject,
+                situation = ?info.situation,
+                decision = "automatic",
+                "rdp: certificate automatically accepted by user setting"
+            );
             return CertDecision::AcceptAndRemember;
         }
         let (tx, rx) = std::sync::mpsc::channel::<CertDecision>();
         if let Ok(mut p) = self.pending.lock() {
             *p = Some(tx);
         }
+        let decision_info = info.clone();
         let info = info.clone();
         let weak = self.weak_ui.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -2396,7 +2429,21 @@ impl CertVerifier for UiCertVerifier {
             ui.set_cert_dialog_stored_fp(stored_fp.into());
             ui.set_cert_dialog_open(true);
         });
-        rx.recv().unwrap_or(CertDecision::Reject)
+        let (decision, decision_source) = match rx.recv() {
+            Ok(decision) => (decision, "user"),
+            Err(_) => (CertDecision::Reject, "dialog-unavailable"),
+        };
+        tracing::info!(
+            host = %decision_info.host,
+            port = decision_info.port,
+            fingerprint = %decision_info.fingerprint,
+            subject = %decision_info.subject,
+            situation = ?decision_info.situation,
+            decision = ?decision,
+            decision_source,
+            "rdp: certificate trust decision completed"
+        );
+        decision
     }
 }
 

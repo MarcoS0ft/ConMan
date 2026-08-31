@@ -3,7 +3,7 @@
 //! Compiled in only behind the `agent-mode` Cargo feature (off by default,
 //! same posture as `automation`); even then, nothing listens
 //! unless the user has turned the interface on via the editable
-//! `config.conman` document (`automation-enabled`,
+//! `conman.ini` document (`automation-enabled`,
 //! off by default — the product's decided consent model, see
 //! `docs/devel/tasks/P8.6-agentic-product-slice.md`). See [`proxy`] for the
 //! actual scope-enforcement engine.

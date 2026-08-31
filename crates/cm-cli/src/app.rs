@@ -460,7 +460,7 @@ mod tests {
 
     fn globals(directory: &Path) -> GlobalOptions {
         GlobalOptions {
-            config_path: Some(directory.join("config.conman")),
+            config_path: Some(directory.join("conman.ini")),
             database_path: Some(directory.join("conman.sqlite")),
             format: OutputFormat::Json,
         }
