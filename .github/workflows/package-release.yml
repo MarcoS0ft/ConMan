@@ -30,6 +30,10 @@ on:
         required: false
       MACOS_CERTIFICATE_PASSWORD:
         required: false
+      CONMAN_MACOS_APP_PROVISIONING_PROFILE:
+        required: false
+      CONMAN_MACOS_CLI_PROVISIONING_PROFILE:
+        required: false
       NOTARIZE_API_KEY_ID:
         required: false
       NOTARIZE_API_KEY_ISSUER:
@@ -242,12 +246,14 @@ jobs:
         env:
           CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APP_PROFILE_BASE64: ${{ secrets.CONMAN_MACOS_APP_PROVISIONING_PROFILE }}
+          CLI_PROFILE_BASE64: ${{ secrets.CONMAN_MACOS_CLI_PROVISIONING_PROFILE }}
           NOTARY_KEY_BASE64: ${{ secrets.NOTARIZE_API_KEY_P8_BASE64 }}
           NOTARY_KEY_ID: ${{ secrets.NOTARIZE_API_KEY_ID }}
           NOTARY_KEY_ISSUER: ${{ secrets.NOTARIZE_API_KEY_ISSUER }}
         run: |
           set -euo pipefail
-          for name in CERTIFICATE_P12_BASE64 CERTIFICATE_PASSWORD NOTARY_KEY_BASE64 NOTARY_KEY_ID NOTARY_KEY_ISSUER; do
+          for name in CERTIFICATE_P12_BASE64 CERTIFICATE_PASSWORD APP_PROFILE_BASE64 CLI_PROFILE_BASE64 NOTARY_KEY_BASE64 NOTARY_KEY_ID NOTARY_KEY_ISSUER; do
             if [[ -z "${!name}" ]]; then
               echo "Required macOS release secret is missing: $name" >&2
               exit 1
@@ -283,6 +289,8 @@ jobs:
           trap cleanup_signing EXIT
 
           printf '%s' "$CERTIFICATE_P12_BASE64" | /usr/bin/base64 -D > "$release_state/certificate.p12"
+          printf '%s' "$APP_PROFILE_BASE64" | /usr/bin/base64 -D > "$release_state/conman.provisionprofile"
+          printf '%s' "$CLI_PROFILE_BASE64" | /usr/bin/base64 -D > "$release_state/conmanctl.provisionprofile"
           printf '%s' "$NOTARY_KEY_BASE64" | /usr/bin/base64 -D > "$release_state/notary.p8"
           security list-keychains -d user \
             | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//' \
@@ -309,6 +317,8 @@ jobs:
             --output-dir dist/macos-build \
             --version '${{ steps.prepare.outputs.version }}' \
             --sign-identity "$identity" \
+            --app-provisioning-profile "$release_state/conman.provisionprofile" \
+            --cli-provisioning-profile "$release_state/conmanctl.provisionprofile" \
             --notary-key "$release_state/notary.p8" \
             --notary-key-id "$NOTARY_KEY_ID" \
             --notary-issuer "$NOTARY_KEY_ISSUER"

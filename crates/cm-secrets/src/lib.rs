@@ -1,8 +1,8 @@
 //! `cm-secrets` — the OS keychain adapter for ConMan.
 //!
 //! Implements the [`cm_core::CredentialStore`] port over the operating-system
-//! keychain via the [`keyring`] crate (Windows Credential Manager / DPAPI,
-//! macOS Keychain, Linux Secret Service / `keyutils`).
+//! keychain (Windows Credential Manager, the macOS data-protection Keychain,
+//! and Linux Secret Service).
 //!
 //! # Key design points
 //!
@@ -20,7 +20,8 @@
 //!   [`CredentialRef::purpose_str`]/`error` only — never [`CredentialRef::account`]
 //!   (which encodes id material) and never a secret value.
 //!
-//! * **Entry cache.** `keyring` 3.x creates a fresh in-memory
+//! * **Entry cache.** The Linux and Windows adapters use `keyring` 3.x, which
+//!   creates a fresh in-memory
 //!   [`keyring::mock`] credential on each [`keyring::Entry::new`] call.  To
 //!   make deterministic CI tests possible — and to avoid redundant OS
 //!   round-trips in the real-backend path — [`KeyringStore`] keeps one
@@ -30,18 +31,43 @@
 //!
 //! # Backend selection
 //!
-//! `keyring` 3.x selects available backends at compile time. This crate enables
-//! the native backend for each supported OS and exposes
+//! This crate selects a persistent native backend for each supported OS and exposes
 //! [`initialize_native_keyring`] so every composition root (`conman`,
 //! `conmanctl`, and future headless tools) selects the same implementation
-//! before constructing a [`KeyringStore`]. Tests may still install keyring's
-//! in-memory mock builder explicitly.
+//! before constructing a [`KeyringStore`]. macOS bypasses `keyring`'s legacy
+//! adapter and calls SecItem against the data-protection Keychain directly.
 
+#[cfg(any(
+    target_os = "windows",
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+))]
 use std::collections::HashMap;
+#[cfg(any(
+    target_os = "windows",
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+))]
 use std::fmt;
+#[cfg(any(
+    target_os = "windows",
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+))]
 use std::sync::{Arc, Mutex};
 
+#[cfg(any(
+    target_os = "windows",
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+))]
 use cm_core::{CredentialError, CredentialRef, CredentialStore, Secret};
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::KeyringStore;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::KeyringStore;
 
 /// Select the platform-native credential backend for this process.
 ///
@@ -51,13 +77,14 @@ use cm_core::{CredentialError, CredentialRef, CredentialStore, Secret};
 pub fn initialize_native_keyring() {
     #[cfg(target_os = "linux")]
     {
-        keyring::set_default_credential_builder(keyring::keyutils::default_credential_builder());
-        tracing::info!(backend = "keyutils", "keychain backend initialized");
+        linux::initialize_native_keyring();
     }
     #[cfg(target_os = "macos")]
     {
-        keyring::set_default_credential_builder(keyring::macos::default_credential_builder());
-        tracing::info!(backend = "macos", "keychain backend initialized");
+        tracing::info!(
+            backend = "macos-data-protection",
+            "keychain backend initialized"
+        );
     }
     #[cfg(target_os = "windows")]
     {
@@ -90,6 +117,10 @@ pub fn initialize_native_keyring() {
 ///
 /// let _store: Box<dyn CredentialStore> = Box::new(KeyringStore::new());
 /// ```
+#[cfg(any(
+    target_os = "windows",
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+))]
 pub struct KeyringStore {
     /// Maps `(service, account)` pairs to their [`keyring::Entry`] objects.
     ///
@@ -100,6 +131,10 @@ pub struct KeyringStore {
     entries: Mutex<HashMap<(String, String), Arc<keyring::Entry>>>,
 }
 
+#[cfg(any(
+    target_os = "windows",
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+))]
 impl KeyringStore {
     /// Creates a new `KeyringStore` with an empty entry cache.
     ///
@@ -142,12 +177,20 @@ impl KeyringStore {
     }
 }
 
+#[cfg(any(
+    target_os = "windows",
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+))]
 impl Default for KeyringStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(
+    target_os = "windows",
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+))]
 impl fmt::Debug for KeyringStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Do not expose the entry cache contents; service/account strings are
@@ -160,6 +203,10 @@ impl fmt::Debug for KeyringStore {
 // CredentialStore impl
 // ---------------------------------------------------------------------------
 
+#[cfg(any(
+    target_os = "windows",
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+))]
 impl CredentialStore for KeyringStore {
     /// Stores `secret` in the OS keychain at the slot identified by `key`.
     ///
@@ -235,7 +282,13 @@ impl CredentialStore for KeyringStore {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "windows",
+        not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+    )
+))]
 mod tests {
     use super::*;
     use cm_core::{CredentialId, CredentialPurpose, CredentialRef, Secret};

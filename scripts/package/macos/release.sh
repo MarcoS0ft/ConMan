@@ -9,6 +9,8 @@ target_dir="$repo_root/target/release"
 output_dir="$repo_root/dist/macos"
 version=""
 identity=""
+app_profile=""
+cli_profile=""
 notary_key=""
 notary_key_id=""
 notary_issuer=""
@@ -17,6 +19,8 @@ usage() {
     cat <<'EOF'
 Usage: release.sh [--target-dir DIR] [--output-dir DIR] [--version VERSION]
                   [--sign-identity IDENTITY]
+                  [--app-provisioning-profile FILE]
+                  [--cli-provisioning-profile FILE]
                   [--notary-key FILE --notary-key-id ID --notary-issuer UUID]
 
 Without signing arguments this creates an unsigned local-validation DMG. An
@@ -32,6 +36,8 @@ while [[ $# -gt 0 ]]; do
         --output-dir) output_dir=$2; shift 2 ;;
         --version) version=$2; shift 2 ;;
         --sign-identity) identity=$2; shift 2 ;;
+        --app-provisioning-profile) app_profile=$2; shift 2 ;;
+        --cli-provisioning-profile) cli_profile=$2; shift 2 ;;
         --notary-key) notary_key=$2; shift 2 ;;
         --notary-key-id) notary_key_id=$2; shift 2 ;;
         --notary-issuer) notary_issuer=$2; shift 2 ;;
@@ -56,6 +62,8 @@ fi
 app_args=(--target-dir "$target_dir" --output-dir "$output_dir")
 [[ -n "$version" ]] && app_args+=(--version "$version")
 [[ -n "$identity" ]] && app_args+=(--sign-identity "$identity")
+[[ -n "$app_profile" ]] && app_args+=(--app-provisioning-profile "$app_profile")
+[[ -n "$cli_profile" ]] && app_args+=(--cli-provisioning-profile "$cli_profile")
 app_result=$("$script_dir/build-app.sh" "${app_args[@]}")
 printf '%s\n' "$app_result"
 app=$(printf '%s\n' "$app_result" | sed -n 's/^APP=//p')
@@ -95,6 +103,7 @@ fi
 
 validate_args=(--app "$app" --dmg "$dmg" --version "$version")
 [[ -n "$identity" ]] && validate_args+=(--require-signature)
+[[ -n "$identity" && "$identity" != "-" ]] && validate_args+=(--require-keychain-sharing)
 [[ "$notary_count" -eq 3 ]] && validate_args+=(--require-gatekeeper)
 "$script_dir/validate.sh" "${validate_args[@]}"
 (

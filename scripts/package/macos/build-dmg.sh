@@ -29,7 +29,7 @@ command -v hdiutil >/dev/null || { echo "hdiutil is required" >&2; exit 1; }
 command -v lipo >/dev/null || { echo "lipo is required" >&2; exit 1; }
 
 main_arches=$(lipo -archs "$app/Contents/MacOS/conman")
-ctl_arches=$(lipo -archs "$app/Contents/Helpers/conmanctl")
+ctl_arches=$(lipo -archs "$app/Contents/Helpers/conmanctl.app/Contents/MacOS/conmanctl")
 [[ "$main_arches" == "$ctl_arches" ]] || {
     echo "App executables have different architectures: conman=$main_arches conmanctl=$ctl_arches" >&2
     exit 1

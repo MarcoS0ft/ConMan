@@ -5,6 +5,19 @@ built `conman` and `conmanctl`; they never mutate Cargo's output directory.
 Every artifact also contains the root `LICENSE-MIT` and `LICENSE-APACHE` plus
 the bundled-font notice, OFL, and Symbols Nerd Font MIT license.
 
+Saved credentials use the freedesktop Secret Service over the user's desktop
+D-Bus session. A Secret Service provider such as GNOME Keyring or KWallet must
+be running and its default collection must be unlocked. The binaries embed their
+D-Bus client library, so no additional client-side shared library is required;
+Linux package formats do not declare one particular provider because desktop
+environments supply different compatible implementations.
+
+`conmanctl` uses the same Secret Service entries as the GUI. When invoked from
+SSH, a service, container, or another headless environment it must be given a
+working user D-Bus session and Secret Service provider. Otherwise it fails with
+an actionable error instead of silently placing credentials in an ephemeral
+kernel keyring.
+
 ```sh
 scripts/package/linux/build-portable-container.sh
 ```

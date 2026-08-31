@@ -10,6 +10,7 @@ dmg=""
 version=""
 require_signature=0
 require_gatekeeper=0
+require_keychain_sharing=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -18,6 +19,7 @@ while [[ $# -gt 0 ]]; do
         --version) version=$2; shift 2 ;;
         --require-signature) require_signature=1; shift ;;
         --require-gatekeeper) require_gatekeeper=1; shift ;;
+        --require-keychain-sharing) require_keychain_sharing=1; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -28,11 +30,15 @@ done
 
 plist="$app/Contents/Info.plist"
 main="$app/Contents/MacOS/conman"
-ctl="$app/Contents/Helpers/conmanctl"
+ctl_app="$app/Contents/Helpers/conmanctl.app"
+ctl="$ctl_app/Contents/MacOS/conmanctl"
 icon="$app/Contents/Resources/ConMan.icns"
 plutil -lint "$plist" >/dev/null
+plutil -lint "$ctl_app/Contents/Info.plist" >/dev/null
 [[ $(plutil -extract CFBundleIdentifier raw "$plist") == "com.marcos0ft.conman" ]]
 [[ $(plutil -extract CFBundleExecutable raw "$plist") == "conman" ]]
+[[ $(plutil -extract CFBundleIdentifier raw "$ctl_app/Contents/Info.plist") == "com.marcos0ft.conman.conmanctl" ]]
+[[ $(plutil -extract CFBundleExecutable raw "$ctl_app/Contents/Info.plist") == "conmanctl" ]]
 short_version=$(printf '%s\n' "$version" | sed -nE 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')
 [[ $(plutil -extract CFBundleShortVersionString raw "$plist") == "$short_version" ]]
 for path in "$main" "$ctl"; do
@@ -63,6 +69,27 @@ if [[ "$require_signature" -eq 1 ]]; then
     codesign --verify --deep --strict --verbose=2 "$app"
     codesign --verify --verbose=2 "$dmg"
 fi
+if [[ "$require_keychain_sharing" -eq 1 ]]; then
+    expected_group="2NZRF4HQT7.com.marcos0ft.conman.shared"
+    for bundle in "$app" "$ctl_app"; do
+        profile="$bundle/Contents/embedded.provisionprofile"
+        [[ -f "$profile" ]] || { echo "Provisioning profile missing from $bundle" >&2; exit 1; }
+        entitlements=$(mktemp "${TMPDIR:-/tmp}/conman-entitlements.XXXXXX")
+        profile_plist=$(mktemp "${TMPDIR:-/tmp}/conman-profile.XXXXXX")
+        codesign -d --entitlements :- "$bundle" > "$entitlements" 2>/dev/null
+        security cms -D -i "$profile" > "$profile_plist"
+        [[ $(plutil -extract keychain-access-groups.0 raw "$entitlements") == "$expected_group" ]] || {
+            echo "Signed Keychain Access Group is incorrect for $bundle" >&2
+            exit 1
+        }
+        profile_groups=$(plutil -extract Entitlements.keychain-access-groups.0 raw "$profile_plist")
+        case "$profile_groups" in
+            *"$expected_group"*|*"2NZRF4HQT7.*"*) ;;
+            *) echo "Provisioning profile does not authorize ConMan's Keychain Access Group: $bundle" >&2; exit 1 ;;
+        esac
+        rm -f "$entitlements" "$profile_plist"
+    done
+fi
 if [[ "$require_gatekeeper" -eq 1 ]]; then
     spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 fi
@@ -83,7 +110,7 @@ attached=1
 [[ -x "$mount_point/Install conmanctl.command" ]]
 [[ -f "$mount_point/README.txt" ]]
 cmp -s "$app/Contents/MacOS/conman" "$mount_point/ConMan.app/Contents/MacOS/conman"
-cmp -s "$app/Contents/Helpers/conmanctl" "$mount_point/ConMan.app/Contents/Helpers/conmanctl"
+cmp -s "$ctl" "$mount_point/ConMan.app/Contents/Helpers/conmanctl.app/Contents/MacOS/conmanctl"
 mounted_license_dir="$mount_point/ConMan.app/Contents/Resources/Licenses"
 mounted_license_count=$(find "$mounted_license_dir" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d '[:space:]')
 [[ "$mounted_license_count" == 5 ]] || {

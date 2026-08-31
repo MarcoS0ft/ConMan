@@ -10,14 +10,15 @@ trap 'rm -rf "$work"' EXIT
 
 app="$work/Applications/ConMan.app"
 link="$work/usr-local-bin/conmanctl"
-mkdir -p "$app/Contents/Helpers" "$(dirname "$link")"
-printf '#!/bin/sh\nexit 0\n' > "$app/Contents/Helpers/conmanctl"
-chmod 0755 "$app/Contents/Helpers/conmanctl"
+cli="$app/Contents/Helpers/conmanctl.app/Contents/MacOS/conmanctl"
+mkdir -p "$(dirname "$cli")" "$(dirname "$link")"
+printf '#!/bin/sh\nexit 0\n' > "$cli"
+chmod 0755 "$cli"
 
 installer="$repo_root/packaging/macos/Install conmanctl.command"
 env CONMANCTL_INSTALL_APP="$app" CONMANCTL_INSTALL_LINK="$link" \
     "$installer" >/dev/null
-[[ -L "$link" && $(readlink "$link") == "$app/Contents/Helpers/conmanctl" ]]
+[[ -L "$link" && $(readlink "$link") == "$cli" ]]
 
 env CONMANCTL_INSTALL_APP="$app" CONMANCTL_INSTALL_LINK="$link" \
     "$installer" --remove >/dev/null

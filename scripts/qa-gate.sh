@@ -37,8 +37,6 @@ SEED_JSON=""
 SSH_HOST="" SSH_USER="" SSH_KEY_PATH=""
 TREE_SSH_LABEL="" TREE_RDP_LABEL=""
 RDP_TARGET_SSH_HOST="" RDP_TARGET_SSH_USER=""
-KEYCTL_SESSION_NAME="p84qagate"
-
 while [ $# -gt 0 ]; do
     case "$1" in
         --out-dir) OUT_DIR="$2"; shift 2 ;;
@@ -98,18 +96,12 @@ else
         fi
         DB_PATH="$OUT_DIR/mcp-db.sqlite"; rm -f "$DB_PATH"
         LOG_FILE="$OUT_DIR/mcp-launch.log"; : > "$LOG_FILE"
-        # A credentialed tree-launch needs a real session keyring (P6.17's
-        # finding, reconfirmed live during this task: under a bare xvfb
-        # session with no keyctl session, `cm-secrets`'s keyutils backend
-        # gets "No matching entry found in secure storage" on every resolve).
-        # This launches xvfb+conman DIRECTLY (not through mcp-run.sh) --
-        # nesting `keyctl session ... bash -c 'scripts/mcp-run.sh start ...'`
-        # (which itself backgrounds a further child) was observed live to
-        # kill the grandchild the moment the wrapped `mcp-run.sh` shell
-        # returned; the flat, single-level `nohup setsid keyctl session ...
-        # & disown` form below is the pattern proven to survive across tool
-        # calls during this task's own live MCP runs.
-        nohup setsid keyctl session "$KEYCTL_SESSION_NAME" bash -c "
+        # ConMan uses the persistent freedesktop Secret Service. Credentialed
+        # journeys therefore inherit the caller's desktop D-Bus session and
+        # unlocked Secret Service provider. A headless caller must arrange
+        # those services before launching the gate; ConMan never falls back to
+        # an ephemeral kernel keyring.
+        nohup setsid bash -c "
             xvfb-run -a env \
                 SLINT_MCP_PORT=$MCP_PORT \
                 SLINT_BACKEND=winit-femtovg \

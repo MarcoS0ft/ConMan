@@ -7,7 +7,7 @@ set -euo pipefail
 # intentionally has one documented location and needs no environment setup.
 link_path="${CONMANCTL_INSTALL_LINK:-/usr/local/bin/conmanctl}"
 app_path="${CONMANCTL_INSTALL_APP:-/Applications/ConMan.app}"
-cli_path="${app_path}/Contents/Helpers/conmanctl"
+cli_path="${app_path}/Contents/Helpers/conmanctl.app/Contents/MacOS/conmanctl"
 
 run_admin() {
     local parent
