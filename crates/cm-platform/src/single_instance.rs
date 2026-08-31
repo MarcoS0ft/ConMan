@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn path_identity_folds_case_insensitive_windows_spelling() {
         let upper = InstanceIdentity::from_paths(
-            Path::new(r"C:\Users\ALICE\ConMan\CONFIG.conman"),
+            Path::new(r"C:\Users\ALICE\ConMan\CONMAN.ini"),
             Path::new(r"C:\Users\ALICE\ConMan\CONMAN.sqlite"),
         )
         .unwrap();
