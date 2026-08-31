@@ -23,9 +23,12 @@ scripts/package/linux/build-portable-container.sh
 ```
 
 This builds on a reproducible Debian 12 glibc baseline in a digest-pinned Rust
-container. It runs the repository release finalizer (including UPX and its
-integrity/version checks), then creates the DEB, RPM, AppImage, and generic
-Linux tar archive from that one finalized stage:
+container. The wrapper derives a local builder-image tag from the checked-in
+Containerfile, so OS packages, Rust 1.96.0, and Zig 0.15.2 are provisioned once
+and reused until that definition changes. It runs the repository release
+finalizer (including UPX and its integrity/version checks), then creates the
+DEB, RPM, AppImage, and generic Linux tar archive from that one finalized
+stage:
 
 ```sh
 scripts/package/linux/build-portable-container.sh dist/packages
@@ -49,6 +52,14 @@ the following CLI workflow:
 `LINUXDEPLOY`/`APPIMAGETOOL` to vetted local copies; otherwise it downloads the
 official continuous AppImage builds into `TOOLS_DIR`.
 
+Cargo sources, target outputs, UPX, and AppImage tools are stored outside the
+checkout so workspace cleanup does not turn every package job into a cold
+build. CI uses `RUNNER_TOOL_CACHE`; local builds use
+`${XDG_CACHE_HOME:-$HOME/.cache}/conman/linux-packaging`. Set
+`CONMAN_LINUX_CACHE_ROOT` to choose another root. Debian and musl keep distinct
+target directories but intentionally share Cargo's target-independent registry
+and source cache.
+
 ## Static archive
 
 The static archive builder deliberately refuses ordinary dynamically linked
@@ -58,8 +69,13 @@ release binaries:
 scripts/package/linux/build-static-container.sh
 ```
 
-This builds both programs natively in Alpine/musl, proves that neither ELF has
-an interpreter nor `DT_NEEDED` entries, and then creates
+This builds both programs natively in a cached Alpine/musl builder image,
+proves that neither ELF has an interpreter nor `DT_NEEDED` entries, and then creates
 `conman-<version>-linux-<arch>-static.tar.gz`. “Static” describes the ELF
 binaries, not an embedded desktop: a graphical application still needs a
 running display server and working host graphics/input services.
+
+The static release disables link-time optimization and uses 16 code-generation
+units. Its modest size cost is intentional: the workspace's size-focused
+release profile makes this final fully static link disproportionately slow
+without changing its portability.

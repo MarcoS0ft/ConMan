@@ -162,9 +162,11 @@ jobs:
           py -3 -m unittest scripts/package/windows/test_windows_packaging.py -v
 
       - name: Build release executables
+        if: runner.os != 'Linux'
         run: cargo build --locked --workspace --release --bins
 
       - name: Stage uncompressed diagnostic artifact
+        if: runner.os != 'Linux'
         id: stage
         run: >-
           ${{ matrix.python }} scripts/dist/prepare_release.py
@@ -174,6 +176,7 @@ jobs:
           --skip-upx
 
       - name: Upload uncompressed diagnostic artifact
+        if: runner.os != 'Linux'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: raw-conman-${{ steps.stage.outputs.sanitized_version }}-${{ matrix.platform }}

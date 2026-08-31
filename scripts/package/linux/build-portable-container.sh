@@ -16,8 +16,14 @@ fi
 need_command "$ENGINE"
 mkdir -p "$OUTPUT_DIR" "${REPO_ROOT}/target"
 OUTPUT_DIR=$(cd "$OUTPUT_DIR" && pwd)
-CARGO_CACHE_DIR=${CARGO_CACHE_DIR:-"${REPO_ROOT}/.cache/cargo-linux-debian"}
-mkdir -p "$CARGO_CACHE_DIR"
+CACHE_ROOT=$(linux_package_cache_root)
+CONTAINERFILE="${REPO_ROOT}/packaging/linux/Containerfile.bookworm"
+BUILDER_IMAGE=$(ensure_linux_builder_image "$ENGINE" "$CONTAINERFILE" bookworm)
+BUILDER_KEY=${BUILDER_IMAGE##*:}
+CARGO_CACHE_DIR=${CARGO_CACHE_DIR:-"${CACHE_ROOT}/cargo"}
+TARGET_CACHE_DIR=${TARGET_CACHE_DIR:-"${CACHE_ROOT}/targets/bookworm-${BUILDER_KEY}"}
+TOOLS_CACHE_DIR=${TOOLS_CACHE_DIR:-"${CACHE_ROOT}/tools"}
+mkdir -p "$CARGO_CACHE_DIR" "$TARGET_CACHE_DIR" "$TOOLS_CACHE_DIR"
 
 # Debian 12 provides a conservative glibc baseline. The image is digest-pinned;
 # artifacts are built and dependency-scanned inside the same distribution.
@@ -27,22 +33,21 @@ mkdir -p "$CARGO_CACHE_DIR"
     -e APPIMAGE_EXTRACT_AND_RUN=1 \
     -e EXPECTED_VERSION="${EXPECTED_VERSION:-}" \
     -e LIBGHOSTTY_VT_SYS_CPU="${LIBGHOSTTY_VT_SYS_CPU:-x86_64_v2}" \
+    -e TOOLS_DIR=/tools-cache/appimage-tools \
     -v "${REPO_ROOT}:/work:Z" \
     -v "${CARGO_CACHE_DIR}:/cargo:Z" \
+    -v "${TARGET_CACHE_DIR}:/work/target/package-bookworm:Z" \
+    -v "${TOOLS_CACHE_DIR}:/tools-cache:Z" \
     -v "${OUTPUT_DIR}:/output:Z" \
     -w /work \
-    docker.io/library/rust@sha256:d99f7b31f49909348dc59b51f3c95d1efded1701ffb222f095aaab7de3c4abd8 \
+    "$BUILDER_IMAGE" \
     bash -euxo pipefail -c '
-        apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-          build-essential ca-certificates curl desktop-file-utils dpkg-dev file git \
-          libfontconfig1-dev libxkbcommon-dev pkg-config python3 xz-utils
-        eval "$(scripts/bootstrap-zig.sh --export)"
         cargo build --locked --release -p conman -p conmanctl
         prepare_args=(
           --target-dir /work/target/package-bookworm/release
           --stage-dir /work/dist/linux-stage
           --platform linux-x86_64
+          --upx-cache /tools-cache/upx
         )
         if [ -n "$EXPECTED_VERSION" ]; then
           prepare_args+=(--expected-version "$EXPECTED_VERSION")

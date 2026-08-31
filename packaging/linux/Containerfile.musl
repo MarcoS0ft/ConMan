@@ -1,0 +1,51 @@
+FROM docker.io/library/rust@sha256:8b5aee3b8fb41756d8447a47f96edc87a21f1e0c2b5ad2f3059542637d6c9b93
+
+ARG ZIG_VERSION=0.15.2
+ARG ZIG_SHA256=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+
+RUN apk add --no-cache \
+        bash \
+        binutils \
+        brotli-dev \
+        brotli-static \
+        build-base \
+        bzip2-dev \
+        bzip2-static \
+        ca-certificates \
+        curl \
+        expat-dev \
+        expat-static \
+        file \
+        fontconfig-dev \
+        fontconfig-static \
+        freetype-dev \
+        freetype-static \
+        git \
+        libpng-dev \
+        libpng-static \
+        libxkbcommon-dev \
+        libxkbcommon-static \
+        linux-headers \
+        musl-dev \
+        perl \
+        pkgconf \
+        python3 \
+        tar \
+        xz \
+        xz-dev \
+        xz-static \
+        zlib-dev \
+        zlib-static \
+    && rustup toolchain install 1.96.0 --profile minimal \
+        --component clippy --component rustfmt \
+    && curl -fsSL --retry 3 \
+        -o /tmp/zig.tar.xz \
+        "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+    && printf '%s  %s\n' "$ZIG_SHA256" /tmp/zig.tar.xz | sha256sum -c - \
+    && mkdir -p /opt/zig \
+    && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1 \
+    && rm /tmp/zig.tar.xz \
+    && zig_version=$(/opt/zig/zig version) \
+    && test "$zig_version" = "$ZIG_VERSION"
+
+ENV PATH="/opt/zig:${PATH}"

@@ -5,6 +5,37 @@ linux_package_root() {
     cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd
 }
 
+linux_package_cache_root() {
+    if [ -n "${CONMAN_LINUX_CACHE_ROOT:-}" ]; then
+        printf '%s\n' "$CONMAN_LINUX_CACHE_ROOT"
+    elif [ -n "${RUNNER_TOOL_CACHE:-}" ]; then
+        printf '%s/conman/linux-packaging\n' "$RUNNER_TOOL_CACHE"
+    elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+        printf '%s/conman/linux-packaging\n' "$XDG_CACHE_HOME"
+    else
+        printf '%s/.cache/conman/linux-packaging\n' "$HOME"
+    fi
+}
+
+ensure_linux_builder_image() {
+    engine=$1
+    containerfile=$2
+    image_name=$3
+    build_context=$(dirname "$containerfile")
+
+    need_command sha256sum
+    image_key=$(sha256sum "$containerfile" | cut -c1-16)
+    image="localhost/conman-${image_name}:${image_key}"
+    if ! "$engine" image inspect "$image" >/dev/null 2>&1; then
+        printf 'Building cached Linux packaging image %s\n' "$image" >&2
+        "$engine" build \
+            --file "$containerfile" \
+            --tag "$image" \
+            "$build_context" >&2
+    fi
+    printf '%s\n' "$image"
+}
+
 die() {
     printf 'error: %s\n' "$*" >&2
     exit 1
