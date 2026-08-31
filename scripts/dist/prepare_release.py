@@ -94,6 +94,26 @@ def sanitize_version(version: str) -> str:
     return sanitized
 
 
+def reject_embedded_build_paths(executables: list[Path], roots: list[str]) -> None:
+    """Reject release binaries that disclose a builder home or checkout path."""
+
+    needles: list[bytes] = []
+    for root in dict.fromkeys(roots):
+        if len(root) < 8:
+            continue
+        needles.append(root.encode("utf-8"))
+        needles.append(root.encode("utf-16-le"))
+
+    for executable in executables:
+        contents = executable.read_bytes()
+        for needle in needles:
+            if needle in contents:
+                raise RuntimeError(
+                    "release executable contains a machine-specific build path: "
+                    f"{executable.name}"
+                )
+
+
 def is_equal_or_ancestor(candidate: Path, descendant: Path) -> bool:
     return candidate == descendant or candidate in descendant.parents
 
@@ -258,6 +278,16 @@ def main() -> int:
             "required release executable(s) missing: "
             + ", ".join(str(args.target_dir / name) for name in missing)
         )
+
+    source_executables = [args.target_dir / name for name in required_names]
+    reject_embedded_build_paths(
+        source_executables,
+        [
+            os.environ.get("HOME", ""),
+            os.environ.get("USERPROFILE", ""),
+            os.environ.get("GITHUB_WORKSPACE", ""),
+        ],
+    )
 
     if args.stage_dir.exists():
         shutil.rmtree(args.stage_dir)

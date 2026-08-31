@@ -65,6 +65,25 @@ class DistributionContractTests(unittest.TestCase):
             self.assertIn("required release executable(s) missing", result.stderr)
             self.assertIn("conmanctl", result.stderr)
 
+    def test_builder_home_path_is_rejected_before_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            executable(target / "conman")
+            executable(target / "conmanctl")
+            with (target / "conman").open("ab") as binary:
+                binary.write(b"/Users/private-builder/.cargo/registry")
+
+            with mock.patch.dict(
+                "os.environ", {"HOME": "/Users/private-builder"}, clear=False
+            ):
+                result = self.run_prepare(root, "macos-arm64")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("machine-specific build path", result.stderr)
+            self.assertFalse((root / "stage").exists())
+
     def test_stage_equal_to_target_fails_without_deleting_binaries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

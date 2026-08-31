@@ -67,6 +67,9 @@ jobs:
           git reset --hard
           git clean -ffdx -e target/ -e .zig/
 
+      - name: Remove machine-specific paths from Rust artifacts
+        run: ${{ matrix.python }} scripts/dist/configure_rust_path_remap.py
+
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
