@@ -17,10 +17,8 @@ use crate::tree::conn_host_kind;
 use super::*;
 
 /// How many recents to show by default (query empty) and how many search
-/// results to show while typing. One constant, one screen's worth of the
-/// 2-column grid `launchpad.slint` renders (CONVENTIONS §2: single source of
-/// truth for such numbers).
-const MAX_RESULTS: usize = 8;
+/// results to show while typing.
+const MAX_RESULTS: usize = 10;
 
 pub(super) fn wire_launchpad(ctx: &Ctx) {
     wire_launchpad_edited(ctx);

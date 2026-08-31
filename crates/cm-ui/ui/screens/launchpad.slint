@@ -5,8 +5,8 @@
 //   import { Launchpad, RecentItem } from "screens/launchpad.slint";
 
 import { Theme } from "../theme.slint";
-import { PrimaryButton, StatusDot } from "../components.slint";
-import { LineEdit } from "std-widgets.slint";
+import { StatusDot } from "../components.slint";
+import { LineEdit, ScrollView } from "std-widgets.slint";
 
 export struct RecentItem {
     id: int,
@@ -22,32 +22,36 @@ export component Launchpad inherits Rectangle {
     in-out property <string>    query;
     callback edited(string);
     callback open-recent(int);
-    callback quick-connect();
 
     background: Theme.color-terminal-bg;
 
-    VerticalLayout {
-        padding: Theme.space-6;
-        spacing: Theme.space-4;
+    launchpad-scroll := ScrollView {
+        width: 100%;
+        height: 100%;
 
-        launchpad-wordmark := Image {
-            source: Theme.dark-mode
-                ? @image-url("../../../../resources/ConMan_Wordmark_DarkMode.svg")
-                : @image-url("../../../../resources/ConMan_Wordmark_LightMode.svg");
-            width: 192px;
-            height: 72px;
-            image-fit: contain;
-            accessible-role: image;
-            accessible-label: "Connection Manager";
-        }
+        VerticalLayout {
+            padding: Theme.space-6;
+            padding-right: Theme.space-6 + Theme.scrollbar-gutter;
+            spacing: Theme.space-4;
 
-        Text { text: greeting; color: Theme.color-text; font-size: Theme.font-xl;
-            font-family: Theme.font-family; font-weight: 700; }
-        Text { text: "Jump back in, or start something new."; color: Theme.color-text-secondary;
-            font-size: Theme.font-base; font-family: Theme.font-family; }
+            launchpad-wordmark := Image {
+                source: Theme.dark-mode
+                    ? @image-url("../../../../resources/ConMan_Wordmark_DarkMode.svg")
+                    : @image-url("../../../../resources/ConMan_Wordmark_LightMode.svg");
+                width: 192px;
+                height: 72px;
+                image-fit: contain;
+                accessible-role: image;
+                accessible-label: "Connection Manager";
+            }
 
-        // Search-to-connect.
-        Rectangle {
+            Text { text: greeting; color: Theme.color-text; font-size: Theme.font-xl;
+                font-family: Theme.font-family; font-weight: 700; }
+            Text { text: "Jump back in, or start something new."; color: Theme.color-text-secondary;
+                font-size: Theme.font-base; font-family: Theme.font-family; }
+
+            // Search-to-connect.
+            Rectangle {
             height: 40px;
             background: Theme.color-card;
             border-radius: Theme.radius-md;
@@ -65,14 +69,13 @@ export component Launchpad inherits Rectangle {
                     accessible-label: "Search or connect";
                     edited(t) => { root.edited(t); } }
             }
-        }
+            }
 
-        // Group header — Theme.font-xs token (was 10px literal).
-        Text { text: "RECENT"; color: Theme.color-text-disabled; font-size: Theme.font-xs;
-            font-family: Theme.font-family; font-weight: 700; letter-spacing: 0.6px; }
+            // Group header — Theme.font-xs token (was 10px literal).
+            Text { text: "RECENT"; color: Theme.color-text-disabled; font-size: Theme.font-xs;
+                font-family: Theme.font-family; font-weight: 700; letter-spacing: 0.6px; }
 
-        // Recents grid (2 columns).
-        for item[idx] in recents : recent-item-row := Rectangle {
+            for item[idx] in recents : recent-item-row := Rectangle {
             height: 50px;
             background: Theme.color-card;
             border-radius: Theme.radius-md;
@@ -107,12 +110,9 @@ export component Launchpad inherits Rectangle {
                 }
             }
             TouchArea { clicked => { root.open-recent(idx); } }
-        }
+            }
 
-        Rectangle { vertical-stretch: 1; }
-
-        HorizontalLayout {
-            launchpad-quick-connect-btn := PrimaryButton { text: "Quick connect"; clicked => { root.quick-connect(); } }
+            Rectangle { vertical-stretch: 1; }
         }
     }
 }

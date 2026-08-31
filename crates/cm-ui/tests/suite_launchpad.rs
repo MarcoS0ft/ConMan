@@ -12,7 +12,10 @@
 
 mod support;
 
-use slint::Model;
+use std::rc::Rc;
+
+use i_slint_backend_testing::ElementHandle;
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use support::{find_by_id, harness_with, pump_ticks};
 
 #[test]
@@ -21,7 +24,7 @@ fn launchpad_suite() {
 
     empty_tab_shows_launchpad_while_connected();
     home_shows_the_branded_wordmark();
-    launchpad_quick_connect_opens_the_real_dialog();
+    launchpad_scrolls_at_compact_height();
     new_tab_button_opens_a_live_shell_not_launchpad();
     empty_tab_is_titled_home_not_shell_n();
 }
@@ -56,22 +59,34 @@ fn empty_tab_shows_launchpad_while_connected() {
         "connected",
         "the empty/Launchpad tab is a live, connected local shell, not a disconnected placeholder"
     );
-    find_by_id(&h.ui, "Launchpad::launchpad-quick-connect-btn");
 }
 
-/// Launchpad's own "Quick connect" primary button must dispatch through the
-/// exact same `AppWindow::quick-connect()` callback the tab-strip/palette
-/// quick-connect affordance uses (`app.slint`'s `Launchpad { quick-connect =>
-/// { root.quick-connect(); } }` binding) -- not a Launchpad-local dialog.
-fn launchpad_quick_connect_opens_the_real_dialog() {
+fn launchpad_scrolls_at_compact_height() {
     let (h, _repo, _provider) = harness_with(false);
+    h.ui.window()
+        .set_size(slint::LogicalSize::new(720.0, 420.0));
+    let rows = (0..10)
+        .map(|idx| cm_ui::RecentItem {
+            id: idx,
+            name: SharedString::from(format!("Recent {idx}")),
+            meta: SharedString::from("just now"),
+            kind: SharedString::from("SSH"),
+            status: SharedString::from("disconnected"),
+        })
+        .collect::<Vec<_>>();
+    h.ui.set_launchpad_recents(ModelRc::from(Rc::new(VecModel::from(rows))));
     pump_ticks(1);
-    assert!(h.ui.get_launchpad_open());
 
-    find_by_id(&h.ui, "Launchpad::launchpad-quick-connect-btn").invoke_accessible_default_action();
+    let scroll = find_by_id(&h.ui, "Launchpad::launchpad-scroll");
+    let first_row = ElementHandle::find_by_element_id(&h.ui, "Launchpad::recent-item-row")
+        .next()
+        .expect("a recent row must be visible before scrolling");
+    let initial_y = first_row.absolute_position().y;
+    scroll.scroll(0.0, -10_000.0);
+    pump_ticks(1);
     assert!(
-        h.ui.get_quick_connect_open(),
-        "Launchpad's Quick connect button must open the real QuickConnectForm dialog"
+        first_row.absolute_position().y < initial_y,
+        "the compact Launchpad must scroll its content vertically"
     );
 }
 
