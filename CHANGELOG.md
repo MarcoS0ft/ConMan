@@ -28,6 +28,8 @@ All notable user-facing changes to Connection Manager are documented here.
 
 ### Changed
 
+- Remove the inert activity-bar placeholder and the hard-coded Launchpad
+  "Open Production in split" action.
 - Store macOS credentials in the modern data-protection Keychain. Developer ID
   builds give the GUI and bundled `conmanctl` helper one explicitly shared,
   team-authorized Keychain Access Group, avoiding legacy per-item ACL prompts.

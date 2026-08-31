@@ -57,7 +57,6 @@ fn empty_tab_shows_launchpad_while_connected() {
         "the empty/Launchpad tab is a live, connected local shell, not a disconnected placeholder"
     );
     find_by_id(&h.ui, "Launchpad::launchpad-quick-connect-btn");
-    find_by_id(&h.ui, "Launchpad::launchpad-open-group-btn");
 }
 
 /// Launchpad's own "Quick connect" primary button must dispatch through the

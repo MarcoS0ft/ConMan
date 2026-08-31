@@ -1596,7 +1596,6 @@ export component AppWindow inherits Window {
     callback edit-failed-profile();
     callback launchpad-edited(string);
     callback open-recent(int);
-    callback open-group-split();
 
     // ── Quick-connect form (P3.2; P6.12 gap 20 adds the kind selector) ──
     in-out property <bool>   quick-connect-open: false;
@@ -2005,11 +2004,6 @@ export component AppWindow inherits Window {
                         tooltip: "Toggle sidebar";
                         clicked => { root.toggle-sidebar(); }
                     }
-                    // P8.1: pre-existing unwired placeholder icon (no `clicked`
-                    // handler, no behavior) — out of this task's scope to wire up
-                    // or invent a fabricated label for. Allowlisted in
-                    // tests/a11y_audit.rs under this exact id.
-                    team-placeholder-btn := ActivityBarButton { glyph: "\u{F0849}"; }
                 }
             }
 
@@ -2858,7 +2852,6 @@ export component AppWindow inherits Window {
                 edited(q) => { root.launchpad-edited(q); }
                 open-recent(i) => { root.open-recent(i); }
                 quick-connect => { root.quick-connect(); }
-                open-group-split => { root.open-group-split(); }
             }
             // ── P6.7: terminal search overlay ────────────────────────────────
             // Floats over the live terminal (top-right), not full-bleed like the

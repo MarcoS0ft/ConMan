@@ -1,6 +1,5 @@
 //! Launchpad activation (P6.14, gap 3): real recents from the `recents`
-//! table, a time-of-day greeting, and the three previously-stub callbacks
-//! (`launchpad-edited` search-to-filter, `open-recent`, `open-group-split`).
+//! table, a time-of-day greeting, search filtering, and recent activation.
 //!
 //! The "empty tab" concept (`Tab::is_empty`) that decides *when* the
 //! Launchpad is shown lives in `tabs.rs` (tab lifecycle) and `overlays.rs`
@@ -26,7 +25,6 @@ const MAX_RESULTS: usize = 8;
 pub(super) fn wire_launchpad(ctx: &Ctx) {
     wire_launchpad_edited(ctx);
     wire_open_recent(ctx);
-    wire_open_group_split(ctx);
 }
 
 /// Recomputes a real greeting + the true "recents" list (empty query) and
@@ -91,55 +89,6 @@ fn wire_open_recent(ctx: &Ctx) {
     });
 }
 
-/// "Open Production in split" (P6.14 gap 3, `on_open_group_split`). Scope
-/// note: the current 2-pane primitive (`panes::do_split`) only ever spawns a
-/// *fresh local shell* for the new pane -- there is no existing way to place
-/// a specific stored SSH/RDP connection into a split pane (that plumbing
-/// belongs to P6.11's "N-way panes" rework). Rather than fake a split with
-/// unrelated content in pane 2, this opens each of the target group's
-/// members (up to the button's implied 2) as its own tab via the same
-/// credentialed connect path -- both actually reach the intended host, even
-/// though the result is tabs rather than literal panes. Revisit once P6.11
-/// lands real per-pane session placement.
-fn wire_open_group_split(ctx: &Ctx) {
-    ctx.ui.on_open_group_split({
-        let state = ctx.state.clone();
-        let tab_model = ctx.tab_model.clone();
-        let weak = ctx.ui.as_weak();
-        let hk_pending = ctx.hk_pending.clone();
-        let cert_pending = ctx.cert_pending.clone();
-        let secrets = ctx.secrets.clone();
-        move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let members: Vec<Connection> = {
-                let st = state.borrow();
-                let Some(group_id) = find_launchpad_group_id(&st) else {
-                    return;
-                };
-                st.conn_tree
-                    .connections()
-                    .iter()
-                    .filter(|c| c.group_id == Some(group_id))
-                    .take(2)
-                    .cloned()
-                    .collect()
-            };
-            for conn in &members {
-                sessions::launch_saved_connection(
-                    &state,
-                    &tab_model,
-                    &ui,
-                    &weak,
-                    &hk_pending,
-                    &cert_pending,
-                    &secrets,
-                    conn,
-                );
-            }
-        }
-    });
-}
-
 /// Resolves `idx` (a `RecentItem` list position, from `on_open_recent`) to
 /// the connection id displayed at that position, or `None` if out of range.
 /// Pulled out of the wired closure so it's testable without a live
@@ -152,24 +101,6 @@ fn recent_id_at(items: &[RecentItem], idx: i32) -> Option<i32> {
         .ok()
         .and_then(|i| items.get(i))
         .map(|item| item.id)
-}
-
-/// Finds the group the "Open Production in split" button refers to. The
-/// button's literal copy says "Production"; the demo/seed data
-/// (`conman::seed_demo_data`) names the equivalent group "Prod" -- match
-/// case-insensitively on either so both the exact and the seeded name work,
-/// preferring an exact "production" match if one exists.
-fn find_launchpad_group_id(st: &State) -> Option<cm_core::GroupId> {
-    let groups = st.conn_tree.groups();
-    groups
-        .iter()
-        .find(|g| g.name.eq_ignore_ascii_case("production"))
-        .or_else(|| {
-            groups
-                .iter()
-                .find(|g| g.name.to_lowercase().contains("prod"))
-        })
-        .map(|g| g.id)
 }
 
 // ---------------------------------------------------------------------------

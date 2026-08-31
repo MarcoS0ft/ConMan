@@ -5,7 +5,7 @@
 //   import { Launchpad, RecentItem } from "screens/launchpad.slint";
 
 import { Theme } from "../theme.slint";
-import { PrimaryButton, SecondaryButton, StatusDot } from "../components.slint";
+import { PrimaryButton, StatusDot } from "../components.slint";
 import { LineEdit } from "std-widgets.slint";
 
 export struct RecentItem {
@@ -23,7 +23,6 @@ export component Launchpad inherits Rectangle {
     callback edited(string);
     callback open-recent(int);
     callback quick-connect();
-    callback open-group-split();
 
     background: Theme.color-terminal-bg;
 
@@ -113,9 +112,7 @@ export component Launchpad inherits Rectangle {
         Rectangle { vertical-stretch: 1; }
 
         HorizontalLayout {
-            spacing: Theme.space-2;
             launchpad-quick-connect-btn := PrimaryButton { text: "Quick connect"; clicked => { root.quick-connect(); } }
-            launchpad-open-group-btn := SecondaryButton { text: "Open Production in split"; clicked => { root.open-group-split(); } }
         }
     }
 }

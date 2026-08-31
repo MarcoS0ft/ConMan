@@ -77,17 +77,7 @@ fn known_shared_interactive_types() -> HashSet<&'static str> {
 /// this list is deliberately short; anything else the audit finds is a real
 /// gap to fix, not a candidate for allowlisting.
 fn allowlisted_ids() -> HashSet<&'static str> {
-    [
-        // Pre-existing placeholder icon in the activity bar (glyph "md-account_group",
-        // see docs/devel/p5.4-os-gaps.md) with no `clicked` handler and no wired
-        // behavior — inert since before this task. Inventing a label for a
-        // non-functional control would be dishonest a11y; wiring it up is a
-        // separate, out-of-scope feature. Revisit (wire behavior + give it a real
-        // label) when this icon is actually turned into a feature.
-        "AppWindow::team-placeholder-btn",
-    ]
-    .into_iter()
-    .collect()
+    HashSet::new()
 }
 
 #[test]
