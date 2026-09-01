@@ -1,7 +1,7 @@
-//! P8.1 — accessibility/element-identity contract audit.
+//! Accessibility and element-identity contract audit.
 //!
 //! This test IS the maintenance rule from
-//! `docs/devel/tasks/P8.1-a11y-element-contract.md` ("the contract's item 6"):
+//! The audit checks the accessibility contract:
 //! any new interactive element or dialog must ship with an id + role + label
 //! in the same change, or this test fails, naming exactly which element is
 //! missing what.
@@ -136,16 +136,16 @@ fn all_interactive_elements_and_dialogs_are_labeled() {
 
     assert!(
         violations.is_empty(),
-        "P8.1 a11y audit found {} violation(s):\n{}",
+        "Accessibility audit found {} violation(s):\n{}",
         violations.len(),
         violations.join("\n")
     );
 }
 
-/// P8.1b — password `FormField`s must not leak cleartext through
+/// Password `FormField`s must not leak cleartext through
 /// `accessible-value` (or any sibling accessibility sink) to introspection.
 ///
-/// See `docs/devel/tasks/P8.1b-password-accessible-value-carveout.md`. Sets a
+/// The test sets a
 /// sentinel secret into the quick-connect dialog's password field (`qc-secret`,
 /// rendered by `qc-password-field := FormField { password: true; text <=>
 /// root.secret; }` in `screens/dialogs.slint`) and a *different* sentinel into
@@ -202,7 +202,7 @@ fn password_fields_never_expose_cleartext_via_accessibility() {
     assert_eq!(
         app.get_qc_secret().as_str(),
         SECRET_SENTINEL,
-        "P8.1b: password FormField's text/model path must be unaffected by the \
+        "Password FormField's text/model path must be unaffected by the \
          accessibility carve-out — masking is accessible-surface-only"
     );
 
@@ -234,12 +234,12 @@ fn password_fields_never_expose_cleartext_via_accessibility() {
 
     assert!(
         secret_leaks.is_empty(),
-        "P8.1b: password secret leaked through accessibility introspection:\n{}",
+        "Password secret leaked through accessibility introspection:\n{}",
         secret_leaks.join("\n")
     );
     assert!(
         plain_surfaced,
-        "P8.1b test has no teeth: the non-password sentinel never surfaced via \
+        "Password test has no teeth: the non-password sentinel never surfaced via \
          accessible_value anywhere in the tree, so this test can't distinguish a \
          targeted carve-out from a blanket accessible-value disable"
     );

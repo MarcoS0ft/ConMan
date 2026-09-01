@@ -1,11 +1,11 @@
-//! Shared scaffolding for the P8.2 in-process element-test suites
+//! Shared scaffolding for the in-process element-test suites
 //! (`suite_dialogs.rs` / `suite_shell.rs` / `suite_overlays.rs`).
 //!
 //! Not a test binary of its own -- Cargo only auto-registers direct children
 //! of `tests/` as integration-test binaries, so each suite declares `mod
 //! support;` (which resolves to this file) separately. Some duplicated
 //! compilation across the three suite binaries is the accepted cost of the
-//! "one binary per suite" structure the task spec requires (each suite needs
+//! "one binary per suite" structure the test harness requires (each suite needs
 //! its own process: `init_integration_test_with_mock_time()` may only run
 //! once per process).
 //!
@@ -102,7 +102,7 @@ pub(crate) fn harness() -> (
     harness_with(true)
 }
 
-/// P8.4: like [`harness`], but lets the caller pick `first_launch` --
+/// Like [`harness`], but lets the caller pick `first_launch` --
 /// `suite_launchpad.rs` needs `false` to reach the Launchpad-fronted empty
 /// tab (`assemble`'s `if first_launch { open_local_tab } else if
 /// restore_snapshot.is_none() { open_empty_tab }` branch in
@@ -116,7 +116,7 @@ pub(crate) fn harness_with(
     Arc<dyn ConnectionRepository>,
     Arc<MockSessionProvider>,
 ) {
-    // P8.6-B: no suite drives the agent-mode proxy (that's conman's own
+    // No suite drives the agent-mode proxy (that's conman's own
     // process, out of scope for this in-process harness) -- every ordinary
     // scenario runs as if agent-mode were off. See `harness_with_agent_mode`
     // for the execute-gate suites, which need a live `AgentModeConfig`.
@@ -124,7 +124,7 @@ pub(crate) fn harness_with(
 }
 
 /// Like [`harness_with`], but lets the caller install a live
-/// `cm_ui::AgentModeConfig` -- the P8.6-B execute-gate suites (Reconnect /
+/// `cm_ui::AgentModeConfig` -- the execute-gate suites (Reconnect /
 /// "Connect in split") need this to exercise `agent_mode_execute_blocked`'s
 /// real call sites end to end, not just the pure decision function
 /// `controller::sessions` already unit-tests in isolation.
@@ -333,7 +333,7 @@ fn all_ids(root: &impl ElementRoot) -> Vec<String> {
 /// message naming what they were waiting for. Zero real sleeping: this is
 /// what makes `suite_overlays.rs`'s scenarios complete in wall-clock
 /// milliseconds rather than seconds of real waiting, and is the "N
-/// mock-ticks" bound the task spec asks for (never an unbounded loop).
+/// mock-ticks" bound the test harness requires (never an unbounded loop).
 pub(crate) fn pump_until(max_ticks: u32, mut predicate: impl FnMut() -> bool) -> bool {
     if predicate() {
         return true;

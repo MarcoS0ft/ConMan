@@ -1,4 +1,4 @@
-//! Integration test for the CSV importer (P9.3): round-trips the checked-in
+//! Integration test for the CSV importer: round-trips the checked-in
 //! sample fixture through the dialog-free
 //! [`cm_storage::import::import_from_path`] seam into a real in-memory
 //! [`SqliteRepository`] + a mock keychain, and asserts the resulting tree,
@@ -165,7 +165,7 @@ fn csv_fixture_round_trips_into_a_real_repo_and_keychain() {
         "the imported key material should round-trip byte-for-byte"
     );
 
-    // ---- P9.6 decision 5: a no-cred_name password row (web-01-ssh) imports
+    // ---- A no-cred_name password row (web-01-ssh) imports
     // as Inline, never a synthesized credential object, and resolves
     // end-to-end via `resolve_connection_auth` exactly like an Object
     // credential would. --------------------------------------------------

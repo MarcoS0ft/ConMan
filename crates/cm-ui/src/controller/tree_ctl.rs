@@ -1214,8 +1214,7 @@ pub(super) fn is_ancestor_or_self(
 
 /// Returns `(kind, host, port, username, auth_method, rdp_domain, rdp_resolution)`.
 /// `rdp_domain`/`rdp_resolution` are only meaningful for `kind == 1` (RDP);
-/// SSH/Local return them empty/default since the editor hides those fields
-/// for those kinds (gap #2).
+/// SSH/Local return them empty/default since the editor hides those fields.
 pub(super) fn profile_fields_from_conn(
     conn: &Connection,
 ) -> (i32, String, String, String, i32, String, String) {
@@ -1342,7 +1341,7 @@ mod tests {
 
     use super::*;
 
-    // ──.99 GPU verify: refresh_conn_model's diff (double-click fix) ──────
+    // ── Connection-tree refresh behavior ───────────────────────────────
 
     fn conn_row(id: i32, label: &str, selected: bool) -> ConnRow {
         ConnRow {
@@ -1472,7 +1471,7 @@ mod tests {
 
     // the tree context menu's "Duplicate" item and
     // `wire_duplicate_conn_row` share this exact mapping — this is the one piece of
-    // genuinely new (if tiny) UI-orchestration logic the context-menu task adds, so
+    // UI orchestration for the context menu is covered directly, so
     // it gets a real test per CONVENTIONS §2 ("tests accompany behavior").
     #[test]
     fn duplicate_connection_clones_settings_with_new_id_and_copy_suffix() {

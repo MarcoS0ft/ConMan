@@ -1,9 +1,7 @@
-//! P8.2 Suite 1 — dialogs: quick-connect + profile-editor field manifests per
+//! Dialog tests cover quick-connect and profile-editor field manifests per
 //! kind, kind-switch port defaults, Save/Cancel persistence, and dialog/button
-//! geometry. Covers the P6.17 "New connection" / "Edit connection" / "Quick
-//! connect" journeys and is exactly the check the win-ui memo's §A/§B said
-//! "would have caught" defect #2 (RDP port stuck at 22, missing Domain/
-//! Resolution) outright.
+//! geometry. They cover the "New connection" / "Edit connection" / "Quick
+//! connect" journeys, including RDP port and Domain/Resolution fields.
 //!
 //! Every scenario below actively DRIVES the dialog open and switches its kind
 //! before asserting field presence -- `visit_descendants`/`find_by_*` only
@@ -221,7 +219,7 @@ fn quick_connect_local_manifest() {
     }
 }
 
-/// VQ-2: exercise the real per-protocol form instances and nested inputs in
+/// Exercise the real per-protocol form instances and nested inputs in
 /// both responsive branches. The narrow case is deliberately below the old
 /// fixed 520px dialog plus margins, so merely shrinking the outer window while
 /// leaving the form untouched cannot satisfy these assertions.
@@ -324,16 +322,12 @@ fn profile_editor_new_ssh_default_manifest() {
 }
 
 /// THE TEETH SCENARIO for defect #2 ("RDP port stuck at 22 / missing
-/// Domain/Resolution", `docs/devel/p8-plan.md` table). Switching the profile
+/// Domain/Resolution"). Switching the profile
 /// editor's kind selector to RDP must update the port default AND surface the
 /// Domain/Resolution fields -- exactly the two symptoms of that defect.
 ///
-/// Verification note (see the P8.2 task report): this scenario was run
-/// against a locally-reintroduced regression (the `changed(new-kind)` port
-/// handler removed and the RDP-only fields deleted from
-/// `screens/profile_editor.slint`) to confirm it fails loudly, then reverted
-/// -- the tree at `master`/this branch already has the fix, so the assertions
-/// below pass unconditionally in every normal run.
+/// The assertions cover the port update and RDP-only fields directly, so a
+/// regression in either branch fails loudly.
 fn profile_editor_kind_switch_updates_port_and_manifest() {
     let (h, _repo, _provider) = harness();
     h.ui.invoke_new_connection(0);
@@ -450,7 +444,7 @@ fn profile_editor_telnet_clears_credentials_and_saves_prompt() {
     }
 }
 
-/// P9.6-A Phase C (P9.5 #7): a brand-new connection has no credential
+/// A brand-new connection has no credential
 /// assigned at all (`cred-mode` defaults to Reference/index-0-"Inherit",
 /// `effective-cred-username` empty) -- the ordinary EDITABLE username field
 /// must be present (it's the actual fallback that gets used), and the
@@ -494,7 +488,7 @@ fn profile_editor_inline_mode_shows_password_hides_credential_picker() {
     );
 }
 
-/// Per Fable's guidance: "Prompt" must NOT be a selectable mode yet -- there
+/// "Prompt" must NOT be a selectable mode yet -- there
 /// is no connect-time password-prompt UX to route into, so a Prompt
 /// connection would surface a confusing "no credential assigned" error.
 /// `CredentialSource::Prompt` stays in the model (harmless, unreachable);
@@ -517,7 +511,7 @@ fn profile_editor_credential_mode_selector_has_no_prompt_option() {
     );
 }
 
-/// P9.5 #6/#7: a connection whose Reference credential HAS its own username
+/// A connection whose Reference credential HAS its own username
 /// shows that username read-only (greyed) instead of the ordinary editable
 /// field -- the credential's username is what's actually used
 /// (`resolve_connection_auth`'s precedence), so editing the connection's own
@@ -622,7 +616,7 @@ fn profile_editor_save_persists_and_cancel_discards() {
     assert!(after_cancel.iter().all(|c| c.name != "Should Not Persist"));
 }
 
-/// Fable non-blocking note (P9.6-A Phase C): Save and a fresh Open already
+/// Save and a fresh Open already
 /// clear the transient Inline password (secrets hygiene) -- Cancel must too,
 /// or a typed-then-cancelled password lingers in `profile-form` until the
 /// next editor-open.
@@ -644,9 +638,9 @@ fn profile_editor_cancel_clears_the_transient_inline_password() {
     );
 }
 
-// ── Geometry (P6.17 gap #1's sibling: dialog/button bounds) ─────────────────
+// ── Geometry (dialog/button bounds) ─────────────────
 
-/// VQ-8: a short Telnet form must consume only its preferred height, while a
+/// A short Telnet form must consume only its preferred height, while a
 /// long RDP form must be wheel-scrollable through its final control without
 /// the fixed action footer covering it.
 fn profile_editor_fields_stay_packed_and_scroll_clear_of_footer() {
@@ -718,7 +712,7 @@ fn profile_editor_fields_stay_packed_and_scroll_clear_of_footer() {
     );
 }
 
-/// VQ-5: deterministic WCAG contrast checks against the live Slint tokens.
+/// Deterministic WCAG contrast checks against the live Slint tokens.
 fn semantic_foregrounds_meet_normal_text_contrast() {
     let probe = ThemeProbe::new().expect("construct ThemeProbe");
     for dark_mode in [false, true] {
@@ -765,8 +759,8 @@ fn contrast_ratio(a: slint::Color, b: slint::Color) -> f64 {
 
 /// Save/Cancel sit within the dialog's own bounds, and the dialog sits
 /// within the window's bounds -- logical-pixel assertions on
-/// `absolute_position()` + `size()`, the exact check the win-ui memo's §A/§B
-/// said would have caught a mispositioned/oversized dialog.
+/// `absolute_position()` + `size()` ensure that a dialog cannot exceed its
+/// parent window.
 fn dialog_and_button_bounds() {
     let (h, _repo, _provider) = harness();
     h.ui.invoke_new_connection(0);
@@ -823,14 +817,14 @@ fn dialog_and_button_bounds() {
     );
 }
 
-/// P9.11 (Bug A geometry twin for `CredTreeRow`, the Keys panel's hover-icon
-/// click fix): after moving `touch` into its own `content` cell (mirroring
+/// Geometry coverage for `CredTreeRow`, the Keys panel's hover-icon
+/// click fix): after moving `touch` into its own `content` cell,
 /// `ConnectionRow`'s `269a5e5` fix exactly), the row's activate path and its
 /// accessible attributes -- which stayed on the `CredTreeRow` ROOT rather
 /// than moving into `content`, per the port's own explicit instruction --
 /// must be unchanged. The real-pointer hover-icon click this port actually
-/// fixes is .99-verify territory (same class as Bug A -- no pointer-
-/// coordinate synthesis in this harness); this proves the structural
+/// pointer-coordinate synthesis is unavailable in this harness; this proves
+/// the structural
 /// refactor didn't regress the one thing this suite CAN drive: the row's
 /// own click/accessible-default-action activation and its a11y label/
 /// selection state.

@@ -340,7 +340,7 @@ fn connection_delete() {
     assert!(db.get_connection(cid.get_id()).expect("get").is_none());
 }
 
-/// P9.6-A Decision 2: `delete_connection` also deletes the connection-scoped
+/// `delete_connection` also deletes the connection-scoped
 /// inline-secret keychain entry when a [`CredentialStore`] is attached via
 /// [`SqliteRepository::with_credential_store`] — the DB's `ON DELETE SET
 /// NULL` only clears the credential-**object** FK; an inline secret lives
@@ -392,8 +392,8 @@ fn connection_delete_also_deletes_the_inline_secret_keychain_entry() {
     );
 }
 
-/// Without an attached store, `delete_connection` behaves exactly as before
-/// P9.6-A — no keychain interaction attempted, delete still succeeds.
+/// Without an attached store, `delete_connection` remains safe: no keychain
+/// interaction is attempted, and deletion still succeeds.
 #[test]
 fn connection_delete_without_a_credential_store_still_succeeds() {
     let db = repo();

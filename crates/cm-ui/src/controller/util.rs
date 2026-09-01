@@ -559,16 +559,16 @@ mod tests {
         assert!(tiny.cols >= 1 && tiny.rows >= 1);
     }
 
-    // ──: verification-bypass gating ──────────────────────────────
+    // ── Verification-bypass gating ──────────────────────────────
     //
     // `is_flag_one` is the value-matching predicate both debug-only
     // `*_auto_accept_*` hooks use. The release inertness itself (the
     // `#[cfg(not(debug_assertions))]` variants never calling `std::env::var`
     // at all) is a compile-time structural property verified by
-    // code-inspection of `ssh_auto_accept_keys`/`rdp_auto_accept_certs`
-    // above, not by this test — see the report for the inspection note.
+    // code inspection of `ssh_auto_accept_keys`/`rdp_auto_accept_certs` above,
+    // not by this test.
 
-    // ──: sidebar-width clamp ─────────────────────────────────────
+    // ── Sidebar-width clamp ─────────────────────────────────────
 
     #[test]
     fn clamp_sidebar_width_passes_through_in_range() {

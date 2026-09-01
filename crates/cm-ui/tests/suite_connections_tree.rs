@@ -1,4 +1,4 @@
-//! P9.5 #2 — connection-tree row click semantics: single click selects
+//! Connection-tree row click semantics: single click selects
 //! (`row-selected`), double click / accessible-default-action launches
 //! (`row-activated`); the two must never be conflated.
 //!
@@ -15,7 +15,7 @@
 //! Rust-side handler a real double click or a real single click would have
 //! triggered.
 //!
-//! P9.5 #1's hover-icon-strip stability (the flicker fix) is NOT covered
+//! Hover-icon-strip stability is not covered
 //! here for the same reason: it depends on real pointer `has-hover` tracking
 //! that this headless testing backend has no way to synthesize (confirmed by
 //! the same grep -- no suite anywhere touches hover state). That fix rests on
@@ -92,7 +92,7 @@ fn select_does_not_launch_but_activate_does() {
     assert_eq!(
         tab_count(&h.ui),
         tabs_before,
-        "row-selected (single click) must NOT open a new tab (P9.5 #2)"
+        "row-selected (single click) must NOT open a new tab"
     );
     let row = nth_by_id(&h.ui, "AppWindow::conn-row", 0);
     assert_eq!(
@@ -107,7 +107,7 @@ fn select_does_not_launch_but_activate_does() {
     assert_eq!(
         tab_count(&h.ui),
         tabs_before + 1,
-        "row-activated (double click / Enter) must open a new tab (P9.5 #2)"
+        "row-activated (double click / Enter) must open a new tab"
     );
 }
 
@@ -234,21 +234,21 @@ fn connection_delete_also_requires_confirmation() {
     );
 }
 
-/// P9.10 #4: the connection tree's `StatusDot` used to be hardcoded
-/// "disconnected" at construction and never touched again -- this proves the
+/// The connection tree's `StatusDot` reflects live connection status rather
+/// than remaining hardcoded to "disconnected" at construction. This proves the
 /// live-status overlay (`tree_ctl::overlay_live_status`, triggered off the
 /// tab's own status-transition detection in `tick_tab`) actually reaches the
 /// row, across a real connecting -> connected -> disconnected lifecycle
 /// driven through the exact tree-launch path (`row-activated`) a real
 /// double-click/Enter goes through.
 ///
-/// Known, documented, accepted gap (not a bug): the row only picks up a
+/// Known, documented behavior (not a bug): the row only picks up a
 /// tab's status once that tab's status actually CHANGES at least once after
 /// being pushed -- `tick_tab`'s refresh hook rides the existing "did this
 /// tab's own status change" detection rather than an unconditional every-
 /// tick walk of the whole tree, so the dot briefly lags the FIRST connecting
-/// phase right after launch (a cosmetically minor, well-bounded trade-off,
-/// not the "inert forever" bug the user reported). This test starts its
+/// after launch (a cosmetically minor, well-bounded trade-off, not an inert
+/// state). This test starts its
 /// assertions from the FIRST transition onward, where the dot is always
 /// accurate.
 fn tree_row_status_dot_tracks_its_connection_s_live_tab() {
@@ -299,14 +299,15 @@ fn tree_row_status_dot_tracks_its_connection_s_live_tab() {
     );
 }
 
-/// P9.12 #1 (right-click regression, fixed): `ContextMenuArea` is not
+/// Right-click regression: `ContextMenuArea` is not
 /// queryable the way an ordinary `Rectangle`/`TouchArea` is via
 /// `accessible_*` attributes, and its `Menu`/`MenuItem` children are
 /// invisible to `ElementHandle` entirely until the menu actually opens (a
 /// real right-click gesture -- confirmed empirically: `find_by_element_
 /// type_name(&h.ui, "Menu"/"MenuItem")` returns zero even with rows present).
 /// So this can't prove the right-click GESTURE reaches the menu (that's
-/// .99-verify, same as the rest of Bug A) -- but `ContextMenuArea` itself
+/// separately verified, same as the rest of the pointer behavior) -- but
+/// `ContextMenuArea` itself
 /// IS queryable by type name, so this proves the fix's declaration-order
 /// move (to the end of `ConnectionRow`, past the `HorizontalLayout`) didn't
 /// accidentally drop, duplicate, or mis-nest it: exactly one extra
@@ -329,7 +330,7 @@ fn connection_row_still_carries_its_context_menu_area() {
         after,
         before + 1,
         "a new connection row must add exactly one ContextMenuArea, proving the \
-         P9.12 #1 fix (declaring it last, after the row's HorizontalLayout) kept it \
+         declaration order (after the row's HorizontalLayout) keeps it \
          present -- not dropped or accidentally duplicated"
     );
 }

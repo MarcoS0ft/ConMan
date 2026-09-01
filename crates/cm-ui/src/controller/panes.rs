@@ -1737,9 +1737,9 @@ mod tests {
         }
 
         /// A `Surface::Framebuffer`-backed session — the RDP pane shape
-        /// used to prove `build_pane_cells` produces a correct
+        /// used to verify `build_pane_cells` produces a correct
         /// `is_rdp` cell without needing a reachable RDP host (see the
-        /// task report's RDP-in-pane verification note).
+        /// RDP-in-pane behavior without a reachable host.
         fn new_rdp() -> Self {
             let (_tx, rx) = mpsc::channel::<cm_session::FrameUpdate>();
             Self {
@@ -1899,7 +1899,7 @@ mod tests {
         // an extra pane whose session surface is `Framebuffer` (RDP)
         // must render as an `is_rdp` pane-cell carrying its own decoded
         // frame — the shape lift that makes RDP-in-a-split possible at all.
-        // Verifiable without a reachable RDP host (see task report).
+        // This is verifiable without a reachable RDP host.
         let (mut tab, _sinks) = test_tab(2);
         let rdp_session = RecordingSession::new_rdp();
         let rdp_frame = Image::from_rgba8(slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(4, 4));

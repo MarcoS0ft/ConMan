@@ -1,10 +1,7 @@
-//! Credential-resolution unit suite (P9.6-A Decision 3) — the headline
-//! deliverable of this phase. `cm_core::resolve_connection_auth` is the pure
-//! function `cm_ui::controller::sessions::resolve_ssh_auth`/`resolve_rdp_auth`
-//! will become thin adapters over (Phase C); this suite is what the recent
-//! empty-username/empty-credential bugs exposed as a real gap — every
-//! `CredentialSource` arm, crossed with {secret present / absent / keychain
-//! miss}, plus the exact username precedence
+//! Credential-resolution unit suite for the pure
+//! `cm_core::resolve_connection_auth` function. The suite covers every
+//! `CredentialSource` arm and the empty-username/empty-credential cases:
+//! secret present / absent / keychain miss, plus the exact username precedence
 //! (inline > object's own username > the connection's settings username)
 //! that class of bug hit.
 

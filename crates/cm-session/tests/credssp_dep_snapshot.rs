@@ -1,8 +1,8 @@
-//! P9.1 CredSSP/NLA dependency-snapshot drift guard.
+//! CredSSP/NLA dependency-snapshot drift guard.
 //!
 //! `crates/cm-session` and `vendor/{ironrdp-connector,ironrdp-async,sspi}`
-//! depend on a **hand-built, pinned RustCrypto pre-release snapshot**
-//! (`docs/devel/memos/P9.1-credssp-dep-audit.md` §3/§4) that makes russh
+//! depend on a **hand-built, pinned RustCrypto pre-release snapshot**. The
+//! dependency snapshot makes russh
 //! 0.61.2 (stable `rand 0.10` / RC ecdsa/rsa pins) coexist with
 //! ironrdp-connector's `credssp` feature (picky/sspi, their own RC
 //! ecdsa/rsa/p256/crypto-bigint pins). It works *only* because every crate
@@ -12,7 +12,7 @@
 //! resolver panic discovered much later:
 //! - a `cargo update` that drifts one shared RustCrypto crate off the
 //!   snapshot (e.g. a future russh bump, or a registry `sspi`/`picky` release
-//!   nudging a transitive pin — see the memo §6 "moving target" table);
+//!   nudging a transitive pin);
 //! - editing `vendor/sspi`'s pin-bumped `Cargo.toml` back toward its stock
 //!   upstream pins;
 //! - bumping `vendor/ironrdp-connector`'s `picky`/`sspi` version requirements
@@ -21,25 +21,24 @@
 //! This test parses the **workspace** `Cargo.lock` (not `cargo metadata` —
 //! zero new dev-dependency, see CONVENTIONS §4) and asserts the exact
 //! resolved version of every crate in the snapshot. A failure here means:
-//! stop, re-read `docs/devel/memos/P9.1-credssp-dep-audit.md` §2/§6 and
-//! `docs/devel/tasks/CLEANUP-credssp-vendoring.md`, and re-derive the pins
+//! stop, re-derive the pins
 //! (or, if RustCrypto 1.0 has landed everywhere, do the vendoring removal the
 //! cleanup ticket describes instead of re-pinning).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// The exact snapshot from `docs/devel/memos/P9.1-credssp-dep-audit.md` §3/§4
+/// The exact dependency snapshot
 /// ("Exact dep changes" / "Crypto-graph coexistence proof"), reproduced onto
-/// `p9.1-credssp-impl`. Keep this list and the memo in sync.
+/// Keep this list synchronized with the vendored dependency pins.
 const PINNED_SNAPSHOT: &[(&str, &str)] = &[
     // The two ends of the coexistence problem.
     ("russh", "0.61.2"),
     ("sspi", "0.21.0"),
     // picky 7.0.0-rc.24 is the only picky release whose RustCrypto pins match
-    // russh 0.61.2 exactly (memo §2 table); this is *the* load-bearing pin.
+    // russh 0.61.2 exactly; this is the load-bearing pin.
     ("picky", "7.0.0-rc.24"),
-    // Shared RustCrypto crates that must unify to ONE instance (memo §4).
+    // Shared RustCrypto crates that must unify to one instance.
     ("ecdsa", "0.17.0-rc.18"),
     ("rsa", "0.10.0-rc.18"),
     ("crypto-bigint", "0.7.5"),
@@ -72,7 +71,7 @@ fn workspace_lock_path() -> PathBuf {
 /// (lockfile format v3/v4: one `[[package]]` table per crate, `name` then
 /// `version` as the first two keys). Deliberately not a full TOML parser —
 /// this file's shape is stable and adding a TOML dependency to a production
-/// crate for one test would itself need a CONVENTIONS §4 dependency memo.
+/// crate for one test would itself need a separate dependency.
 ///
 /// Returns the **first** version seen for each name (irrelevant here: every
 /// pinned snapshot name in this test resolves to exactly one version, which
@@ -113,8 +112,8 @@ fn credssp_dep_snapshot_matches_pinned_versions() {
 
     assert!(
         drifted.is_empty(),
-        "CredSSP dep snapshot drifted — see docs/devel/tasks/CLEANUP-credssp-vendoring.md \
-         and docs/devel/memos/P9.1-credssp-dep-audit.md before re-pinning:\n{}",
+        "CredSSP dependency snapshot drifted; inspect vendored dependency pins \
+         before updating:\n{}",
         drifted.join("\n")
     );
 }

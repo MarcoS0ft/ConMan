@@ -1,4 +1,4 @@
-//! Integration test for the RoyalTS `.rjson` importer (P9.2): round-trips the
+//! Integration test for the RoyalTS `.rjson` importer: round-trips the
 //! checked-in sample fixture through the dialog-free
 //! [`cm_storage::import::import_from_path`] seam into a real in-memory
 //! [`SqliteRepository`] + a mock keychain, and asserts the resulting tree,

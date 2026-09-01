@@ -1,9 +1,6 @@
-//! A `CredentialStore` double for the P8.2 element-test harness.
-//!
-//! None of the P8.2 suites drive a real secret round-trip through the OS
-//! keychain -- that is `cm-secrets`'s own concern (and out of scope per the
-//! task spec: "real protocol sessions... out"). This just satisfies the
-//! [`CredentialStore`] port so [`cm_ui::build_for_test`] can construct a real
+//! A `CredentialStore` double for the element-test harness. It avoids OS
+//! keychain access so [`cm_ui::build_for_test`] can construct a real
+//! [`CredentialStore`] port and exercise UI behavior.
 //! `AppWindow` + controller without touching the OS keychain from a test
 //! process.
 

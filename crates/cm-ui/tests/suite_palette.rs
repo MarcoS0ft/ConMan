@@ -1,4 +1,4 @@
-//! P10.3 VQ-9 — command-palette geometry at the real Slint boundary.
+//! Command-palette geometry at the real Slint boundary.
 
 #![cfg(feature = "ui-introspection")]
 

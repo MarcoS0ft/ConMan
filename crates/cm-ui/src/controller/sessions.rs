@@ -1974,8 +1974,8 @@ pub(super) fn launch_saved_connection(
         }
     }
 
-    // VQ-7: every saved-profile launch above ultimately pushes one tab, but
-    // the protocol-specific open paths deliberately derive labels for their
+    // Every saved-profile launch above ultimately pushes one tab, but the
+    // protocol-specific open paths deliberately derive labels for their
     // other callers (Quick Connect / debug hooks). Apply the saved profile's
     // user-facing name at this shared saved-only boundary instead. `Tab::
     // identity` is already the canonical active-session label cached across

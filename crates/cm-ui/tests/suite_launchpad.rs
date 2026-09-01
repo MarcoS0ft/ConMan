@@ -1,10 +1,7 @@
-//! P8.4 Suite -- Launchpad (P6.14), covering the P6.17 Linux J1 / Windows W10
-//! journey ("the empty/home tab renders the Launchpad... while reporting
-//! status connected") that P8.2's three suites did not port (`support::
-//! harness()` always uses `first_launch: true`, which never reaches the
-//! Launchpad -- see `controller/mod.rs::assemble`'s `if first_launch {
-//! open_local_tab } else if restore_snapshot.is_none() { open_empty_tab }`
-//! branch). This suite uses `support::harness_with(false)` to reach the
+//! Launchpad coverage for the Linux J1 / Windows W10 journey: the empty/home
+//! tab renders the Launchpad while reporting connected status. The regular
+//! `harness()` always uses `first_launch: true`, which never reaches the
+//! Launchpad. This suite uses `support::harness_with(false)` to reach the
 //! `open_empty_tab` branch deterministically (an in-memory repo with no
 //! session-tab snapshot to restore).
 
@@ -39,7 +36,7 @@ fn home_shows_the_branded_wordmark() {
 /// J1/W10: a non-first-launch start with nothing to restore lands on the
 /// Launchpad-fronted empty/home tab -- `is_empty: true` in the tab model,
 /// `launchpad_open: true`, greeting text present, AND the tab's own reported
-/// status is still `"connected"` (P6.14's specific claim: an empty tab is not
+/// status is still `"connected"` (an empty tab is not
 /// a broken/disconnected one, it is a real, live, empty local shell wearing
 /// a friendlier front-end).
 fn empty_tab_shows_launchpad_while_connected() {
@@ -90,7 +87,7 @@ fn launchpad_scrolls_at_compact_height() {
     );
 }
 
-/// P6.14's "empty-vs-real distinction" (W10's `34-launchpad-new-tab.png`):
+/// The "empty-vs-real distinction" (W10's `34-launchpad-new-tab.png`):
 /// the `+`-button new-tab action opens a live local shell tab, never another
 /// Launchpad -- the Launchpad only ever fronts the *first*, already-empty
 /// slot, not every subsequently-opened tab.

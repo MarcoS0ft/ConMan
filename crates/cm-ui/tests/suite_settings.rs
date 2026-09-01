@@ -1,18 +1,15 @@
-//! P8.4 Suite -- Settings: theme dark/light toggle, density compact/cosy
-//! toggle, and accent-preset selection. Covers the P6.17 Linux J3 / Windows
-//! W3 journey ("Settings: theme dark<->light + density compact<->cosy") that
-//! P8.2's three suites did not port (`suite_dialogs.rs` / `suite_shell.rs` /
-//! `suite_overlays.rs` never open the Settings panel).
+//! Settings: theme dark/light toggle, density compact/cosy toggle, and
+//! accent-preset selection. Covers the Linux J3 / Windows W3 journey and
+//! opens the Settings panel directly because the other suites do not cover it.
 //!
-//! Scope note (honest limit, matches the p8-plan.md layer table): this suite
+//! Scope note: this suite
 //! asserts the MODEL -- `Theme.dark-mode`/`Theme.density`/`Theme.accent-index`
 //! aliased onto `AppWindow` (`ui.get_dark_mode()`/`get_density()`/
 //! `get_accent_index()`), and that the real `SegmentedControl`/swatch elements
 //! drive them via their real `accessible-action-default`. It does NOT assert
 //! that a dark-mode toggle visually recolors already-open chrome/grids pixel-
-//! for-pixel (that is the `visual:theme-toggle-recolor` check --
-//! `memos/P8.4-qa-gate-rubric.md` -- the F-grid/P6.17-V1 class the testing
-//! backend's "no pixels" honest limit puts out of this layer's reach).
+//! for-pixel; pixel-level recoloring is outside this layer's reach because the
+//! testing backend provides no rendered pixels.
 
 #![cfg(feature = "ui-introspection")]
 
@@ -237,7 +234,7 @@ fn settings_body_scrolls_beneath_fixed_header() {
     }
 }
 
-/// P10.3 VQ-4: the Settings `ScrollView` is vertical-only in practice at both
+/// The Settings `ScrollView` is vertical-only in practice at both
 /// supported sidebar boundaries. This drives its real wheel route in both
 /// horizontal directions and checks the dense controls that previously set an
 /// oversized intrinsic content width.
@@ -366,7 +363,7 @@ fn open_settings_panel() {
 /// J3/W3: clicking the Theme segmented control's "Light"/"Dark" options
 /// (real `SegmentedControl` elements, not property pokes) must flip
 /// `Theme.dark-mode` (aliased as `AppWindow::dark-mode`) -- the same
-/// `ui.get_dark_mode()` read the P6.8 terminal-repaint handler depends on.
+/// `ui.get_dark_mode()` read the terminal-repaint handler depends on.
 fn theme_dark_light_toggle_updates_dark_mode() {
     let (h, _repo, _provider) = harness();
     open_settings(&h);
@@ -397,7 +394,7 @@ fn density_compact_cosy_toggle() {
     assert_eq!(h.ui.get_density(), 0, "Compact must select density index 0");
 }
 
-/// Accent swatches (`Accent preset N`, 1-indexed per the P8.1 a11y contract's
+/// Accent swatches (`Accent preset N`, 1-indexed per the a11y contract's
 /// "honest ordinal, no fabricated color name" note) are a radio group:
 /// selecting one updates `accent-index` and its own `accessible-checked`
 /// flips to `true` while the previously-selected swatch's flips to `false`.
@@ -435,7 +432,7 @@ fn accent_preset_selection() {
     );
 }
 
-/// P7.1 cont.: the Rendering segmented control (Auto/Software/Hardware) drives
+/// The Rendering segmented control (Auto/Software/Hardware) drives
 /// `render-backend` (aliased `AppWindow::render-backend`) AND persists the
 /// mapped `render.backend` string ("auto"/"software"/"accelerated") via the
 /// real controller handler. The renderer only switches on next launch, so this
@@ -629,7 +626,7 @@ fn build_identity_is_exposed() {
     );
 }
 
-/// P8.6-B: only compiled/run when this binary was built with BOTH
+/// This is only compiled/run when this binary was built with BOTH
 /// `ui-introspection` and `agent-mode` -- `agent-mode-available` (and hence
 /// the whole Automation section) is otherwise `false` and nothing below
 /// would exist in the tree at all (see `AgentModeConfig`'s doc comment for

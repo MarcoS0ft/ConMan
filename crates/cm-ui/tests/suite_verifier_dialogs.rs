@@ -1,62 +1,13 @@
-//! P8.4 Suite -- host-key / RDP-cert dialogs (P3.1/P4.2), covering the P6.17
-//! Linux J8 / Windows "SSH... host-key TOFU" and Part-C1 RDP-cert journeys'
-//! *dialog* half: field manifest, mismatch-vs-unknown copy/button variants,
-//! and that Accept/Reject actually close the dialog.
+//! Dialog integration suite for host-key, RDP-certificate, and import-password
+//! prompts. It verifies each dialog's field manifest, unknown/mismatch variants,
+//! button labels, and close callbacks.
 //!
-//! ## Honest limit (read before extending this suite)
-//! The real `UiHostKeyVerifier`/`UiCertVerifier` (`controller/sessions.rs`)
-//! run `decide()` on a background thread spawned by the concrete
-//! `SessionProvider`, block on `rx.recv()`, and marshal the "show the
-//! dialog" step onto the UI thread via `slint::invoke_from_event_loop`.
-//! That marshalling only executes once something drains the testing
-//! backend's event queue -- i.e. `AppWindow::run()` / `run_event_loop()` --
-//! which the P8.2 `build_for_test` seam **deliberately never enters** (see
-//! its doc: "does not enter the event loop"). Verified against the vendored
-//! `i-slint-backend-testing` source
-//! (`testing_backend.rs`'s `Queue::invoke_from_event_loop` just pushes to a
-//! `VecDeque` and unparks a thread; only `TestingBackend::run_event_loop`
-//! pops it). So the real accept-a-*queued*-decision round trip through
-//! `HkQueue`/`cert_pending` genuinely cannot be driven from this harness
-//! without either entering the event loop (defeats the point of an
-//! in-process, no-display seam) or new product code (out of scope, per
-//! CONVENTIONS §3.5) -- this is reported to the coordinator via the P8.4
-//! mapping table's `retired:` note on that half, not silently skipped.
-//!
-//! What **is** testable here, and is exactly what P8.2's three suites never
-//! covered: the dialogs' own model + structure -- field manifest per
-//! situation (unknown vs mismatch), the fingerprint/subject text rendering,
-//! button labels, and that clicking Accept/Reject (the real
-//! `on_host_key_accept`/`on_host_key_reject`/`on_cert_accept`/`on_cert_reject`
-//! callback wiring) closes the dialog. This suite drives the dialogs open by
-//! setting the exact same properties `UiHostKeyVerifier::decide` /
-//! `UiCertVerifier::decide` set (`host_key_open`, `host_key_mismatch`, ...) --
-//! i.e. it plays the verifier's role directly, in-line, on the test thread,
-//! which is a legitimate "mock verifier" in spirit even though it isn't the
-//! literal `HostKeyVerifier`/`CertVerifier` trait object. The MCP layer (J8 /
-//! Part-C1's real accept-reaches-Connected round trip) is where the full,
-//! real, threaded path is actually exercised end to end -- see
-//! `memos/P8.4-qa-gate-rubric.md`'s mapping table.
-//!
-//! ## P9.4: `ImportPasswordDialog` has the identical honest limit
-//! `run_import`/`ImportExportHandles` (`controller/import_export.rs`) are
-//! `pub(super)` -- unreachable from an integration test -- and the only
-//! existing way to drive `run_import` without the (blocking, un-automatable)
-//! native file picker is `CONMAN_AUTOIMPORT`, which `util::wire_env_hooks`
-//! only wires from the real `run()`, not `build_for_test` (this harness's
-//! `assemble` seam) -- so the real `ImportError::PasswordRequired` ->
-//! dialog-opens -> submit -> `import_from_path_with_password` retry round
-//! trip against an actual file genuinely cannot be driven from here, same
-//! structural reason as the host-key/cert dialogs above. What *is* covered:
-//! the dialog's manifest (file name rendering, field/button presence) and
-//! that submit/cancel (the real `on_import_password_submit`/
-//! `on_import_password_cancel` wiring) safely close it -- played the same
-//! "set the properties the real caller would set" way, `pending_import_path`
-//! left `None` (nothing to retry against) so submit exercises its
-//! nothing-pending no-op branch rather than a real re-import. The dialog
-//! dispatch logic itself (`.csv`/`.xml` routing, `PasswordRequired` mapping,
-//! `import_from_path_with_password`) is covered by dialog-free unit tests in
-//! `controller/import_export.rs`'s own `#[cfg(test)]` module -- the seam the
-//! module's own doc says is where that belongs.
+//! The production verifier queues its callback on the UI event loop, which the
+//! in-process test backend does not run. These tests therefore drive the same
+//! dialog properties directly and cover the model, field manifest, rendered
+//! text, button labels, and close callbacks. Import dispatch remains covered
+//! by controller unit tests because the integration harness cannot invoke the
+//! native file picker.
 
 #![cfg(feature = "ui-introspection")]
 
@@ -112,7 +63,7 @@ fn host_key_unknown_manifest_and_accept_closes() {
     );
 }
 
-/// Host-key MISMATCH (the loud "possible attack" variant, P3.1): "Reject"
+/// Host-key MISMATCH (the loud "possible attack" variant): "Reject"
 /// becomes primary/default and "Accept & replace" is marked destructive --
 /// distinct element ids from the unknown-host variant (never the same
 /// button relabeled), per `dialogs.slint`'s `if mismatch : ... if !mismatch :
@@ -144,10 +95,10 @@ fn host_key_mismatch_manifest_and_reject_closes() {
     );
 }
 
-/// Unknown/self-signed RDP certificate TOFU (P4.2, the Windows Part-C1
+/// Unknown/self-signed RDP certificate TOFU (the Windows Part-C1
 /// journey's dialog): "Reject" / "Accept & remember", subject + SHA-256
 /// fingerprint rendered in mono, both verified truthful against the real
-/// target in the Windows P6.17 memo -- this suite only proves the *dialog*
+/// target in the Windows journey -- this suite only proves the *dialog*
 /// renders the manifest and wires Accept/Reject, not the truthfulness
 /// (that needs a real cert, MCP territory).
 fn cert_unknown_manifest_and_accept_remember_closes() {
@@ -204,7 +155,7 @@ fn cert_mismatch_manifest_and_reject_closes() {
     );
 }
 
-/// P9.4: the mRemoteNG import password prompt -- manifest (file name
+/// The mRemoteNG import password prompt -- manifest (file name
 /// rendering, field + button presence) and that Import (the real
 /// `on_import_password_submit` wiring) closes the dialog. `pending_import_
 /// path` is never populated here (see the module doc's honest-limit note),
@@ -227,7 +178,7 @@ fn import_password_dialog_manifest_and_submit_closes() {
     let submit_btn = find_by_id(&h.ui, "ImportPasswordDialog::import-password-submit-btn");
 
     // Typing into the password field -- proves `on_import_password_edited`
-    // doesn't panic; never re-displayed/asserted against (P8.1b no-leak
+    // doesn't panic; never re-displayed/asserted against (no-leak
     // shape, same as `KbdInteractiveDialog`'s answers).
     h.ui.invoke_import_password_edited("mock-password".into());
 

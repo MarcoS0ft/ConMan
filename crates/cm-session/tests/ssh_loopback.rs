@@ -1,8 +1,8 @@
-//! P3.1/P6.2 SSH integration tests.
+//! SSH integration tests.
 //!
-//! The bulk of this file is a **default-on** loopback harness (P6.2, gap 23):
+//! The bulk of this file is a **default-on** loopback harness:
 //! an in-process SSH server (russh's server side — same dependency already in
-//! the workspace, no new-dep memo) so the hostile-byte-consuming `drive()`
+//! the workspace, no new dependency) so the hostile-byte-consuming `drive()`
 //! loop in `cm_session::ssh` runs on every plain `cargo test`, no external
 //! `sshd` required. Covers: connect; password auth success/failure; publickey
 //! auth success/failure; host-key verifier callback paths (Unknown→accept,
@@ -17,7 +17,7 @@
 //! `#![cfg(unix)]`: both the harness and the malformed-input tests key
 //! host/user credentials off `ssh-keygen` (already assumed available by the
 //! pre-existing ignored real-host test in this file). Windows coverage of
-//! this file is `UNVERIFIED` — see the P6.2 task report.
+//! Live-host coverage is `UNVERIFIED` because it requires a local SSH server.
 #![cfg(unix)]
 
 mod support;
@@ -116,7 +116,7 @@ impl HostKeyVerifier for FixedVerifier {
 }
 
 /// A scripted client-side [`KbdInteractiveHandler`] for the loopback tests
-/// (P6.13): returns the next queued round's answers in order, recording every
+/// Returns the next queued round's answers in order, recording every
 /// challenge it was shown; returns `None` (abort) once the script is
 /// exhausted so a test can never hang waiting on an unscripted round.
 struct ScriptedKbdHandler {
@@ -423,7 +423,7 @@ fn ssh_publickey_auth_wrong_key_surfaces_failed_status() {
 }
 
 // ---------------------------------------------------------------------------
-// Keyboard-interactive auth (P6.13)
+// Keyboard-interactive authentication
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -671,7 +671,7 @@ fn ssh_kbd_interactive_handler_abort_surfaces_failed_status() {
 }
 
 // ---------------------------------------------------------------------------
-// P6.4: stored-credential resolution -> keychain fetch -> real transport
+// Stored-credential resolution -> keychain fetch -> real transport
 //
 // `resolve_effective_credential` (connection -> nearest-ancestor group
 // default) itself is unit-tested in `cm-core`; the cm-ui glue that calls it
@@ -680,7 +680,7 @@ fn ssh_kbd_interactive_handler_abort_surfaces_failed_status() {
 // the other half: that a secret coming out of a real `CredentialStore`
 // implementation authenticates against a real SSH transport -- both for a
 // stored password and for stored key material via the new
-// `SshAuthInput::KeyMaterial` path (P6.4 memo).
+// `SshAuthInput::KeyMaterial` path.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -734,7 +734,7 @@ fn ssh_credential_key_material_auth_success_via_keychain() {
     // Store the raw PEM text under `CredentialPurpose::SshKey`, exactly as a
     // pasted SSH-key credential is stored (`cm-ui/src/controller/keys_ctl.rs`),
     // then fetch it back and feed it through `SshAuthInput::KeyMaterial` (no
-    // file path for a keychain-stored key -- see the P6.4 memo).
+    // file path for a keychain-stored key).
     let store = InMemoryCredentialStore::new();
     let cred_id = CredentialId::new(43);
     store
@@ -1061,7 +1061,7 @@ fn ssh_truncated_connection_fails_soft_no_panic() {
 }
 
 // ---------------------------------------------------------------------------
-// Real-host integration test (unchanged from P3.1) — needs a local `sshd`.
+// Real-host integration test — needs a local `sshd`.
 // ---------------------------------------------------------------------------
 
 /// Kills the spawned sshd and removes the temp dir on drop.

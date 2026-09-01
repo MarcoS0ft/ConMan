@@ -1,7 +1,6 @@
-//! P8.4 Suite -- split panes: H/V split growing `pane-count`, focus move
-//! between panes (`active-pane`), and the broadcast toggle + targeting menu
-//! (P6.9/P5.1/P6.11). Covers the P6.17 Linux J6 / Windows W7 journeys that
-//! P8.2's three suites did not port.
+//! Split panes: H/V split growing `pane-count`, focus move between panes
+//! (`active-pane`), and the broadcast toggle + targeting menu.
+//! Covers split-pane focus and routing behavior.
 //!
 //! Every action below drives the real callback the keyboard shortcuts
 //! (`Ctrl+Shift+\|-|B`, MCP/real-binary territory -- `dispatch_key_event`) and
@@ -60,12 +59,13 @@ fn split_h_then_v_grows_pane_count() {
     assert_eq!(active_tab_pane_count(&h), 3, "V-split must grow to 3 panes");
 }
 
-/// P9.10 #2: the per-pane disconnect affordance's real callback
+/// The per-pane disconnect affordance's real callback
 /// (`ui.invoke_pane_disconnect(pane_id)` -- the exact `on_pane_disconnect`
 /// `PaneSlot`'s corner icon button fires, see `panes::wire_pane_disconnect`)
 /// closes exactly the targeted pane, not necessarily the FOCUSED one, and
 /// collapses a 2-pane split back to a single surface. The real-pointer
-/// gesture (hovering/clicking the corner icon on real hardware) is .99-verify
+/// gesture (hovering/clicking the corner icon on real hardware) is separately
+/// verified
 /// territory like Bug A; this proves the callback's own effect, the same
 /// "drive the semantic action directly" pattern every other scenario in this
 /// suite already uses.
@@ -167,7 +167,7 @@ fn broadcast_toggle_and_target_menu() {
     );
 }
 
-/// P8.6-B (Fable review fixup): "Connect in split" establishes a live
+/// "Connect in split" establishes a live
 /// session with stored credentials exactly like a fresh launch, so it's an
 /// execute-scope action too -- gated identically to Reconnect (see
 /// `suite_overlays.rs`'s sibling test, which has the fuller comment on why

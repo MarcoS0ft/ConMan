@@ -1,4 +1,4 @@
-//! A `SessionProvider` double for the P8.2 element-test harness.
+//! A `SessionProvider` double for the element-test harness.
 //!
 //! No real PTY or remote transport, no threads, no sleeping -- every
 //! session this hands out is a [`ScriptedSession`] whose entire lifecycle is
@@ -137,7 +137,7 @@ impl Session for ScriptedSession {
 ///   `Arc` from the test to move the session through its lifecycle.
 pub(crate) struct MockSessionProvider {
     next_remote_status: Mutex<Arc<Mutex<SessionStatus>>>,
-    // P8.6-B (Fable review fixup): the execute-gate tests need to prove a
+    // The execute-gate tests need to prove a
     // *blocked* reconnect/connect-in-split never dials the provider at all --
     // not just that the resulting tab looks failed (which a normal connect
     // error would also produce). A plain call count is enough; nothing needs
@@ -189,7 +189,7 @@ impl MockSessionProvider {
 
     /// Installs the status cell every subsequent `connect_ssh`/`connect_rdp`
     /// call hands out, until replaced by another call. The test keeps its own
-    /// clone of `cell` to mutate the session's reported status afterward.
+    /// clone of `cell` to mutate the session's status afterward.
     pub(crate) fn script_next_remote(&self, cell: Arc<Mutex<SessionStatus>>) {
         *self
             .next_remote_status

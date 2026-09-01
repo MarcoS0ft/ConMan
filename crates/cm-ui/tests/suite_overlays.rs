@@ -1,5 +1,5 @@
-//! P8.2 Suite 3 — overlay lifecycle under mock time: the connecting overlay
-//! holding indefinitely (the win-ui memo §C spinner race is gone by
+//! Overlay lifecycle under mock time: the connecting overlay does not remain
+//! indefinitely (the spinner race is prevented by
 //! construction -- nothing here is timing-sensitive, because nothing is
 //! real), resolving to a failure with Reconnect/Edit, and toast
 //! appearance/expiry. Every scenario advances [`i_slint_backend_testing::
@@ -47,7 +47,7 @@ fn toast_count(ui: &cm_ui::AppWindow) -> usize {
 /// Drives the quick-connect SSH flow through the real dialog + Connect
 /// button, with the provider scripted to report `Connecting` and never
 /// anything else, then hands back the shared status cell so the caller can
-/// move the session forward later. `host` is parameterized (P9.5 #3's
+/// move the session forward later. `host` is parameterized (the
 /// per-tab-identity scenario opens two SSH tabs to two different hosts to
 /// prove they don't bleed into each other).
 fn connect_ssh_via_quick_connect(
@@ -94,7 +94,7 @@ fn connecting_overlay_holds_indefinitely_and_chrome_stays_reachable() {
     // "indefinitely" proof: no timeout fires because none exists, and no
     // sleeping happened to get here (wall-clock: this whole scenario runs in
     // well under a second of real time -- see the suite's determinism note in
-    // the P8.2 task report).
+    // the test contract).
     pump_ticks(100);
     assert!(
         h.ui.get_overlay_connecting(),
@@ -171,14 +171,14 @@ fn connecting_resolves_to_error_overlay_with_reconnect_and_edit() {
     assert!(
         h.ui.get_error_is_failure(),
         "a genuine SessionStatus::Failed must mark the overlay as a real failure \
-         (P9.12 #3 -- \"Connection failed\" framing)"
+         (\"Connection failed\" framing)"
     );
 
     find_by_id(&h.ui, "ErrorOverlay::error-reconnect-btn");
     find_by_id(&h.ui, "ErrorOverlay::error-edit-btn");
 }
 
-/// P9.12 #3: a clean SSH `exit`/disconnect must NOT show the same
+/// A clean SSH `exit`/disconnect must NOT show the same
 /// "Connection failed" framing a real failure does -- `overlays::update_
 /// overlays_from_status` used to set `overlay_error(true)` identically for
 /// `Failed`, `Disconnected`, and `Exited`, so exiting a shell normally
@@ -224,7 +224,7 @@ fn clean_disconnect_and_exit_are_not_shown_as_a_failure() {
     );
 }
 
-/// A background (non-active) remote tab failing pushes a toast (P5.3b); the
+/// A background (non-active) remote tab failing pushes a toast; the
 /// toast's own 3.2s auto-dismiss `Timer` (`components.slint::Toast`) fires
 /// under mock time exactly like any other Slint timer -- no real waiting for
 /// a duration this suite's determinism/teeth relies on staying instant.
@@ -260,7 +260,7 @@ fn background_tab_failure_toasts_and_auto_expires() {
     );
 }
 
-/// P9.5 #3: the actual bug the user hit -- alternating tabs while a connect
+/// Alternating tabs while a connect
 /// is in progress showed the *connecting* tab's content in the tab switched
 /// to. `AppWindow::session-identity`/`connecting-kind` are single properties
 /// shared by whichever tab is active (feeding `ConnectingOverlay`); this
@@ -314,7 +314,7 @@ fn switching_tabs_shows_each_tabs_own_identity_not_the_others() {
     );
 }
 
-/// P8.6-B (Fable review fixup): Reconnect is an execute-scope action -- an
+/// Reconnect is an execute-scope action -- an
 /// agent driving the ErrorOverlay's "Reconnect" button re-establishes a live
 /// session with stored credentials, same as any fresh launch. Uses
 /// `support::harness_with_agent_mode` (every other suite in this file runs
@@ -324,7 +324,7 @@ fn switching_tabs_shows_each_tabs_own_identity_not_the_others() {
 /// ungated, then flipping the shared `mcp_interaction_count` to 1 right
 /// before driving Reconnect, mirroring exactly what the real proxy's
 /// `McpInteractionGuard` does around an agent's `click_element` call: the
-/// adversarial case Fable's review flagged -- write is granted (so the click
+/// adversarial case -- write is granted (so the click
 /// itself is never denied at the proxy layer, out of this in-process
 /// harness's reach anyway), execute is not.
 fn reconnect_is_refused_when_agent_mode_lacks_execute_scope() {
@@ -370,7 +370,7 @@ fn reconnect_is_refused_when_agent_mode_lacks_execute_scope() {
     );
 }
 
-/// P9.12 #2: opening a brand-new SSH tab must blank the shared `root.frame`
+/// Opening a brand-new SSH tab must blank the shared `root.frame`
 /// property immediately -- `push_tab` makes the new tab active but never
 /// touches `frame`, and (unlike a tab switch, a reconnect, or a session's
 /// own new-snapshot tick) nothing else runs on the routine tick loop to
@@ -407,7 +407,7 @@ fn opening_a_new_ssh_tab_blanks_the_shared_frame_property() {
     );
 }
 
-/// P9.12 #2, RDP counterpart -- `root.rdp-frame` is the same kind of single
+/// RDP counterpart -- `root.rdp-frame` is the same kind of single
 /// AppWindow-level property as `root.frame` above, and `open_rdp_tab`'s fix
 /// is the identical one-line blank. Same seed-then-launch proof.
 fn opening_a_new_rdp_tab_blanks_the_shared_rdp_frame_property() {

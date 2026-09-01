@@ -342,8 +342,7 @@ pub enum RdpError {
     /// so — unlike the TLS-only path, where a blank password just fails
     /// later at the Windows logon screen — ConMan can and must detect this
     /// up front and give an actionable message instead of letting the raw
-    /// CredSSP/NTLM exchange fail cryptically. See the reviewer check
-    ///.
+    /// CredSSP/NTLM exchange fail cryptically.
     #[error("This server requires credentials (NLA); add a credential or enter a password.")]
     CredentialsRequired,
     #[error("Certificate rejected: {0}")]
@@ -2149,7 +2148,7 @@ fn publish_frame(image: &DecodedImage, tx: &SyncSender<FrameUpdate>) {
 // Unit tests
 
 /// Counts distinct `(r, g, b)` triples in a [`FrameUpdate`]'s RGBA buffer
-/// (ignoring alpha). Test-only helper ( visual QA hardening) used both to
+/// (ignoring alpha). Test-only helper used both to
 /// pick the "richest" frame in a content window and, on that chosen frame,
 /// to assert real variety - one source of truth for what "distinct color"
 /// means in `rdp_connect_live_host`, which also documents the
@@ -2454,10 +2453,8 @@ mod tests {
     // A full in-process RDP server that completes the X.224/MCS negotiation and
     // a real TLS accept is out of scope without a new dependency (rcgen for
     // self-signed cert generation, or ironrdp-server for full protocol
-    // fidelity) — see the new-dep memo
-    //. `verify_cert` is exactly
-    // the decision function that new dep would let us exercise inside a live
-    // `connect`; calling it directly against two real (throwaway,
+    // fidelity). `verify_cert` is the decision function that a live
+    // `connect` would exercise; calling it directly against two real (throwaway,
     // pre-generated) self-signed certs exercises the identical TOFU logic —
     // Unknown/Match/Mismatch × Accept/Reject — without needing a live socket.
 
@@ -2722,7 +2719,7 @@ mod tests {
     /// unaffected by this check at all, even though the password is empty.
     /// This is the plain-TLS regression guard: a blank password against a
     /// TLS-only server must not be misdiagnosed as an NLA credential problem
-    /// (it just proceeds to the graphical Windows logon screen, as before).
+    /// (it proceeds to the graphical Windows logon screen).
     #[test]
     fn credssp_requires_credentials_false_when_tls_only_selected_regardless_of_password() {
         assert!(!credssp_requires_credentials(false, b""));
@@ -2779,7 +2776,7 @@ mod tests {
         "0.0.0.0:0".parse().expect("hardcoded SocketAddr is valid")
     }
 
-    /// Drift guard (reviewer check): proves, against the real
+    /// Drift guard: proves, against the real
     /// vendored `ClientConnector` state machine — not a reimplementation —
     /// that `should_perform_credssp` only becomes meaningful *after*
     /// `mark_as_upgraded`, and is unconditionally `false` right after
@@ -2803,10 +2800,9 @@ mod tests {
     /// What this test does *not* cover: driving `connect` itself end to
     /// end (that needs a real or fully-scripted RDP negotiation over a
     /// socket — `connect_begin` parses actual X.224 Connection Confirm
-    /// bytes). That remaining gap is covered by the win11-dev live NLA
-    /// verify: an empty-password HYBRID connection to a real NLA-enabled
-    /// server must surface `RdpError::CredentialsRequired`, not the
-    /// cryptic earlier `RdpError::Auth`.
+    /// bytes). A live NLA connection must surface
+    /// `RdpError::CredentialsRequired` rather than the cryptic
+    /// `RdpError::Auth`.
     #[test]
     fn credssp_state_machine_only_settles_after_mark_as_upgraded() {
         use ironrdp_connector::ClientConnectorState;
@@ -2823,10 +2819,8 @@ mod tests {
         };
         let should_upgrade = ironrdp_tokio::skip_connect_begin(&mut connector);
 
-        // This is exactly the point where the earlier check lived (rdp.rs
-        // step "4b", immediately after connect_begin): should_perform_credssp
-        // is false here even though the server selected HYBRID. Checking here
-        // is dead code.
+        // Before mark_as_upgraded, should_perform_credssp is false even though
+        // the server selected HYBRID. Checking here would be ineffective.
         assert!(
             !connector.should_perform_credssp(),
             "should_perform_credssp() must be false before mark_as_upgraded, even for \
@@ -2913,9 +2907,7 @@ mod tests {
     }
 
     /// A non-CredSSP `connect_finalize` failure (e.g. a plain TLS-only-path
-    /// finalize error) passes through unchanged as `RdpError::Protocol`,
-    /// exactly like the earlier behavior — the plain-TLS regression guard
-    /// for the finalize step.
+    /// finalize error) passes through unchanged as `RdpError::Protocol`.
     #[test]
     fn map_finalize_error_non_credssp_passes_through_unchanged() {
         use ironrdp_connector::ConnectorErrorExt as _;
@@ -2933,7 +2925,7 @@ mod tests {
 
     // Connection-failure surfacing over a real socket
     //
-    // No in-process RDP protocol responder exists (see the new-dep memo above),
+    // No in-process RDP protocol responder exists,
     // so these exercise the client-side failure path — refused connection,
     // abrupt close, and garbage bytes where the X.224 Connection Confirm is
     // expected — proving `RdpSession::connect` always fails soft (typed
@@ -3078,10 +3070,10 @@ mod tests {
     /// In-memory `tracing` sink for `rdp_connect_live_host`: the
     /// RDP driver runs on its own dedicated OS thread (spawned inside
     /// `RdpSession::connect`), so a thread-local `tracing::subscriber::
-    /// set_default` in the test's own task would never see its events -
+    /// set_default` in the test's own task would not see its events -
     /// this installs a real global subscriber (`try_init`, safe here because
-    /// this test is `#[ignore]`d and is expected to be run alone via
-    /// `--ignored rdp_connect_live_host`) writing formatted log lines into a
+    /// this test is `#[ignore]`d and is expected to be run alone, writing
+    /// formatted log lines into a
     /// shared buffer the test can `.contains` on afterward, instead of
     /// requiring a human to eyeball `--nocapture` output.
     #[derive(Clone, Default)]
@@ -3137,10 +3129,10 @@ mod tests {
     /// headless/software and structurally blind to GPU-compositing bugs):
     /// beyond "connects and gets one frame", this asserts (1) the confirmed
     /// desktop size matches the *requested* `RdpSettings` (proves resolution
-    /// negotiation, not post-hoc scaling - #10 at the wire level), (2) the
+    /// negotiation, not post-hoc scaling at the wire level), (2) the
     /// framebuffer has real RGB variety, not just a non-zero byte (catches a
     /// uniform solid-color decode failure the old check missed), and (3) the
-    /// #9/#11 black-screen root cause (alpha = wire-padding 0x00 while RGB is
+    /// black-screen root cause (alpha = wire-padding 0x00 while RGB is
     /// valid) as a documented invariant, so a future alpha "cleanup" can't
     /// silently reintroduce it. See the assertions' own comments below.
     ///
@@ -3158,7 +3150,7 @@ mod tests {
     /// - The fixed 15 s connect-wait can trip on this host's own
     /// reconnect-throttling (a same-user RDP reconnect attempted right
     /// after a prior disconnect gets held/rejected server-side for ~20 s -
-    /// see the `test-hosts` memo). The timeout is now tunable via
+    /// see host reconnect throttling). The timeout is now tunable via
     /// `CONMAN_LIVE_RDP_TIMEOUT_SECS` (default unchanged, 15) and a single
     /// connect attempt that times out gets one retry after a cooldown.
     #[tokio::test]
@@ -3317,14 +3309,14 @@ mod tests {
             usize::from(frame.width) * usize::from(frame.height) * 4
         );
 
-        // visual QA, requested-size validation (#10 at the wire
+        // requested-size validation at the wire
         // level). `frame.width`/`frame.height` are not an echo of `cfg` -
         // they come from `DecodedImage::new(.., desktop_size.width,
         // desktop_size.height)` in `drive_inner`, where `desktop_size` is
         // `connection_result.desktop_size`, IronRDP's server-CONFIRMED
         // active size from `connect_finalize`. Asserting it equals the
         // requested size proves the resolution was actually negotiated
-        // end-to-end (not bitmap-scaled after the fact - the #10 bug).
+        // end-to-end (not bitmap-scaled after the fact).
         // Logged unconditionally so a clamp is visible in the test output
         // even if this assertion is later relaxed for a target host that
         // genuinely can't honor arbitrary resolutions.
@@ -3338,7 +3330,7 @@ mod tests {
             "server did not honor the requested desktop resolution \
              (requested {}x{}, server confirmed {}x{}) -- if this specific \
              xrdp target genuinely cannot support the requested size, this \
-             is a legitimate clamp, not a #10 regression; verify against \
+             is a legitimate clamp; verify against \
              the target's real capabilities before assuming a regression",
             cfg.width,
             cfg.height,
@@ -3347,7 +3339,7 @@ mod tests {
         );
 
         // visual QA, content variety, and the alpha=0/
-        // RGB-valid invariant behind the #9/#11 black-screen root cause.
+        // RGB-valid invariant behind the black-screen behavior.
         //
         // `PixelFormat::RgbA32`'s byte order is [R, G, B, A] per pixel
         // (ironrdp_graphics::image_processing::PixelFormat::channel_order),
@@ -3379,7 +3371,7 @@ mod tests {
             distinct_rgb.len()
         );
 
-        // (the highest-value part): pin the #9/#11 black-screen root
+        // Pin the black-screen root
         // cause as a test-documented invariant. That black screen was NOT a
         // wire bug - IronRDP's fast-path/tile decoders leave the alpha
         // channel at the wire-padding value 0x00 while the RGB channels are
@@ -3413,7 +3405,7 @@ mod tests {
                 "all {} alpha=0 pixel(s) share a single RGB value -- if \
                  alpha=0 now correlates with genuinely blank/unset pixels \
                  (rather than wire padding on otherwise-valid content), the \
-                 #9/#11 black-screen root-cause analysis needs \
+                 black-screen root-cause analysis needs \
                  re-checking before touching cm-ui's forced-opaque fix",
                 alpha_zero_rgb.len()
             );

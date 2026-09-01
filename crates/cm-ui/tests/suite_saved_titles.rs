@@ -1,4 +1,4 @@
-//! P10.3 VQ-7 — saved profiles keep their user-facing names in the tab strip
+//! Saved profiles keep their user-facing names in the tab strip.
 //! and active-session label. Quick Connect remains endpoint-derived.
 
 #![cfg(feature = "ui-introspection")]

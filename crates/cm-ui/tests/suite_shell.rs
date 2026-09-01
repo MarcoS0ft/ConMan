@@ -1,6 +1,6 @@
-//! P8.2 Suite 2 — shell chrome: command palette open/filter/dispatch, tab
+//! Shell chrome: command palette open/filter/dispatch, tab
 //! open/select/close, sidebar collapse, the status pill tracking live session
-//! status, and the P6.17 "gap #5" tab-strip/sidebar geometry (first-tab left
+//! status, and the tab-strip/sidebar geometry (first-tab left
 //! inset, the nav/tab-strip divider) as logical-pixel assertions.
 //!
 //! One process, one `#[test]`, scenarios run sequentially, each against its
@@ -102,12 +102,12 @@ fn tab_count(ui: &cm_ui::AppWindow) -> usize {
     ElementHandle::find_by_element_id(ui, "AppWindow::tab-item").count()
 }
 
-// ── Command palette (P6.17 "open command palette / run an action") ─────────
+// ── Command palette (open command palette / run an action) ─────────
 
 /// Opens the palette via its real status-bar affordance, filters to a single
 /// unambiguous action via `set_accessible_value` on the search input, and
 /// dispatches it via `invoke_accessible_default_action` on the one remaining
-/// result row -- exactly the two semantic actions the task spec calls out.
+/// result row -- the two semantic actions in the contract.
 fn palette_open_filter_dispatch() {
     let (h, _repo, _provider) = harness();
     let tabs_before = tab_count(&h.ui);
@@ -362,7 +362,7 @@ fn close_confirmation_owns_terminal_keyboard() {
     });
     assert!(!h.ui.get_close_confirm_dont_ask());
 
-    // Shift+Tab wraps backward to Confirm and owns both modifier phases.
+    // Shift+Tab wraps backward to Confirm and owns both modifiers.
     h.ui.window().dispatch_event(WindowEvent::KeyPressed {
         text: Key::Shift.into(),
     });
@@ -406,7 +406,7 @@ fn close_confirmation_owns_terminal_keyboard() {
     assert!(!h.ui.get_close_confirm_key_guard_active());
     assert_eq!(provider.terminal_key_input_count(), before);
 
-    // Reopen for the Escape phase-pair contract.
+    // Reopen for the Escape contract.
     h.ui.invoke_close_tab(0);
 
     h.ui.window().dispatch_event(WindowEvent::KeyPressed {
@@ -480,7 +480,7 @@ fn sidebar_collapse_toggles() {
     );
 }
 
-// ── Status pill (P6.9 gap 13: label tracks live status, not a hardcoded one) ─
+// ── Status pill (label tracks live status, not a hardcoded one) ─
 
 fn status_pill_tracks_session_status() {
     let (h, _repo, _provider) = harness();
@@ -498,12 +498,12 @@ fn status_pill_tracks_session_status() {
     assert_eq!(h.ui.get_session_status().as_str(), "connected");
 }
 
-// ── Geometry (P6.17 gap #5: first-tab left inset, nav/tab-strip divider) ────
+// ── Geometry (first-tab left inset, nav/tab-strip divider) ────
 
 /// The nav column (activity bar + optional side panel) must end strictly
 /// before the first tab begins -- proving both a non-zero left inset AND
-/// that something (the P7.3 hairline divider) occupies the gap between them.
-/// This is the exact defect class the win-ui memo's #5 flagged ("tab flush
+/// that something (the hairline divider) occupies the gap between them.
+/// This checks the defect class where the tab is flush
 /// to the window corner, no divider"): a regression back to that state would
 /// make `first_tab_x` collapse to `activity_bar_right`.
 fn first_tab_inset_and_divider_present() {
@@ -533,7 +533,7 @@ fn first_tab_inset_and_divider_present() {
     );
 }
 
-/// P10.3 VQ-3: the tab viewport may overflow, but the selected tab is
+/// The tab viewport may overflow, but the selected tab is
 /// automatically revealed and the New Tab affordance is pinned outside the
 /// scrolling region.  This uses the real button repeatedly at the observed
 /// 900 px boundary rather than constructing a synthetic tab model.
@@ -635,7 +635,7 @@ fn tab_navigation_tracks_measured_overflow() {
     );
 }
 
-/// P10.3 VQ-4 (Credentials): long user data must yield to row actions and
+/// Credentials: long user data must yield to row actions and
 /// panel bounds.  Check both the normal 252 px panel and its supported 180 px
 /// minimum with the same intentionally oversized synthetic values.
 fn credential_rows_fit_default_and_minimum_sidebar_widths() {
@@ -701,7 +701,7 @@ fn credential_rows_fit_default_and_minimum_sidebar_widths() {
     }
 }
 
-/// P10.3 VQ-6: each split reserves a real chrome row above its content.  At
+/// Each split reserves a real chrome row above its content. At
 /// the 900 px window and minimum sidebar width, both terminal surfaces must
 /// begin below that row and the disconnect action must fit entirely within
 /// it, so neither painting nor hit-testing can overlap session pixels.
@@ -822,7 +822,7 @@ fn activity_bar_accessible_checked_tracks_active_panel_and_sidebar() {
     assert!(checked("AppWindow::sidebar-toggle-btn"));
 }
 
-// ── P9.10: tab context menu / Home pill (element-reachable pieces) ─────────
+// ── Tab context menu / Home pill (element-reachable pieces) ─────────
 //
 // The right-click menu itself (opening it, the real gesture) is out of this
 // harness's reach the same way Bug A's hover-icon click was -- Slint's
@@ -837,7 +837,7 @@ fn activity_bar_accessible_checked_tracks_active_panel_and_sidebar() {
 // file already uses for the palette/quick-connect.
 
 /// Mirrors `suite_overlays.rs`'s identical helper (kept local here rather
-/// than shared -- each P8.2 suite binary is its own process/compilation
+/// than shared -- each suite binary is its own process/compilation
 /// unit, some duplication across them is the accepted cost, see this file's
 /// module doc and `support`'s).
 fn connect_ssh_via_quick_connect(
@@ -941,7 +941,8 @@ fn tab_duplicate_is_available_for_a_saved_connection_but_not_for_quick_connect()
 /// Failed/error-overlay state a spontaneous disconnect already leaves a tab
 /// in -- then "Reconnect" from that same tab dials the provider again.
 /// Drives both new callbacks directly via their `invoke_*` methods (the real
-/// gesture, opening the context menu and clicking an item, is .99-verify
+/// gesture, opening the context menu and clicking an item, is separately
+/// verified
 /// territory -- see this section's header comment).
 fn tab_disconnect_keeps_the_tab_open_and_tab_reconnect_dials_again() {
     let (h, _repo, provider) = harness();

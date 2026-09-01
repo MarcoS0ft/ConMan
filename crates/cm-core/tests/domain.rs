@@ -237,14 +237,14 @@ fn credential_ref_format_is_pinned() {
 
 #[test]
 fn credential_ref_for_connection_format_and_purpose_str() {
-    // P9.6-A: connection-scoped refs use "conn:" not "cred:", so they never
+    // Connection-scoped refs use "conn:" not "cred:", so they never
     // collide with an object credential's keychain slot.
     let inline = CredentialRef::for_connection(ConnectionId::new(7), CredentialPurpose::Password);
     assert_eq!(inline.service(), "conman");
     assert_eq!(inline.account(), "conn:7:password");
 
     // purpose_str() is the one piece of a CredentialRef that's safe to log
-    // (P9.8 H2-H6) — never the full account(), which encodes id material.
+    // — never the full account(), which encodes id material.
     assert_eq!(inline.purpose_str(), Some("password"));
     let object = CredentialRef::new(CredentialId::new(9), CredentialPurpose::SshPassphrase);
     assert_eq!(object.purpose_str(), Some("ssh-passphrase"));

@@ -998,9 +998,8 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
 ///
 /// `pub(crate)`: reached from outside this crate only through the tiny public
 /// forwarding wrapper `cm_ui::build_for_test` (`lib.rs`), gated the same way
-/// - this keeps the seam out of the public `run` surface per the API contract
-///   ("no change to the public `cm_ui::run` signature; internal seam, no memo
-///   needed"). See.
+/// - this keeps the seam out of the public `run` surface and preserves the
+///   public `cm_ui::run` signature.
 ///
 /// # Panics
 /// Panics if `AppWindow::new` fails (e.g. no testing backend installed -

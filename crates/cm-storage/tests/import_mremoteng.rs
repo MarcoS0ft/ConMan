@@ -1,4 +1,4 @@
-//! Integration test for the mRemoteNG importer (P9.4): round-trips the
+//! Integration test for the mRemoteNG importer: round-trips the
 //! checked-in sample fixture through the dialog-free
 //! [`cm_storage::import::import_from_path`] seam into a real in-memory
 //! [`SqliteRepository`] + a mock keychain, and asserts the resulting tree,
@@ -95,7 +95,7 @@ fn mremoteng_fixture_round_trips_into_a_real_repo_and_keychain() {
         .expect("ssh connection persisted");
     assert_eq!(ssh.kind, ConnectionKind::Ssh);
 
-    // ---- P9.6 decision 5: mRemoteNG's per-node password imports as Inline,
+    // ---- mRemoteNG's per-node password imports as Inline,
     // never a synthesized credential object, and resolves end-to-end through
     // `resolve_connection_auth` (username + secret) exactly like an Object
     // credential would. --------------------------------------------------

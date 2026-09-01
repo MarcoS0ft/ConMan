@@ -1,5 +1,5 @@
-//! P6.2 shared test support: an in-process SSH server (russh server side —
-//! same dependency already in the workspace, no new-dep memo needed) used by
+//! Shared test support: an in-process SSH server (russh server side —
+//! same dependency already in the workspace, no new dependency needed) used by
 //! `tests/ssh_loopback.rs` so the protocol paths in `cm_session::ssh` run
 //! against a real transport on every plain `cargo test`, no external `sshd`.
 //!
@@ -27,7 +27,7 @@ use russh::{ChannelId, Pty};
 use std::borrow::Cow;
 use tokio::net::TcpListener;
 
-/// A minimal in-memory [`CredentialStore`] for P6.4 loopback tests: proves
+/// A minimal in-memory [`CredentialStore`] for loopback tests: proves
 /// the credential-resolution + keychain-fetch + real-transport chain without
 /// touching the OS keychain (which the plain `cm-secrets` mock backend also
 /// avoids, but this keeps the test self-contained in `cm-session`, which has
@@ -81,7 +81,7 @@ pub(crate) struct KbdRound {
     pub expected_answers: Vec<String>,
 }
 
-/// Server-side scripted keyboard-interactive challenge (P6.13): a sequence of
+/// Server-side scripted keyboard-interactive challenge: a sequence of
 /// rounds. A round with zero prompts is valid (tests the malformed/empty-
 /// challenge fail-soft path on both ends).
 #[derive(Clone)]
@@ -108,7 +108,7 @@ pub(crate) struct SshServerConfig {
     /// granting a shell — simulates a server-side abrupt close after auth.
     pub abrupt_close: bool,
     /// `Some(cfg)` drives the keyboard-interactive challenge/response script
-    /// (P6.13); `None` rejects all keyboard-interactive attempts.
+    /// `None` rejects all keyboard-interactive attempts.
     pub kbd_interactive: Option<KbdInteractiveTestConfig>,
 }
 
@@ -216,7 +216,7 @@ impl ServerTrait for TestServer {
 /// "echo probe").
 struct TestHandler {
     cfg: SshServerConfig,
-    /// Index into `cfg.kbd_interactive`'s `rounds` (P6.13) — advances only on
+    /// Index into `cfg.kbd_interactive`'s `rounds` — advances only on
     /// a correctly-answered round.
     kbd_round: usize,
 }
@@ -258,7 +258,7 @@ impl Handler for TestHandler {
         }
     }
 
-    /// Drives the scripted keyboard-interactive challenge (P6.13):
+    /// Drives the scripted keyboard-interactive challenge:
     /// `response == None` is the initial request (send the current round's
     /// prompts); `Some(response)` carries the client's answers to that round.
     /// A wrong answer rejects outright; a correct answer on the last round
