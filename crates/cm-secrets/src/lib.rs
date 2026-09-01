@@ -113,7 +113,7 @@ pub fn initialize_native_keyring() {
 /// use cm_secrets::KeyringStore;
 /// use cm_core::CredentialStore;
 ///
-/// let _store: Box<dyn CredentialStore> = Box::new(KeyringStore::new);
+/// let _store: Box<dyn CredentialStore> = Box::new(KeyringStore::new());
 /// ```
 #[cfg(any(
     target_os = "windows",
