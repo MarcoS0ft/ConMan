@@ -291,8 +291,7 @@ pub struct MouseEvent {
 /// **Not `Send`/`Sync` by contract.** The primary implementation
 /// (libghostty-vt) is `!Send + !Sync`, so an engine is owned by a single thread
 /// for its whole life. Only bytes (in) and [`GridSnapshot`]/encoded bytes (out)
-/// cross threads — never the engine itself (validated in; ARCHITECTURE
-/// §4). Do not add a `: Send` bound.
+/// cross threads — never the engine itself. Do not add a `: Send` bound.
 pub trait TerminalEngine {
     /// Feed raw VT bytes (from a PTY/SSH stream). Never panics on malformed
     /// input — the engine parses defensively and fails soft.
@@ -304,7 +303,7 @@ pub trait TerminalEngine {
     /// Produce an owned snapshot of the viewport starting `scroll_offset`
     /// lines above the live tail (`0` = the tail — the earlier sole
     /// behavior). Implementations **clamp** `scroll_offset` to the available
-    /// scrollback (never error on an out-of-range request — CONVENTIONS §2,
+    /// scrollback (never error on an out-of-range request;
     /// untrusted/derived input fails soft); the clamped value actually used
     /// is echoed back via [`GridSnapshot::scroll_offset`].
     fn snapshot(&self, scroll_offset: u32) -> GridSnapshot;

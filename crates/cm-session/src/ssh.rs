@@ -1,6 +1,6 @@
 //! SSH terminal session over [russh](https://docs.rs/russh) 0.61.
 //!
-//! Architecture (ARCHITECTURE §4): a **tokio** current-thread runtime on a
+//! Architecture: a **tokio** current-thread runtime on a
 //! dedicated OS thread drives russh (connect → host-key verify → auth → PTY +
 //! shell → channel IO). Channel bytes are forwarded over an `mpsc` to the
 //! same `!Send` engine-owner thread** the local terminal uses ([`run_engine_owner`]);
@@ -74,7 +74,7 @@ pub enum SshError {
 
 /// Hard cap on keyboard-interactive challenge rounds within a single auth
 /// attempt — guards against a hostile/broken server looping the client
-/// forever (CONVENTIONS §2, parser/loop safety: every loop must be bounded).
+/// forever; every parser loop must be bounded.
 const MAX_KBD_INTERACTIVE_ROUNDS: u32 = 16;
 
 /// Pads or truncates `answers` to exactly `expected` entries. Defensive: a
@@ -943,7 +943,7 @@ where
 /// server reports success/failure or the round cap is hit. A round with zero
 /// prompts (a valid but unusual server behavior) is answered with zero
 /// responses rather than treated as an error — fail soft, never panic, on
-/// malformed/empty challenges (CONVENTIONS §2).
+/// malformed or empty challenges.
 async fn keyboard_interactive_auth(
     handle: &mut russh::client::Handle<ClientHandler>,
     user: &str,

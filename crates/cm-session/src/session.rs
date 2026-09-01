@@ -21,7 +21,7 @@ use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalSize};
 ///
 /// The handle is `Send` (it holds only channels + state); the `!Send` VT engine
 /// stays confined to its owner thread — only bytes (in) and owned
-/// [`GridSnapshot`]s (out) cross threads (ARCHITECTURE §4). Object-safe so the
+/// [`GridSnapshot`]s (out) cross threads. Object-safe so the
 /// UI can hold `Box<dyn TerminalSession>` per tab.
 ///
 /// Implementors also implement [`Session`] (unified lifecycle + surface).

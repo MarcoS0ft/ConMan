@@ -1,2 +1,2 @@
-# rustfmt defaults are the style authority (CONVENTIONS §2).
+# Rustfmt defaults are the style authority.
 # Edition is read from each crate's Cargo.toml.

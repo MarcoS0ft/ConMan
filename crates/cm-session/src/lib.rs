@@ -5,7 +5,7 @@
 //! 1. **Terminal sessions** — local PTY shell ([`LocalTerminalSession`]) and
 //!    SSH/TELNET remote terminals ([`SshTerminalSession`],
 //!    [`TelnetTerminalSession`]). All implement [`TerminalSession`]
-//!    and [`Session`] (ARCHITECTURE §4). Gated on
+//!    and [`Session`]. Gated on
 //!    `engine-libghostty`.
 //!
 //! 2. **RDP session** — [`RdpSession`] driven by IronRDP over tokio. Implements

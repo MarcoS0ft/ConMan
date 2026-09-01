@@ -196,7 +196,7 @@ pub enum RdpClipboardEvent {
 ///
 /// Contains the full RGBA buffer at the negotiated resolution; the UI blits
 /// the entire buffer into a `slint::Image` (full-frame replacement is fast —
-/// ARCHITECTURE §5). Dirty-rect coalescing happens inside the session driver;
+/// Dirty-rect coalescing happens inside the session driver;
 /// a single [`FrameUpdate`] per timer tick is the norm.
 #[derive(Debug, Clone)]
 pub struct FrameUpdate {
@@ -214,7 +214,7 @@ pub struct FrameUpdate {
 /// - `Framebuffer` — a channel of decoded RGBA frames (RDP sessions).
 ///
 /// The UI inspects this once on session construction and holds the appropriate
-/// receiver for the tab's lifetime (ARCHITECTURE §4).
+/// receiver for the tab's lifetime.
 #[allow(clippy::large_enum_variant)]
 pub enum Surface {
     /// Terminal sessions: receive [`GridSnapshot`]s for glyph-atlas rendering.

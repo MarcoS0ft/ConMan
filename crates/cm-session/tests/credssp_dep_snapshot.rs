@@ -19,7 +19,7 @@
 //!   without re-validating the whole snapshot.
 //!
 //! This test parses the **workspace** `Cargo.lock` (not `cargo metadata` —
-//! zero new dev-dependency, see CONVENTIONS §4) and asserts the exact
+//! zero new dev-dependencies) and asserts the exact
 //! resolved version of every crate in the snapshot. A failure here means:
 //! stop, re-derive the pins
 //! (or, if RustCrypto 1.0 has landed everywhere, do the vendoring removal the

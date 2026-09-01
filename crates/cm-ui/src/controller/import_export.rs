@@ -1,6 +1,6 @@
 //! Import/export palette actions: native file dialogs (`rfd`) wired to
 //! the frozen `cm_storage::json_io` envelope. Secrets are excluded by default
-//! on export (ARCHITECTURE §6) — this module never sets
+//! on export; this module never sets
 //! `ExportOptions::include_secrets`, and no "include secrets" UI is exposed
 //! (see the import API documentation).
 //!
@@ -101,7 +101,7 @@ impl ImportExportHandles {
 // Dialog-free seam (headlessly testable)
 
 /// Export the current tree to `path` as pretty JSON. Secrets are always
-/// excluded — default [`ExportOptions`] (ARCHITECTURE §6); see the module doc.
+/// excluded — default [`ExportOptions`]; see the module doc.
 pub(super) fn export_to_path(repo: &dyn ConnectionRepository, path: &Path) -> Result<(), String> {
     let json = cm_storage::export_to_json(repo, &ExportOptions::default(), None)
         .map_err(|e| format!("export failed: {e}"))?;

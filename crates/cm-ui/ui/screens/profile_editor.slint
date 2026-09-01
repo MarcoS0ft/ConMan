@@ -31,7 +31,7 @@ import { ComboBox, ScrollView } from "std-widgets.slint";
 // 1 = Inline (username/password +domain-for-RDP typed on this connection) ·
 // 2 = Prompt (no stored secret - prompted at connect time)
 // `inline-password` TRANSIENT - Rust clears it immediately after profile-save
-// reads it (secrets hygiene, CONVENTIONS §3); Inline's username/domain reuse
+// reads it; Inline's username/domain reuse
 // the ordinary `username`/`rdp-domain` fields above instead of separate ones.
 // `inline-has-secret` whether a keychain entry already exists for this
 // connection's Inline password (drives the placeholder hint only).
@@ -381,7 +381,7 @@ export component ProfileEditor inherits Rectangle {
                         // no-leak pattern (password: true - raw
                         // TextInput internally, see components.slint). TRANSIENT
                         // - Rust clears this immediately after profile-save
-                        // reads it (secrets hygiene, CONVENTIONS §3).
+                        // reads it.
                         profile-inline-password-field := FormField {
                             label: "Password";
                             placeholder: root.form.inline-has-secret

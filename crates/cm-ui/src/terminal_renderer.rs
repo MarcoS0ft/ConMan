@@ -6,7 +6,7 @@
 //! Swash supplies mask or intrinsic-color glyph pixels. Pure CPU work, headless-testable,
 //! with no windowing/GPU dependency.
 //!
-//! ## Threading (`!Send` boundary, ARCHITECTURE §4 /)
+//! ## Threading (`!Send` boundary)
 //! [`TerminalRenderer::render`] returns a `SharedPixelBuffer`, which **is** `Send`. The
 //! `slint::Image::from_rgba8` wrap (which yields a `!Send` `Image`) is deliberately *not*
 //! done here — it happens on the UI thread. So `render` is callable on the engine

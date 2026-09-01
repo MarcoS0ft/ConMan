@@ -3,7 +3,7 @@ use crate::kind::ConnectionKind;
 /// Errors from a [`crate::ConnectionRepository`].
 ///
 /// `Backend` carries an adapter-specific message; adapters must ensure no
-/// secrets ever reach it (CONVENTIONS §2, secrets hygiene).
+/// secrets ever reach it.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RepositoryError {

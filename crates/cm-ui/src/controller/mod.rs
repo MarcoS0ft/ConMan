@@ -5,7 +5,7 @@
 //! store. It wires the Connections panel and Keys
 //! panel to real persisted data and handles all CRUD operations.
 //!
-//! Threading (ARCHITECTURE §4):
+//! Threading:
 //! - Sessions run their byte-pump on dedicated threads.
 //! - The controller lives entirely on the UI thread.
 //! - A `slint::Timer` coalesces snapshots, renders the active tab.
@@ -541,8 +541,7 @@ type KbdQueue = Arc<Mutex<std::collections::VecDeque<Sender<Option<Vec<cm_core::
 ///
 /// Built once in [`run`] after all models + initial state are constructed,
 /// then passed by reference to each feature module's `wire_*` function. Pure
-/// parameter bundling — introduced by the controller split, no behavior
-/// change (CONVENTIONS §3: internal/private, no memo required).
+/// parameter bundling with no behavior of its own.
 // `pub(crate)`, not private: `lib.rs`'s `build_for_test` needs to name
 // this type to box it up as the test harness's keepalive handle. Its fields
 // stay private - only this crate's `controller` module (and submodules) can

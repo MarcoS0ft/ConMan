@@ -66,7 +66,7 @@ impl SessionSetupError {
 }
 
 /// Establishes a live [`Session`] for a resolved connection config
-/// (ARCHITECTURE §3). Object-safe so it can be held as `Arc<dyn
+/// Object-safe so it can be held as `Arc<dyn
 /// SessionProvider>`.
 ///
 /// Each method returns immediately with a handle in

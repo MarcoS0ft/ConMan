@@ -1,6 +1,6 @@
 //! Automatic software-renderer fallback so `conman` renders instead of
-//! dying on a host with no usable hardware OpenGL (e.g. the win11-dev VM,
-//! which only has OpenGL 1.1 / no real GPU driver - `conman.exe` used to
+//! dying on a host with no usable hardware OpenGL (for example, a machine
+//! with only OpenGL 1.1 and no functional GPU driver). `conman.exe` would
 //! crash on GL init unless the user manually set `SLINT_BACKEND=software`).
 //!
 //! ## Why a self-probe subprocess, not `BackendSelector` or catch-unwind

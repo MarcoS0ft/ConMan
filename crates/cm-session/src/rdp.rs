@@ -1,6 +1,6 @@
 //! RDP session via IronRDP.
 //!
-//! Architecture (ARCHITECTURE §4/§5):
+//! Architecture:
 //! - A **tokio current-thread runtime** on a dedicated OS thread drives the
 //!   IronRDP state machines (connect → TLS upgrade → auth → active stage).
 //! - The driver maintains a persistent RGBA [`DecodedImage`] framebuffer,
@@ -2929,7 +2929,7 @@ mod tests {
     // so these exercise the client-side failure path — refused connection,
     // abrupt close, and garbage bytes where the X.224 Connection Confirm is
     // expected — proving `RdpSession::connect` always fails soft (typed
-    // `Failed` status, never a panic) exactly as CONVENTIONS §2 requires for
+    // `Failed` status, never a panic) as required for
     // untrusted transport input.
 
     fn test_rdp_settings(port: u16) -> cm_core::RdpSettings {
@@ -3136,10 +3136,8 @@ mod tests {
     /// valid) as a documented invariant, so a future alpha "cleanup" can't
     /// silently reintroduce it. See the assertions' own comments below.
     ///
-    /// **Hardening (found during coordinator re-verification against a real
-    /// xrdp host, master `b397e4c`):** this live smoke was flaky in two ways
-    /// unrelated to the RDP decode/resolution code itself (both confirmed
-    /// correct by a clean run):
+    /// This live smoke accounts for two sources of target-side timing
+    /// variability unrelated to the RDP decode/resolution code:
     /// - The old code asserted variety against whichever frame happened to
     /// be the *first* non-empty one, which can be a solid xrdp
     /// greeter/background frame that arrives before real desktop content -

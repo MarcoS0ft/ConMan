@@ -7,7 +7,7 @@
 //! `controller/sessions.rs`). `KnownHosts` — the file-backed known-hosts
 //! policy engine — is *not* moved: it does real file I/O
 //! (`russh::keys::known_hosts::*`), which has no place in `cm-core`'s
-//! charter (ARCHITECTURE §1: "no I/O"). It stays in `cm-session::ssh`; the
+//! no-I/O boundary. It stays in `cm-session::ssh`; the
 //! `SessionProvider` adapter constructs it internally so callers never need
 //! to know it exists.
 
@@ -102,7 +102,7 @@ pub struct KbdInteractiveChallenge {
 /// user dismissed the prompt) or `Some(answers)` with exactly
 /// `challenge.prompts.len` entries, in order. Answers are [`Secret`] and
 /// must never be logged, `Debug`-formatted, or otherwise stringified outside
-/// the auth exchange itself (CONVENTIONS §2).
+/// the auth exchange itself.
 pub trait KbdInteractiveHandler: Send + Sync {
     fn respond(&self, challenge: &KbdInteractiveChallenge) -> Option<Vec<Secret>>;
 }

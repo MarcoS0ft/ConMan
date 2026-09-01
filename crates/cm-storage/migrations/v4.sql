@@ -1,4 +1,4 @@
--- v4: CredentialSource on connections (P9.6-A).
+-- v4: CredentialSource on connections.
 --
 -- Connection.credential: Option<CredentialId> became
 -- Connection.credential_source: Option<CredentialSource>

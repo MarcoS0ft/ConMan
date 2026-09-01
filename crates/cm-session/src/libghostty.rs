@@ -7,7 +7,7 @@
 //!
 //! Threading: like the underlying `Terminal`, [`LibghosttyEngine`] is
 //! `!Send + !Sync` (it holds an FFI pointer). It is owned by a single thread;
-//! only bytes and [`GridSnapshot`]s cross thread boundaries (ARCHITECTURE §4).
+//! only bytes and [`GridSnapshot`]s cross thread boundaries.
 //!
 //! Build note: this adapter is compiled from Ghostty source via zig **0.15.2**
 //! (not 0.16.0). On Windows debug builds set
@@ -849,7 +849,7 @@ mod tests {
 
     #[test]
     fn buffer_text_on_empty_terminal_is_all_blank_lines() {
-        // Maximal/empty-input edge case (CONVENTIONS §2): no scrollback yet,
+        // Maximal/empty-input edge case: no scrollback yet,
         // buffer_text degrades to just the blank active rows, never panics.
         let e = engine(4, 10);
         let lines = e.buffer_text();

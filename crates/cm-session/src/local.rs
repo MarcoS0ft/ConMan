@@ -1,5 +1,5 @@
 //! Local shell terminal session: a PTY-backed [`cm_core::TerminalEngine`]
-//! driver realizing the ARCHITECTURE §4 byte-pump on dedicated OS threads.
+//! driver realizing the byte pump on dedicated OS threads.
 //!
 //! Two threads back each session:
 //! - **PTY reader** — blocking-reads the PTY master and forwards `Vec<u8>`

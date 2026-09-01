@@ -1,29 +1,25 @@
 #!/usr/bin/env bash
-# P8.3 — win11-dev wrapper for the Slint-native MCP automation surface.
+# Windows wrapper for the Slint-native MCP automation surface.
 #
-# Uses the P6.17-proven durable launch shape: a real Scheduled Task plus an
+# Uses a Scheduled Task plus an
 # SSH local-forward — a foreground SSH command or
-# `Start-Process` both lose the process on session disconnect, see
-# memos/win11-dev-vm-ops.md "ConMan QA runner"), but registers/triggers
-# **ConManMCP**, forwards `SLINT_MCP_PORT`, and drives the target over MCP
+# `Start-Process` both lose the process on session disconnect. It registers
+# and triggers **ConManMCP**, forwards `SLINT_MCP_PORT`, and drives the target over MCP
 # (`scripts/mcp-scenario-driver.py`).
 #
-# The task's action runs a `run-mcp.ps1` deployed directly on the VM (NOT
-# tracked in this repo: host-specific infra scripts live only on the box, per the
-# P6.2b "no host details in tracked scripts" rule). `run-mcp.ps1` must, at
+# The scheduled task runs a `run-mcp.ps1` deployed directly on the VM (not
+# tracked in this repo because host-specific infrastructure stays on the
+# target). `run-mcp.ps1` must, at
 # minimum:
-#   - write a sentinel as its literal first line (before any try/catch) —
-#     memos/win11-dev-vm-ops.md's "sentinel-first-line" rule, so a later run
+#   - write a sentinel as its literal first line (before any try/catch), so a later run
 #     can distinguish "never ran" from "still running" from "crashed";
 #   - set $env:SLINT_MCP_PORT, $env:SLINT_BACKEND = "software" (this VM has no
 #     usable hardware OpenGL — same finding as the ConManQA runner) and
-#     optionally $env:CONMAN_DB_PATH / $env:CONMAN_AUTOIMPORT (P8.3's "reuse
-#     the existing data-seeding seams" note);
+#     optionally $env:CONMAN_DB_PATH / $env:CONMAN_AUTOIMPORT;
 #   - launch a `conman.exe` that was built with `--features automation`.
 #
 # All host/user/path details are supplied via environment variables — nothing
-# machine-specific is hard-coded here (CONVENTIONS: infra notes/host details
-# stay in the gitignored runbook, never in tracked files).
+# machine-specific is hard-coded here.
 #
 # Usage:
 #   scripts/mcp-win.sh register   # one-time: create/replace the ConManMCP task
@@ -68,8 +64,7 @@ cmd_register() {
     : "${WIN_MCP_SCRIPT:?set WIN_MCP_SCRIPT (Windows path to run-mcp.ps1)}"
     # `/it` (interactive-only) + no explicit `/RU` targets the currently
     # logged-on interactive user — required for winit/the software renderer
-    # to attach to a real desktop session at all (see the ConManQA precedent
-    # in memos/win11-dev-vm-ops.md).
+    # to attach to a real desktop session.
     echo "mcp-win: registering scheduled task '${WIN_MCP_TASK_NAME}' on ${WIN_SSH_HOST}"
     ssh "$WIN_SSH_HOST" \
         "schtasks /create /tn \"${WIN_MCP_TASK_NAME}\" /tr \"powershell -NoProfile -ExecutionPolicy Bypass -File \\\"${WIN_MCP_SCRIPT}\\\"\" /sc once /st 23:59 /it /f" \
@@ -84,8 +79,7 @@ open_tunnel_and_wait() {
     echo "mcp-win: opening SSH port-forward 127.0.0.1:${LOCAL_FWD_PORT} -> ${WIN_SSH_HOST}:${WIN_MCP_PORT}"
     # -4 forces IPv4: a dual-stack `ssh -N -L` here failed outright with
     # "bind [::1]:<port>: Cannot assign requested address" on a host where
-    # IPv6 loopback bind is unavailable — observed directly in this task's
-    # win11-dev verification pass; forcing IPv4 avoids it.
+    # IPv6 loopback bind is unavailable; forcing IPv4 avoids it.
     ssh -4 -N -L "${LOCAL_FWD_PORT}:127.0.0.1:${WIN_MCP_PORT}" "$WIN_SSH_HOST" &
     TUNNEL_PID=$!
 
@@ -137,7 +131,7 @@ mcp-win: tunnel ready — MCP server reachable at http://127.0.0.1:${LOCAL_FWD_P
 .mcp.json stanza (MCP-native agents):
 {
   "mcpServers": {
-    "conman-win11-dev": {
+    "conman-windows": {
       "type": "streamable-http",
       "url": "http://127.0.0.1:${LOCAL_FWD_PORT}/mcp"
     }

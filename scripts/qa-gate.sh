@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# P8.4 -- the unified QA-gate driver: runs (a) the in-process element-test
+# Unified QA-gate driver: runs (a) the in-process element-test
 # suites, (b) the MCP real-binary journey script, (c) the thin visual layer,
-# and emits one combined pass/fail/UNVERIFIED report with evidence paths --
-# the same functional-hard-gate / visual-advisory split P6.17 pinned.
+# and emits one combined pass/fail/UNVERIFIED report with evidence paths.
 #
-# Runnable on Linux (xvfb or headless, per the P8.3 spike) and win11-dev (the
+# Runnable on Linux (Xvfb or headless) and Windows (the
 # ConManMCP task + SSH-forward recipe, scripts/mcp-win.sh). This script does
-# NOT itself SSH to win11-dev -- run scripts/mcp-win.sh separately (see
-# memos/win11-dev-vm-ops.md) and point --mcp-port at the local end of that
-# tunnel with --skip-linux-launch.
+# not itself SSH to Windows; run scripts/mcp-win.sh separately and point
+# --mcp-port at the local end of that tunnel with --skip-linux-launch.
 #
 # Usage (Linux, everything in one go):
 #   scripts/qa-gate.sh --out-dir /tmp/qa-gate-out \
@@ -17,7 +15,7 @@
 #     --tree-rdp-label p84-tree-rdp \
 #     --rdp-target-ssh-host <rdp-target-ip> --rdp-target-ssh-user <rdp-target-user>
 #
-# Usage (win11-dev, MCP+visual legs only, tunnel already open via mcp-win.sh):
+# Usage (Windows, MCP+visual legs only, tunnel already open via mcp-win.sh):
 #   scripts/qa-gate.sh --out-dir /tmp/qa-gate-win --skip-in-process \
 #     --skip-linux-launch --mcp-port 48950 --light \
 #     --tree-ssh-label wintgt-ssh --tree-rdp-label wintgt-rdp \
@@ -67,7 +65,7 @@ SUMMARY="$OUT_DIR/SUMMARY.md"
 section() { echo -e "\n## $1\n" | tee -a "$SUMMARY"; }
 line() { echo "$1" | tee -a "$SUMMARY"; }
 
-echo "# P8.4 QA gate run -- $(date -u +%FT%TZ)" >> "$SUMMARY"
+echo "# ConMan QA gate run -- $(date -u +%FT%TZ)" >> "$SUMMARY"
 
 # ---------------------------------------------------------------------------
 # (a) In-process element-test suites
@@ -158,7 +156,7 @@ else
         VISUAL_STATUS=$?
         cat "$OUT_DIR/visual-stderr.log" | tee -a "$SUMMARY"
         [ "$VISUAL_STATUS" -eq 0 ] && line "OVERALL: PASS (report: $OUT_DIR/visual-report.json)" \
-            || line "OVERALL: FAIL/advisory (report: $OUT_DIR/visual-report.json) -- re-read: hard-fail only if a functional/#1-class regression, agent-vision is always advisory"
+            || line "OVERALL: FAIL/advisory (report: $OUT_DIR/visual-report.json) -- functional regressions are hard failures; qualitative review remains advisory"
     fi
 fi
 

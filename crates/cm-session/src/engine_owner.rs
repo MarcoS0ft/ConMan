@@ -1,4 +1,4 @@
-//! Shared byte-pump engine-owner thread (ARCHITECTURE §4).
+//! Shared byte-pump engine-owner thread.
 //!
 //! Both the local PTY session and the SSH session drive the **same** `!Send`
 //! [`LibghosttyEngine`] from a single owner thread: only raw bytes and owned
@@ -15,7 +15,7 @@ use cm_core::terminal::{GridSnapshot, Key, KeyEvent, MouseEvent, TerminalEngine,
 use crate::libghostty::{EngineError, LibghosttyEngine};
 
 /// Bracketed-paste wire markers (xterm ctlseqs / VT100.net, DECSET 2004).
-/// Single source of truth for the escape bytes (CONVENTIONS §2) — shared by
+/// Single source of truth for the escape bytes, shared by
 /// [`wrap_paste`] and its tests.
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn query_buffer_on_empty_terminal_replies_without_blocking() {
-        // Empty-input edge case (CONVENTIONS §2): no bytes fed at all.
+        // Empty-input edge case: no bytes fed at all.
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         let _ = drive_snapshots(4, 10, vec![Msg::QueryBuffer(reply_tx)]);
         let lines = reply_rx.try_recv().expect("buffer reply");

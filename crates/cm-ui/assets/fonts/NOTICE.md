@@ -1,9 +1,9 @@
-# Bundled font assets — redistribution licenses (P2.3)
+# Bundled font assets — redistribution licenses
 
 These fonts are compiled into `cm-ui` via `include_bytes!` (see
 `src/terminal_renderer.rs`) and rendered by the software glyph atlas. All are
 redistributable under permissive font licenses compatible with ConMan's
-royalty-free / proprietary-capable posture (CONVENTIONS §4 — **no GPL/LGPL**).
+royalty-free and proprietary-compatible posture (**no GPL/LGPL**).
 
 Source: Nerd Fonts release **v3.4.0** (https://github.com/ryanoasis/nerd-fonts),
 downloaded 2026-06-27.
@@ -16,9 +16,8 @@ downloaded 2026-06-27.
   Copyright 2020 The JetBrains Mono Project Authors
   (https://github.com/JetBrains/JetBrainsMono).
 
-  > **License-check finding (deviation from the P2.3 spec).** The spec named
-  > JetBrains Mono as *"base Apache-2.0"*. That was true for JetBrains Mono 1.x;
-  > **JetBrains relicensed JetBrains Mono to SIL OFL-1.1 starting with the 2.x
+  > JetBrains Mono 1.x used Apache-2.0. **JetBrains relicensed JetBrains Mono
+  > to SIL OFL-1.1 starting with the 2.x
   > series**, and the Nerd Fonts v3.4.0 archive ships the OFL-1.1 (v2.304)
   > build. OFL-1.1 is a permissive font license that explicitly permits bundling
   > and redistribution inside applications (including commercial/proprietary
@@ -27,8 +26,7 @@ downloaded 2026-06-27.
   > the OFL Reserved-Font-Name clause — which only restricts *modified* copies
   > from reusing the reserved name. We redistribute the font **verbatim**
   > (unmodified) and ship the license, so OFL-1.1 imposes no problem. It is
-  > **not** GPL/LGPL, so per CONVENTIONS §4 it needs no human approval — but the
-  > Apache→OFL change is recorded here and surfaced to the coordinator.
+  > **not** GPL/LGPL.
 
 ## Symbols Nerd Font Mono — universal icon fallback
 
@@ -43,8 +41,8 @@ downloaded 2026-06-27.
 
 ## Why these two
 
-ARCHITECTURE §5: the renderer's atlas looks up **base font → Symbols Nerd Font
-Mono**, so any base font (including a future user-picked font in P2.4) gains
+The renderer's atlas looks up **base font → Symbols Nerd Font Mono**, so any
+base font (including a user-selected font) gains
 Nerd Font icon coverage from the fallback. JetBrains Mono Nerd Font is itself
 already patched, so with the default bundle the base resolves icons directly;
 the symbols font is the safety net for non-patched bases.

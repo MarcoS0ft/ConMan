@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
-"""P8.4 -- the MCP-driven "real binary" journey script.
+"""MCP-driven real-binary journey script.
 
-Builds on P8.3's `scripts/mcp-scenario-driver.py` (same JSON-RPC-over-HTTP
-client, same element-tree-by-accessible-label pattern) to drive the REAL,
-running `conman` (or `conman.exe`) binary through the journeys the P6.17
-acceptance pass drove through legacy automation, now addressed semantically
-instead of by screen coordinates:
+Builds on `scripts/mcp-scenario-driver.py` and its JSON-RPC-over-HTTP client
+to drive a running `conman` (or `conman.exe`) through semantic element-tree
+interactions instead of screen coordinates:
 
   1. quick-connect SSH (public-key auth) to a loopback/fixture host, reaching
-     Connected (P6.17 Linux J4 / Windows SSH-probe).
+     Connected.
   2. credentialed tree-launch (SSH): click a saved, credential-bound
-     connection row and reach Connected without ever typing a secret (P6.17
-     J10, "P6.4 path").
+     connection row and reach Connected without ever typing a secret.
   3. credentialed tree-launch (RDP) to a live target, reaching Connected --
      asserts the tab's status pill reads Connected ("Connected with success"
-     is the ironrdp log line the P6.17/win-ui memos anchor on; this script
-     doesn't grep the log, that's the coordinator's evidence-gathering step
+     is the corresponding IronRDP log line; this script
+     doesn't grep the log, leaving that as separate evidence gathering
      over the same SSH/console access used for the precheck below). Runs a
      TARGET-SIDE PRECHECK first (a cert bound to RDP-Tcp, and either NLA off
-     -- the original win-ui-investigation memo recommendation, plain-TLS path
-     -- or NLA on -- P9.1's CredSSP/NTLM path, also an expect-success
+     -- the plain-TLS path -- or NLA on -- the CredSSP/NTLM path, also an expect-success
      configuration now) over a plain `ssh` call, so a failure here is
      attributable to a real client regression, not target config drift.
   4. reconnect: drops the RDP session on the target (`tsdiscon`) and clicks
@@ -33,17 +29,16 @@ instead of by screen coordinates:
      expose).
 
 ## Why RDP is driven via tree-launch, never via a typed Quick Connect password
-Learned by hand against a live app (recorded in `memos/P8.4-qa-gate-rubric.md`):
 `FormField`'s PASSWORD variant (`components.slint`) binds `accessible-value`
-to a hardcoded `""` (P8.1b's deliberate security carve-out -- a password
+to a hardcoded `""`; a password
 field must never let *reading* the accessible surface leak the cleartext).
 That is a plain, non-two-way binding, so it is also not *writable* through
 `set_element_value` -- there is no element on a Quick Connect RDP or
 password-auth-SSH form this script can type a password into. This is a real,
 permanent architectural boundary, not a script bug: it is exactly the class
-of "undrivable without product code" case CONVENTIONS §3.5 asks to report
-rather than route around with a product change. The credentialed tree-launch
-path (P6.4/P6.17 J10 pattern -- the secret is resolved from the keychain via
+of "undrivable without product code" case the gate must report rather than
+route around with a product change. The credentialed tree-launch path, where
+the secret is resolved from the keychain via
 an imported credential, never typed) sidesteps it entirely and is, in fact,
 the *more* representative real-world path for a saved connection anyway.
 Quick Connect over MCP therefore only ever demonstrates non-secret auth here
@@ -61,7 +56,7 @@ Usage (seed a CONMAN_AUTOIMPORT JSON with the tree-launch connections BEFORE
 launching conman -- see scripts/qa-gate.sh, which wires this up end-to-end):
     scripts/qa-gate-mcp.py --port 48900 --out-dir /tmp/out \\
         --ssh-host 127.0.0.1 --ssh-user <ssh-user> --ssh-key-path <ssh-key> \\
-        --tree-ssh-label p84-tree-ssh --tree-rdp-label p84-tree-rdp \\
+        --tree-ssh-label saved-ssh --tree-rdp-label saved-rdp \\
         --rdp-target-ssh-host <rdp-target-ip> --rdp-target-ssh-user <rdp-target-user> \\
         --report-out /tmp/out/mcp-report.json
 """
@@ -169,9 +164,8 @@ def set_value_by_label(client: McpClient, elements: list[dict], label: str, valu
     that actually carries the real two-way `text` binding is the inner
     input, addressed by its `accessible-label` (the human field label, e.g.
     "HOST"/"USERNAME"/"PRIVATE KEY") + `accessible-role: TextInput` -- the
-    same pattern P8.3's own `mcp-scenario-driver.py::is_host_field` already
-    used, which this function generalizes. NOTE: password-type fields
-    (P8.1b's carve-out) bind `accessible-value` to a hardcoded `""`, not `<=>
+    same pattern `mcp-scenario-driver.py::is_host_field` uses, generalized
+    here. NOTE: password-type fields bind `accessible-value` to a hardcoded `""`, not `<=>
     text` -- this function cannot and must not be used for PASSWORD/
     PASSPHRASE fields; see the module docstring's "why RDP is driven via
     tree-launch" note."""
@@ -338,7 +332,7 @@ def step_tree_launch(client: McpClient, window_handle: str, report: Report, args
     """Click a saved, credential-bound connection row in the CONNECTIONS
     tree (needs CONMAN_AUTOIMPORT-seeded data -- see scripts/qa-gate.sh) and
     reach Connected without this script ever handling a secret. Shared by
-    the SSH tree-launch journey (P6.17 J10) and the RDP journey (the
+    the SSH tree-launch journey and the RDP journey (the
     password-carve-out workaround; see module docstring)."""
     if not conn_label:
         report.record(step, "skip", "no matching --tree-*-label given (needs CONMAN_AUTOIMPORT-seeded data)")
@@ -402,17 +396,15 @@ def target_precheck(args, report: Report) -> None:
     over plain ssh before attempting a connect, so a failure is attributable
     to the client, not target-config drift.
 
-    P9.1 (CredSSP/NLA support) made both `UserAuthentication` values a
-    supported, expect-success configuration: NLA off (`0`, the original
-    win-ui-investigation memo recommendation -- plain TLS path, unchanged)
-    and NLA on (`1` -- exercises the new CredSSP/NTLM path). Only the legacy
+    Both `UserAuthentication` values are supported, expect-success
+    configurations: NLA off (`0`, the plain TLS path) and NLA on (`1`, the
+    CredSSP/NTLM path). Only the legacy
     Standard RDP Security case (no enhanced-security layer at all) remains
     unsupported by design; this PowerShell probe can't directly observe that
     (it only reads the NLA flag, not the negotiated security layer), so it is
     not distinguished here -- a target with NLA off and `SecurityLayer` also
     forced to legacy RDP would still report NLA=0 and pass this precheck, then
-    fail the actual connect with `RdpError::LegacySecurityOnly` (see
-    `docs/devel/memos/rdp-xrdp-diagnosis-2026-07.md`)."""
+    fail the actual connect with `RdpError::LegacySecurityOnly`."""
     step = "mcp:rdp-target-precheck"
     if not args.rdp_target_ssh_host:
         report.record(step, "skip", "no --rdp-target-ssh-host given")
@@ -437,7 +429,7 @@ def target_precheck(args, report: Report) -> None:
         cert = next((l.split("=", 1)[1] for l in out.stdout.splitlines() if l.startswith("CERT=")), "")
         if nla in ("0", "1") and cert:
             mode = "NLA off (UserAuthentication=0), plain-TLS path" if nla == "0" \
-                else "NLA on (UserAuthentication=1), CredSSP/NTLM path (P9.1)"
+                else "NLA on (UserAuthentication=1), CredSSP/NTLM path"
             report.record(step, "pass", f"target precheck OK: {mode}, cert bound ({cert})")
         else:
             report.record(

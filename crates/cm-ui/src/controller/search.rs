@@ -24,7 +24,7 @@ use crate::terminal_renderer::SearchMatch;
 
 use super::*;
 
-/// Hard cap on the number of matches kept (CONVENTIONS §2: bound every
+/// Hard cap on the number of matches kept (bound every
 /// loop/allocation driven by derived/untrusted-shaped input) — a common
 /// single-character query across a full 10k-line buffer could otherwise
 /// produce an unusably large match list.
@@ -225,7 +225,7 @@ pub(super) fn handle_search_key(
 /// Find every occurrence of `query` in `lines` (oldest-first, one entry per
 /// buffer row — the shape `TerminalEngine::buffer_text` returns). Case-folds
 /// unless `case_sensitive`. Empty query -> no matches (never "everything
-/// matches" — CONVENTIONS §2 empty-input case). Matching is by Unicode
+/// matches"). Matching is by Unicode
 /// scalar, not byte offset, so match columns line up with terminal cells for
 /// the common single-scalar-per-cell case; combining-mark grapheme clusters
 /// share the same simplification `terminal_renderer`'s glyph draw already
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn maximal_input_is_capped_not_hung() {
         // A common single-character query across a large buffer must not
-        // produce an unbounded match list (CONVENTIONS §2 bounded-loop rule).
+        // produce an unbounded match list.
         let big: Vec<String> = (0..2000).map(|_| "aaaaaaaaaa".to_owned()).collect();
         let m = find_matches(&big, "a", true);
         assert_eq!(m.len(), MAX_SEARCH_MATCHES);

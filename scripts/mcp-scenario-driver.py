@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P8.3 — JSON-RPC driver for the Slint-native MCP automation surface.
+"""JSON-RPC driver for the Slint-native MCP automation surface.
 
 Speaks plain HTTP + single JSON-RPC (MCP "Streamable HTTP" transport, POST-only
 mode) to `i-slint-backend-testing`'s embedded MCP server
@@ -7,18 +7,17 @@ mode) to `i-slint-backend-testing`'s embedded MCP server
 `i-slint-backend-testing-1.17.0/mcp_server.rs`), reached over
 `http://127.0.0.1:<port>/mcp` — identical whether that port is a direct local
 connection (scripts/mcp-run.sh) or the far end of an SSH local-forward onto
-win11-dev (scripts/mcp-win.sh). Stdlib-only (no `requests`/`mcp` SDK dependency)
+Windows (scripts/mcp-win.sh). Stdlib-only (no `requests`/`mcp` SDK dependency)
 so it runs anywhere Python3 does.
 
-Runs the DoD's core smoke sequence per docs/devel/tasks/P8.3-mcp-automation-surface.md:
+Runs the core automation smoke sequence:
     initialize -> list_windows -> find the Quick Connect trigger by its
     accessible label ("Quick connect") -> click_element -> find the "HOST"
     field in the dialog that opens -> set_element_value -> get_element_properties
     (round-trip check) -> take_screenshot (PNG saved to --out-dir).
 
 Every request/response pair is appended to --transcript (JSON-RPC bodies,
-pretty-printed) so a run produces the transcript artifact the task's
-verification section asks for. Exit code 0 = every step passed; non-zero on
+pretty-printed). Exit code 0 = every step passed; non-zero on
 the first failing step, with a message on stderr.
 
 Usage:

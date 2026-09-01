@@ -53,7 +53,7 @@ pub(super) fn persist_session_tabs(state: &Rc<RefCell<State>>) {
 /// built, when `run` decided restore is enabled and there is something to
 /// restore). Any connection id no longer present (deleted since the
 /// snapshot was saved) is skipped, never a hard failure — the stored file is
-/// our own, but still handled defensively (CONVENTIONS §2). If nothing ended
+/// our own, but still handled defensively. If nothing ended
 /// up restorable at all, falls back to the empty/Launchpad home tab rather
 /// than leaving the window with zero tabs.
 pub(super) fn restore_session_tabs(ctx: &Ctx, snap: SessionTabSnapshot) {

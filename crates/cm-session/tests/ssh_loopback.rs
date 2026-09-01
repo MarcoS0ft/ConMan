@@ -968,7 +968,7 @@ fn ssh_server_side_abrupt_close_never_panics() {
 }
 
 // ---------------------------------------------------------------------------
-// Malformed input at the transport's earliest stage (CONVENTIONS §2):
+// Malformed input at the transport's earliest stage:
 // truncated/garbage bytes must fail soft — typed error, no panic.
 // ---------------------------------------------------------------------------
 

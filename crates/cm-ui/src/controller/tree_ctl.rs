@@ -1472,7 +1472,7 @@ mod tests {
     // the tree context menu's "Duplicate" item and
     // `wire_duplicate_conn_row` share this exact mapping — this is the one piece of
     // UI orchestration for the context menu is covered directly, so
-    // it gets a real test per CONVENTIONS §2 ("tests accompany behavior").
+    // it gets a real test.
     #[test]
     fn duplicate_connection_clones_settings_with_new_id_and_copy_suffix() {
         let src = Connection::new(

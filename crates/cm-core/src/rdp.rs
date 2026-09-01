@@ -5,7 +5,7 @@
 //! implemented by `cm-ui` (`UiCertVerifier` in `controller/sessions.rs`).
 //! `CertStore` — the JSON-file-backed trust store — is *not* moved: it does
 //! real file I/O (`std::fs`), which has no place in `cm-core`'s charter
-//! (ARCHITECTURE §1: "no I/O"). It stays in `cm-session::rdp`; the
+//! (this crate performs no I/O). It stays in `cm-session::rdp`; the
 //! `SessionProvider` adapter constructs it internally so callers never need
 //! to know it exists.
 

@@ -1,10 +1,7 @@
 use ironrdp_core::{WriteBuf, other_err};
 use ironrdp_pdu::{PduHint, nego};
-// P9.1: `picky` itself is no longer referenced directly (only via
-// picky-asn1-x509/picky-asn1-der) now that the SmartCard match arm below was
-// stubbed out, but it stays a declared dependency (credssp feature parity
-// with the audited dep snapshot); mark it explicitly used to satisfy this
-// crate's `unused_crate_dependencies` lint.
+// `picky` is part of the CredSSP dependency set but is referenced through its
+// ASN.1 companion crates here.
 use picky as _;
 use picky_asn1_x509::{Certificate, ExtensionView, GeneralName, oids};
 use sspi::credssp::{self, ClientState, CredSspClient};
@@ -114,12 +111,8 @@ impl CredsspSequence {
                 }
                 .into()
             }
-            // P9.1: smart-card CredSSP requires sspi's `scard` feature, which
-            // pulls `winscard` -> `crypto-bigint =0.7.0-rc.18`, conflicting
-            // with russh 0.61.2's `crypto-bigint ^0.7.3`. ConMan only performs
-            // NTLM username/password NLA, so the scard feature is disabled and
-            // this arm is unreachable in practice. Return an error rather than
-            // reference the (now feature-gated) sspi smart-card types.
+            // Smart-card CredSSP is unavailable because the required SSPI
+            // feature pulls a crypto-bigint version incompatible with russh.
             Credentials::SmartCard { .. } => {
                 return Err(general_err!(
                     "smart card CredSSP is not supported in this build (sspi `scard` feature disabled)"
@@ -230,12 +223,8 @@ impl CredsspSequence {
     }
 }
 
-// P9.1: unreachable now that the SmartCard match arm above (which was their
-// only caller) returns an error instead of parsing the certificate. Kept
-// (rather than deleted) so a future smartcard-CredSSP reactivation (once the
-// `scard` sspi feature no longer conflicts with russh's crypto-bigint pin)
-// doesn't have to rewrite them from scratch; `#[allow(dead_code)]` silences
-// the lint in the meantime.
+// Retained for a future smart-card implementation once its dependency set is
+// compatible with the rest of the application.
 #[allow(dead_code)]
 fn extract_user_name(cert: &Certificate) -> Option<String> {
     cert.tbs_certificate.subject.find_common_name().map(ToString::to_string)

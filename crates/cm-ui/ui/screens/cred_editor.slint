@@ -3,7 +3,7 @@
 // Allows creating and editing a Credential (name, kind, username) and storing
 // the secret via the OS keychain. The `secret` / `passphrase` fields
 // are TRANSIENT — Rust MUST clear them immediately after reading them in the
-// `cred-save` callback (see CONVENTIONS secrets hygiene).
+// `cred-save` callback.
 //
 // Mounted inside a Modal in app.slint.
 

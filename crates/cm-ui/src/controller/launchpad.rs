@@ -197,9 +197,8 @@ fn relative_time_secs(now: i64, then: i64) -> String {
 }
 
 /// A real (if coarse) greeting: UTC-hour buckets rather than a literal
-/// hardcoded string. Deliberately not locale/timezone-aware - pulling in a
-/// local-time crate for a cosmetic greeting isn't worth a new-dependency
-/// memo (CONVENTIONS §4); this is a known, low-stakes simplification.
+/// hardcoded string. Deliberately not locale/timezone-aware: pulling in a
+/// local-time crate is not justified for a cosmetic greeting.
 pub(super) fn current_greeting() -> String {
     greeting_for_hour(current_utc_hour()).to_owned()
 }

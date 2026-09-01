@@ -321,7 +321,7 @@ fn profile_editor_new_ssh_default_manifest() {
     assert!(find_by_id_opt(&h.ui, "ProfileEditor::profile-rdp-resolution-field").is_none());
 }
 
-/// THE TEETH SCENARIO for defect #2 ("RDP port stuck at 22 / missing
+/// RDP port-default regression scenario ("RDP port stuck at 22 / missing
 /// Domain/Resolution"). Switching the profile
 /// editor's kind selector to RDP must update the port default AND surface the
 /// Domain/Resolution fields -- exactly the two symptoms of that defect.
@@ -343,7 +343,7 @@ fn profile_editor_kind_switch_updates_port_and_manifest() {
     assert_eq!(
         form.port.as_str(),
         "3389",
-        "defect #2: kind switch to RDP must update the untouched port default (22 -> 3389)"
+        "kind switch to RDP must update the untouched port default (22 -> 3389)"
     );
     find_by_id(&h.ui, "ProfileEditor::profile-rdp-domain-field");
     find_by_id(&h.ui, "ProfileEditor::profile-rdp-resolution-field");

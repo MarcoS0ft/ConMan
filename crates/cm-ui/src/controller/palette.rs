@@ -243,7 +243,7 @@ pub(super) fn dispatch_palette_action(
         "Open Settings" => ui.set_active_panel(2),
         // ── DATA ──────────────────────────────────────────────────────────────
         // native save/open dialogs (`rfd`) wired to `cm_storage::json_io`.
-        // Secrets are excluded by default on export (ARCHITECTURE §6); see
+        // Secrets are excluded by default on export; see
         // `import_export.rs` and.
         "Export connections\u{2026}" => {
             let io = state.borrow().io.clone();

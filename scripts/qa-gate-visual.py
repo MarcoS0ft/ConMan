@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""P8.4 -- the thin render-correctness (visual) layer.
+"""Thin render-correctness layer for the ConMan QA gate.
 
-Per `docs/devel/p8-plan.md` §"Layer 3b" (deliberately thin): the semantic
-layers (in-process suites, MCP journeys) assert the MODEL; this layer exists
-for the one thing only pixels can catch -- defect #1's class (correct
+The semantic layers (in-process suites and MCP journeys) assert the model;
+this layer exists for the one thing only pixels can catch: correct
 fields, wrong pixels: no opaque card, bleed-through) is invisible to element
 queries. Every region below comes from QUERIED element bounds
 (`get_element_properties`/`get_element_tree` position+size, scaled to
@@ -12,8 +11,7 @@ client-offset math -- and every screenshot is taken via `take_screenshot` in
 the SAME MCP session that just drove the state into existence (no
 spinner-vs-screenshot races).
 
-Checks (each `visual:<id>`, each mapping to a defect class it would have
-caught -- see `memos/P8.4-qa-gate-rubric.md`'s mapping table):
+Checks (each `visual:<id>` maps to a visual defect class):
   visual:dialog-gutter        -- a sampled pixel inside a dialog's own
                                   bounds, away from any child control, must
                                   equal the dialog's background token
@@ -37,15 +35,12 @@ caught -- see `memos/P8.4-qa-gate-rubric.md`'s mapping table):
   visual:theme-toggle-recolor -- an ALREADY-OPEN, already-rendered surface
                                   (the CONNECTIONS tree panel) actually
                                   changes pixel color when the theme is
-                                  toggled live -- catches the F-grid/P6.17-V1
-                                  "stale chrome after a live toggle" class.
-  visual:agent-vision         -- NOT automated: this script only captures
-                                  the frame; the qualitative "does this frame
-                                  match GUI_DESIGN with citations" verdict is
-                                  an agent-in-the-loop review of the captured
-                                  PNGs, recorded in the rubric doc/report by
-                                  the human or agent running the gate, not by
-                                  this script. Recorded here as `unverified`
+                                  toggled live -- catches stale chrome after
+                                  a live theme change.
+  visual:qualitative-review   -- NOT automated: this script only captures
+                                  the frame; the qualitative design verdict
+                                  is a human or agent review of the captured
+                                  PNGs. It is recorded as `unverified`
                                   with a pointer to the screenshot, never
                                   silently skipped.
 
@@ -237,8 +232,7 @@ def check_label_contrast(report: Report) -> None:
         bg = hex_to_rgb(TOKENS["color-overlay"][idx])
         ratio = contrast_ratio(fg, bg)
         # WCAG AA for normal text is 4.5:1; these are small/secondary labels
-        # so 3.0:1 (AA "large text"/UI-component threshold) is the bar this
-        # rubric uses -- see memos/P8.4-qa-gate-rubric.md's thresholds table.
+        # so 3.0:1 (AA "large text"/UI-component threshold) is the bar.
         if ratio >= 3.0:
             report.record(check + f":{theme}", "pass", f"contrast {ratio:.2f}:1 (color-text-secondary on color-overlay, {theme})")
         else:
@@ -314,20 +308,20 @@ def check_tab_sidebar_divider(client, window_handle, out_dir: Path, report: Repo
     # (~260px), not a hairline -- sampling a single pixel in there tests
     # "is the side panel rendered", which is a much weaker/different claim
     # than the one #5 needs (a real seam, not two panels flush together).
-    # The geometric assert above is the actual #5 regression detector (a
+    # The geometric assertion detects a flush-to-corner regression (a
     # flush-to-corner regression collapses `tab_x` to `activity_right`,
     # which this WOULD catch); the screenshot is kept purely so an
-    # agent-vision reviewer can also eyeball the seam directly.
+    # qualitative reviewer can also inspect the seam directly.
     if HAVE_PIL:
         theme = "dark" if dark else "light"
         png_path = out_dir / f"tab-divider-{theme}.png"
         screenshot(client, window_handle, png_path)
-        report.record(check + ":screenshot", "pass", f"captured for agent-vision review ({theme})", str(png_path))
+        report.record(check + ":screenshot", "pass", f"captured for qualitative review ({theme})", str(png_path))
 
 
 def check_theme_toggle_recolor(client, window_handle, out_dir: Path, report: Report, dark: bool) -> None:
-    """The F-grid/P6.17-V1 class: does an ALREADY-RENDERED surface actually
-    recolor on a LIVE theme toggle, not just newly-opened chrome? Samples the
+    """Check that an already-rendered surface recolors on a live theme toggle,
+    not just newly-opened chrome. Samples the
     CONNECTIONS tree panel background (already on screen) before and after
     toggling Settings' Theme control."""
     check = "visual:theme-toggle-recolor"
@@ -400,18 +394,18 @@ def check_theme_toggle_recolor(client, window_handle, out_dir: Path, report: Rep
     else:
         report.record(
             check, "fail",
-            f"already-rendered CONNECTIONS panel pixel did NOT change ({before_px} ~= {after_px}) on a live theme toggle -- stale chrome (F-grid/V1 class)",
+            f"already-rendered CONNECTIONS panel pixel did NOT change ({before_px} ~= {after_px}) on a live theme toggle -- stale chrome",
             f"{before_path},{after_path}",
         )
 
 
-def check_agent_vision(out_dir: Path, report: Report) -> None:
-    check = "visual:agent-vision"
+def check_qualitative_review(out_dir: Path, report: Report) -> None:
+    check = "visual:qualitative-review"
     report.record(
         check, "unverified",
-        "qualitative GUI_DESIGN-token-citation review is an agent-in-the-loop "
+        "qualitative design review requires a human or agent "
         f"step, not automated by this script -- review the PNGs under {out_dir} "
-        "and record verdicts+citations in the gate report by hand (see rubric doc)",
+        "and record the verdict in the gate report",
     )
 
 
@@ -462,7 +456,7 @@ def main() -> int:
 
         check_tab_sidebar_divider(client, window_handle, out_dir, report, args.dark)
         check_theme_toggle_recolor(client, window_handle, out_dir, report, args.dark)
-        check_agent_vision(out_dir, report)
+        check_qualitative_review(out_dir, report)
     finally:
         client.close()
 

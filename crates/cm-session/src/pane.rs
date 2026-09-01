@@ -6,7 +6,7 @@
 //! pane id in `0..count`; id `0` is always the tab's "primary" pane (the
 //! controller keeps its session/renderer in `Tab` fields directly, while ids
 //! `1..count` live in `Tab::extra_panes` — see `cm-ui/src/controller/mod.rs`).
-//! The PaneGroup itself carries no session references (ARCHITECTURE §4 — the
+//! The PaneGroup itself carries no session references; the
 //! controller is the session owner); it only tracks geometry and focus.
 //!
 //! Ids stay dense on every mutation: splitting always allocates `count` as

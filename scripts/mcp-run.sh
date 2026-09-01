@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# P8.3 — Linux launcher for the Slint-native MCP automation surface.
+# Linux launcher for the Slint-native MCP automation surface.
 #
 # Builds (if needed) and launches a `conman` binary built with
 # `--features automation` (= `slint/mcp` + `cm-ui/ui-introspection`, both off
-# by default — see docs/devel/memos/P8.3-slint-mcp-feature.md), with
+# by default), with
 # `SLINT_MCP_PORT` set so the embedded MCP server starts
 # (`i-slint-backend-testing`'s `mcp_server.rs`; no port set = no server, zero
 # overhead — this script is the only thing that ever sets that env var).
@@ -24,15 +24,14 @@
 # Env overrides (all optional, same defaults as the flags above):
 #   CONMAN_BIN, MCP_RUN_PORT (48900), MCP_RUN_MODE (xvfb), MCP_RUN_DIR
 #   (mktemp -d on first `start`, then reused), CONMAN_DB_PATH, CONMAN_AUTOIMPORT
-#   (the existing data-seeding seams, P6.6/P6.17 — not reinvented here, just
-#   forwarded; see AI_GUIDANCE.md's "Data seeding for MCP runs" note).
+#   (forwarded to the application's existing data-seeding interfaces).
 #
 # `--mode xvfb` (default): launches under `xvfb-run` with
 # `SLINT_BACKEND=winit-femtovg` — the real GPU-path renderer, confirmed to
-# support every MCP tool including `take_screenshot` under Xvfb (P8.3 opening
-# spike). `--mode headless`: no Xvfb, `SLINT_BACKEND=headless` (the
+# support every MCP tool including `take_screenshot` under Xvfb.
+# `--mode headless`: no Xvfb, `SLINT_BACKEND=headless` (the
 # windowless software rasterizer the `mcp` feature unlocks) — also confirmed
-# to support the full tool set including screenshots in the P8.3 spike; use
+# to support the full tool set including screenshots; use
 # this on a box with no X server at all (e.g. a minimal CI container).
 #
 # On `start`, once the port is confirmed open, prints:
