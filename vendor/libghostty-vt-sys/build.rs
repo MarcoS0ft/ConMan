@@ -75,6 +75,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_CPU");
     println!("cargo:rerun-if-env-changed=GHOSTTY_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_SYSTEM_DIR");
+    println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_CACHE_ROOT");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
     println!("cargo:rerun-if-env-changed=DEBUG");
@@ -123,8 +124,13 @@ fn build_vendored(link_mode: LinkMode) {
 
     // Build libghostty-vt via zig.
     let install_prefix = out_dir.join("ghostty-install");
-    let zig_cache_dir = out_dir.join("zig-cache");
-    let zig_global_cache_dir = out_dir.join("zig-global-cache");
+    let cache_root = env::var_os("LIBGHOSTTY_VT_SYS_CACHE_ROOT").map(PathBuf::from);
+    let zig_cache_dir = cache_root
+        .as_ref()
+        .map_or_else(|| out_dir.join("zig-cache"), |root| root.join("local"));
+    let zig_global_cache_dir = cache_root
+        .as_ref()
+        .map_or_else(|| out_dir.join("zig-global-cache"), |root| root.join("global"));
 
     let optimize = zig_optimize_mode();
 
@@ -139,6 +145,8 @@ fn build_vendored(link_mode: LinkMode) {
         .arg(&install_prefix)
         .arg("--cache-dir")
         .arg(&zig_cache_dir)
+        .arg("--global-cache-dir")
+        .arg(&zig_global_cache_dir)
         .current_dir(&ghostty_dir);
 
     // ConMan patch: build a *portable* libghostty-vt. By default the Zig
@@ -169,9 +177,7 @@ fn build_vendored(link_mode: LinkMode) {
         );
         build
             .arg("--system")
-            .arg(&zig_system_dir)
-            .arg("--global-cache-dir")
-            .arg(&zig_global_cache_dir);
+            .arg(&zig_system_dir);
     }
 
     // Only pass -Dtarget when cross-compiling. For native builds, let zig

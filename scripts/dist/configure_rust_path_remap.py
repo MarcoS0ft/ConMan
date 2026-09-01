@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 def remap_flags(home: str, workspace: str, existing: str = "") -> str:
@@ -17,6 +17,15 @@ def remap_flags(home: str, workspace: str, existing: str = "") -> str:
     flags = [existing.strip()] if existing.strip() else []
     flags.extend(f"--remap-path-prefix={source}={target}" for source, target in roots)
     return " ".join(flags)
+
+
+def neutral_native_cache_root(platform: str, system_root: str = "") -> str:
+    """Return a stable builder-neutral path for native compiler intermediates."""
+
+    if platform == "nt":
+        root = system_root or r"C:\Windows"
+        return str(PureWindowsPath(root) / "Temp" / "conman-zig-cache")
+    return "/tmp/conman-zig-cache"
 
 
 def main() -> int:
@@ -35,6 +44,10 @@ def main() -> int:
 
     with args.github_env.open("a", encoding="utf-8", newline="\n") as output:
         output.write(f"RUSTFLAGS={flags}\n")
+        output.write(
+            "LIBGHOSTTY_VT_SYS_CACHE_ROOT="
+            f"{neutral_native_cache_root(os.name, os.environ.get('SystemRoot', ''))}\n"
+        )
     return 0
 
 
