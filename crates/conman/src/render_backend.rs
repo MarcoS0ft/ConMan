@@ -325,7 +325,7 @@ pub(crate) fn log_decision(decision: &RendererDecision) {
             tracing::info!(
                 renderer = "software",
                 fallback = true,
-                "startup renderer: forced the software renderer (P7.1 fallback)"
+                "startup renderer: using the software renderer fallback"
             );
         }
     }

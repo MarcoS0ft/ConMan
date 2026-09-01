@@ -3467,15 +3467,14 @@ mod tests {
             logged.contains("rdp: resize PDU sent"),
             "the resize PDU was never logged as sent -- most likely the \
              DisplayControl DVC isn't registered/open (the exact bug this \
-             assertion exists to catch; see the P9.9-FIX doc comment on \
-             `drive_inner`'s DRDYNVC registration). Captured log:\n{logged}"
+             assertion exists to catch; inspect `drive_inner`'s DRDYNVC \
+             registration). Captured log:\n{logged}"
         );
         assert!(
             !logged.contains("rdp: resize request dropped"),
             "the resize request was explicitly dropped (DisplayControl DVC \
-             not registered or not yet open) -- see the P9.9-FIX timing \
-             caveat if this fires right after connect; a resize well after \
-             connect should never hit it. Captured log:\n{logged}"
+             not registered or not yet open). A resize well after connect \
+             should never hit this path. Captured log:\n{logged}"
         );
 
         match post_resize_frame {

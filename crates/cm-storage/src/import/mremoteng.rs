@@ -110,9 +110,7 @@ pub fn parse(
         .is_some_and(|v| v.eq_ignore_ascii_case("true"));
     if full_file_encryption {
         return Err(ImportExportError::Malformed(
-            "mRemoteNG Full File Encryption is not supported — re-export with it disabled \
-             (fast-follow)"
-                .into(),
+            "mRemoteNG Full File Encryption is not supported — re-export with it disabled".into(),
         ));
     }
 
@@ -127,7 +125,7 @@ pub fn parse(
     if !engine.eq_ignore_ascii_case("AES") || !mode.eq_ignore_ascii_case("GCM") {
         return Err(ImportExportError::Malformed(format!(
             "unsupported mRemoteNG encryption scheme (EncryptionEngine={engine}, \
-             BlockCipherMode={mode}); only AES/GCM (ConfVersion 2.6+) is supported (fast-follow)"
+             BlockCipherMode={mode}); only AES/GCM (ConfVersion 2.6+) is supported"
         )));
     }
 
