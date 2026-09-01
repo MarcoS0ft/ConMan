@@ -1,4 +1,4 @@
-//! mRemoteNG `confCons.xml` importer (P9.4).
+//! mRemoteNG `confCons.xml` importer.
 //!
 //! Same architecture as every other importer in this module: parse into an
 //! in-memory [`ExportEnvelope`], then hand it to the existing, unmodified
@@ -10,14 +10,14 @@
 //! ## Document shape (attribute-based XML)
 //! ```xml
 //! <mrng:Connections xmlns:mrng="http://mremoteng.org" Name="Connections"
-//!     EncryptionEngine="AES" BlockCipherMode="GCM" KdfIterations="1000"
-//!     FullFileEncryption="false" Protected="<base64 canary>" ConfVersion="2.6">
-//!   <Node Name="Prod" Type="Container">
-//!     <Node Name="app01" Type="Connection" Protocol="RDP"
-//!         Hostname="app01.example.test" Port="3389" Username="admin"
-//!         Domain="CORP" Password="<base64 AES-GCM ciphertext>"
-//!         InheritHostname="false" .../>
-//!   </Node>
+//! EncryptionEngine="AES" BlockCipherMode="GCM" KdfIterations="1000"
+//! FullFileEncryption="false" Protected="<base64 canary>" ConfVersion="2.6">
+//! <Node Name="Prod" Type="Container">
+//! <Node Name="app01" Type="Connection" Protocol="RDP"
+//! Hostname="app01.example.test" Port="3389" Username="admin"
+//! Domain="CORP" Password="<base64 AES-GCM ciphertext>"
+//! InheritHostname="false".../>
+//! </Node>
 //! </mrng:Connections>
 //! ```
 //! The root element may or may not carry the `mrng:` prefix (older exports
@@ -30,10 +30,10 @@
 //! ## MVP boundary (clean errors, not half-built support)
 //! - `FullFileEncryption="true"` (whole-file-encrypted body, a different
 //!   scheme entirely) → a clear [`ImportExportError::Malformed`] naming it
-//!   unsupported. Fast-follow, not built here.
+//!   unsupported. unsupported here.
 //! - Anything other than `EncryptionEngine="AES"` +
 //!   `BlockCipherMode="GCM"` (i.e. legacy pre-2.6 AES-CBC/MD5-key, or the
-//!   CCM/EAX block modes) → same, a clear named error. Fast-follow.
+//!   CCM/EAX block modes) → same, a clear named error. unsupported.
 //!
 //! ## Password handling
 //! [`parse`] pre-validates `password` against the root `Protected` canary
@@ -67,7 +67,7 @@
 //! missing-host handling. `Port` blank/unparsable → the kind's default.
 //! mRemoteNG has **no separate credential objects** (creds are inline per
 //! node, never shared) — a decrypted password becomes a
-//! [`CredentialSource::Inline`] (P9.6 decision 5) carrying `username`/`domain`
+//! [`CredentialSource::Inline`]  carrying `username`/`domain`
 //! on the source itself, with the plaintext pushed as an
 //! [`crate::json_io::ExportedConnectionSecret`] once the connection's
 //! synthetic id is known; `username`/`domain` also still land on the
@@ -154,7 +154,7 @@ pub fn parse(
         conman_export_version: json_io::ENVELOPE_VERSION,
         exported_at: 0, // foreign import: no meaningful export timestamp
         credential_folders: Vec::new(),
-        // mRemoteNG never produces a shared credential object (P9.6 decision
+        // mRemoteNG never produces a shared credential object ( decision
         // 5 — every per-node password is Inline, never Object); these two
         // stay permanently empty.
         credentials: Vec::new(),
@@ -167,15 +167,13 @@ pub fn parse(
     Ok((envelope, ctx.warnings))
 }
 
-// ---------------------------------------------------------------------------
 // Parse state
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct ParseCtx {
     groups: Vec<Group>,
     connections: Vec<Connection>,
-    /// P9.6 decision 5: every decrypted per-node password becomes an
+    /// every decrypted per-node password becomes an
     /// Inline connection-secret (never a shared credential object) — see
     /// [`push_connection`].
     connection_secrets: Vec<ExportedConnectionSecret>,
@@ -222,9 +220,7 @@ impl ParseCtx {
     }
 }
 
-// ---------------------------------------------------------------------------
 // XML → generic attribute tree
-// ---------------------------------------------------------------------------
 
 /// A `<Node>` element: its attributes plus nested child `<Node>`s (a
 /// `Container`'s contents). Built once by [`parse_xml_tree`] so the rest of
@@ -331,9 +327,7 @@ fn collect_attrs(e: &BytesStart<'_>) -> Result<HashMap<String, String>, ImportEx
     Ok(map)
 }
 
-// ---------------------------------------------------------------------------
 // Inheritance
-// ---------------------------------------------------------------------------
 
 /// The resolved (post-inheritance) value of each auth-critical field at some
 /// point in the container chain — threaded down the walk like `royalts.rs`'s
@@ -407,9 +401,7 @@ fn resolve_inheritable(node: &XmlNode, ancestor: &Inherited) -> Inherited {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tree walk: groups + connections
-// ---------------------------------------------------------------------------
 
 fn walk_nodes(
     nodes: &[XmlNode],
@@ -503,7 +495,7 @@ fn build_connection(
         .as_deref()
         .is_some_and(|p| !p.trim().is_empty());
     let decrypted_password = if kind == ConnectionKind::Telnet {
-        // P10.1 Telnet login is driven entirely by the remote terminal. Do
+        // Telnet login is driven entirely by the remote terminal. Do
         // not even attempt to decrypt the node's password: aside from being
         // unnecessary, doing so would make ignored credential material
         // observable through password/decryption failures.
@@ -536,7 +528,7 @@ fn build_connection(
         )));
     }
 
-    // P9.6 decision 5: a decrypted password becomes an Inline source —
+    // a decrypted password becomes an Inline source —
     // mRemoteNG's per-node password is never shared, so there's no dedupe
     // concept the way RoyalTS's CredentialID has. `username`/`domain` are
     // carried on the source itself (authoritative, per

@@ -9,23 +9,23 @@
 //! * **Account format.** Every keychain entry uses the fixed service name
 //!   `"conman"` ([`cm_core::CredentialRef::SERVICE`]) and an account of the
 //!   form `"cred:<credential-id>:<purpose>"` (built by
-//!   [`cm_core::CredentialRef::new`]).  The format is a contract shared by
+//!   [`cm_core::CredentialRef::new`]). The format is a contract shared by
 //!   this crate and `cm-core`; do not change it without updating both.
 //!
 //! * **Secrets are never logged.** [`cm_core::Secret`] has a custom
-//!   `Debug` / `Display` that emits `"<redacted>"`.  This crate never
+//!   `Debug` / `Display` that emits `"<redacted>"`. This crate never
 //!   formats, prints, or clones the raw bytes for any purpose other than
 //!   passing them directly to the OS keychain API. [`CredentialStore`]
-//!   failures/lookups (P9.8 H2-H6) are logged with `service`/
+//!   failures/lookups are logged with `service`/
 //!   [`CredentialRef::purpose_str`]/`error` only — never [`CredentialRef::account`]
 //!   (which encodes id material) and never a secret value.
 //!
 //! * **Entry cache.** The Linux and Windows adapters use `keyring` 3.x, which
 //!   creates a fresh in-memory
-//!   [`keyring::mock`] credential on each [`keyring::Entry::new`] call.  To
+//!   [`keyring::mock`] credential on each [`keyring::Entry::new`] call. To
 //!   make deterministic CI tests possible — and to avoid redundant OS
 //!   round-trips in the real-backend path — [`KeyringStore`] keeps one
-//!   `Arc<keyring::Entry>` per `(service, account)` pair.  All three
+//!   `Arc<keyring::Entry>` per `(service, account)` pair. All three
 //!   operations (`store`, `get`, `delete`) obtain the cached entry before
 //!   releasing the internal lock, then execute the keychain I/O lock-free.
 //!
@@ -98,14 +98,12 @@ pub fn initialize_native_keyring() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // KeyringStore
-// ---------------------------------------------------------------------------
 
 /// OS-keychain adapter implementing [`CredentialStore`].
 ///
 /// Wraps the [`keyring`] crate, keying secrets by
-/// [`CredentialRef`] → `(service, account)`.  An internal entry cache
+/// [`CredentialRef`] → `(service, account)`. An internal entry cache
 /// ensures deterministic behaviour under the mock backend and avoids
 /// redundant entry construction with real OS backends.
 ///
@@ -115,7 +113,7 @@ pub fn initialize_native_keyring() {
 /// use cm_secrets::KeyringStore;
 /// use cm_core::CredentialStore;
 ///
-/// let _store: Box<dyn CredentialStore> = Box::new(KeyringStore::new());
+/// let _store: Box<dyn CredentialStore> = Box::new(KeyringStore::new);
 /// ```
 #[cfg(any(
     target_os = "windows",
@@ -149,7 +147,7 @@ impl KeyringStore {
     /// Returns the cached [`Arc<keyring::Entry>`] for `key`, creating and
     /// caching a fresh entry if one does not yet exist.
     ///
-    /// The mutex is held only for the HashMap lookup/insert.  Keychain I/O
+    /// The mutex is held only for the HashMap lookup/insert. Keychain I/O
     /// is performed after releasing the lock.
     fn entry_for(&self, key: &CredentialRef) -> Result<Arc<keyring::Entry>, CredentialError> {
         let cache_key = (key.service().to_owned(), key.account().to_owned());
@@ -199,9 +197,7 @@ impl fmt::Debug for KeyringStore {
     }
 }
 
-// ---------------------------------------------------------------------------
 // CredentialStore impl
-// ---------------------------------------------------------------------------
 
 #[cfg(any(
     target_os = "windows",
@@ -210,7 +206,7 @@ impl fmt::Debug for KeyringStore {
 impl CredentialStore for KeyringStore {
     /// Stores `secret` in the OS keychain at the slot identified by `key`.
     ///
-    /// Overwrites any existing entry for the same key.  The raw bytes are
+    /// Overwrites any existing entry for the same key. The raw bytes are
     /// passed directly via [`keyring::Entry::set_secret`] and are never
     /// copied into a log, error message, or any auxiliary buffer.
     fn store(&self, key: &CredentialRef, secret: &Secret) -> Result<(), CredentialError> {
@@ -228,7 +224,7 @@ impl CredentialStore for KeyringStore {
 
     /// Returns the secret stored under `key`, or `None` if no entry exists.
     ///
-    /// [`keyring::Error::NoEntry`] is normalised to `Ok(None)`.  Every other
+    /// [`keyring::Error::NoEntry`] is normalised to `Ok(None)`. Every other
     /// keychain error is propagated as [`CredentialError::Backend`].
     fn get(&self, key: &CredentialRef) -> Result<Option<Secret>, CredentialError> {
         match self.entry_for(key)?.get_secret() {
@@ -261,7 +257,7 @@ impl CredentialStore for KeyringStore {
 
     /// Removes the keychain entry for `key`.
     ///
-    /// If the entry does not exist this is a no-op (idempotent).  Any other
+    /// If the entry does not exist this is a no-op (idempotent). Any other
     /// keychain error is propagated as [`CredentialError::Backend`].
     fn delete(&self, key: &CredentialRef) -> Result<(), CredentialError> {
         match self.entry_for(key)?.delete_credential() {
@@ -278,9 +274,7 @@ impl CredentialStore for KeyringStore {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(all(
     test,
@@ -297,7 +291,7 @@ mod tests {
     /// Switch the process-wide keyring backend to the built-in in-memory mock.
     ///
     /// [`std::sync::Once`] guarantees this runs exactly once even when tests
-    /// execute in parallel.  The mock backend is already the compile-time
+    /// execute in parallel. The mock backend is already the compile-time
     /// default on Linux when no platform features are enabled, but we install
     /// it explicitly here for clarity and cross-platform determinism.
     static MOCK_INIT: Once = Once::new();
@@ -313,9 +307,7 @@ mod tests {
         CredentialRef::new(CredentialId::new(id), purpose)
     }
 
-    // -----------------------------------------------------------------------
     // Round-trip tests (mock backend — deterministic in CI)
-    // -----------------------------------------------------------------------
 
     #[test]
     fn round_trip_password() {
@@ -440,9 +432,7 @@ mod tests {
         store.delete(&sk_key).expect("cleanup");
     }
 
-    // -----------------------------------------------------------------------
     // Secret hygiene — Debug / Display must never expose raw bytes
-    // -----------------------------------------------------------------------
 
     #[test]
     fn secret_debug_is_redacted() {
@@ -482,9 +472,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
     // Trait-object usability
-    // -----------------------------------------------------------------------
 
     #[test]
     fn can_be_used_as_dyn_credential_store() {

@@ -2,11 +2,11 @@
 //
 // GUI_DESIGN §4 component inventory. Every widget imports the Theme global and reads
 // `Theme.*` tokens, so dark/light + accent flip everywhere at once. Chrome glyphs use
-// Theme.font-family-icons (bundled Symbols Nerd Font Mono, P5.4) via codepoint strings.
+// Theme.font-family-icons (bundled Symbols Nerd Font Mono) via codepoint strings.
 //
-//   import { StatusDot, StatusPill, IconButton, ActivityBarButton,
-//            PrimaryButton, SecondaryButton, SegmentedControl, FormField,
-//            Card, EmptyState } from "components.slint";
+// import { StatusDot, StatusPill, IconButton, ActivityBarButton,
+// PrimaryButton, SecondaryButton, SegmentedControl, FormField,
+// Card, EmptyState } from "components.slint";
 
 import { Theme } from "theme.slint";
 // InputType is a Slint 1.17 builtin — no import needed.
@@ -27,7 +27,7 @@ export global EditableFocus {
 // ── StatusDot ───────────────────────────────────────────────────────────────
 // Filled circle whose color reflects a session-state string. The single source of
 // truth for status → color (tab dot, tree row, status bar all use this).
-//   state: "connected" | "connecting" | "disconnected" | "error" | ""
+// state: "connected" | "connecting" | "disconnected" | "error" | ""
 export component StatusDot {
   in property <string> state: "disconnected";
   in property <length> diameter: 7px;
@@ -55,8 +55,7 @@ export component StatusPill {
   in property <string> state: "disconnected";
   in property <string> text: "";
 
-  // P8.1: read-only status text — role `text` (not interactive), label tracks
-  // the live status line verbatim (dynamic content per the a11y contract).
+  // read-only status text — role `text` (not interactive), label tracks
   // Qualified `AccessibleRole.text` (not bare `text`) — this component has its
   // own `text` property, which would otherwise shadow the enum value.
   accessible-role: AccessibleRole.text;
@@ -81,25 +80,25 @@ export component StatusPill {
 
 // ── IconButton ────────────────────────────────────────────────────────────────
 // Square hit-target rendering one Nerd Font icon glyph. Used for toolbar/header actions.
-//   glyph: a Symbols Nerd Font Mono codepoint string, e.g. "\u{EA60}" (cod-add).
+// glyph: a Symbols Nerd Font Mono codepoint string, e.g. "\u{EA60}" (cod-add).
 export component IconButton {
   in property <string> glyph;
   in property <length> size: Theme.control-height;
   in property <length> glyph-size: 15px;
   in property <bool>   enabled: true;
   in property <color>  glyph-color: Theme.color-text-secondary;
-  // P5.3b: optional tooltip text shown above the button on hover.
+  // optional tooltip text shown above the button on hover.
   in property <string> tooltip: "";
-  // P9.5 #1: exposes this button's own hover state so a container (e.g. a
+  // exposes this button's own hover state so a container (e.g. a
   // hoverable list row with an action-icon strip) can OR it together with
-  // its own hover TouchArea -- see `ConnectionRow` in app.slint for why a
+  // its own hover TouchArea - see `ConnectionRow` in app.slint for why a
   // bare `touch.has-hover` on the container alone is unstable once an
   // overlapping child TouchArea (like this button's) is what's actually
   // receiving pointer-move events.
   out property <bool> hovered: touch.has-hover;
   // Fires whenever `hovered` changes. A container can't reach into an
   // `if`-conditional instance's properties from outside that conditional
-  // (Slint compile error: "Cannot access id") -- e.g. `ConnectionRow`'s
+  // (Slint compile error: "Cannot access id") - e.g. `ConnectionRow`'s
   // action-icon strip only exists `if action-hover`, so its own
   // `move-up-btn.hovered` etc. can't be read from `action-hover`'s own
   // formula. This callback sidesteps that: the conditional instance can
@@ -110,14 +109,14 @@ export component IconButton {
   changed hovered => { root.hover-changed(root.hovered); }
   callback clicked();
 
-  // P8.1: icon-only button — the visible tooltip text IS the accessible label
+  // icon-only button — the visible tooltip text IS the accessible label
   // (the contract's rule for icon-only buttons). Every call site MUST supply a
   // non-empty `tooltip`; the a11y audit test (tests/a11y_audit.rs) fails any
   // IconButton instance that doesn't.
   accessible-role: button;
   accessible-label: root.tooltip;
   // Real activation via accessibility APIs / the testing backend's
-  // invoke_accessible_default_action() (mirrors Slint's own Button widget).
+  // invoke_accessible_default_action (mirrors Slint's own Button widget).
   accessible-action-default => { root.clicked(); }
 
   width: size;
@@ -181,7 +180,7 @@ export component IconButton {
 export component ActivityBarButton {
   in property <string> glyph;
   in property <bool>   active: false;
-  // P8.1: icon-only nav button — same tooltip-is-the-label contract as IconButton.
+  // icon-only nav button — same tooltip-is-the-label contract as IconButton.
   in property <string> tooltip: "";
   callback clicked();
 
@@ -242,7 +241,7 @@ export component PrimaryButton {
   callback clicked();
   out property <bool> has-focus: button-focus.has-focus;
 
-  // P8.1: a button's accessible label is its own visible text (contract §3).
+  // a button's accessible label is its own visible text (contract §3).
   accessible-role: button;
   accessible-label: root.text;
   accessible-action-default => { root.clicked(); }
@@ -310,7 +309,7 @@ export component SecondaryButton {
   callback clicked();
   out property <bool> has-focus: button-focus.has-focus;
 
-  // P8.1: a button's accessible label is its own visible text (contract §3).
+  // a button's accessible label is its own visible text (contract §3).
   accessible-role: button;
   accessible-label: root.text;
   accessible-action-default => { root.clicked(); }
@@ -362,7 +361,7 @@ export component SecondaryButton {
 
 // ── SegmentedControl ──────────────────────────────────────────────────────────
 // Token segmented picker (theme dark/light/system, auth method, density…).
-//   options: labels; selected: 0-based index; emits changed(new-index).
+// options: labels; selected: 0-based index; emits changed(new-index).
 export component SegmentedControl {
   in property <[string]> options;
   in-out property <int>  selected: 0;
@@ -370,7 +369,7 @@ export component SegmentedControl {
 
   preferred-height: Theme.control-height;
 
-  // P8.1: the strip is a non-interactive grouping container (no label
+  // the strip is a non-interactive grouping container (no label
   // required — the audit test's interactive-role set excludes `tab-list`);
   // each option below is the real interactive target and carries its own
   // role/label/index per the contract's repeated-item rule.
@@ -392,7 +391,7 @@ export component SegmentedControl {
         border-radius: Theme.radius-sm;
         background: idx == root.selected ? Theme.color-accent
                   : seg-touch.has-hover ? Theme.color-hover : transparent;
-        // P8.1: one option = one tab. Label is the option's own visible
+        // one option = one tab. Label is the option's own visible
         // text; repeated instances disambiguate via item-index/item-count
         // (never label suffixes), per the contract.
         accessible-role: tab;
@@ -430,7 +429,6 @@ export component FormField {
   in property <string> label;
   in property <string> placeholder;
   in property <bool>   password: false;
-  // P9.6-A Phase C (P9.5 #7): greys out and disables the field -- used by the
   // connection editor's Username field in Reference/Object mode, where the
   // username actually used comes from the bound credential, not this
   // connection. Only wired for the non-password (`LineEdit`) variant; no
@@ -449,23 +447,23 @@ export component FormField {
       font-family: Theme.font-family;
       font-weight: 600;
     }
-    // P8.1b: std LineEdit binds `accessible-value <=> text` **inside its own
+    // std LineEdit binds `accessible-value <=> text` **inside its own
     // definition** in every style (`i-slint-compiler-1.17.0/widgets/*/lineedit.slint`).
     // That is a two-way alias declared at the widget's own scope. Empirically (see
     // `tests/a11y_audit.rs`'s sentinel test), TWO mitigations were tried and BOTH
     // failed to stop the leak on a std LineEdit instance:
-    //  1. `accessible-value: root.password ? "" : root.text;` written at this
-    //     instantiation site — compiles with no error/warning, but is silently
-    //     dropped at runtime; `accessible_value()` still returned the cleartext.
-    //     There is no supported way to override one side of a two-way binding
-    //     declared inside a std widget's own definition.
-    //  2. `accessible-role: none;` on the same LineEdit instance — this override
-    //     DOES take effect (`accessible_role()` correctly reports `None`), but
-    //     `accessible_value()` STILL returned the cleartext regardless: the
-    //     testing/introspection API reads the raw `accessible-value` property
-    //     value directly, independent of role (role-gating is a concern of the
-    //     OS-native accessibility bridge, not this API) — so muting the role does
-    //     not stop this sink.
+    // 1. `accessible-value: root.password ? "": root.text;` written at this
+    // instantiation site — compiles with no error/warning, but is silently
+    // dropped at runtime; `accessible_value` still returned the cleartext.
+    // There is no supported way to override one side of a two-way binding
+    // declared inside a std widget's own definition.
+    // 2. `accessible-role: none;` on the same LineEdit instance — this override
+    // DOES take effect (`accessible_role` correctly reports `None`), but
+    // `accessible_value` STILL returned the cleartext regardless: the
+    // testing/introspection API reads the raw `accessible-value` property
+    // value directly, independent of role (role-gating is a concern of the
+    // OS-native accessibility bridge, not this API) — so muting the role does
+    // not stop this sink.
     // The only mechanism that actually works: never let a std LineEdit hold the
     // real secret in the first place. Password fields use the raw `TextInput`
     // builtin instead: it has no widget-level `accessible-value <=> text` alias
@@ -496,7 +494,7 @@ export component FormField {
       // The accessible surface for this field lives HERE, on the wrapping
       // Rectangle — not on `secure-input` below (which carries the real
       // secret and has its own accessible surface turned off). `text-input`
-      // role + human label are present per scope item 3; the value is masked
+      // role + human label are present per accessibility contract; the value is masked
       // (empty), never the cleartext.
       accessible-role: text-input;
       accessible-label: root.label;
@@ -607,8 +605,8 @@ export component EmptyState {
 // Kind: 0 = info (accent), 1 = success (green), 2 = warning (amber), 3 = error (red).
 //
 // Usage in AppWindow:
-//   ToastBar at the bottom of the window, bound to an `active-toasts` model.
-//   The Rust controller pushes entries; the Timer auto-dismisses each item.
+// ToastBar at the bottom of the window, bound to an `active-toasts` model.
+// The Rust controller pushes entries; the Timer auto-dismisses each item.
 export component Toast inherits Rectangle {
     in property <string> message: "Disconnected from web-prod-01";
     in property <int>    kind:    0;   // 0=info 1=success 2=warning 3=error

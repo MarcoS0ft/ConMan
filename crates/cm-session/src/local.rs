@@ -9,7 +9,7 @@
 //!
 //! Only **bytes** and the owned **`GridSnapshot`** cross thread boundaries —
 //! the engine itself never moves. Local PTY I/O is blocking, so plain OS
-//! threads are used (tokio is reserved for the network transports in P3/P4).
+//! threads are used (tokio is reserved for the network transports in /).
 
 use std::io::{Read, Write};
 use std::sync::Mutex;
@@ -74,7 +74,7 @@ impl Transport for PtyTransport {
 /// `Send` (it holds only channels, join handles, and the child); the `!Send`
 /// engine stays confined to the owner thread.
 ///
-/// Implements both [`TerminalSession`] and [`Session`] (unified P4.1 trait).
+/// Implements both [`TerminalSession`] and [`Session`] (unified trait).
 #[derive(Debug)]
 pub struct LocalTerminalSession {
     control_tx: Sender<Msg>,
@@ -83,7 +83,7 @@ pub struct LocalTerminalSession {
     owner_handle: Mutex<Option<JoinHandle<()>>>,
     reader_handle: Mutex<Option<JoinHandle<()>>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
-    /// P9.8 D5 fire-once guard: `status()` is polled repeatedly (every UI
+    /// D5 fire-once guard: `status` is polled repeatedly (every UI
     /// tick) once the shell exits, but the "shell exited" line must log
     /// exactly once, not on every poll.
     exit_logged: std::sync::atomic::AtomicBool,
@@ -102,7 +102,7 @@ impl LocalTerminalSession {
         size: TerminalSize,
         options: TerminalOptions,
     ) -> Result<Self, SessionError> {
-        // P9.8 D1: shell path/argv0 only -- never cfg.env (may carry secrets
+        // D1: shell path/argv0 only - never cfg.env (may carry secrets
         // via an inherited/overridden variable) or cfg.args (may carry a
         // password on the command line for some tools).
         tracing::info!(
@@ -239,7 +239,7 @@ impl TerminalSession for LocalTerminalSession {
     fn status(&self) -> SessionStatus {
         match self.exit_status() {
             Some(status) => {
-                // P9.8 D5: log exactly once (status() is polled every UI
+                // D5: log exactly once (status is polled every UI
                 // tick while the exited tab stays open).
                 if !self
                     .exit_logged
@@ -260,7 +260,7 @@ impl TerminalSession for LocalTerminalSession {
     /// Signal shutdown, kill the child if still running, and join both threads.
     /// Idempotent: a second call is a no-op (handles already taken).
     fn shutdown(&self) {
-        // Killing the child closes the PTY, unblocking the reader's read().
+        // Killing the child closes the PTY, unblocking the reader's read.
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
         }
@@ -279,7 +279,7 @@ impl TerminalSession for LocalTerminalSession {
 
 impl Drop for LocalTerminalSession {
     fn drop(&mut self) {
-        // Best-effort cleanup for a session dropped without `shutdown()`: kill
+        // Best-effort cleanup for a session dropped without `shutdown`: kill
         // the child and signal the owner so the threads terminate. Threads are
         // detached (not joined) to avoid blocking in `drop`.
         let already_done = self
@@ -299,11 +299,11 @@ impl Drop for LocalTerminalSession {
 
 /// Unified [`Session`] implementation for [`LocalTerminalSession`].
 ///
-/// `surface()` returns `Surface::TerminalGrid`; `status()` and `shutdown()`
-/// delegate to the `TerminalSession` impl; `resize_px()` converts pixel
+/// `surface` returns `Surface::TerminalGrid`; `status` and `shutdown`
+/// delegate to the `TerminalSession` impl; `resize_px` converts pixel
 /// dimensions to cell dimensions using an approximate 8×16 font size (the
-/// UI layer drives precise resize via `TerminalSession::resize()` with real
-/// font metrics in P4.2).
+/// UI layer drives precise resize via `TerminalSession::resize` with real
+/// font metrics in).
 impl Session for LocalTerminalSession {
     fn surface(&self) -> &Surface {
         &self.surface
@@ -632,7 +632,7 @@ mod resize_storm_tests {
 }
 
 /// B7 startup-latency profiling (cross-platform; uses the OS default shell). Run with
-/// `--ignored --nocapture` (optionally `CONMAN_LOG=trace` to also see the
+/// `--ignored - nocapture` (optionally `CONMAN_LOG=trace` to also see the
 /// `engine_owner::timing` markers). Measures spawn → first non-empty snapshot,
 /// isolating the session/PTY layer from the GUI/render path.
 #[cfg(test)]

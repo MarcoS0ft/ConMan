@@ -1,11 +1,11 @@
 //! `cm-ui` — the Slint user interface for ConMan.
 //!
-//! Hosts the Slint UI definitions, the glyph-atlas terminal renderer (P2.3),
+//! Hosts the Slint UI definitions, the glyph-atlas terminal renderer,
 //! and the controllers/view-models that translate between the core's ports and
 //! the widgets. Receives ready-to-draw snapshots and never imports a protocol
 //! or storage library directly.
 //!
-//! # P1.4 additions
+//! The UI exposes the following components and panels:
 //!
 //! - [`AppConfig`] carries the repository and credential store into [`run`].
 //! - [`tree`] module: `ConnectionTree` flattens groups + connections for the
@@ -43,7 +43,7 @@ mod generated_ui {
 }
 
 // Re-export the Slint-generated types used by the controller and by
-// cm-platform or tests.  `Theme` is internal and not re-exported here;
+// cm-platform or tests. `Theme` is internal and not re-exported here;
 // appearance is driven via the alias properties on `AppWindow` instead.
 pub use generated_ui::{
     AppWindow, ConnRow, CredRow, KbdPromptRow, PaletteAction, PaneCell, RecentItem, TabItem,
@@ -55,9 +55,9 @@ pub use terminal_renderer::{
     CellMetrics, Rgb, TerminalFontSystem, TerminalRenderer, TerminalTheme,
 };
 
-/// P8.6-B: what the `conman` composition root exposes to the Settings UI
+/// What the `conman` composition root exposes to the Settings UI
 /// (and, once confirmed, the execute-scope launch gate) about the agent-mode
-/// scope-enforcement proxy (P8.6-A, `conman/src/agent_mode`). `cm-ui` cannot
+/// scope-enforcement proxy (`conman/src/agent_mode`). `cm-ui` cannot
 /// depend on `conman` (the dependency points the other way — `conman` is the
 /// binary crate, `cm-ui` the library it links), so this is a plain,
 /// cm-ui-owned mirror of the fields `conman::agent_mode::AgentModeHandle`
@@ -76,25 +76,25 @@ pub struct AgentModeConfig {
     /// Live-reloadable granted scopes: the Settings UI's scope checkboxes
     /// write into this lock on every change; the proxy (running on its own
     /// thread in `conman`) reads it on every `tools/call` it gates. Shared,
-    /// not owned -- this is the exact `Arc` the proxy thread already holds.
+    /// not owned - this is the exact `Arc` the proxy thread already holds.
     pub scopes: Arc<std::sync::RwLock<cm_core::ScopeSet>>,
-    /// The execute-scope launch gate's signal (P8.6-B item 4): a count, not
+    /// The execute-scope launch gate's signal: a count, not
     /// a bool, of agent-driven **write**-tool calls (`click_element`/
     /// `invoke_accessibility_action`/`dispatch_key_event`) currently in
     /// flight through the proxy. A plain bool would race under concurrent
-    /// agent connections -- each accepted connection gets its own proxy
+    /// agent connections - each accepted connection gets its own proxy
     /// thread, so two overlapping write-tool calls could have one clear the
     /// flag while the other is still in flight, opening a window where its
     /// own triggered click wouldn't be marked. `> 0` means "an agent write
-    /// interaction is in progress right now" -- see
+    /// interaction is in progress right now" - see
     /// [`AgentModeConfig::mcp_interaction_active`].
     ///
     /// Verified (not assumed) that the window this counts actually covers
     /// the launch callback: the vendored Slint MCP server's `click_element`/
     /// etc. handlers run on Slint's own single-threaded event loop and
     /// dispatch the pointer/key event *synchronously* (inline, before their
-    /// async handler returns) -- the callback a launch button would fire is
-    /// guaranteed to complete before the proxy's blocking `forward()` call
+    /// async handler returns) - the callback a launch button would fire is
+    /// guaranteed to complete before the proxy's blocking `forward` call
     /// (which brackets the increment/decrement) returns.
     pub mcp_interaction_count: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -111,13 +111,13 @@ pub struct BuildIdentity {
 impl AgentModeConfig {
     /// True while at least one agent-driven write-tool call is in flight.
     /// The execute-scope launch gate refuses a launch when this is true AND
-    /// `execute` isn't granted -- see `sessions::agent_mode_execute_blocked`.
+    /// `execute` isn't granted - see `sessions::agent_mode_execute_blocked`.
     ///
     /// Fail-safe, not fail-open: this can spuriously refuse a **human**
     /// launch that happens to land in the (short, ~tens-of-milliseconds)
-    /// window while an unrelated agent write-tool call is in flight --
+    /// window while an unrelated agent write-tool call is in flight -
     /// over-restricting, never under-restricting. Accepted trade-off for
-    /// v1 (documented in the P8.6 delivery memo) -- distinguishing human
+    /// The current design - distinguishing human
     /// from agent-injected input within the window would need event
     /// tagging inside Slint itself, out of scope here.
     pub fn mcp_interaction_active(&self) -> bool {
@@ -138,7 +138,7 @@ impl std::fmt::Debug for AgentModeConfig {
 /// Configuration injected by the `conman` binary at startup.
 ///
 /// `repo` and `secrets` are held as `Arc<dyn Trait>` so the controller can
-/// share them across closures without lifetime issues.  The binary creates the
+/// share them across closures without lifetime issues. The binary creates the
 /// concrete adapters (`SqliteRepository`, `KeyringStore`) and boxes them here.
 pub struct AppConfig {
     /// The SQLite-backed connection and credential repository.
@@ -164,7 +164,7 @@ pub struct AppConfig {
     /// Process-private CLIPRDR staging root. `None` disables file clipboard
     /// while leaving text clipboard available.
     pub secure_clipboard_root: Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>,
-    /// P6.16: receives a `()` for every activation request from a second
+    /// Receives a `` for every activation request from a second
     /// `conman` launch (delivered by `cm_platform::single_instance`). `run`
     /// spawns a small listener thread that brings the window forward on the
     /// UI thread for each message. `None` when the composition root could not
@@ -175,16 +175,16 @@ pub struct AppConfig {
     /// `cm-platform` type so `cm-ui` does not need a dependency on
     /// `cm-platform` for this one hook.
     pub activation_rx: Option<std::sync::mpsc::Receiver<()>>,
-    /// P6.14: `true` only on the very first-ever launch (a brand-new DB that
+    /// `true` only on the very first-ever launch (a brand-new DB that
     /// the composition root just seeded with demo data). The first launch
     /// always opens a plain local-shell tab, by established design,
     /// regardless of the "restore last session" setting or the Launchpad
     /// empty-workspace fallback (there is nothing to restore and no recents
     /// to show yet anyway). `false` for every later launch.
     pub first_launch: bool,
-    /// P8.6-B: `Some(_)` only when `conman` was built with the `agent-mode`
+    /// `Some(_)` only when `conman` was built with the `agent-mode`
     /// feature AND the user has `automation.enabled` on (the proxy is
-    /// actually listening). `None` -- agent-mode off, or not compiled in --
+    /// actually listening). `None` - agent-mode off, or not compiled in -
     /// is the default/common case; see [`AgentModeConfig`]'s doc comment for
     /// why this field itself is never behind a `cfg`.
     pub agent_mode: Option<AgentModeConfig>,
@@ -196,21 +196,19 @@ impl std::fmt::Debug for AppConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// P8.2 — in-process element-test harness (dev/test-only public surface)
-// ---------------------------------------------------------------------------
+// In-process element-test harness (dev/test-only public surface).
 
 /// A hermetically-constructed, non-event-loop-driven `AppWindow` from
 /// [`build_for_test`], plus everything that must stay alive for as long as
 /// the caller wants the wired callbacks/timers to keep working (the redraw
 /// timer, the resize-debounce timer, every Slint list-model handle the
-/// controller closed over, ...). That "everything else" is intentionally
-/// opaque -- callers only ever need `ui` (to drive/introspect the element
+/// controller closed over,...). That "everything else" is intentionally
+/// opaque - callers only ever need `ui` (to drive/introspect the element
 /// tree); the rest exists purely to not be dropped.
 ///
 /// Dropping a `TestHarness` tears the whole wired app down (timers stop,
-/// callbacks' captured `Rc`/`Arc` handles release) -- keep it alive for the
-/// duration of a test scenario, same as the real `run()` keeps its `Ctx`
+/// callbacks' captured `Rc`/`Arc` handles release) - keep it alive for the
+/// duration of a test scenario, same as the real `run` keeps its `Ctx`
 /// alive for the duration of the event loop.
 #[cfg(any(test, feature = "ui-introspection"))]
 pub struct TestHarness {
@@ -254,22 +252,22 @@ impl TestHarness {
     }
 }
 
-/// P8.2 construction seam: builds the real `AppWindow` + controller wiring
-/// in-process -- the same model setup and `wire_*()` registration [`run`]
-/// does -- without entering the event loop, given already-constructed test
+/// Builds the real `AppWindow` + controller wiring
+/// in-process - the same model setup and `wire_*` registration [`run`]
+/// does - without entering the event loop, given already-constructed test
 /// doubles in `config` (an in-memory `SqliteRepository`, a mock/loopback
 /// `SessionProvider`, `activation_rx: None`). Does not change `run`'s public
 /// signature or behavior; this is an additional, test-facing entry point.
 ///
 /// Callers must first initialize `i-slint-backend-testing`'s simulated
-/// backend (`i_slint_backend_testing::init_no_event_loop()` for widget-only
-/// checks, or `init_integration_test_with_mock_time()` — **once per process**
+/// backend (`i_slint_backend_testing::init_no_event_loop` for widget-only
+/// checks, or `init_integration_test_with_mock_time` — **once per process**
 /// — for anything that needs the redraw timer / mock time to advance). See
-/// `crates/cm-ui/tests/` and `docs/devel/tasks/P8.2-element-test-harness.md`.
+/// `crates/cm-ui/tests/`.
 ///
 /// # Panics
-/// Panics if the underlying `AppWindow::new()` fails (see
-/// [`controller::build_for_test`]'s panic doc) -- acceptable for a test-only
+/// Panics if the underlying `AppWindow::new` fails (see
+/// [`controller::build_for_test`]'s panic doc) - acceptable for a test-only
 /// entry point; a failed harness construction should abort that test loudly.
 #[cfg(any(test, feature = "ui-introspection"))]
 pub fn build_for_test(config: AppConfig) -> TestHarness {

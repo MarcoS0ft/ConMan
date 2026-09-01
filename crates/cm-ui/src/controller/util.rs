@@ -23,8 +23,8 @@ fn is_flag_one(v: Option<&str>) -> bool {
 }
 
 /// Debug-only headless test hook: auto-accept SSH host keys without prompting
-/// (`CONMAN_SSH_AUTO_ACCEPT_KEYS=1`). P6.3 gap 24: compiled out entirely in
-/// release builds -- the `#[cfg(not(debug_assertions))]` variant below never
+/// (`CONMAN_SSH_AUTO_ACCEPT_KEYS=1`).: compiled out entirely in
+/// release builds - the `#[cfg(not(debug_assertions))]` variant below never
 /// calls `std::env::var` at all, so a release binary cannot be made to skip
 /// host-key verification regardless of its environment (verified by
 /// inspection of that fn body, plus `is_flag_one`'s unit test below covering
@@ -41,7 +41,7 @@ pub(super) fn ssh_auto_accept_keys() -> bool {
 
 /// Debug-only headless test hook: auto-accept RDP TLS certs without prompting
 /// (`CONMAN_RDP_AUTO_ACCEPT_CERTS=1`). Same release-inertness rationale as
-/// [`ssh_auto_accept_keys`] (P6.3 gap 24).
+/// [`ssh_auto_accept_keys`].
 #[cfg(debug_assertions)]
 pub(super) fn rdp_auto_accept_certs() -> bool {
     is_flag_one(
@@ -111,7 +111,7 @@ pub(super) fn apply_platform_shell_placeholders(ui: &AppWindow) {
     ui.set_settings_shell_cwd_placeholder(placeholders.cwd.into());
 }
 
-/// Push an OS-read accent color (P6.8, gap 10; see `cm_platform::accent`) into
+/// Push an OS-read accent color (see `cm_platform::accent`) into
 /// the live `Theme.os-accent-color` Slint global via the `set-os-accent`
 /// callback — used both at startup and from the best-effort live accent-change
 /// watch.
@@ -134,12 +134,12 @@ pub(super) fn grid_for(
     }
 }
 
-/// Side-panel drag-resize clamps (P6.9 gap 11). Rust-side mirror of the
+/// Side-panel drag-resize clamps. Rust-side mirror of the
 /// `Theme.side-panel-min-width` / `-max-width` tokens (`cm-ui/ui/theme.slint`)
-/// -- the `.slint` drag handle already clamps live while dragging, but every
-/// value that reaches the settings table goes through this Rust copy too, so
-/// a stale/out-of-range persisted value (e.g. from a future lower minimum)
-/// can never restore a sidebar wider/narrower than what the chrome allows.
+/// - the `.slint` drag handle already clamps live while dragging, but every
+///   value that reaches the settings table goes through this Rust copy too, so
+///   a stale/out-of-range persisted value (e.g. from a future lower minimum)
+///   can never restore a sidebar wider/narrower than what the chrome allows.
 pub(super) const SIDEBAR_WIDTH_MIN: i32 = 180;
 pub(super) const SIDEBAR_WIDTH_MAX: i32 = 480;
 
@@ -149,7 +149,7 @@ pub(super) fn clamp_sidebar_width(px: i32) -> i32 {
 }
 
 /// Apply the small set of env-var overrides that must take effect before the
-/// window is populated (theme + palette visibility) -- read once at startup.
+/// window is populated (theme + palette visibility) - read once at startup.
 pub(super) fn apply_early_env_overrides(ui: &AppWindow) {
     // CONMAN_DARK_MODE env-var overrides the persisted theme (dev / CI).
     if let Ok(v) = std::env::var("CONMAN_DARK_MODE") {
@@ -165,7 +165,7 @@ pub(super) fn apply_early_env_overrides(ui: &AppWindow) {
 }
 
 /// Register every `CONMAN_*` headless test hook. Each hook is independent and
-/// gated on its own env var; split into one function per hook (P6.1
+/// gated on its own env var; split into one function per hook (
 /// function-size budget) — pure code move, identical logic/order.
 pub(super) fn wire_env_hooks(ctx: &Ctx, hooks: &mut Vec<Timer>) {
     wire_ssh_autoinit(ctx);
@@ -184,7 +184,7 @@ pub(super) fn wire_env_hooks(ctx: &Ctx, hooks: &mut Vec<Timer>) {
     wire_autoexport(ctx, hooks);
 }
 
-// P6.9 (gap 11) headless test hook: CONMAN_SIDEBAR_WIDTH=<px> — updates the
+// headless test hook: CONMAN_SIDEBAR_WIDTH=<px> — updates the
 // live width then fires the exact same `sidebar-width-changed` callback a
 // real drag-release does (the `.slint` handle updates `sidebar-width` live
 // during the drag and only calls this callback, with the already-current
@@ -235,7 +235,7 @@ fn wire_ssh_autoinit(ctx: &Ctx) {
     }
 }
 
-// ── CONMAN_TREE_AUTOLAUNCH (P6.4 QA hook) ────────────────────────────────
+// ── CONMAN_TREE_AUTOLAUNCH ( QA hook) ────────────────────────────────
 // Format: "<connection-id>" — resolves + connects a saved connection through
 // the exact same stored-credential path a tree row click uses
 // (`sessions::launch_saved_connection`: resolve_effective_credential ->
@@ -275,7 +275,7 @@ fn wire_tree_autolaunch(ctx: &Ctx) {
     );
 }
 
-// ── CONMAN_RDP_AUTOINIT (P4.2 test hook) ─────────────────────────────────
+// ── CONMAN_RDP_AUTOINIT ( test hook) ─────────────────────────────────
 // Format: "username:password:host[:port]" — opens an RDP tab immediately on
 // startup without requiring the user to click a connection in the panel.
 fn wire_rdp_autoinit(ctx: &Ctx) {
@@ -318,7 +318,7 @@ fn wire_rdp_autoinit(ctx: &Ctx) {
     }
 }
 
-// P6.12 (gap 20) headless test hook: CONMAN_OPEN_QUICKCONNECT=ssh|rdp|local —
+// headless test hook: CONMAN_OPEN_QUICKCONNECT=ssh|rdp|local —
 // opens the quick-connect dialog pre-set to the given kind, without
 // submitting it. No existing hook opens this dialog headlessly (mirrors
 // CONMAN_SHOW_KEYS's plain property-set style); exists so the xvfb screenshot
@@ -337,7 +337,7 @@ fn wire_open_quickconnect(ctx: &Ctx) {
     ctx.ui.set_quick_connect_open(true);
 }
 
-// P6.12 (gap 20) headless test hook: CONMAN_LOCAL_QC_AUTOCONNECT=1 — drives
+// headless test hook: CONMAN_LOCAL_QC_AUTOCONNECT=1 — drives
 // the quick-connect dialog's Local kind through the exact same
 // `sessions::qc_connect_local` dispatch a real "Connect" click uses (reading
 // whatever `qc-local-*` fields are already set, empty by default -> the OS
@@ -426,7 +426,7 @@ fn wire_show_keys(ctx: &Ctx) {
     }
 }
 
-// P5.1: Auto-split hook (headless screenshot tests).
+// Auto-split hook (headless screenshot tests).
 // CONMAN_AUTOSPLIT=h|v — trigger an H- or V-split after a short delay.
 fn wire_autosplit(ctx: &Ctx, hooks: &mut Vec<Timer>) {
     if let Ok(dir) = std::env::var("CONMAN_AUTOSPLIT") {
@@ -463,7 +463,7 @@ fn wire_autobroadcast(ctx: &Ctx) {
     }
 }
 
-// P6.6: CONMAN_AUTOIMPORT=<path> — import the given JSON export file shortly
+// CONMAN_AUTOIMPORT=<path> — import the given JSON export file shortly
 // after startup, bypassing the native file-open dialog
 // (`import_export::run_import`, the same dialog-free half
 // `import_via_dialog` calls once a path is chosen). Exists so the xvfb
@@ -492,14 +492,14 @@ fn wire_autoimport(ctx: &Ctx, hooks: &mut Vec<Timer>) {
     }
 }
 
-// P6.17 finding F3: CONMAN_AUTOEXPORT=<path> — export the current tree to
+// finding F3: CONMAN_AUTOEXPORT=<path> — export the current tree to
 // the given JSON file shortly after startup, bypassing the native
 // file-save dialog (`import_export::run_export`, the same dialog-free half
 // `export_via_dialog` calls once a path is chosen). Mirrors
 // `CONMAN_AUTOIMPORT` exactly: exists so a headless gate can capture the
 // real post-export success/error toast and assert the on-disk JSON (esp.
 // secret exclusion) without a display-dependent, blocking native file
-// picker in CI (closes the P6.17 J15 gap).
+// picker in CI (closes the J15 gap).
 fn wire_autoexport(ctx: &Ctx, hooks: &mut Vec<Timer>) {
     if let Ok(path) = std::env::var("CONMAN_AUTOEXPORT") {
         let io = ctx.state.borrow().io.clone();
@@ -559,16 +559,16 @@ mod tests {
         assert!(tiny.cols >= 1 && tiny.rows >= 1);
     }
 
-    // ── gap 24: verification-bypass gating ──────────────────────────────
+    // ──: verification-bypass gating ──────────────────────────────
     //
     // `is_flag_one` is the value-matching predicate both debug-only
     // `*_auto_accept_*` hooks use. The release inertness itself (the
     // `#[cfg(not(debug_assertions))]` variants never calling `std::env::var`
     // at all) is a compile-time structural property verified by
     // code-inspection of `ssh_auto_accept_keys`/`rdp_auto_accept_certs`
-    // above, not by this test — see the P6.3 report for the inspection note.
+    // above, not by this test — see the report for the inspection note.
 
-    // ── gap 11: sidebar-width clamp ─────────────────────────────────────
+    // ──: sidebar-width clamp ─────────────────────────────────────
 
     #[test]
     fn clamp_sidebar_width_passes_through_in_range() {

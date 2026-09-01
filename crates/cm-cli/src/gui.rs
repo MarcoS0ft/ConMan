@@ -58,7 +58,7 @@ impl std::error::Error for GuiArgumentError {}
 /// Parse only the startup arguments supported by the graphical executable.
 ///
 /// The iterator excludes the executable name, matching
-/// `std::env::args_os().skip(1)`. Paths remain [`OsString`]s until converted
+/// `std::env::args_os.skip(1)`. Paths remain [`OsString`]s until converted
 /// to [`PathBuf`], so non-Unicode platform paths are preserved. Unknown
 /// options, positional arguments, duplicate overrides, and combinations of
 /// help/version with other arguments are rejected.

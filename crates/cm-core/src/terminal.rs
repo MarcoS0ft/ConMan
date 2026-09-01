@@ -4,20 +4,14 @@
 //! entities — they carry no `serde` derives. They are the contract between
 //! three layers: the session layer drives [`TerminalEngine::feed`] /
 //! [`TerminalEngine::resize`], the engine adapter (libghostty-vt, in
-//! `cm-session`) maintains VT state, and the renderer (`cm-ui`, P2.3) consumes
+//! `cm-session`) maintains VT state, and the renderer (`cm-ui`) consumes
 //! the [`GridSnapshot`].
 //!
 //! `cm-core` stays free of any engine dependency: only the trait and the value
 //! types live here.
 //!
-//! Scope (P2.1): the snapshot is the **visible viewport only** — scrollback,
-//! selection, and search are out of scope and will extend this surface later.
-//!
-//! P6.7 extends the above: [`TerminalEngine::snapshot`] now takes a caller-supplied
-//! scroll offset (lines above the live tail) so a [`GridSnapshot`] can render any
-//! window into the engine's retained scrollback, not just the tail. See
-//! `docs/devel/memos/P6.7-scrollback-port.md` for the signature discussion and
-//! `docs/devel/tasks/P6.7-scrollback-search.md` for the feature spec.
+//! The snapshot is the **visible viewport**, including scrollback, selection,
+//! and search through the caller-supplied offset.
 
 use std::ops::{BitOr, BitOrAssign};
 
@@ -192,15 +186,15 @@ pub struct CursorState {
 /// An owned snapshot of a **viewport window** into the engine's grid, for
 /// rendering.
 ///
-/// Row-major: `cells[row * size.cols + col]`, with `cells.len() == size.rows *
+/// Row-major: `cells[row * size.cols + col]`, with `cells.len == size.rows *
 /// size.cols`. This type is deliberately `Send` (it owns only plain data and
 /// `String`s): it crosses from the engine-owner thread to the renderer/UI
 /// bridge, while the engine itself — being `!Send` — never moves.
 ///
-/// P6.7: the window need not be the live tail — [`TerminalEngine::snapshot`]
-/// takes a `scroll_offset` (lines above the tail) and echoes back the
-/// resolved position via `scroll_offset`/`scrollback_len` below, so callers
-/// can render a scroll-position indicator and address absolute buffer lines
+/// The window need not be the live tail. [`TerminalEngine::snapshot`] takes a
+/// `scroll_offset` (lines above the tail) and echoes back the resolved
+/// position via `scroll_offset`/`scrollback_len`, so callers can render a
+/// scroll-position indicator and address absolute buffer lines
 /// (`scrollback_len - scroll_offset + row`) without a second round trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GridSnapshot {
@@ -211,9 +205,8 @@ pub struct GridSnapshot {
     /// of `scroll_offset` (i.e. how far back the user *could* scroll right now).
     pub scrollback_len: u32,
     /// The scroll offset actually used to produce this snapshot (lines above
-    /// the tail; `0` = the live/tail view, `snapshot`'s pre-P6.7 sole
-    /// behavior). Always `<= scrollback_len` — implementations clamp rather
-    /// than erroring on an out-of-range request.
+    /// the tail; `0` = the live/tail view). Always `<= scrollback_len` —
+    /// implementations clamp rather than erroring on an out-of-range request.
     pub scroll_offset: u32,
     /// Whether the application has enabled a mouse-tracking mode (DECSET
     /// 1000/1002/1003 and friends). `cm-ui`'s wheel handler uses this to
@@ -298,7 +291,7 @@ pub struct MouseEvent {
 /// **Not `Send`/`Sync` by contract.** The primary implementation
 /// (libghostty-vt) is `!Send + !Sync`, so an engine is owned by a single thread
 /// for its whole life. Only bytes (in) and [`GridSnapshot`]/encoded bytes (out)
-/// cross threads — never the engine itself (validated in P0.2; ARCHITECTURE
+/// cross threads — never the engine itself (validated in; ARCHITECTURE
 /// §4). Do not add a `: Send` bound.
 pub trait TerminalEngine {
     /// Feed raw VT bytes (from a PTY/SSH stream). Never panics on malformed
@@ -309,7 +302,7 @@ pub trait TerminalEngine {
     fn resize(&mut self, size: TerminalSize);
 
     /// Produce an owned snapshot of the viewport starting `scroll_offset`
-    /// lines above the live tail (`0` = the tail — the pre-P6.7 sole
+    /// lines above the live tail (`0` = the tail — the earlier sole
     /// behavior). Implementations **clamp** `scroll_offset` to the available
     /// scrollback (never error on an out-of-range request — CONVENTIONS §2,
     /// untrusted/derived input fails soft); the clamped value actually used
@@ -325,7 +318,7 @@ pub trait TerminalEngine {
     }
 
     /// Plain-text rows spanning the full retained buffer (scrollback +
-    /// active screen), oldest first, for whole-buffer search (P6.7). Row `i`
+    /// active screen), oldest first, for whole-buffer search. Row `i`
     /// is `i` lines above the buffer's origin — the same address space as
     /// `GridSnapshot::scrollback_len`/`scroll_offset` (`scrollback_len -
     /// scroll_offset` is the absolute row of the snapshot's first visible
@@ -348,9 +341,9 @@ pub trait TerminalEngine {
     /// Whether the application has enabled bracketed paste (DECSET 2004).
     /// `cm_session::engine_owner`'s `Msg::Paste` handler consults this to
     /// decide whether to wrap pasted bytes in the `ESC[200~`/`ESC[201~`
-    /// markers (P6.5) or send them raw. Defaults to `false` (raw paste), so
+    /// markers or send them raw. Defaults to `false` (raw paste), so
     /// adding this method is non-breaking for any engine that doesn't track
-    /// the mode — see `docs/devel/memos/P6.5-bracketed-paste-port.md`.
+    /// the mode — see.
     fn bracketed_paste_enabled(&self) -> bool {
         false
     }
@@ -360,7 +353,7 @@ pub trait TerminalEngine {
     /// cursor-position report (`CSI 6 n`) or device attributes (`CSI c`). The
     /// caller must forward these to the PTY. On Windows this is essential: the
     /// ConPTY/conhost host issues `CSI 6 n` at startup and **stalls ~3 s**
-    /// waiting for the reply before emitting the shell prompt (P2.6/B7). The
+    /// waiting for the reply before emitting the shell prompt (/B7). The
     /// default returns empty for engines that never produce replies.
     fn take_responses(&mut self) -> Vec<u8> {
         Vec::new()

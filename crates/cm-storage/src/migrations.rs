@@ -5,7 +5,7 @@ use crate::error::StorageError;
 /// Latest schema version this build understands.
 pub const CURRENT_VERSION: u32 = 4;
 
-/// Ordered migration scripts.  Index `i` upgrades from version `i` to `i+1`,
+/// Ordered migration scripts. Index `i` upgrades from version `i` to `i+1`,
 /// i.e. `MIGRATIONS[0]` is the v0→v1 script (the initial schema).
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, include_str!("../migrations/v1.sql")),
@@ -14,7 +14,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (4, include_str!("../migrations/v4.sql")),
 ];
 
-/// Applies all pending migrations on `conn`.  Safe to call on a fresh (empty)
+/// Applies all pending migrations on `conn`. Safe to call on a fresh (empty)
 /// database as well as on any partially-migrated one.
 ///
 /// Each migration is wrapped in an explicit transaction, so a mid-migration
@@ -37,7 +37,7 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), StorageErro
 }
 
 /// **Test helper only** — set up a database at the requested `version` without
-/// applying later migrations.  Useful for writing upgrade-path tests.
+/// applying later migrations. Useful for writing upgrade-path tests.
 #[cfg(test)]
 pub fn setup_db_at_version(
     conn: &mut rusqlite::Connection,
@@ -54,9 +54,7 @@ pub fn setup_db_at_version(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Private helpers
-// ---------------------------------------------------------------------------
 
 fn ensure_version_table(conn: &rusqlite::Connection) -> Result<(), StorageError> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);")
@@ -132,9 +130,7 @@ fn apply_migration_tx(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -280,7 +276,7 @@ mod tests {
         .expect("insert group");
 
         // Apply all remaining migrations (v2 adds the app-state table; later
-        // versions, e.g. v3's `recents` table, ride along -- `run_migrations`
+        // versions, e.g. v3's `recents` table, ride along - `run_migrations`
         // always walks to `CURRENT_VERSION`, so this asserts against that
         // constant rather than a version number that will go stale again).
         run_migrations(&mut conn).expect("migrate v1 → current");
@@ -391,7 +387,7 @@ mod tests {
         )
         .expect("insert connection with credential_id");
 
-        // ...and one without (today's "inherit from group" case).
+        //...and one without (today's "inherit from group" case).
         conn.execute(
             "INSERT INTO connections \
              (group_id, kind, name, settings_json, credential_id, sort, created_at, updated_at) \

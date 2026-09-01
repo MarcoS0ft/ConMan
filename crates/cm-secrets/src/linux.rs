@@ -1,7 +1,7 @@
 //! Linux credential storage backed by the freedesktop Secret Service.
 //!
 //! A Secret Service provider such as GNOME Keyring or KWallet owns persistence,
-//! locking, and user prompts.  ConMan deliberately does not fall back to the
+//! locking, and user prompts. ConMan deliberately does not fall back to the
 //! process/session-scoped kernel keyring: a saved credential must either be
 //! durably stored or fail with an actionable error.
 
@@ -21,7 +21,7 @@ pub(crate) fn initialize_native_keyring() {
 pub struct KeyringStore {
     entries: Mutex<HashMap<(String, String), Arc<keyring::Entry>>>,
     // keyring's synchronous Secret Service backend cautions against concurrent
-    // or rapidly overlapping D-Bus calls.  One process-wide store is shared by
+    // or rapidly overlapping D-Bus calls. One process-wide store is shared by
     // ConMan, so a small operation lock is sufficient.
     io: Mutex<()>,
 }

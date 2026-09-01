@@ -1,21 +1,19 @@
 // ConMan — Theme global: color tokens, spacing, radii, fonts, status colors.
 //
-// Authoritative source: docs/devel/GUI_DESIGN.md §3 (token table).
-// Visual direction: "Quiet Pro" (Direction A) — compact, hairline chrome, cool-blue accent.
 // Targets Slint 1.17 (std-widgets `Palette` available; `ColorScheme` enum is a builtin).
 //
 // Dark/light is driven by `dark-mode`. Default seeds from the OS scheme via
 // `Palette.color-scheme` (no platform code needed); the Settings panel may override it.
 // Accent is set by the preset picker in Settings; persisted value is restored at launch
-// via AppWindow.invoke_apply_accent_index().
-//   Theme.dark-mode = bool           // written by Settings panel or apply_settings_to_ui
+// via AppWindow.invoke_apply_accent_index.
+// Theme.dark-mode = bool // written by Settings panel or apply_settings_to_ui
 //
-// Every other .slint imports this global; there are ZERO hardcoded colors elsewhere:
-//   import { Theme } from "theme.slint";
+// Every other.slint imports this global; there are ZERO hardcoded colors elsewhere:
+// import { Theme } from "theme.slint";
 
 // ColorScheme is a Slint 1.17 builtin — no import needed.
 import { Palette } from "std-widgets.slint";
-// Bundle the Symbols Nerd Font Mono for cross-platform chrome icons (P5.4).
+// Bundle the Symbols Nerd Font Mono for cross-platform chrome icons.
 // Slint registers this font under its internal family name "Symbols Nerd Font Mono"
 // and makes it available as Theme.font-family-icons on all platforms.
 import "../assets/fonts/SymbolsNerdFontMono-Regular.ttf";
@@ -31,24 +29,23 @@ export global Theme {
 
   // ── Accent color (preset or restored from settings; cool-blue fallback) ──────
   // Accent is set by the Settings panel accent picker or restored from persisted
-  // settings at launch via AppWindow.invoke_apply_accent_index().
+  // settings at launch via AppWindow.invoke_apply_accent_index.
   // Status colors NEVER derive from this (see §status).
   in-out property <color> accent: #3b82f6;
 
-  // ── Density preset (P5.2) ─────────────────────────────────────────────────
-  // 0 = Compact (Direction A default), 1 = Cosy (bumped row heights + spacing).
+  // ── Density preset ────────────────────────────────────────────────────────
   // Written by Settings › Density segmented control; read from the settings DB
   // on launch. Changing this property automatically reflows all dependent
   // component metrics below without any additional Rust code.
   in-out property <int> density: 0;
 
   // ── Surfaces — depth ladder: canvas → activity/side panel → card → overlay ──
-  //   color-base:     window canvas / session area chrome (recedes)
-  //   color-elevated: activity bar + side panel surface
-  //   color-card:     cards, inputs, tabs, list rows (lifts)
-  //   color-overlay:  dialogs, command palette, context menus (floats)
-  //   color-stroke:   hairline borders / dividers
-  //   color-hover:    soft hover wash for interactive rows / icon buttons
+  // color-base: window canvas / session area chrome (recedes)
+  // color-elevated: activity bar + side panel surface
+  // color-card: cards, inputs, tabs, list rows (lifts)
+  // color-overlay: dialogs, command palette, context menus (floats)
+  // color-stroke: hairline borders / dividers
+  // color-hover: soft hover wash for interactive rows / icon buttons
   out property <color> color-base:     dark-mode ? #0e1014 : #eef0f3;
   out property <color> color-elevated: dark-mode ? #15181e : #e9ecf0;
   out property <color> color-card:     dark-mode ? #1c2027 : #ffffff;
@@ -57,7 +54,7 @@ export global Theme {
   out property <color> color-hover:    dark-mode ? #ffffff0d : #0000000a;
   // Modal scrim behind dialogs / command palette (same in both schemes).
   out property <color> color-scrim:    #00000099;
-  // Quiet chrome strip (tab strip + status bar backgrounds, P7.6, fixes P7.3-a).
+  // Quiet chrome strip for tab strip and status bar backgrounds.
   // `color-base.darker(0.2)` was asymmetric across schemes: near-invisible on
   // the dark canvas but a heavy #C6C8CB slab on the light one. A dedicated
   // per-scheme token keeps both readings hairline-subtle.
@@ -138,10 +135,10 @@ export global Theme {
   // Curated preset options shown in the Settings › Appearance accent picker.
   out property <[color]> accent-presets: [#3b82f6, #2dd4bf, #3fb950, #a78bfa];
 
-  // ── OS accent (P6.8, gap 10) ────────────────────────────────────────────
+  // ── OS accent ─────────────────────────────────────────────────────────────
   // The live OS accent color, written once at startup (and live, on the OS
   // accent-change signal where the platform supports it) via
-  // `AppWindow.set-os-accent()` -- see `cm_platform::accent`. NOT folded into
+  // `AppWindow.set-os-accent` - see `cm_platform::accent`. NOT folded into
   // `accent-presets` because it isn't a fixed preset color, it tracks a
   // runtime value. The reserved "OS accent" swatch in Settings sets `accent`
   // to this; `os-accent-index` is the sentinel `accent-index` value that
@@ -152,20 +149,18 @@ export global Theme {
 
   // Segoe UI = Windows system font (our primary platform); falls back elsewhere.
   out property <string> font-family:       "Segoe UI";
-  // Mono = the bundled Nerd Font shared with the terminal renderer (P2.3).
+  // Mono = the bundled Nerd Font shared with the terminal renderer.
   out property <string> font-family-mono:  "JetBrains Mono";
-  // Cross-platform icon font: bundled Symbols Nerd Font Mono (P5.4).
-  // Chrome glyphs use MDI / Codicon codepoints (see docs/devel/p5.4-os-gaps.md).
+  // Cross-platform icon font: bundled Symbols Nerd Font Mono.
   out property <string> font-family-icons: "Symbols Nerd Font Mono";
 
-  // ── Component metrics — density-aware (P5.2) ──────────────────────────────
-  // Direction A compact values at density==0; Cosy bumps row/control heights
+  // ── Component metrics — density-aware ─────────────────────────────────────
   // and padding by 6px everywhere, which is enough to feel more spacious without
-  // breaking any layout constraints.  All callers read these tokens — zero
+  // breaking any layout constraints. All callers read these tokens — zero
   // hardcoded sizes outside this file.
   out property <length> activity-bar-width: 48px;
-  out property <length> side-panel-width:  252px;   // default; resizable + persisted (P6.9)
-  // Drag-resize clamps for the side panel (P6.9, gap 11). Plain `int` (not
+  out property <length> side-panel-width:  252px;   // default; resizable + persisted
+  // Drag-resize clamps for the side panel. Plain `int` (not
   // `length`) so they compare directly against the `int`-typed
   // `AppWindow.sidebar-width` property with no unit-stripping conversion.
   out property <int> side-panel-min-width: 180;
@@ -181,13 +176,13 @@ export global Theme {
   out property <length> icon-btn:     density == 1 ? 26px : 22px;  // container side length
   // Hairline gap between adjacent compact icon buttons.
   out property <length> gap-hairline:  1px;
-  // Settings panel section header row height (carry-over fix h).
+  // Settings panel section header row height .
   out property <length> settings-section-header-height: 34px;
-  // Keyboard shortcut label column width in settings shortcut rows (carry-over fix h).
+  // Keyboard shortcut label column width in settings shortcut rows .
   out property <length> settings-shortcut-label-width: 112px;
   // Vertical scrollbar rail width (Fluent std-widgets `ScrollView`'s
-  // vertical-bar draws 14px wide, overlaid on the flickable's right edge) --
+  // vertical-bar draws 14px wide, overlaid on the flickable's right edge) -
   // scrollable field columns pad their content by this much on the right so
-  // the rail never overdraws field borders (P7.6, fixes P7.2-a).
+  // the rail never overdraws field borders.
   out property <length> scrollbar-gutter: 14px;
 }

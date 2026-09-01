@@ -7,13 +7,13 @@
 //! # Current scope
 //!
 //! - [`app_db_path`] / [`app_log_dir`]: OS-standard per-user data directory
-//!   resolution (P1.5, extended for logging in P6.3).
+//!   resolution.
 //! - [`app_config_path`] / [`TextConfigStore`]: the user-editable
 //!   `conman.ini` document and its line-preserving persistence adapter.
 //! - [`single_instance`]: an identity-scoped OS advisory lock plus a loopback
-//!   activation handshake (P6.16); see the module docs for the protocol.
-//! - [`accent`]: OS accent-color read + best-effort live watch (P6.8, gap 10).
-//!   Clipboard access and DPI helpers remain unimplemented (not yet scheduled).
+//!   activation handshake; see the module docs for the protocol.
+//! - [`accent`]: OS accent-color read + best-effort live watch.
+//! - Clipboard access and DPI helpers remain unimplemented.
 //! - [`console`]: terminal ANSI/VT capability detection plus parent-console
 //!   output for help/version from the release Windows GUI executable.
 
@@ -43,10 +43,8 @@ pub const DB_PATH_ENV_VAR: &str = "CONMAN_DB_PATH";
 
 /// Returns `<OS data dir>/conman`, creating it if it does not exist.
 ///
-/// Shared by [`app_db_path`] and [`app_log_dir`]. Uses the `dirs` crate (P6.3:
-/// consolidated with `cm-session`/`cm-ui`, which already depended on it — see
-/// gap 29 / `memos/P6.3-*`; the prior `directories`-crate resolution here had
-/// the smaller call-site footprint to move).
+/// Shared by [`app_db_path`] and [`app_log_dir`]. Uses the `dirs` crate for
+/// platform-specific resolution.
 fn conman_data_dir() -> Result<PathBuf, PlatformError> {
     let base = dirs::data_dir().ok_or(PlatformError::NoDataDir)?;
     let dir = base.join("conman");
@@ -224,9 +222,9 @@ fn resolve_db_path(db_path_override: Option<String>) -> Result<PathBuf, Platform
 }
 
 /// Returns `<OS data dir>/conman/logs`, the directory the release-build
-/// rotating file log layer writes into (P6.3 — `windows_subsystem = "windows"`
-/// swallows stderr in release, so this is the only place release diagnostics
-/// land). Created if it does not exist.
+/// rotating file log layer writes into. The GUI subsystem has no console in
+/// release builds, so this is where release diagnostics land. Created if it
+/// does not exist.
 ///
 /// # Errors
 /// Returns [`PlatformError`] when no data directory can be determined or the
@@ -242,8 +240,7 @@ pub fn app_log_dir() -> Result<PathBuf, PlatformError> {
 mod tests {
     use super::*;
 
-    /// P6.3 gap 29: the `directories` -> `dirs` consolidation must not change
-    /// the CONMAN_DB_PATH override contract.
+    /// The `CONMAN_DB_PATH` override contract is preserved.
     #[test]
     fn resolve_db_path_honors_override() {
         let dir = std::env::temp_dir().join(format!("conman-test-{}", std::process::id()));

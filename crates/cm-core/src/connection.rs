@@ -5,9 +5,7 @@ use crate::ids::{ConnectionId, CredentialId, GroupId};
 use crate::kind::ConnectionKind;
 use crate::settings::ConnectionSettings;
 
-// ---------------------------------------------------------------------------
-// CredentialSource (P9.6-A)
-// ---------------------------------------------------------------------------
+// CredentialSource
 
 /// How a [`Connection`] obtains its authentication credential.
 ///
@@ -18,7 +16,7 @@ use crate::settings::ConnectionSettings;
 /// and always prompt). The three `Some(_)` variants are the user-approved
 /// explicit modes.
 ///
-/// Adjacently tagged (`{"kind": "...", "value": ...}`) rather than the
+/// Adjacently tagged (`{"kind": "...", "value":...}`) rather than the
 /// internally-tagged style [`crate::SshAuthMethod`] uses, because `Object`'s
 /// payload (a bare [`CredentialId`], itself `#[serde(transparent)]`) can't be
 /// flattened into an internally-tagged map the way `SshAuthMethod::PublicKey`'s
@@ -33,7 +31,7 @@ pub enum CredentialSource {
     /// any) lives in the keychain keyed to the **connection**, not a
     /// credential object — see [`crate::CredentialRef::for_connection`].
     /// Password only; inline SSH keys/passphrases stay credential-objects
-    /// (non-goal, per the P9.6 design brief).
+    /// (non-goal, per the design brief).
     Inline {
         username: String,
         domain: Option<String>,
@@ -81,7 +79,7 @@ pub struct Connection {
     /// How this connection obtains its credential. `None` means inherit from
     /// the ancestor group chain (see [`resolve_effective_credential`]) —
     /// preserves today's behavior. `Some(_)` is one of the three explicit,
-    /// user-facing modes (P9.6-A): reference a shared object, inline
+    /// user-facing modes: reference a shared object, inline
     /// creds, or explicitly prompt.
     #[serde(deserialize_with = "deserialize_credential_source")]
     pub credential_source: Option<CredentialSource>,
@@ -166,7 +164,7 @@ impl Connection {
 ///    or the connection's own source is `Inline`/`Prompt` (an explicit,
 ///    non-object choice — never falls back to the group chain).
 ///
-/// The walk is bounded by `groups.len()` to be cycle-safe: a valid (acyclic)
+/// The walk is bounded by `groups.len` to be cycle-safe: a valid (acyclic)
 /// group tree of N nodes has paths of at most N steps, so any longer walk
 /// would imply a cycle and is terminated. Used by [`resolve_connection_auth`]
 /// for the `Object`/inherit cases; kept as its own function because callers
@@ -193,13 +191,11 @@ pub fn resolve_effective_credential(conn: &Connection, groups: &[Group]) -> Opti
     None
 }
 
-// ---------------------------------------------------------------------------
-// resolve_connection_auth (P9.6-A Decision 3)
-// ---------------------------------------------------------------------------
+// Authentication resolution
 
 /// Effective, resolved authentication material for a [`Connection`] — the
-/// pure counterpart to `cm_ui::controller::sessions::resolve_ssh_auth` /
-/// `resolve_rdp_auth` (Phase C makes those thin adapters over this).
+/// pure counterpart to `cm_ui::controller::sessions::resolve_ssh_auth` and
+/// `resolve_rdp_auth`, which are thin adapters over this function.
 #[derive(Debug, Clone)]
 pub struct ResolvedAuth {
     /// Never `None` for callers that need a bare string (matches the
@@ -234,7 +230,7 @@ pub struct ResolvedAuth {
 ///   are authoritative (override settings + group; `username` still falls
 ///   back to the settings username if the inline value is empty, mirroring
 ///   the object case's defensiveness); `secret` = `has_secret &&
-///   purpose == Password` ? `store.get(conn:<id>:password)` : `None` (inline
+/// purpose == Password` ? `store.get(conn:<id>:password)`: `None` (inline
 ///   never stores any other purpose — password-only, per the non-goals).
 /// - `Some(Prompt)` → `username` = the connection's settings username (may be
 ///   empty), `domain` = `None`, `secret` = `None` (the caller prompts).

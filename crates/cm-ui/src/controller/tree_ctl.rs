@@ -66,8 +66,8 @@ fn wire_toggle_conn_row(ctx: &Ctx) {
     });
 }
 
-/// P9.5 #2: a single click on a leaf connection row selects/highlights it
-/// (`ConnRow.selected`) rather than launching -- launching now needs a
+/// #2: a single click on a leaf connection row selects/highlights it
+/// (`ConnRow.selected`) rather than launching - launching now needs a
 /// double click (`wire_row_activated`, sessions.rs) or keyboard Enter
 /// (wired directly to `row-activated` at the AppWindow level, unchanged).
 /// Mirrors [`wire_toggle_conn_row`]'s idx -> flat-row -> mutate-tree ->
@@ -119,8 +119,8 @@ fn wire_new_connection(ctx: &Ctx) {
                 selected_group_idx,
                 rdp_domain: SharedString::from(""),
                 rdp_resolution: SharedString::from(default_rdp_resolution().as_str()),
-                // P9.6-A Phase C: a new connection starts in Reference mode
-                // (index 0 = "Inherit from group"), matching pre-P9.6 default
+                // a new connection starts in Reference mode
+                // (index 0 = "Inherit from group"), matching earlier default
                 // behavior exactly.
                 cred_mode: 0,
                 inline_password: SharedString::from(""),
@@ -160,13 +160,13 @@ fn wire_new_group(ctx: &Ctx) {
     });
 }
 
-/// P9.6-A mechanical fix: the credential-object id a connection points at
-/// directly (not counting group inheritance) -- what `Connection::credential:
+/// mechanical fix: the credential-object id a connection points at
+/// directly (not counting group inheritance) - what `Connection::credential:
 /// Option<CredentialId>` used to BE before it became `credential_source:
 /// Option<CredentialSource>`. `None` for every other source (inherit/Inline/
 /// Prompt), matching that field's old meaning exactly. Still what the
 /// Reference-mode dropdown itself resolves (`cred_name_idx`/
-/// `KeysPanel::resolve_effective`, `resolve_cred_from_idx`) -- Inline/Prompt
+/// `KeysPanel::resolve_effective`, `resolve_cred_from_idx`) - Inline/Prompt
 /// modes are handled alongside it via `cred_mode_fields`/
 /// `credential_source_from_form`, not by extending this helper's contract.
 pub(super) fn object_credential_id(source: &Option<CredentialSource>) -> Option<CredentialId> {
@@ -176,10 +176,10 @@ pub(super) fn object_credential_id(source: &Option<CredentialSource>) -> Option<
     }
 }
 
-/// P9.6-A Phase C: derives the mode-selector's `cred-mode` (0=Reference,
+/// derives the mode-selector's `cred-mode` (0=Reference,
 /// 1=Inline, 2=Prompt) plus the Inline-only username/domain overrides.
 /// `Inline`'s own `username`/`domain` are the model's authoritative source
-/// for those fields (`resolve_connection_auth`'s Decision 3) -- NOT
+/// for those fields (`resolve_connection_auth`'s) - NOT
 /// `conn.settings`, which `profile_fields_from_conn` already derived and
 /// which the caller overrides with these `Some(_)` values only when Inline.
 /// `has_secret` mirrors the enum's own flag; false for every other source.
@@ -228,8 +228,8 @@ fn wire_edit_conn(ctx: &Ctx) {
                 st.conn_tree.groups(),
             );
             let eff_name = KeysPanel::cred_display_name(eff_cred_id, st.keys_panel.credentials());
-            // P9.5 #6: the bound credential's own username, shown read-only
-            // next to its name (Reference mode only -- see `cred-mode == 0`
+            // #6: the bound credential's own username, shown read-only
+            // next to its name (Reference mode only - see `cred-mode == 0`
             // in profile_editor.slint).
             let eff_username = eff_cred_id
                 .and_then(|id| st.keys_panel.credentials().iter().find(|c| c.id == id))
@@ -253,7 +253,7 @@ fn wire_edit_conn(ctx: &Ctx) {
                 rdp_domain: SharedString::from(rdp_domain.as_str()),
                 rdp_resolution: SharedString::from(rdp_resolution.as_str()),
                 cred_mode,
-                // Never populate the actual secret -- only its presence.
+                // Never populate the actual secret - only its presence.
                 inline_password: SharedString::from(""),
                 inline_has_secret,
             };
@@ -294,7 +294,7 @@ fn wire_edit_group(ctx: &Ctx) {
     });
 }
 
-// P6.10 (gap 15): "Duplicate" from the tree context menu. Builds a fresh (id == 0)
+// "Duplicate" from the tree context menu. Builds a fresh (id == 0)
 // `Connection` cloned from `src`, ready for the exact same `upsert_connection` repo
 // call the profile editor's "New Connection" path already makes (form.id == 0 in
 // `wire_profile_save`) — no new repo/port surface, just a second UI-side caller of
@@ -306,11 +306,11 @@ pub(super) fn duplicate_connection(
     sort: i64,
     now: i64,
 ) -> Result<Connection, cm_core::DomainError> {
-    // P9.6-A: copy the credential source as-is for Object/Prompt/inherit --
+    // copy the credential source as-is for Object/Prompt/inherit -
     // unaffected by the new connection getting a fresh id. Inline is the one
     // exception: its secret lives in the keychain keyed to `src`'s OWN
     // connection id (`CredentialRef::for_connection`), which this pure
-    // mapping function has no store handle to copy -- so the duplicate keeps
+    // mapping function has no store handle to copy - so the duplicate keeps
     // the inline username/domain but reports `has_secret: false` here.
     // `wire_duplicate_conn_row` (this file) is the caller that DOES have a
     // store handle: it copies the actual secret and persists the corrected
@@ -341,9 +341,9 @@ pub(super) fn duplicate_connection(
 
 /// Follow-up to `duplicate_connection`'s deliberate `has_secret: false`
 /// (that pure mapping function has no store handle to copy the source's
-/// keychain secret -- see its doc comment): copies `conn:<src_id>:password`
+/// keychain secret - see its doc comment): copies `conn:<src_id>:password`
 /// to `conn:<new_id>:password`, then persists the corrected `has_secret`
-/// flag. Best-effort and non-fatal -- `conn` (already inserted by the
+/// flag. Best-effort and non-fatal - `conn` (already inserted by the
 /// caller) stays exactly as `duplicate_connection` left it on any failure
 /// here: a working duplicate whose password just needs to be re-entered,
 /// not a broken one. Only called when `src`'s source was Inline with a
@@ -433,14 +433,14 @@ fn wire_duplicate_conn_row(ctx: &Ctx) {
                 tracing::warn!("reload after duplicate failed: {e}");
             }
             refresh_conn_model(&st, &conn_model);
-            // P9.5 #6: a duplicated Object-credentialed connection bumps that
+            // #6: a duplicated Object-credentialed connection bumps that
             // credential's "used by N connections" badge.
             keys_ctl::refresh_cred_model(&st, &cred_model);
         }
     });
 }
 
-// P6.10 (gap 15, fix round 2)/P6.11: "Connect in split" from the tree context
+// (fix round 2)/: "Connect in split" from the tree context
 // menu (both the per-row ConnectionRow menu and the keyboard-Menu-key
 // tree-level menu route here). Defaults to a horizontal (side-by-side) split
 // — the same default a user reaches via Ctrl+Shift+\ / the "Split
@@ -572,7 +572,7 @@ fn wire_delete_conn_row(ctx: &Ctx) {
             }
             refresh_conn_model(&st, &conn_model);
             refresh_group_name_list(&st, &ui);
-            // P9.5 #6: deleting a connection may drop a credential's "used by
+            // #6: deleting a connection may drop a credential's "used by
             // N connections" count.
             keys_ctl::refresh_cred_model(&st, &cred_model);
         }
@@ -612,23 +612,23 @@ fn group_delete_impact(
 
 /// Item (d): after a save, should the connection's OLD Inline secret (if
 /// any) be deleted from the keychain? Only when it WAS Inline before this
-/// save AND is no longer Inline now -- staying Inline (even across a
+/// save AND is no longer Inline now - staying Inline (even across a
 /// blank/untouched password field) must never touch the keychain entry it
 /// still owns. Storage already deletes `conn:<id>:password` when the
-/// connection itself is deleted (P9.6-A Decision 2); this is specifically the
+/// connection itself is deleted; this is specifically the
 /// mode-switch case, which is cm-ui's to handle.
 pub(super) fn should_delete_inline_secret(old_was_inline: bool, new_cred_mode: i32) -> bool {
     old_was_inline && new_cred_mode != 1
 }
 
-/// P9.6-A Phase C: the `CredentialSource` to save, from the mode selector +
+/// the `CredentialSource` to save, from the mode selector +
 /// its mode-specific fields. `typed_password_present` is whether the caller's
 /// (already-captured, about-to-be-cleared) transient password field was
-/// non-empty -- true means "set/replace the stored secret", so `has_secret`
+/// non-empty - true means "set/replace the stored secret", so `has_secret`
 /// becomes true even for a connection that never had one; blank preserves
 /// whatever `had_secret` already said (loaded from the enum's own flag when
-/// the editor opened -- see `cred_mode_fields`). `domain` is Inline-only for
-/// RDP (SSH has no use for it, per the P9.6 non-goals) -- `is_rdp` gates it
+/// the editor opened - see `cred_mode_fields`). `domain` is Inline-only for
+/// RDP (SSH has no use for it, per the non-goals) - `is_rdp` gates it
 /// exactly like `profile_editor.slint`'s own Domain field.
 pub(super) fn credential_source_from_form(
     cred_mode: i32,
@@ -720,8 +720,8 @@ fn wire_profile_save(ctx: &Ctx) {
                     .map(|c| c.created_at)
                     .unwrap_or(now)
             };
-            // Item (d) handoff: was this connection Inline *before* this save?
-            // (`form.id == 0` -- a brand-new connection -- can't have been.)
+            // Item (d): was this connection Inline *before* this save?
+            // (`form.id == 0` - a brand-new connection - can't have been.)
             let old_was_inline = {
                 let st = state.borrow();
                 st.conn_tree.conn_by_id(form.id as i64).is_some_and(|c| {
@@ -777,7 +777,7 @@ fn wire_profile_save(ctx: &Ctx) {
                 }
             };
             // A newly typed Inline password overwrites the stored secret
-            // (keyed to the connection, never the SQLite row -- Decision 2).
+            // (keyed to the connection, never the SQLite row -).
             if effective_cred_mode == 1 && !typed_password.is_empty() {
                 let key_ref = CredentialRef::for_connection(saved_id, CredentialPurpose::Password);
                 if let Err(e) = secrets_ps.store(&key_ref, &Secret::from_string(typed_password)) {
@@ -805,8 +805,8 @@ fn wire_profile_save(ctx: &Ctx) {
             }
             refresh_conn_model(&st, &conn_model);
             refresh_group_name_list(&st, &ui);
-            // P9.5 #6: a save here may change which credential a connection
-            // directly references -- keep the Keys panel's "used by N
+            // #6: a save here may change which credential a connection
+            // directly references - keep the Keys panel's "used by N
             // connections" badges in sync.
             keys_ctl::refresh_cred_model(&st, &cred_model);
         }
@@ -826,7 +826,7 @@ fn wire_group_save(ctx: &Ctx) {
             // Reject any parent choice that would form a cycle: the chosen parent
             // must not be the group itself AND must not be any of its descendants.
             // (`is_ancestor_or_self` covers both: it returns true when
-            //  candidate == self and when candidate is reachable from self.)
+            // candidate == self and when candidate is reachable from self.)
             let parent_id = {
                 let st = state.borrow();
                 let resolved =
@@ -1023,22 +1023,22 @@ fn wire_reorder_group_row(ctx: &Ctx) {
     });
 }
 
-/// .99 GPU verify (real double-click investigation): this used to
+///.99 GPU verify (real double-click investigation): this used to
 /// unconditionally `remove(0)` every existing row then `push` every row of
-/// `flat` fresh, on EVERY call -- including the plain, non-structural
+/// `flat` fresh, on EVERY call - including the plain, non-structural
 /// `row-selected` refresh a single click triggers (`wire_select_conn_row`,
 /// above) to update the `selected` highlight. A `VecModel::remove`/`push`
 /// pair is a STRUCTURAL model mutation Slint's `for conn[idx] in
 /// connections: ConnectionRow {...}` repeater reacts to by destroying and
 /// recreating the row's component instance (including its `touch`
-/// TouchArea) -- so a plain single click on a row destroyed and rebuilt
+/// TouchArea) - so a plain single click on a row destroyed and rebuilt
 /// that exact row's own `touch` out from under the pointer as a SIDE EFFECT
 /// of merely selecting it. Slint's double-click detection tracks
 /// `click_count` by comparing the CURRENT click's hit item to the item the
 /// PREVIOUS click landed on (`i-slint-core`'s `send_mouse_event_to_item`);
 /// since the row's `touch` was a brand-new instance by the time the second
 /// click of a double-click landed, that comparison always failed, resetting
-/// `click_count` to 0 -- so `double-clicked` (P9.5 #2's launch gesture)
+/// `click_count` to 0 - so `double-clicked` ( #2's launch gesture)
 /// could never fire on a real pointer, even though headless element tests
 /// (which invoke `row-activated`/`row-selected` directly, bypassing Slint's
 /// click-count machinery entirely) never exercised this at all.
@@ -1046,7 +1046,7 @@ fn wire_reorder_group_row(ctx: &Ctx) {
 /// Fixed by diffing instead of blindly rebuilding: `set_row_data` at a
 /// stable index is a data-only update Slint's repeater applies to the
 /// EXISTING component instance in place (no destroy/recreate), which keeps
-/// `touch`'s identity stable across a plain selection change -- restoring
+/// `touch`'s identity stable across a plain selection change - restoring
 /// real-pointer double-click detection. Rows are only actually added/
 /// removed (a genuine structural change: connect/delete/duplicate/reorder/
 /// expand-collapse) at the tail, past whichever prefix already matches.
@@ -1074,17 +1074,17 @@ pub(super) fn refresh_conn_model(state: &State, conn_model: &Rc<VecModel<ConnRow
     }
 }
 
-/// P9.10 #4: `ConnRow.status` used to be hardcoded `"disconnected"` at
-/// construction (`tree::ConnTree::make_conn_row`) and never touched again --
+/// #4: `ConnRow.status` used to be hardcoded `"disconnected"` at
+/// construction (`tree::ConnTree::make_conn_row`) and never touched again -
 /// an inert dot the user correctly flagged ("we have the connection status
 /// pill on the navbar... but they don't really do anything"). Overlays the
 /// row with the BEST live tab's status for that connection id (precedence
 /// connected > connecting > whatever `make_conn_row` already set), via the
 /// same `Tab::origin_connection_id` reverse-lookup the tab context menu's
-/// "Duplicate" (P9.10 #1) and the ErrorOverlay's "Edit…" button already rely
+/// "Duplicate" ( #1) and the ErrorOverlay's "Edit…" button already rely
 /// on for the opposite direction (tab -> connection). Multiple tabs can
 /// share one `origin_connection_id` (e.g. Duplicate, or two tree launches of
-/// the same saved connection) -- connected wins over connecting, matching
+/// the same saved connection) - connected wins over connecting, matching
 /// "this connection has SOME live session" being the more useful signal than
 /// any single tab's state.
 fn overlay_live_status(state: &State, mut row: ConnRow) -> ConnRow {
@@ -1099,7 +1099,7 @@ fn overlay_live_status(state: &State, mut row: ConnRow) -> ConnRow {
         match tab.session.status() {
             SessionStatus::Connected => {
                 best = Some("connected");
-                break; // Nothing outranks "connected" -- stop looking.
+                break; // Nothing outranks "connected" - stop looking.
             }
             SessionStatus::Connecting if best.is_none() => best = Some("connecting"),
             _ => {}
@@ -1112,9 +1112,9 @@ fn overlay_live_status(state: &State, mut row: ConnRow) -> ConnRow {
 }
 
 /// The minimal sequence of `VecModel` operations to turn `old` into `new`.
-/// `SetRowData` (index unchanged, data updated in place -- Slint's repeater
+/// `SetRowData` (index unchanged, data updated in place - Slint's repeater
 /// reuses the existing component instance) is always preferred over
-/// `Push`/`RemoveLast` (structural -- destroys/recreates it) for any index
+/// `Push`/`RemoveLast` (structural - destroys/recreates it) for any index
 /// present in both; only a genuine length change adds/removes at the tail.
 #[derive(Debug, PartialEq)]
 enum RowOp {
@@ -1161,7 +1161,7 @@ pub(super) fn refresh_group_name_list(state: &State, ui: &AppWindow) {
 
 /// Map a 1-based dropdown index back to the corresponding [`GroupId`].
 ///
-/// Index 0 (the "Root" sentinel) returns `None`.  An out-of-bounds index also
+/// Index 0 (the "Root" sentinel) returns `None`. An out-of-bounds index also
 /// returns `None` (safe degradation to root).
 pub(super) fn group_id_from_name_idx(idx: i32, groups: &[Group]) -> Option<GroupId> {
     if idx <= 0 {
@@ -1215,7 +1215,7 @@ pub(super) fn is_ancestor_or_self(
 /// Returns `(kind, host, port, username, auth_method, rdp_domain, rdp_resolution)`.
 /// `rdp_domain`/`rdp_resolution` are only meaningful for `kind == 1` (RDP);
 /// SSH/Local return them empty/default since the editor hides those fields
-/// for those kinds (P7.2, gap #2).
+/// for those kinds (gap #2).
 pub(super) fn profile_fields_from_conn(
     conn: &Connection,
 ) -> (i32, String, String, String, i32, String, String) {
@@ -1264,7 +1264,7 @@ pub(super) fn profile_fields_from_conn(
 }
 
 /// Default "WIDTHxHEIGHT" string shown/stored when a form has never had an
-/// RDP resolution set -- matches QuickConnectForm's default (screens/dialogs.slint).
+/// RDP resolution set - matches QuickConnectForm's default (screens/dialogs.slint).
 pub(super) fn default_rdp_resolution() -> String {
     format!(
         "{}x{}",
@@ -1342,7 +1342,7 @@ mod tests {
 
     use super::*;
 
-    // ── .99 GPU verify: refresh_conn_model's diff (double-click fix) ──────
+    // ──.99 GPU verify: refresh_conn_model's diff (double-click fix) ──────
 
     fn conn_row(id: i32, label: &str, selected: bool) -> ConnRow {
         ConnRow {
@@ -1368,7 +1368,7 @@ mod tests {
     fn diff_conn_rows_produces_only_set_row_data_when_only_selection_changes() {
         // The double-click regression's whole fix: a plain row-selected
         // refresh (nothing added/removed/reordered, just two rows' `selected`
-        // flags flipping) must produce ONLY SetRowData ops -- never a
+        // flags flipping) must produce ONLY SetRowData ops - never a
         // Push/RemoveLast, which would destroy and recreate the row's
         // `touch` TouchArea and break Slint's real-pointer double-click
         // detection (see `refresh_conn_model`'s doc comment for the full
@@ -1470,7 +1470,7 @@ mod tests {
         assert!(matches!(auth, SshAuthInput::Agent));
     }
 
-    // P6.10 (gap 15): the tree context menu's "Duplicate" item and
+    // the tree context menu's "Duplicate" item and
     // `wire_duplicate_conn_row` share this exact mapping — this is the one piece of
     // genuinely new (if tiny) UI-orchestration logic the context-menu task adds, so
     // it gets a real test per CONVENTIONS §2 ("tests accompany behavior").
@@ -1510,9 +1510,9 @@ mod tests {
     #[test]
     fn duplicate_connection_inline_reports_no_secret_on_the_copy() {
         // The pure mapping function has no store handle to copy the actual
-        // keychain secret -- `has_secret` starts false regardless of the
-        // source's own flag. `copy_inline_secret_on_duplicate` (the caller's
-        // follow-up, tested below) is what corrects it after a real copy.
+        // keychain secret - `has_secret` starts false regardless of the
+        // source's own flag. `copy_inline_secret_on_duplicate` corrects it
+        // after a real copy.
         let src = Connection::new(
             ConnectionId::new(5),
             None,
@@ -1547,9 +1547,9 @@ mod tests {
         );
     }
 
-    // -- copy_inline_secret_on_duplicate ---------------------------------------
+    // copy_inline_secret_on_duplicate - -------------------------------------
 
-    /// Minimal `(service, account) -> bytes` `CredentialStore` double -- just
+    /// Minimal `(service, account) -> bytes` `CredentialStore` double - just
     /// enough to prove `copy_inline_secret_on_duplicate` actually reads the
     /// source key and writes the destination key, without pulling in a real
     /// OS keychain.
@@ -1686,7 +1686,7 @@ mod tests {
         )
         .unwrap();
         let src_id = repo.upsert_connection(&src).expect("insert source");
-        // Nothing actually stored under `src_id`'s key -- a real-world
+        // Nothing actually stored under `src_id`'s key - a real-world
         // "has_secret said true but the keychain entry is gone" edge case.
         let store = MapStore::new();
 
@@ -1725,7 +1725,7 @@ mod tests {
     }
 
     // Baseline ConnProfile builder for the settings_from_form/profile_fields_from_conn
-    // tests below -- keeps each test focused on the field(s) it actually varies.
+    // tests below - keeps each test focused on the field(s) it actually varies.
     fn base_profile_form() -> ConnProfile {
         ConnProfile {
             id: 0,
@@ -1788,7 +1788,7 @@ mod tests {
         ));
     }
 
-    // ── P7.2: RDP-kind field manifest / default port mapping ────────────────
+    // ──: RDP-kind field manifest / default port mapping ────────────────
 
     #[test]
     fn rdp_kind_defaults_to_port_3389_on_garbage() {
@@ -1876,7 +1876,7 @@ mod tests {
         assert_eq!(rdp_resolution, "1024x768");
     }
 
-    // -- group name list helpers ---------------------------------------------
+    // group name list helpers - -------------------------------------------
 
     fn make_group(id: i64, sort: i64, name: &str) -> Group {
         Group {
@@ -1954,7 +1954,7 @@ mod tests {
         }
     }
 
-    // -- is_ancestor_or_self ---------------------------------------------------
+    // is_ancestor_or_self - -------------------------------------------------
 
     #[test]
     fn ancestor_self_is_detected() {
@@ -2021,7 +2021,7 @@ mod tests {
         ));
     }
 
-    // -- cred_mode_fields / credential_source_from_form (P9.6-A Phase C) ------
+    // cred_mode_fields / credential_source_from_form - ----
 
     #[test]
     fn cred_mode_fields_none_and_object_are_reference_mode() {
@@ -2055,7 +2055,7 @@ mod tests {
 
     #[test]
     fn credential_source_from_form_reference_mode_maps_dropdown_selection() {
-        // mode 0 (Reference): same as pre-P9.6-A -- `None` selection means
+        // mode 0 (Reference): same as earlier - `None` selection means
         // inherit, `Some(id)` an explicit Object.
         assert_eq!(
             credential_source_from_form(0, None, "", "", false, false, false),
@@ -2085,7 +2085,7 @@ mod tests {
 
     #[test]
     fn credential_source_from_form_inline_ssh_never_carries_a_domain() {
-        // Domain is RDP-only, per the P9.6 non-goals -- `is_rdp: false` drops
+        // Domain is RDP-only, per the non-goals - `is_rdp: false` drops
         // even a non-empty typed domain.
         let source = credential_source_from_form(1, None, "bob", "CORP", false, true, false);
         assert_eq!(
@@ -2141,7 +2141,7 @@ mod tests {
         );
     }
 
-    // -- should_delete_inline_secret (item d) ----------------------------------
+    // should_delete_inline_secret -------------------------------------------
 
     #[test]
     fn should_delete_inline_secret_switching_away_from_inline() {
@@ -2151,7 +2151,7 @@ mod tests {
 
     #[test]
     fn should_delete_inline_secret_staying_inline_never_deletes() {
-        // Even across a blank/untouched password field on this save -- the
+        // Even across a blank/untouched password field on this save - the
         // keychain entry it already owns must survive.
         assert!(!should_delete_inline_secret(true, 1));
     }

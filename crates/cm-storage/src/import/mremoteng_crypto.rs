@@ -1,4 +1,4 @@
-//! mRemoteNG per-field AES-256-GCM decryption (P9.4).
+//! mRemoteNG per-field AES-256-GCM decryption.
 //!
 //! mRemoteNG (ConfVersion ≥ 2.6, `BlockCipherMode="GCM"` — the default and the
 //! only mode this MVP supports; see `mremoteng.rs`'s module doc for the
@@ -7,7 +7,7 @@
 //!
 //! 1. `blob = base64_decode(value)`.
 //! 2. `salt = blob[0..16]`, `nonce = blob[16..32]` (**16 bytes — not the
-//!    usual 12**), `ct_and_tag = blob[32..]` (ciphertext with the 16-byte GCM
+//!    usual 12), `ct_and_tag = blob[32..]` (ciphertext with the 16-byte GCM
 //!    tag appended).
 //! 3. `key = PBKDF2-HMAC-SHA1(password, salt, iterations, dklen = 32)`
 //!    (AES-256 key size). `iterations` comes from the document's
@@ -18,14 +18,14 @@
 //! This matches the widely-used `mremoteng_decrypt`-style reference tools
 //! (e.g. github.com/haseebT/mRemoteNG-Decrypt, github.com/gquere/mRemoteNG_password_decrypt).
 //!
-//! **RustCrypto gotcha:** the crate's default [`aes_gcm::Aes256Gcm`] alias is
+//! RustCrypto gotcha: the crate's default [`aes_gcm::Aes256Gcm`] alias is
 //! a 12-byte-nonce instantiation and will reject mRemoteNG's 16-byte nonce
 //! (wrong-length nonce is a hard `aead` error, not silent truncation) — this
 //! module uses the nonce-size-generic form, [`Cipher`], instantiated with
 //! [`aes_gcm::aead::consts::U16`] instead.
 //!
 //! Never logs a password (encryption or decrypted), key, salt, or nonce byte
-//! — see the P9.8 §3 secret-safety checklist; only lengths/booleans/error
+//! — see the §3 secret-safety checklist; only lengths/booleans/error
 //! variants are fit to log, and this module doesn't log at all (the caller,
 //! `mremoteng.rs`, logs skip/warning *reasons*, never values).
 

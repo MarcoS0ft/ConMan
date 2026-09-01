@@ -2,9 +2,7 @@
 //!
 //! Purpose: on Windows, embed ConMan's application icon in the executable and
 //! place `ghostty-vt.dll` next to the produced `conman.exe` automatically, so
-//! `cargo run`/`cargo build` "just work" with no manual packaging step (and no
-//! risk of the historical clobber bug where the exe was overwritten by a
-//! copy).
+//! `cargo run`/`cargo build` "just work" with no manual packaging step.
 //!
 //! Background: `libghostty-vt-sys` links the engine **statically** on Linux/macOS
 //! (`libghostty-vt.a`), so there is no runtime library to ship there — this
@@ -14,7 +12,7 @@
 //! under its own name (never onto `conman.exe`).
 //!
 //! Ordering + discovery: `conman` declares `libghostty-vt-sys` as a
-//! **build-dependency** purely so this script runs *after* the engine's native
+//! build-dependency** purely so this script runs *after* the engine's native
 //! build and receives its `links` metadata. The `-sys` crate exports its install
 //! `include` directory as `cargo:include`, surfaced here as
 //! `DEP_GHOSTTY_VT_INCLUDE`; the DLL sits in the sibling `bin/` directory. If

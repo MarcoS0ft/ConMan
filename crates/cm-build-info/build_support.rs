@@ -35,7 +35,7 @@ impl RepositorySnapshot {
                 .and_then(|count| count.parse().ok()),
             // Git status includes untracked, non-ignored files by default. This
             // is important for newly added product resources while naturally
-            // excluding target/ and docs/devel/ via .gitignore.
+            // excluding target/ and docs/devel/ via.gitignore.
             dirty: git_text(
                 workspace,
                 &["status", "--porcelain=v1", "--untracked-files=normal"],

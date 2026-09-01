@@ -5,7 +5,7 @@
 //! stderr `tracing_subscriber` layer should emit ANSI color codes. Without
 //! this check, a legacy Windows console (e.g. Server 2022's default conhost,
 //! which does not enable VT processing by default) prints raw escape-code
-//! literals instead of color — `tracing_subscriber`'s `fmt::layer()` defaults
+//! literals instead of color — `tracing_subscriber`'s `fmt::layer` defaults
 //! to ANSI **on** with no terminal detection of its own.
 //!
 //! - **Redirected stderr (file/pipe)**: always `false` — there's no terminal
@@ -91,14 +91,10 @@ pub fn stderr_supports_ansi() -> bool {
 
 /// Enables `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the stderr console handle.
 ///
-/// **Compile- and runtime-UNVERIFIED in this task**: this agent's environment
-/// has only the `x86_64-unknown-linux-gnu` Rust target installed, so this
-/// `cfg`-gated function is never parsed by `cargo build`/`cargo check` here,
-/// and there is no Windows host to run it on. Written carefully against the
-/// vendored `windows` 0.62 crate source (`Win32::System::Console`'s generated
-/// bindings for `GetStdHandle`/`GetConsoleMode`/`SetConsoleMode`) — a Windows
-/// build/run is required to confirm it actually compiles and behaves as
-/// documented.
+/// Uses the generated `windows` 0.62 bindings for
+/// `Win32::System::Console::{GetStdHandle, GetConsoleMode, SetConsoleMode}`.
+/// The implementation is compiled only on Windows and requires a Windows
+/// build to exercise.
 #[cfg(windows)]
 fn enable_vt_stderr() -> bool {
     use windows::Win32::System::Console::{
@@ -107,7 +103,7 @@ fn enable_vt_stderr() -> bool {
     };
     // SAFETY: `GetStdHandle`/`GetConsoleMode`/`SetConsoleMode` are simple
     // Win32 calls taking a process-standard handle and stack-local
-    // in/out-params that outlive this synchronous sequence -- no aliasing,
+    // in/out-params that outlive this synchronous sequence - no aliasing,
     // no retained pointers.
     unsafe {
         let Ok(handle) = GetStdHandle(STD_ERROR_HANDLE) else {
@@ -134,7 +130,7 @@ mod tests {
         // under `cargo test`, a real terminal, headless CI, etc.), this must
         // return a bool, never panic. The actual value is runtime-dependent
         // (test harnesses typically redirect stderr, so `false` is the
-        // expected/common result here) -- not asserted either way.
+        // expected/common result here) - not asserted either way.
         let _ = stderr_supports_ansi();
     }
 

@@ -1,44 +1,30 @@
-//! P7.1: automatic software-renderer fallback so `conman` renders instead of
+//! Automatic software-renderer fallback so `conman` renders instead of
 //! dying on a host with no usable hardware OpenGL (e.g. the win11-dev VM,
-//! which only has OpenGL 1.1 / no real GPU driver -- `conman.exe` used to
+//! which only has OpenGL 1.1 / no real GPU driver - `conman.exe` used to
 //! crash on GL init unless the user manually set `SLINT_BACKEND=software`).
 //!
 //! ## Why a self-probe subprocess, not `BackendSelector` or catch-unwind
 //!
-//! See `docs/devel/memos/P7.1-backend-fallback.md` for the full write-up;
-//! summary of why the obvious-looking alternatives don't work:
+//! `BackendSelector` only chooses the backend and renderer. The GL context and
+//! shaders are created later, when the window is shown and the event loop is
+//! running, so successful selection does not prove that acceleration works.
+//! Slint's platform can also only be selected once per process, which rules
+//! out selecting acceleration and then retrying with software rendering.
 //!
-//! - `slint::BackendSelector::select()` only decides *which* backend/renderer
-//!   code path gets activated. It does not create a GL context or compile a
-//!   single shader -- that happens lazily, later, when the window is actually
-//!   shown and the event loop runs. So `select()` succeeding proves nothing
-//!   about whether the accelerated path will actually work.
-//! - `i_slint_core::platform::set_platform` (which `select()` calls) can only
-//!   succeed **once per process** (`SetPlatformError::AlreadySet` after
-//!   that). So even if we could detect the GL failure in-process, we could
-//!   not turn around and re-select the software renderer in the same
-//!   process.
-//! - Catching the failure with `std::panic::catch_unwind` around the whole
-//!   UI run and then retrying in-process runs into the same one-shot
-//!   `set_platform` wall, and would also require reconstructing `AppConfig`
-//!   (its `mpsc::Receiver` from the single-instance guard is not `Clone` and
-//!   would have been dropped mid-unwind). Relaunching a *new* process instead
-//!   collides with the single-instance lock: `InstanceGuard::listen()` moves
-//!   the bound loopback listener onto a background thread that outlives a
-//!   caught panic on the main thread, so a same-process relaunch would see
-//!   its own still-running parent as "already running" and exit doing
-//!   nothing. And a hard OS-level crash (e.g. an access violation from a
-//!   broken driver) isn't a Rust panic at all -- `catch_unwind` can't catch
-//!   it regardless.
+//! Catching a panic around the UI is not a substitute: a broken graphics
+//! driver may terminate the process without a Rust panic, and an in-process
+//! retry would still encounter Slint's one-shot platform selection. A
+//! disposable subprocess provides fresh platform state and contains hard
+//! driver failures without disturbing the primary process.
 //!
 //! Instead, before initializing Slint or acquiring the single-instance lock,
 //! `conman` spawns a disposable, side-effect-free copy of itself
 //! ([`run_probe_child`]) that does nothing but create a
-//! trivial window and run it through the exact same `show()` +
-//! `run_event_loop()` sequence the real app uses (see the generated
-//! `ComponentHandle::run()` that `cm_ui::run` calls). If that child exits
-//! abnormally -- covering both a caught panic *and* a hard crash, since
-//! either way the OS reports a non-success exit status -- the software
+//! trivial window and run it through the exact same `show` +
+//! `run_event_loop` sequence the real app uses (see the generated
+//! `ComponentHandle::run` that `cm_ui::run` calls). If that child exits
+//! abnormally - covering both a caught panic *and* a hard crash, since
+//! either way the OS reports a non-success exit status - the software
 //! renderer is forced for the real run that follows in this (parent)
 //! process, which still has its one-and-only `set_platform` call unused.
 //!
@@ -47,8 +33,8 @@
 //! gates (which set `winit-femtovg` / `software`) are unaffected.
 //!
 //! [`resolve`] (which may call `force_software_backend`'s `unsafe
-//! std::env::set_var`) must run **before** `logging::init()` -- see
-//! `force_software_backend`'s doc comment for why -- so the decision is
+//! std::env::set_var`) must run **before** `logging::init` - see
+//! `force_software_backend`'s doc comment for why - so the decision is
 //! carried across that call as a [`RendererDecision`] and only logged
 //! afterward, by [`log_decision`].
 
@@ -58,7 +44,7 @@ use std::time::{Duration, Instant};
 use cm_core::RendererBackend;
 
 /// Set (to any value) on the disposable probe child so `main` takes the
-/// minimal probe branch instead of the real startup path. Internal only --
+/// minimal probe branch instead of the real startup path. Internal only -
 /// never documented for end users.
 pub(crate) const PROBE_ENV_VAR: &str = "CONMAN_RENDER_PROBE_CHILD";
 
@@ -81,7 +67,7 @@ slint::slint! {
 }
 
 /// Entry point for the disposable probe child. `main` dispatches here, before
-/// anything else, when [`PROBE_ENV_VAR`] is set -- no logging subscriber, no
+/// anything else, when [`PROBE_ENV_VAR`] is set - no logging subscriber, no
 /// single-instance guard, no storage, no keyring: this process exists only to
 /// answer "does the accelerated renderer come up here?" via its exit status.
 pub(crate) fn run_probe_child() -> ExitCode {
@@ -151,15 +137,14 @@ fn probe() -> ProbeOutcome {
 /// # Safety
 /// `std::env::set_var` is `unsafe` because mutating the environment races
 /// with any other thread reading it. This is only ever called from
-/// [`resolve`], which `main` calls **before** `logging::init()` (which, in
+/// [`resolve`], which `main` calls **before** `logging::init` (which, in
 /// release builds, spawns a background log-appender thread) and before any
 /// unrestricted worker exists. The sole concurrent worker is the
 /// single-instance responder started by the composition root; its audited
 /// loop performs only bounded socket I/O, tracing, and mpsc sends and never
 /// reads or mutates the environment. Therefore no concurrent environment
-/// access can race this mutation (CONVENTIONS §2 unsafe-usage rule; see also
-/// `docs/devel/memos/P7.1-backend-fallback.md`). Do not call this after other
-/// workers are allowed to start -- that would break the invariant.
+/// access can race this mutation. Do not call this after other
+/// workers are allowed to start - that would break the invariant.
 fn force_software_backend() {
     #[allow(unsafe_code)] // see the doc comment above for the upheld invariant
     unsafe {
@@ -167,7 +152,7 @@ fn force_software_backend() {
     }
 }
 
-/// The renderer decision made by [`resolve`], carried across `logging::init()`
+/// The renderer decision made by [`resolve`], carried across `logging::init`
 /// so [`log_decision`] can report it once a subscriber exists.
 pub(crate) enum RendererDecision {
     /// The user set `SLINT_BACKEND` themselves; honored verbatim.
@@ -175,7 +160,7 @@ pub(crate) enum RendererDecision {
     /// An explicit `renderer-backend` preference from `conman.ini`.
     Configured(RendererBackend),
     /// A previously-persisted backend was honored from machine-local state, so
-    /// the probe was skipped this launch (P7.1 cont.). Carries the backend
+    /// the probe was skipped this launch. Carries the backend
     /// string ("software" | "accelerated"). For "software" the fallback has
     /// already been forced inside [`resolve`]; "accelerated" needs nothing set
     /// (it is Slint's default).
@@ -190,12 +175,12 @@ pub(crate) enum RendererDecision {
     FallbackForced(String),
 }
 
-/// Decides the renderer for the real run and -- if a fallback is needed --
+/// Decides the renderer for the real run and - if a fallback is needed -
 /// applies it immediately, by forcing `SLINT_BACKEND=software` in this
 /// process's environment.
 ///
 /// Must run before any Slint API is used in this process, and **before**
-/// `logging::init()`: forcing the fallback needs `std::env::set_var`, which
+/// `logging::init`: forcing the fallback needs `std::env::set_var`, which
 /// is only sound while no concurrent thread can access the environment (see
 /// `force_software_backend`'s doc comment). Returns the decision for
 /// [`log_decision`] to report once logging is up.
@@ -237,7 +222,7 @@ pub(crate) fn resolve(
                 force_software_backend();
                 return RendererDecision::Cached(RendererBackend::Software);
             }
-            // "accelerated" is Slint's default, so nothing to set -- just skip
+            // "accelerated" is Slint's default, so nothing to set - just skip
             // the probe.
             Some(RendererBackend::Accelerated) => {
                 return RendererDecision::Cached(RendererBackend::Accelerated);
@@ -263,8 +248,7 @@ pub(crate) fn resolve(
 /// enters this cache. Returns `None` when nothing should be written.
 ///
 /// This is the single source of truth for the two safety invariants `main`
-/// must uphold (pulled out of `main` itself so they're unit-testable, P7.1
-/// cont. hardening):
+/// must uphold (pulled out of `main` so they are unit-testable):
 ///
 /// - A probe that comes up [`RendererDecision::Accelerated`] is **never**
 ///   auto-persisted as "accelerated" — carrying that to a GPU-less machine
@@ -299,7 +283,7 @@ pub(crate) fn persist_decision(
 }
 
 /// Logs the decision [`resolve`] already made and applied, via `tracing`
-/// (P7.1 requirements 2-3). Call immediately after `logging::init()`.
+/// Call immediately after `logging::init`.
 pub(crate) fn log_decision(decision: &RendererDecision) {
     match decision {
         RendererDecision::ExplicitEnv(explicit) => {
@@ -367,7 +351,7 @@ mod tests {
     }
 
     /// The probe child must actually take the minimal branch and never fall
-    /// through into the real app's storage/keyring/UI startup -- exercised
+    /// through into the real app's storage/keyring/UI startup - exercised
     /// indirectly via `main`'s dispatch, but the constant itself must not
     /// collide with anything a user would plausibly set.
     #[test]
@@ -377,18 +361,18 @@ mod tests {
     }
 
     /// A healthy probe run (this test binary is not the `conman` binary, so
-    /// `current_exe()` here is the test harness -- but running an arbitrary
+    /// `current_exe` here is the test harness - but running an arbitrary
     /// executable that exits 0 with no `PROBE_ENV_VAR` handling still proves
     /// the spawn/wait/classify machinery works end to end without needing
     /// the real `conman` binary or a display).
     #[test]
     fn probe_classifies_a_process_that_never_touches_the_env_var_as_accelerated() {
-        // `probe()` always spawns `current_exe()`, which for `cargo test` is
+        // `probe` always spawns `current_exe`, which for `cargo test` is
         // the test binary itself, re-run with PROBE_ENV_VAR set. The test
         // binary doesn't understand that var, so it just re-runs the whole
         // test suite (recursion). To keep this test cheap and deterministic
         // it directly exercises the wait/classify loop against a trivial
-        // child instead of `probe()`'s `current_exe()` path.
+        // child instead of `probe`'s `current_exe` path.
         let mut child = child_that_exits(0)
             .spawn()
             .expect("the platform command interpreter must exist for this test");
@@ -417,16 +401,14 @@ mod tests {
         assert!(!status.success());
     }
 
-    // ── P7.1 cont.: persisted-backend cache precedence ───────────────────
-    //
     // These exercise `resolve`, which mutates *process-global* env vars
     // (`SLINT_BACKEND`, via `force_software_backend`). To avoid cross-test env
     // races they live in a SINGLE `#[test]` fn (so their steps run
     // sequentially, never in parallel with each other) that saves and restores
     // the two env vars it touches.
     //
-    // The reprobe step drives `resolve` down the real `probe()` path, which
-    // spawns `current_exe()` (this test binary) with `PROBE_ENV_VAR` set. The
+    // The reprobe step drives `resolve` down the real `probe` path, which
+    // spawns `current_exe` (this test binary) with `PROBE_ENV_VAR` set. The
     // guard at the top mirrors what the real `main` does with that var
     // (dispatch away before doing real work): when this fn is re-entered inside
     // the spawned probe child it returns immediately, so the probe cannot
@@ -521,15 +503,13 @@ mod tests {
         set_env("CONMAN_RENDER_REPROBE", saved_reprobe.as_deref());
     }
 
-    // ── P7.1 cont.: `persist_decision` — the pure persist-policy fn ──────────
-    //
     // No env mutation, no subprocess, no I/O: these run in any order, in
     // parallel with everything else in this module.
 
     #[test]
     fn persist_decision_never_persists_a_fresh_accelerated_probe() {
         // The headline safety invariant: a probe that comes up Accelerated
-        // must NEVER be persisted -- that's exactly what would crash a
+        // must NEVER be persisted - that's exactly what would crash a
         // GPU-less machine that later imports/inherits this DB.
         assert_eq!(persist_decision(&RendererDecision::Accelerated, None), None);
         assert_eq!(
@@ -573,9 +553,9 @@ mod tests {
 
     #[test]
     fn persist_decision_clears_a_stale_software_cache_on_reprobe_accelerated() {
-        // Only reachable via CONMAN_RENDER_REPROBE (see resolve()'s cache
+        // Only reachable via CONMAN_RENDER_REPROBE (see resolve's cache
         // precedence): a stale "software" pin, reprobed, now comes up
-        // Accelerated -- clear the cache to "auto" so future launches probe
+        // Accelerated - clear the cache to "auto" so future launches probe
         // fresh instead of staying stuck in software.
         assert_eq!(
             persist_decision(

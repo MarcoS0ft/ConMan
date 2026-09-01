@@ -1,4 +1,4 @@
-//! ConMan's own CSV interchange-format importer (P9.3).
+//! ConMan's own CSV interchange-format importer.
 //!
 //! Unlike RoyalTS/mRemoteNG, this is not a foreign product's export format —
 //! it's an interchange schema ConMan owns, designed for hand-authored or
@@ -6,8 +6,8 @@
 //! importer in this module: parse into an in-memory [`ExportEnvelope`], then
 //! hand it to the existing, unmodified [`crate::json_io::import`] seam.
 //!
-//! Uses the `csv` crate (memos/P9.3-csv-dep.md) rather than a hand-rolled
-//! splitter: RFC 4180 quoting/escaping is needed for `ssh_private_key_pem`,
+//! Uses the `csv` crate rather than a hand-rolled splitter: RFC 4180
+//! quoting/escaping is needed for `ssh_private_key_pem`,
 //! which is expected to carry a multi-line PEM block, and
 //! [`::csv::StringRecord::position`] gives an exact source line number for
 //! free — used verbatim as the "row N" in every [`ImportWarning`].
@@ -60,14 +60,14 @@
 //!   by secret material on any row simply resolves to no credential (never a
 //!   hard error — the connection still imports, just without one).
 //!
-//!   Without `cred_name`, a row's own secret material (P9.6 decision 5)
-//!   becomes: **`CredentialSource::Inline`** when the row is password-auth
-//!   (genuinely per-row, unshared — the whole point of Inline), carrying
-//!   `username`/`domain` on the source itself and the secret as a
-//!   connection-scoped [`crate::json_io::ExportedConnectionSecret`]; or
-//!   **still `CredentialSource::Object`** when the row is key-auth — Inline
-//!   is password-only (no key-material field), so an SSH key must stay a
-//!   `Credential{SshKey}` + `ExportedSecret(ssh-key)` regardless of sharing.
+//! Without `cred_name`, a row's own secret material
+//! becomes: **`CredentialSource::Inline`** when the row is password-auth
+//! (genuinely per-row, unshared — the whole point of Inline), carrying
+//! `username`/`domain` on the source itself and the secret as a
+//! connection-scoped [`crate::json_io::ExportedConnectionSecret`]; or
+//! still `CredentialSource::Object`** when the row is key-auth — Inline
+//! is password-only (no key-material field), so an SSH key must stay a
+//! `Credential{SshKey}` + `ExportedSecret(ssh-key)` regardless of sharing.
 //! - `username`/`domain` land on the **connection's** settings (unchanged);
 //!   an `Object` credential (shared `cred_name` or a per-row key) also
 //!   carries `username` so it's still authoritative post-assignment (mirrors
@@ -167,9 +167,7 @@ pub fn parse(contents: &str) -> Result<(ExportEnvelope, Vec<ImportWarning>), Imp
     Ok((envelope, ctx.warnings))
 }
 
-// ---------------------------------------------------------------------------
 // Parse state
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct ParseCtx {
@@ -177,7 +175,7 @@ struct ParseCtx {
     credentials: Vec<Credential>,
     credential_secrets: Vec<ExportedSecret>,
     connections: Vec<Connection>,
-    /// P9.6 decision 5: a no-`cred_name`, password-auth row's secret lands
+    /// a no-`cred_name`, password-auth row's secret lands
     /// here (Inline, connection-scoped) instead of in `credential_secrets` —
     /// see [`resolve_row_credential`].
     connection_secrets: Vec<ExportedConnectionSecret>,
@@ -211,9 +209,7 @@ impl ParseCtx {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Field access
-// ---------------------------------------------------------------------------
 
 /// Looks up `name` (case-insensitive) in `rec` via the header index; a
 /// missing column, a missing cell, or a blank (whitespace-only) value are all
@@ -230,7 +226,7 @@ fn field(idx: &HeaderIndex, rec: &::csv::StringRecord, name: &str) -> Option<Str
 
 /// The 1-based source line number for `rec`, used in every "row N" warning.
 ///
-/// The csv crate's tracked `line()` differs between LF and CRLF input after a
+/// The csv crate's tracked `line` differs between LF and CRLF input after a
 /// multi-line quoted record. Its byte offset is stable, so count newline bytes
 /// before the record instead. This keeps diagnostics tied to the user's real
 /// source line on every platform. Falls back to the record index only when the
@@ -264,9 +260,7 @@ fn parse_or<T: std::str::FromStr>(raw: Option<&str>, default: T) -> T {
         .unwrap_or(default)
 }
 
-// ---------------------------------------------------------------------------
 // Secret-material classification (shared by both passes)
-// ---------------------------------------------------------------------------
 
 /// Determines what (if any) secret material a row supplies, from its own
 /// `auth_method`/`password`/`ssh_private_key_pem`/`ssh_passphrase` columns.
@@ -320,9 +314,7 @@ fn push_secrets(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Pass 1: `cred_name` credential dedupe
-// ---------------------------------------------------------------------------
 
 fn collect_credentials(records: &[::csv::StringRecord], idx: &HeaderIndex, ctx: &mut ParseCtx) {
     for rec in records {
@@ -368,9 +360,7 @@ fn collect_credentials(records: &[::csv::StringRecord], idx: &HeaderIndex, ctx: 
     }
 }
 
-// ---------------------------------------------------------------------------
 // Pass 2: group tree + connections
-// ---------------------------------------------------------------------------
 
 fn walk_rows(
     contents: &str,
@@ -417,7 +407,7 @@ fn ensure_group_path(ctx: &mut ParseCtx, path: &str) -> Option<GroupId> {
 }
 
 /// What a row's own credential resolution produced: an already-registered
-/// (shared or per-row) credential **object**, or — P9.6 decision 5 — a
+/// (shared or per-row) credential **object**, or — — a
 /// genuinely per-row password whose plaintext is pushed as an Inline
 /// connection-secret once the connection's synthetic id is known (mirrors
 /// `mremoteng.rs`'s `push_connection`).
@@ -582,7 +572,7 @@ fn process_row(row_num: u64, rec: &::csv::StringRecord, idx: &HeaderIndex, ctx: 
         cred_name.as_deref(),
         &name,
     );
-    // P9.6 decision 5: a shared cred_name / key-bearing row stays an Object
+    // a shared cred_name / key-bearing row stays an Object
     // reference; a genuinely per-row password (no cred_name) becomes Inline,
     // carrying username/domain on the source itself (authoritative, per
     // `resolve_connection_auth`'s Inline arm).
@@ -745,7 +735,7 @@ mod tests {
         );
     }
 
-    /// P9.6 decision 5: `web-01-ssh` has no `cred_name` and password auth —
+    /// `web-01-ssh` has no `cred_name` and password auth —
     /// the genuinely-per-row, unshared case that must become
     /// `CredentialSource::Inline` (not a synthesized `Credential` object).
     #[test]

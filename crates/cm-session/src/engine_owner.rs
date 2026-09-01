@@ -20,14 +20,13 @@ use crate::libghostty::{EngineError, LibghosttyEngine};
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
-/// P6.5: wrap `bytes` in the bracketed-paste start/end markers when
+/// Wrap `bytes` in the bracketed-paste start/end markers when
 /// `bracketed` is true (the app enabled DECSET 2004 — `Msg::Paste`'s handler
 /// below queries this via [`TerminalEngine::bracketed_paste_enabled`]);
 /// otherwise return them unchanged. This is the "raw otherwise" half of the
-/// P6.5 paste contract (`docs/devel/tasks/
-/// P6.5-terminal-selection-copy-paste.md`) — deliberately a byte-for-byte
+/// paste contract — deliberately a byte-for-byte
 /// passthrough in the non-bracketed case (no newline-to-CR translation or
-/// control-byte stripping), matching `paste()`'s pre-P6.5 behavior exactly so
+/// control-byte stripping), matching `paste`'s earlier behavior exactly so
 /// existing callers/tests see no change unless the app actually asked for
 /// bracketed paste.
 pub(crate) fn wrap_paste(bytes: &[u8], bracketed: bool) -> Vec<u8> {
@@ -51,30 +50,29 @@ pub(crate) enum Msg {
     Mouse(MouseEvent),
     Paste(Vec<u8>),
     Resize(TerminalSize),
-    /// P6.7: set the viewport's scroll offset (lines above the live tail,
+    /// Set the viewport's scroll offset (lines above the live tail,
     /// `0` = tail/follow — see [`ScrollState`]). The offset is the caller's
     /// (`cm-ui`'s) best absolute guess computed from the last `GridSnapshot`
     /// it saw; the owner loop clamps/tracks it from here. A fresh snapshot at
     /// the new position is pushed immediately so a scroll action is not
     /// delayed until the next PTY byte.
     SetScroll(u32),
-    /// P6.7: request the full retained buffer as plain-text lines (search).
+    /// Request the full retained buffer as plain-text lines (search).
     /// The owner loop replies on `reply` rather than blocking the sender —
     /// see `TerminalEngine::buffer_text`'s "can be expensive" note.
     QueryBuffer(Sender<Vec<String>>),
     Shutdown,
 }
 
-/// P6.7 follow-tail / freeze scroll bookkeeping for the engine-owner loop.
+/// Follow-tail / freeze scroll bookkeeping for the engine-owner loop.
 ///
 /// `Tail` always resolves to the live bottom (offset `0`), so new output
 /// naturally keeps showing the tail with no compensation needed. `Frozen`
 /// pins the view at the buffer growth-point distance it had when the user
-/// last scrolled: as more lines are fed, `scrollback_len()` grows by the same
+/// last scrolled: as more lines are fed, `scrollback_len` grows by the same
 /// amount the tail does, so `offset0 + (scrollback_len_now -
 /// scrollback_len0)` keeps the *same absolute content* on screen instead of
-/// drifting forward with the tail. See `docs/devel/memos/
-/// P6.7-scrollback-port.md` for the trade-off discussion.
+/// drifting forward with the tail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScrollState {
     Tail,
@@ -178,9 +176,9 @@ pub(crate) fn run_engine_owner<T: Transport, S: SnapshotSink, C: ControlSource>(
     timing(start, "owner: engine ready");
     let mut logged_feed = false;
     let mut logged_nonempty = false;
-    // P6.7: scroll position lives here (not on the engine — see `ScrollState`'s
+    // scroll position lives here (not on the engine — see `ScrollState`'s
     // doc comment / the port memo) because this loop is the only place that
-    // cheaply knows `scrollback_len()` at the moment new bytes are fed.
+    // cheaply knows `scrollback_len` at the moment new bytes are fed.
     let mut scroll = ScrollState::Tail;
 
     while let Ok(msg) = control_rx.recv_msg() {
@@ -199,12 +197,12 @@ pub(crate) fn run_engine_owner<T: Transport, S: SnapshotSink, C: ControlSource>(
                 let snap = engine.snapshot(offset);
                 if !logged_nonempty && snap.cells.iter().any(|c| !c.grapheme.is_empty()) {
                     timing(start, "owner: first NON-EMPTY snapshot");
-                    // P9.8 D4/§5.3: parallel `debug!` (the existing `timing()`
-                    // trace line above is untouched -- this promotes the same
+                    // D4/§5.3: parallel `debug!` (the existing `timing`
+                    // trace line above is untouched - this promotes the same
                     // event to a level an operator can see without full trace
                     // spam). This loop is shared by local PTY *and* SSH
                     // sessions (both call `run_engine_owner`), so the message
-                    // says "terminal", not "local" -- ttfr_ms (time to first
+                    // says "terminal", not "local" - ttfr_ms (time to first
                     // rendered content) is exactly as meaningful for an SSH
                     // shell as a local one, and this is distinct from the
                     // SSH driver's own "ssh: shell ready" connect_ms (channel
@@ -254,7 +252,7 @@ pub(crate) fn run_engine_owner<T: Transport, S: SnapshotSink, C: ControlSource>(
     // engine + transport dropped here.
 }
 
-/// Emit a B7 startup-timing marker at `trace` level (P6.3: replaces the
+/// Emit a B7 startup-timing marker at `trace` level (replaces the
 /// ad-hoc `CONMAN_TIMING` env-var gate — enable with `CONMAN_LOG=trace` or
 /// `CONMAN_LOG=cm_session=trace`; no cost when the level is filtered out).
 pub(crate) fn timing(start: Instant, stage: &str) {
@@ -289,7 +287,7 @@ mod tests {
     #[test]
     fn wrap_paste_never_wraps_when_not_bracketed_even_with_tilde_bytes() {
         // Raw passthrough must not be confused by content that happens to
-        // look like the markers -- "raw otherwise" means byte-for-byte.
+        // look like the markers - "raw otherwise" means byte-for-byte.
         let input = b"\x1b[200~not a real wrap\x1b[201~";
         assert_eq!(wrap_paste(input, false), input.to_vec());
     }
@@ -315,7 +313,7 @@ mod tests {
     /// Drives `run_engine_owner` synchronously (on the test thread) with a
     /// scripted message sequence, returning everything the fake transport
     /// received. Used to prove `Msg::Paste` wraps (or doesn't) depending on
-    /// whether the engine has DECSET 2004 enabled -- exercising the exact
+    /// whether the engine has DECSET 2004 enabled - exercising the exact
     /// code path the real byte-pump uses, without any PTY/echo involved.
     fn drive(messages: Vec<Msg>) -> Vec<u8> {
         let (control_tx, control_rx) = std::sync::mpsc::channel();
@@ -380,7 +378,7 @@ mod tests {
         assert_eq!(out, b"\r");
     }
 
-    // ── P6.7: Msg::SetScroll / Msg::QueryBuffer via a fresh engine-owner ────
+    // ──: Msg::SetScroll / Msg::QueryBuffer via a fresh engine-owner ────
 
     /// Like `drive`, but on a caller-chosen `rows x cols` grid (small, so
     /// scrollback fills quickly) and returns every [`GridSnapshot`] pushed to

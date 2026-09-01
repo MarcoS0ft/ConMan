@@ -4,7 +4,7 @@
 // `actions`. The AppWindow shortcut layer opens it from every focus owner; this component
 // then owns focus, query editing, navigation, activation, and dismissal until it closes.
 //
-//   import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
+// import { CommandPalette, PaletteAction } from "screens/command_palette.slint";
 
 import { Theme } from "../theme.slint";
 import { StatusDot } from "../components.slint";
@@ -36,7 +36,7 @@ export component CommandPalette inherits Rectangle {
     // activated(idx): dispatches the action at `idx` in the current filtered list.
     callback activated(int);
 
-    // P8.1: no dialog role in Slint 1.17 — groupbox + "<Title> dialog" (static
+    // no dialog role in Slint 1.17 — groupbox + "<Title> dialog" (static
     // title here; the palette's own content, not its chrome, is dynamic).
     accessible-role: groupbox;
     accessible-label: "Command palette dialog";
@@ -181,7 +181,7 @@ export component CommandPalette inherits Rectangle {
                     // now superseded by `idx == root.selected-index`.
                     background: idx == root.selected-index ? Theme.color-accent-subtle
                               : row-touch.has-hover ? Theme.color-hover : transparent;
-                    // P8.1: one result row = one list item; label combines the
+                    // one result row = one list item; label combines the
                     // visible primary + secondary text (dynamic per action).
                     accessible-role: list-item;
                     accessible-label: act.detail == "" ? act.label : act.label + " — " + act.detail;

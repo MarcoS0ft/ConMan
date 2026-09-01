@@ -1,4 +1,4 @@
-//! Terminal text-selection semantics (P6.5): click counting (single/double/
+//! Terminal text-selection semantics: click counting (single/double/
 //! triple), word/line-boundary expansion over a [`GridSnapshot`], copy-text
 //! extraction, and the per-pane lifecycle state machine the controller drives
 //! from pointer events.
@@ -6,8 +6,8 @@
 //! [`terminal_renderer::Selection`] is pure cell-range geometry consumed by the
 //! draw pass; everything here is the layer *above* it that decides when a
 //! selection exists, how big it is, and when it goes stale. See
-//! `terminal_renderer::SelectionPoint`'s doc comment for the P6.7
-//! (scrollback) coordinate seam this module inherits.
+//! `terminal_renderer::SelectionPoint`'s doc comment for the scrollback
+//! coordinate seam this module inherits.
 use std::time::{Duration, Instant};
 
 use cm_core::{Cell, GridSnapshot};
@@ -94,9 +94,9 @@ pub(crate) fn line_bounds(cols: u16) -> (u16, u16) {
     (0, cols.saturating_sub(1))
 }
 
-/// The absolute buffer row of `snap`'s viewport row 0 (P6.7). See
+/// The absolute buffer row of `snap`'s viewport row 0. See
 /// `terminal_renderer::SelectionPoint`'s doc comment for the address space —
-/// `0` for a snapshot with no scrollback fields set (pre-P6.7-shaped test
+/// `0` for a snapshot with no scrollback fields set (earlier test
 /// fixtures), which is also the correct value for a live tail view.
 fn viewport_top(snap: &GridSnapshot) -> u32 {
     snap.scrollback_len.saturating_sub(snap.scroll_offset)
@@ -115,7 +115,7 @@ fn viewport_row(snap: &GridSnapshot, abs_row: u16) -> Option<u16> {
 /// shared by [`extract_text`] and the staleness check in
 /// [`PaneSelectionState::invalidate_if_stale`] so both agree on exactly what
 /// "the content currently under the selection" means. `sel`'s rows are
-/// absolute buffer lines (P6.7); rows outside `snap`'s current viewport
+/// absolute buffer lines; rows outside `snap`'s current viewport
 /// window contribute nothing (the selection has scrolled out of view).
 fn selected_cells(snap: &GridSnapshot, sel: &Selection) -> Vec<Cell> {
     let cols = snap.size.cols;
@@ -140,7 +140,7 @@ fn selected_cells(snap: &GridSnapshot, sel: &Selection) -> Vec<Cell> {
 
 /// Extract the selected text from `snap`, one line per selected row (trailing
 /// blanks trimmed per line, matching the usual "copy from a terminal" feel),
-/// joined with `\n`. `sel`'s rows are absolute buffer lines (P6.7); a row
+/// joined with `\n`. `sel`'s rows are absolute buffer lines; a row
 /// outside `snap`'s current viewport window contributes an empty line (rather
 /// than being skipped) so a selection spanning partly off-screen content
 /// still copies with the right line count — the common case is the whole
@@ -172,8 +172,7 @@ pub(crate) fn extract_text(snap: &GridSnapshot, sel: &Selection) -> String {
 /// and drains on tick: the live [`Selection`] (if any), the multi-click
 /// tracker, a pending drag anchor, and the lifecycle bookkeeping used
 /// to implement the pinned rule "selection clears on new output that scrolls
-/// the region [or] on resize" (`docs/devel/tasks/
-/// P6.5-terminal-selection-copy-paste.md`) — see [`invalidate_if_stale`].
+/// the region [or] on resize" — see [`invalidate_if_stale`].
 ///
 /// "Clears on focus change" is implemented by the controller calling
 /// [`clear`](Self::clear) directly when it detects the active tab or the
@@ -350,8 +349,8 @@ impl PaneSelectionState {
     ///
     /// Returns `true` iff the visible [`Selection`] geometry actually changed
     /// (created, extended, or — implicitly, via [`clear`](Self::clear), which
-    /// callers invoke separately — removed). P6.8 bundled fix (F-perf,
-    /// P6.17 finding R1): the controller uses this to gate the forced
+    /// callers invoke separately — removed). bundled fix (F-perf,
+    /// finding R1): the controller uses this to gate the forced
     /// selection-highlight re-render in `sessions.rs`'s `wire_pointer` so a
     /// plain button-less hover move (no selection, [`crate::input::map_mouse`]
     /// returns `None`) no longer forces a full-grid raster on every motion
@@ -364,11 +363,11 @@ impl PaneSelectionState {
         snap: Option<&GridSnapshot>,
         now: Instant,
     ) -> bool {
-        // P6.7: `cell.0` from `renderer.cell_at()` is viewport-relative; a
+        // `cell.0` from `renderer.cell_at` is viewport-relative; a
         // `Selection`'s stored rows are absolute buffer lines, so translate
         // once here via the snapshot's current scroll position. No `snap` ->
         // no scrollback context -> the row is used as-is (matches the
-        // pre-P6.7 degenerate "no snapshot yet" behavior).
+        // earlier degenerate "no snapshot yet" behavior).
         let abs_row = snap.map_or(cell.0, |s| {
             u16::try_from(viewport_top(s) + u32::from(cell.0)).unwrap_or(u16::MAX)
         });
@@ -514,7 +513,7 @@ mod tests {
         row_snap_at(rows, cols, 0, 0)
     }
 
-    /// Like `row_snap`, but at a given scrollback position (P6.7): `rows` is
+    /// Like `row_snap`, but at a given scrollback position: `rows` is
     /// the *visible viewport* content, and `scrollback_len`/`scroll_offset`
     /// place it within a larger absolute-row address space, matching what a
     /// real scrolled-back `GridSnapshot` reports.
@@ -815,10 +814,10 @@ mod tests {
         assert!(s.selection().is_none());
     }
 
-    // ── P6.8 bundled fix (F-perf, P6.17 finding R1): on_pointer's "changed" ──
+    // ── bundled fix (F-perf, finding R1): on_pointer's "changed" ──
     // return value is exactly the render-gating signal `sessions.rs`'s
     // `wire_pointer` uses to skip the forced re-render on events that didn't
-    // touch the selection -- these assert that signal is correct.
+    // touch the selection - these assert that signal is correct.
 
     #[test]
     fn press_without_an_existing_selection_reports_unchanged() {
@@ -853,8 +852,8 @@ mod tests {
 
     #[test]
     fn button_less_hover_move_reports_unchanged() {
-        // The exact case P6.17 finding R1 flagged: a plain move with no
-        // button held (not dragging) must never report a selection change --
+        // The exact case finding R1 flagged: a plain move with no
+        // button held (not dragging) must never report a selection change -
         // this is the "hover-only move" the F-perf gate exists to skip.
         let snap = row_snap(&["abcdef"], 6);
         let mut s = PaneSelectionState::default();
@@ -1012,7 +1011,7 @@ mod tests {
         assert!(s.selection().is_none());
     }
 
-    // ── P6.7: selection survives scrollback (offset-aware) ──────────────────
+    // ──: selection survives scrollback (offset-aware) ──────────────────
 
     #[test]
     fn selection_made_while_scrolled_back_stores_absolute_row() {
@@ -1030,7 +1029,7 @@ mod tests {
 
     #[test]
     fn copy_text_at_offset_k_returns_the_right_text() {
-        // Spec wording (P6.7 verification): "a selection made at offset K
+        // Spec wording ( verification): "a selection made at offset K
         // copies the right text."
         let snap = row_snap_at(&["hello world"], 11, 100, 40);
         let mut s = PaneSelectionState::default();
@@ -1064,7 +1063,7 @@ mod tests {
     #[test]
     fn selection_clears_on_tail_follow_jump_scrolling_it_out_of_view() {
         // Made 40 lines back (absolute row 60); then the view snaps to the
-        // tail (offset 0) -- the selection's absolute row is no longer part
+        // tail (offset 0) - the selection's absolute row is no longer part
         // of the displayed window at all, so it must clear.
         let snap1 = row_snap_at(&["hello"], 5, 100, 40);
         let mut s = PaneSelectionState::default();

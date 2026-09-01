@@ -7,7 +7,7 @@ publish.workspace = true
 
 [dependencies]
 cm-core = { path = "../cm-core" }
-# Structured logging (P9.8): backend-name/error diagnostics only — never a
+# Structured logging: backend-name/error diagnostics only — never a
 # secret value. The composition root (`conman`) installs the subscriber; this
 # crate only calls the `tracing::*` macros.
 tracing = "0.1"

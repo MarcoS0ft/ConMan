@@ -30,7 +30,7 @@ impl ConnectionSettings {
     }
 }
 
-/// RDP connection settings (P4 — extended with resolution and color-depth).
+/// RDP connection settings, including resolution and color depth.
 ///
 /// `username` is the Windows/xrdp login name; if `None`, the server shows a
 /// graphical login screen (TLS-only security). `domain` may be omitted for
@@ -87,7 +87,7 @@ impl Default for RdpSettings {
     }
 }
 
-/// SSH connection settings (host-key policy lives in the session layer, P3).
+/// SSH connection settings (host-key policy lives in the session layer).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshSettings {
     pub host: String,

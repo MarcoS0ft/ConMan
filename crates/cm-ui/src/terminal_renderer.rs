@@ -1,4 +1,4 @@
-//! Glyph-atlas terminal renderer (P2.3).
+//! Glyph-atlas terminal renderer.
 //!
 //! Rasterizes a [`cm_core::GridSnapshot`] into an RGBA [`slint::SharedPixelBuffer`]
 //! using a software grapheme atlas. `cosmic-text` shapes complete cell graphemes and
@@ -6,10 +6,10 @@
 //! Swash supplies mask or intrinsic-color glyph pixels. Pure CPU work, headless-testable,
 //! with no windowing/GPU dependency.
 //!
-//! ## Threading (`!Send` boundary, ARCHITECTURE §4 / P0.3)
+//! ## Threading (`!Send` boundary, ARCHITECTURE §4 /)
 //! [`TerminalRenderer::render`] returns a `SharedPixelBuffer`, which **is** `Send`. The
 //! `slint::Image::from_rgba8` wrap (which yields a `!Send` `Image`) is deliberately *not*
-//! done here — it happens on the UI thread in P2.4. So `render` is callable on the engine
+//! done here — it happens on the UI thread. So `render` is callable on the engine
 //! thread that owns the (`!Send`) VT engine; only the buffer crosses to the UI thread.
 //!
 //! ## Fonts (bundled, see `assets/fonts/`)
@@ -62,7 +62,7 @@ pub struct CellMetrics {
 /// A single endpoint of a terminal text selection: a cell position addressed
 /// in **absolute buffer-line** coordinates.
 ///
-/// **P6.7 resolves the P6.5 seam** this doc comment used to describe: `row`
+/// The absolute coordinate model means `row`
 /// is now an absolute line index in the same address space as
 /// [`cm_core::GridSnapshot::scrollback_len`]/`scroll_offset` (`0` = the
 /// oldest retained line; the live tail is always the highest indices). As
@@ -162,7 +162,7 @@ impl Selection {
     }
 }
 
-/// A single search-match span within one row (P6.7), in the same absolute
+/// A single search-match span within one row, in the same absolute
 /// buffer-line address space as [`SelectionPoint::row`]. `col_start`/`col_end`
 /// are inclusive. Produced by `cm-ui`'s search logic (`controller/search.rs`)
 /// scanning `TerminalEngine::buffer_text`'s plain-text lines — never by this
@@ -192,18 +192,18 @@ pub struct TerminalTheme {
     pub fg: Rgb,
     pub bg: Rgb,
     pub cursor: Rgb,
-    /// Background tint painted over a selected cell (P6.5), instead of its
+    /// Background tint painted over a selected cell, instead of its
     /// normal resolved background. Text color is left as-is on top of it.
     pub selection_bg: Rgb,
-    /// Background tint for a non-current search match (P6.7).
+    /// Background tint for a non-current search match.
     pub search_bg: Rgb,
-    /// Background tint for the *current* search match (P6.7) — brighter than
+    /// Background tint for the *current* search match — brighter than
     /// `search_bg` so next/prev navigation is visually obvious.
     pub search_current_bg: Rgb,
-    /// Scrollbar track color (P6.7 position indicator), drawn only when
+    /// Scrollbar track color ( position indicator), drawn only when
     /// `GridSnapshot::scrollback_len > 0`.
     pub scrollbar_track: Rgb,
-    /// Scrollbar thumb color (P6.7 position indicator).
+    /// Scrollbar thumb color ( position indicator).
     pub scrollbar_thumb: Rgb,
     /// The 16 ANSI colors (0-7 normal, 8-15 bright).
     pub ansi: [Rgb; 16],
@@ -212,7 +212,7 @@ pub struct TerminalTheme {
 impl TerminalTheme {
     /// The dark default. fg/bg pinned to `Theme.color-terminal-bg`/`color-terminal-fg`'s
     /// dark values (`#0a0c10`/`#c9ccd1`); the 16-color ANSI cube keeps its original
-    /// VS-Code-dark-like values (not a token in `theme.slint` — P6.8 scope is default
+    /// VS-Code-dark-like values (not a token in `theme.slint` — scope is default
     /// fg/bg, not a full palette redesign).
     #[must_use]
     pub fn dark() -> Self {
@@ -250,7 +250,7 @@ impl TerminalTheme {
         }
     }
 
-    /// The light counterpart (P6.8, gap 9 / closes P6.17 finding V1). fg/bg pinned to
+    /// The light counterpart (/ closes finding V1). fg/bg pinned to
     /// `Theme.color-terminal-bg`/`color-terminal-fg`'s light values (`#ffffff`/`#2b2f36`).
     /// The ANSI cube is a reasonable light-background default (close to VS Code's Light+
     /// terminal palette) — darkened/desaturated versions of the dark palette so text stays
@@ -527,7 +527,7 @@ impl TerminalRenderer {
         self.render_to(snap, w, h)
     }
 
-    /// [`render`](Self::render) with an optional P6.5 text selection tinted
+    /// [`render`](Self::render) with an optional text selection tinted
     /// into the draw pass. `None` behaves exactly like `render`.
     pub fn render_selected(
         &mut self,
@@ -555,7 +555,7 @@ impl TerminalRenderer {
         self.render_to_selected(snap, target_w, target_h, None)
     }
 
-    /// [`render_to`](Self::render_to) with an optional P6.5 text selection
+    /// [`render_to`](Self::render_to) with an optional text selection
     /// tinted into the draw pass: selected cells are painted with
     /// [`TerminalTheme::selection_bg`] instead of their resolved background
     /// (glyph/underline/strikethrough still draw in the cell's normal fg on
@@ -578,7 +578,7 @@ impl TerminalRenderer {
         self.render_to_full(snap, target_w, target_h, selection, &[], None)
     }
 
-    /// [`render_to_selected`](Self::render_to_selected) with P6.7 search
+    /// [`render_to_selected`](Self::render_to_selected) with search
     /// highlighting: `matches` are tinted with [`TerminalTheme::search_bg`]
     /// (or `search_current_bg` for `matches[current_match]`), and a
     /// scrollbar position indicator is drawn on the right edge whenever
@@ -616,8 +616,8 @@ impl TerminalRenderer {
         let rows = usize::from(snap.size.rows);
         let cw = self.metrics.cell_w as usize;
         let ch_h = self.metrics.cell_h as usize;
-        // P6.7: absolute buffer row of this snapshot's viewport row 0 — see
-        // `SelectionPoint`'s doc comment. Saturates to 0 for a pre-P6.7-style
+        // absolute buffer row of this snapshot's viewport row 0 — see
+        // `SelectionPoint`'s doc comment. Saturates to 0 for a earlier
         // snapshot that never set these fields (all-zero is indistinguishable
         // from "at the tail with no scrollback," which is the correct fallback).
         let abs_top = snap.scrollback_len.saturating_sub(snap.scroll_offset);
@@ -733,7 +733,7 @@ impl TerminalRenderer {
         (fg, bg)
     }
 
-    /// P6.7 scroll-position indicator: a thin vertical scrollbar on the right
+    /// scroll-position indicator: a thin vertical scrollbar on the right
     /// edge, drawn only when there is scrollback to show a position within
     /// (`snap.scrollback_len == 0` draws nothing — nothing to indicate).
     /// Thumb position/height are proportional to `(scrollback_len -
@@ -1433,7 +1433,7 @@ mod tests {
         assert_eq!(t.palette_256(1), t.ansi[1]);
     }
 
-    // ── P6.5: Selection geometry ─────────────────────────────────────────
+    // ──: Selection geometry ─────────────────────────────────────────
 
     fn pt(row: u16, col: u16) -> SelectionPoint {
         SelectionPoint { row, col }
@@ -1542,7 +1542,7 @@ mod tests {
         assert_eq!(px_at(&buf, c1x, c1y), (10, 10, 10));
     }
 
-    // ── P6.7: search-match highlighting + selection-vs-offset seam ──────────
+    // ──: search-match highlighting + selection-vs-offset seam ──────────
 
     #[test]
     fn search_match_tints_only_the_matched_cell() {
@@ -1747,8 +1747,8 @@ mod tests {
 
     #[test]
     fn light_and_dark_themes_have_distinct_default_fg_bg() {
-        // Sanity: light() remains a genuine alternative scheme even though the
-        // application currently selects dark() for every new terminal.
+        // Sanity: light remains a genuine alternative scheme even though the
+        // application currently selects dark for every new terminal.
         let dark = TerminalTheme::dark();
         let light = TerminalTheme::light();
         assert_eq!(dark.bg, (0x0a, 0x0c, 0x10));
@@ -1773,7 +1773,7 @@ mod tests {
         assert_eq!(px_at(&after, 0, 0), TerminalTheme::light().bg);
     }
 
-    /// P10.2 profiling aid: a warm 80x24 ASCII grid should reuse the per-renderer atlas.
+    /// profiling aid: a warm 80x24 ASCII grid should reuse the per-renderer atlas.
     #[test]
     #[ignore = "profiling aid; run explicitly with --ignored --nocapture"]
     fn profile_warm_ascii_render() {

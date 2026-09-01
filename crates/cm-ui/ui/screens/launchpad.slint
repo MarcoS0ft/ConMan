@@ -1,8 +1,7 @@
 // ConMan — Launchpad (the productive "empty / new tab" state; GUI_DESIGN §5 + the
-// Direction A pressure-test). Fills the session area when a tab has no live session:
 // search-to-connect, recents, and group shortcuts instead of a blank screen.
 //
-//   import { Launchpad, RecentItem } from "screens/launchpad.slint";
+// import { Launchpad, RecentItem } from "screens/launchpad.slint";
 
 import { Theme } from "../theme.slint";
 import { StatusDot } from "../components.slint";
@@ -81,7 +80,7 @@ export component Launchpad inherits Rectangle {
             border-radius: Theme.radius-md;
             border-width: 1px;
             border-color: Theme.color-stroke;
-            // P8.1: one recent-connection card = one list item; label combines
+            // one recent-connection card = one list item; label combines
             // the connection name + relative time (both dynamic).
             accessible-role: list-item;
             accessible-label: item.name + " · " + item.meta;

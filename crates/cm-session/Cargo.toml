@@ -6,14 +6,14 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-# The libghostty-vt VT engine adapter (validated GO-WITH-CAVEATS in P0.2).
+# The libghostty-vt VT engine adapter.
 # Default on. Building it requires the zig 0.15.2 toolchain (see
-# docs/devel/AI_GUIDANCE.md); on Windows debug builds, also
+# on Windows debug builds, also
 # LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseSafe.
 default = ["engine-libghostty"]
 # The libghostty engine + the terminal sessions that drive it (local PTY + SSH).
 # portable-pty/russh are tied in here so a zig-free `--no-default-features`
-# build stays minimal. tokio and dirs are unconditional since P4.1 RDP always
+# build stays minimal. tokio and dirs are unconditional since RDP always
 # needs them.
 engine-libghostty = [
     "dep:libghostty-vt",
@@ -30,13 +30,13 @@ engine-alacritty = []
 cm-core = { path = "../cm-core" }
 cm-platform = { path = "../cm-platform" }
 thiserror = "2"
-# Pinned to the exact versions validated in the P0.2 spike.
+# Pinned to the exact versions required by the engine.
 libghostty-vt = { version = "=0.2.0", optional = true }
 portable-pty = { version = "0.9.0", optional = true }
-# Structured logging facade (P6.3). The composition root (`conman`) installs
+# Structured logging facade. The composition root (`conman`) installs
 # the actual subscriber; libraries only ever call the `tracing::*` macros.
 tracing = { version = "0.1", optional = true }
-# SSH transport (P3.1). russh 0.61 re-exports keys/agent/known_hosts via `russh::keys`.
+# SSH transport. russh 0.61 re-exports keys/agent/known_hosts via `russh::keys`.
 # Use the `ring` crypto backend (not the default `aws-lc-rs`, which needs NASM + a C
 # build that fails on MSVC); keep `rsa` (RSA keys) and `flate2` (compression).
 russh = { version = "0.61", optional = true, default-features = false, features = [
@@ -45,14 +45,14 @@ russh = { version = "0.61", optional = true, default-features = false, features 
     "flate2",
 ] }
 dirs = { version = "6", optional = true }
-# P4.1: IronRDP pure-Rust RDP client (versions verified 2026-06-28 against crates.io).
+# IronRDP pure-Rust RDP client.
 # ironrdp-connector 0.9, ironrdp-session 0.10, ironrdp-tokio 0.9, ironrdp-graphics 0.8.1,
 # ironrdp-input 0.6, ironrdp-pdu 0.8, ironrdp-cliprdr 0.6, ironrdp-dvc 0.7,
-# ironrdp-displaycontrol 0.7 (both added P9.9-FIX).
+# ironrdp-displaycontrol 0.7.
 # Note: ironrdp-svc is a transitive dep only (via ironrdp-cliprdr); not used directly.
-# TLS uses rustls with ring backend to avoid aws-lc-rs / NASM requirement (P3.1 lesson).
+# TLS uses rustls with ring backend to avoid aws-lc-rs / NASM requirement.
 ironrdp-connector = { version = "0.9", features = ["credssp"] }
-# P9.1: enable CredSSP/NLA. ironrdp-tokio re-exports ironrdp-async but has no
+# Enable CredSSP/NLA. ironrdp-tokio re-exports ironrdp-async but has no
 # credssp passthrough, so depend on ironrdp-async directly to turn the feature
 # on across the (patched/vendored) graph. Feature unification activates the
 # credssp connect_finalize variant used in rdp.rs.
@@ -65,27 +65,27 @@ ironrdp-graphics = "0.8"
 ironrdp-input = "0.6"
 ironrdp-pdu = "0.8"
 ironrdp-cliprdr = "0.6"
-# P9.9-FIX: register the DisplayControl DVC (DRDYNVC) so mid-session resize
-# PDUs are actually transmitted -- both already at 0.7.0 in Cargo.lock as
+# Register the DisplayControl DVC (DRDYNVC) so mid-session resize
+# PDUs are actually transmitted - both already at 0.7.0 in Cargo.lock as
 # transitive deps of ironrdp-session, so this adds zero new packages (same
-# discipline as the P9.4 aes-gcm pin).
+# discipline as the AES-GCM pin).
 ironrdp-dvc = "0.7"
 ironrdp-displaycontrol = "0.7"
 ironrdp-tls = { version = "0.2", features = ["rustls"] }
 # tokio-rustls / rustls: direct deps to force the `ring` feature and silence the
 # "multiple providers" panic from ironrdp-tls's own tokio-rustls dep (which enables
-# `aws_lc_rs` by default).  We explicitly install ring as the process-level provider
-# before any TLS call; see rdp.rs `install_ring_provider()`.
+# `aws_lc_rs` by default). We explicitly install ring as the process-level provider
+# before any TLS call; see rdp.rs `install_ring_provider`.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-# rustls-native-certs: load the platform root CA store for cert validation (P4.1).
+# rustls-native-certs: load the platform root CA store for cert validation.
 # CA-valid certs are accepted silently; only self-signed / unknown / changed certs
 # reach the TOFU CertVerifier.
 rustls-native-certs = "0.8"
 x509-cert = "0.2"
-# SHA-256 fingerprinting for TOFU certificate verification (P4.1).
+# SHA-256 fingerprinting for TOFU certificate verification.
 sha2 = "0.10"
-# tokio is unconditional (P4.1 RDP always needs it; SSH also uses it when
+# tokio is unconditional (RDP always needs it; SSH also uses it when
 # engine-libghostty is on).
 tokio = { version = "1", features = [
     "rt",
@@ -96,16 +96,16 @@ tokio = { version = "1", features = [
     "time",
     "macros",
 ] }
-# serde_json: used by CertStore for persistent JSON cert storage (P4.2).
+# serde_json: used by CertStore for persistent JSON cert storage.
 # Promoted from dev-dep to dep so the production code can load/save the cert store.
 serde_json = "1"
 tempfile = "3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
-# P9.9-FIX: rdp_connect_live_host captures its own driver-thread log output
+# rdp_connect_live_host captures its own driver-thread log output
 # (via a private in-memory MakeWriter) to assert the resize PDU was actually
-# emitted, not just "session stable" -- the exact signal whose silent `None`
+# emitted, not just "session stable" - the exact signal whose silent `None`
 # masked the missing-DisplayControl-DVC bug. Already in Cargo.lock at 0.3.x
 # (transitive via other workspace crates' dev/build graph); confirm no new
 # packages before committing.

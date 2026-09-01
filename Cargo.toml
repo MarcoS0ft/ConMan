@@ -30,19 +30,18 @@ unreachable_pub = "warn"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
-# P6.3 (gap 26): release-build tuning. Measured on Linux (see the P6.3
-# report for the before/after binary-size and clean-build-time numbers):
+# Release-build tuning:
 # thin LTO + stripping cut the shipped binary noticeably with a modest link-
 # time cost; codegen-units=1 trades a slower release build for better
 # cross-crate optimization, acceptable since release builds are infrequent
-# (CI/release, not the inner dev loop -- `cargo build`/`cargo run` default to
+# (CI/release, not the inner dev loop - `cargo build`/`cargo run` default to
 # the unaffected dev profile).
 [profile.release]
 lto = "thin"
 strip = true
 codegen-units = 1
 
-# P4.1: Resolve pre-release crypto dep conflicts between russh 0.61.x and
+# Resolve pre-release crypto dependency conflicts between russh 0.61.x and
 # ironrdp-connector 0.9.0 (which depends on picky/sspi with conflicting pinned
 # pre-release crypto crates).
 #
@@ -60,10 +59,9 @@ ironrdp-pdu = { path = "vendor/ironrdp-pdu" }
 # (.99 = Zen 5) bakes in AVX-512/newer instructions that crash 0xc000001d on
 # older x86-64 targets (e.g. a Haswell Xeon); x86_64_v3 runs on Haswell+.
 libghostty-vt-sys = { path = "vendor/libghostty-vt-sys" }
-# P9.1: vendor sspi 0.21.0 with its exact RustCrypto RC pins re-aligned to the
+# Vendor sspi 0.21.0 with its exact RustCrypto RC pins re-aligned to the
 # snapshot russh 0.61.2 uses (picky rc.24 / rsa rc.18 / ecdsa rc.18 / p256-p521
 # rc.10). Stock sspi 0.21.0 pins picky=rc.23+rsa=rc.17 and sspi 0.21.1 pins
 # picky=rc.25 (ecdsa rc.22 / p256 rc.14) — neither unifies with russh's exact
-# pins. See docs/devel/memos/P9.1-credssp-dep-audit.md and
-# docs/devel/tasks/CLEANUP-credssp-vendoring.md (removal trigger).
+# pins.
 sspi = { path = "vendor/sspi" }

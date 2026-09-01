@@ -1,4 +1,4 @@
-//! RDP auth-input and certificate-verification contract types (P6.15).
+//! RDP auth-input and certificate-verification contract types.
 //!
 //! Moved here from `cm-session/src/rdp.rs` — pure data/trait definitions, no
 //! I/O, needed by the [`crate::session_ports::SessionProvider`] port and
@@ -7,13 +7,11 @@
 //! real file I/O (`std::fs`), which has no place in `cm-core`'s charter
 //! (ARCHITECTURE §1: "no I/O"). It stays in `cm-session::rdp`; the
 //! `SessionProvider` adapter constructs it internally so callers never need
-//! to know it exists. See `docs/devel/memos/P6.15-sessionprovider-port.md`.
+//! to know it exists.
 
 use crate::credential::Secret;
 
-// ---------------------------------------------------------------------------
 // Certificate verification
-// ---------------------------------------------------------------------------
 
 /// Which store a previously-seen RDP certificate came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +32,7 @@ pub enum CertSituation {
     },
 }
 
-/// Details of a certificate awaiting user decision (prompt UI = P4.2).
+/// Details of a certificate awaiting user decision (prompt UI =).
 #[derive(Debug, Clone)]
 pub struct CertInfo {
     pub host: String,
@@ -57,14 +55,12 @@ pub enum CertDecision {
 
 /// Decides whether to trust an unknown/changed server certificate.
 ///
-/// In P4.2 this is backed by the host-key dialog; in tests it is programmatic.
+/// In this is backed by the host-key dialog; in tests it is programmatic.
 pub trait CertVerifier: Send + Sync {
     fn decide(&self, info: &CertInfo) -> CertDecision;
 }
 
-// ---------------------------------------------------------------------------
 // Auth input
-// ---------------------------------------------------------------------------
 
 /// RDP authentication credentials.
 ///

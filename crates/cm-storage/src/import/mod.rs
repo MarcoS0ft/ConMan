@@ -1,4 +1,4 @@
-//! Foreign-format connection import framework (P9.2).
+//! Foreign-format connection import framework.
 //!
 //! Every foreign importer follows the same shape: **parse** a third-party
 //! file into an in-memory, v1-shaped [`ExportEnvelope`], then hand it to the
@@ -10,7 +10,7 @@
 //!
 //! ## How the next importer slots in
 //! 1. Add `<format>.rs` with a `pub fn parse(contents: &str) -> Result<(ExportEnvelope,
-//!    Vec<ImportWarning>), ImportExportError>` — mint synthetic, file-scoped
+//! Vec<ImportWarning>), ImportExportError>` — mint synthetic, file-scoped
 //!    IDs via `GroupId::new`/`CredentialId::new`/`ConnectionId::new` (they're
 //!    only ever used as intra-envelope link keys; [`crate::json_io::import`]
 //!    remaps every record to a fresh database ID regardless), push
@@ -20,8 +20,8 @@
 //! 3. That's it — [`ForeignImportOutcome`], the warning surfacing, and the
 //!    `.json` native passthrough are all shared.
 //!
-//! `.rjson` (RoyalTS), `.csv` (ConMan's own CSV interchange format, P9.3),
-//! and `.xml` (mRemoteNG, P9.4) are all implemented. `.xml` is the one
+//! `.rjson` (RoyalTS), `.csv` (ConMan's own CSV interchange format),
+//! and `.xml` (mRemoteNG) are all implemented. `.xml` is the one
 //! importer whose secrets are encrypted — [`import_from_path`] tries
 //! mRemoteNG's built-in default password; a custom-password file surfaces
 //! [`ImportExportError::PasswordRequired`], which the caller resolves by
@@ -77,8 +77,8 @@ pub struct ForeignImportOutcome {
 /// are testable without a file picker).
 ///
 /// - `.rjson` → [`royalts::parse`].
-/// - `.csv` → [`csv::parse`] (P9.3).
-/// - `.xml` → [`mremoteng::parse`] (P9.4), tried with mRemoteNG's built-in
+/// - `.csv` → [`csv::parse`].
+/// - `.xml` → [`mremoteng::parse`], tried with mRemoteNG's built-in
 ///   default password — a custom-password file returns
 ///   [`ImportExportError::PasswordRequired`]; re-invoke via
 ///   [`import_from_path_with_password`] once the caller has prompted for it.
@@ -144,10 +144,10 @@ pub fn import_from_path_with_password(
         }
     };
 
-    // P9.6 decision 5: `connection_secrets` (Inline per-connection secrets)
+    // `connection_secrets` (Inline per-connection secrets)
     // must count toward "attempted" alongside `credential_secrets` (Object
-    // secrets) — before this lane every foreign importer hard-coded
-    // `connection_secrets: Vec::new()`, so omitting it here happened to be
+    // secrets) — previously every foreign importer hard-coded
+    // `connection_secrets: Vec::new`, so omitting it here happened to be
     // harmless; now that mRemoteNG/CSV populate it, omitting it would
     // undercount and make `cm_ui`'s "N secret(s) skipped" toast lie by
     // silently hiding real Inline-secret failures behind `saturating_sub`.
@@ -237,9 +237,9 @@ mod tests {
 
     #[test]
     fn unregistered_extension_is_a_malformed_error_not_a_panic() {
-        // `.xml` (mRemoteNG, P9.4) is now registered too (like `.csv` before
+        // `.xml` (mRemoteNG) is now registered too (like `.csv` before
         // it) — use `.rtsz`, RoyalTS's encrypted-vault format, which the
-        // P9.2 spec explicitly leaves out of scope, as a still-genuinely-
+        // spec explicitly leaves out of scope, as a still-genuinely-
         // unregistered extension.
         let dir = tempfile::tempdir().expect("tmp dir");
         let path = dir.path().join("export.rtsz");

@@ -1,16 +1,4 @@
-// ConMan — main application window (Direction A shell, P1.4 panels).
-//
-// P1.4 additions over P2.8/P3.2 baseline:
-//  • ConnRow gains `depth: int` for subgroup indentation.
-//  • ConnectionRow gains CRUD hover buttons and group-toggle behaviour.
-//  • New CredRow struct + CredTreeRow component for the Keys panel.
-//  • New ConnProfile / GroupForm / CredFormData structs (in screen files).
-//  • Keys panel is now a real credential folder tree (replaces the P2.8 stub).
-//  • Connections panel header has New Group + New Connection buttons.
-//  • ProfileEditor / GroupEditor / CredEditor modals mounted here.
-//  • AppWindow gains credentials, cred-name-list, editor state + callbacks.
-//
-// BEHAVIOUR PRESERVED: TerminalSurface and its callbacks are UNCHANGED from P2.4.
+// ConMan main application window.
 
 import { Theme } from "theme.slint";
 import {
@@ -29,7 +17,7 @@ import {
 import { CredFormData, CredEditor } from "screens/cred_editor.slint";
 
 // ── Models ────────────────────────────────────────────────────────────────
-// Toast entry for background-event notifications (P5.3b).
+// Toast entry for background-event notifications.
 // kind: 0=info · 1=success · 2=warning · 3=error
 export struct ToastEntry {
     id:      int,
@@ -42,27 +30,26 @@ export struct TabItem {
     id: int,
     status: string,
     pane-count: int,
-    // P9.10 #3: the Launchpad-fronted "Home"/new-tab-without-a-live-session
-    // tab (`Tab::is_empty` in the controller) isn't a connection -- it must
+    // the Launchpad-fronted "Home"/new-tab-without-a-live-session
+    // tab (`Tab::is_empty` in the controller) isn't a connection - it must
     // not show the connection StatusDot. Mirrors `Tab::is_empty` 1:1 (see
     // `push_tab`, the only place `TabItem` is constructed for a real
     // controller-driven tab).
     is-home: bool,
-    // P9.10 #1: whether the tab context menu's "Duplicate" item has a
-    // target to relaunch -- a stored-connection tab (`origin_connection_id`
+    // whether the tab context menu's "Duplicate" item has a
+    // target to relaunch - a stored-connection tab (`origin_connection_id`
     // is `Some`) or a plain local shell (`!is_remote`). `false` for a
     // quick-connect-originated remote tab (no stored settings to safely
-    // relaunch) and for a reattached tab whose origin wasn't preserved --
+    // relaunch) and for a reattached tab whose origin wasn't preserved -
     // omit the item rather than launch nothing (spec's explicit rule).
     can-duplicate: bool,
 }
 
-// P6.11: one entry per pane in the active tab's N-way split, computed in Rust
-// from `PaneGroup::rects()` (fractional geometry) plus that pane's current
+// one entry per pane in the active tab's N-way split, computed in Rust
+// from `PaneGroup::rects` (fractional geometry) plus that pane's current
 // frame image and surface kind. Drives the `pane-cells` repeater in the
 // session area — only populated (non-empty) when the active tab has more
 // than one pane; a single-pane tab keeps using `frame`/`rdp-frame`/
-// `rdp-active` directly (unchanged since P2.4/P4.2).
 export struct PaneCell {
     pane: int,
     x: float,
@@ -73,7 +60,7 @@ export struct PaneCell {
     is-rdp: bool,
 }
 
-// Flattened connection-tree row.  `depth` drives left-indent (16 px per level).
+// Flattened connection-tree row. `depth` drives left-indent (16 px per level).
 // Rust flattens the group/connection tree into this list honouring expand/collapse.
 export struct ConnRow {
     id: int,
@@ -87,7 +74,7 @@ export struct ConnRow {
     depth: int,        // 0 = root level, 1 = inside a group, etc.
 }
 
-// Flattened credential-folder row for the Keys panel.  Mirrors ConnRow shape.
+// Flattened credential-folder row for the Keys panel. Mirrors ConnRow shape.
 export struct CredRow {
     id: int,
     label: string,
@@ -97,14 +84,13 @@ export struct CredRow {
     expanded: bool,
     selected: bool,
     depth: int,
-    // P9.5 #6: "" (folder rows, or a credential used by no connection) hides
+    // "" (folder rows, or a credential used by no connection) hides
     // the badge; otherwise a ready-made label ("Used by 1 connection" / "Used
-    // by N connections") -- precomputed in Rust (keys_ctl::refresh_cred_model)
-    // rather than formatted in .slint, matching `kind`'s existing pattern.
+    // by N connections") - precomputed in Rust (keys_ctl::refresh_cred_model)
+    // rather than formatted in.slint, matching `kind`'s existing pattern.
     used-by-label: string,
 }
 
-// ── TerminalSurface (verbatim from P2.4; background tokenised) ─────────────
 component TerminalSurface inherits Rectangle {
     in property <image> frame;
     callback key-input(string, int, int);
@@ -201,16 +187,16 @@ component TerminalSurface inherits Rectangle {
     changed height => { root.resized(self.width, self.height); }
 }
 
-// ── RdpSurface (P4.2) ──────────────────────────────────────────────────────
+// ── RdpSurface ──────────────────────────────────────────────────────
 // Framebuffer surface for RDP sessions. Renders a decoded RGBA slint::Image and
 // forwards keyboard (both key-down AND key-up), pointer, and scroll events to the
 // controller for conversion to IronRDP FastPath PDUs.
 //
 // Key design differences from TerminalSurface (which is FROZEN):
-//  - Uses both `key-pressed` and `key-released` events (RDP needs key-up PDUs).
-//  - `special()` pure function exposes F-key codes to the controller.
-//  - Background is pure black (the framebuffer fills it).
-//  - No toggle-palette callback (Ctrl-K palette is handled at the AppWindow level).
+// - Uses both `key-pressed` and `key-released` events (RDP needs key-up PDUs).
+// - `special` pure function exposes F-key codes to the controller.
+// - Background is pure black (the framebuffer fills it).
+// - No toggle-palette callback (Ctrl-K palette is handled at the AppWindow level).
 component RdpSurface inherits Rectangle {
     in property <image> frame;
     // key-down: fired on key-pressed (key-down PDU to RDP).
@@ -219,7 +205,7 @@ component RdpSurface inherits Rectangle {
     callback key-up(string /* text */, int /* special */, int /* mods */);
     callback release-keys();
     callback pointer(int /* button */, int /* kind */, length /* x */, length /* y */, int /* mods */);
-    // rdp-scroll: passes actual pointer position (carry-over fix c).
+    // rdp-scroll: passes actual pointer position .
     callback rdp-scroll(length /* x */, length /* y */, length /* dx */, length /* dy */);
     callback resized(length /* w */, length /* h */);
     in property <int> focus-request: 0;
@@ -304,7 +290,7 @@ component RdpSurface inherits Rectangle {
             source: frame;
             width: 100%;
             height: 100%;
-            // P9.5 #10: `contain` (not `fill`) -- the controller now
+            // `contain` (not `fill`) - the controller now
             // negotiates the RDP desktop at the pane's live pixel size (see
             // `sessions::apply_pane_resolution`), so this is a 1:1 no-op in
             // the common case; `contain` only matters (no distortion,
@@ -330,7 +316,7 @@ component RdpSurface inherits Rectangle {
                     root.mods(e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta));
             }
             scroll-event(e) => {
-                // Pass actual pointer position (carry-over fix c: was surface centre).
+                // Pass actual pointer position (was surface centre).
                 root.rdp-scroll(rdp-ta.mouse-x, rdp-ta.mouse-y, e.delta-x, e.delta-y);
                 accept
             }
@@ -355,11 +341,11 @@ component Tab inherits Rectangle {
     in property <string> status;
     in property <int>    pane-count: 1;
     in property <bool>   active;
-    // P9.10 #3: the Home tab isn't a connection -- it shows a house glyph
+    // the Home tab isn't a connection - it shows a house glyph
     // (Codicon `cod-home`, same icon family as this row's own close button
     // just below) instead of the connection StatusDot.
     in property <bool>   is-home: false;
-    // P8.1: position within the tab strip, supplied by the `for` loop at the
+    // position within the tab strip, supplied by the `for` loop at the
     // call site — repeated items disambiguate via item-index/item-count, not
     // label suffixes (the contract's rule).
     in property <int>    item-index: 0;
@@ -368,12 +354,12 @@ component Tab inherits Rectangle {
     in property <bool> home-pinned: false;
     in property <int> drag-source-index: -1;
     in property <int> drag-target-index: -1;
-    // P9.10 #1: whether "Duplicate" has a target to relaunch -- see
+    // whether "Duplicate" has a target to relaunch - see
     // `TabItem::can_duplicate`'s doc comment (Rust side) for the exact rule.
     in property <bool>   can-duplicate: false;
     callback clicked();
     callback closed();
-    // P9.10 #1: the tab context menu's session actions -- Home never wires
+    // the tab context menu's session actions - Home never wires
     // these (see the ContextMenuArea below), so the controller doesn't need
     // its own `is-home` guard at the callback site, just the usual
     // out-of-range `idx` one every other tab callback already has.
@@ -385,7 +371,7 @@ component Tab inherits Rectangle {
     callback drag-preview(int);
     callback drag-cancelled();
 
-    // P8.1: one tab per session; label is the (dynamic) tab title.
+    // one tab per session; label is the (dynamic) tab title.
     accessible-role: tab;
     accessible-label: root.title;
     // Status and pane count were the only useful fields exposed solely by the
@@ -465,11 +451,11 @@ component Tab inherits Rectangle {
         }
     }
 
-    // P9.10 #1: right-click menu, mirroring the connection tree row's
+    // right-click menu, mirroring the connection tree row's
     // ContextMenuArea/Menu/MenuItem shape (app.slint's ConnectionRow,
-    // `if !data.is-group : MenuItem {...}` conditional-item pattern). Home
-    // suppresses every session item -- there is no session to reconnect/
-    // disconnect/duplicate -- but "Close" is still offered everywhere,
+    // `if !data.is-group: MenuItem {...}` conditional-item pattern). Home
+    // suppresses every session item - there is no session to reconnect/
+    // disconnect/duplicate - but "Close" is still offered everywhere,
     // mirroring `close-tab-btn`'s own always-present behavior.
     ContextMenuArea {
         Menu {
@@ -497,9 +483,9 @@ component Tab inherits Rectangle {
         padding-left: Theme.space-3;
         padding-right: Theme.space-2;
         spacing: Theme.space-2;
-        // P9.10 #3: an explicit fixed width (the larger of the dot's default
+        // an explicit fixed width (the larger of the dot's default
         // 7px diameter and the glyph's icon-xs size) so this cell reserves
-        // the SAME space in every tab -- the title's x-position never shifts
+        // the SAME space in every tab - the title's x-position never shifts
         // between a Home tab and a normal one.
         VerticalLayout {
             width: Theme.icon-xs;
@@ -552,7 +538,7 @@ component Tab inherits Rectangle {
     }
 }
 
-// ── ConnectionRow (P1.4: depth-indent + hover CRUD buttons) ────────────────
+// ── ConnectionRow (depth-indent + hover CRUD buttons) ────────────────
 // The base `touch` is the FIRST child so the HorizontalLayout (holding the
 // interactive action buttons) is rendered on top and captures clicks first —
 // the same pattern used by the Tab component's close button.
@@ -676,32 +662,31 @@ component SessionActionsMenu inherits Rectangle {
 
 component ConnectionRow inherits Rectangle {
     in property <ConnRow> data;
-    // P5.3b: keyboard-navigation cursor highlight (driven by parent's kb-idx).
+    // keyboard-navigation cursor highlight (driven by parent's kb-idx).
     in property <bool> highlighted: false;
-    // P8.1: position within the flattened tree, supplied by the `for` loop.
+    // position within the flattened tree, supplied by the `for` loop.
     in property <int> row-index: 0;
     in property <int> row-count: 0;
-    // P9.5 #2: single click on a leaf row selects/highlights (`selected`);
-    // double click launches (`activated`). Groups aren't affected -- a
+    // single click on a leaf row selects/highlights (`selected`);
+    // double click launches (`activated`). Groups aren't affected - a
     // single click still expands/collapses (`toggled`), which was never the
     // "launches accidentally" complaint. Keyboard Enter and the context
-    // menu's "Connect" still call `activated()` directly (see `touch`
-    // below) -- only the plain mouse click path changes.
-    callback activated();       // open session tab (leaf) -- double-click
-    callback selected();        // select/highlight (leaf) -- single-click
+    // menu's "Connect" still call `activated` directly (see `touch`
+    // below) - only the plain mouse click path changes.
+    callback activated();       // open session tab (leaf) - double-click
+    callback selected();        // select/highlight (leaf) - single-click
     callback toggled();         // expand / collapse group
     callback edit-clicked();    // open profile / group editor
     callback new-sub();         // new child item under this group
-    callback duplicate-clicked(); // P6.10: clone this connection (leaf only)
-    // P6.10 / P6.11: open this connection into the active tab's next pane
-    // slot (leaf only). SSH/Local/RDP all supported since P6.11 lifted the
-    // RDP-in-pane deferral — see the ContextMenuArea comment below.
+    callback duplicate-clicked(); // Clone this connection (leaf only).
+    // Open this connection into the active tab's next pane slot (leaf only).
+    // SSH, Local, and RDP all use the same in-pane connection path.
     callback connect-in-split-clicked();
     callback delete-clicked();
     callback move-up();         // reorder: move one step up within same parent
     callback move-down();       // reorder: move one step down within same parent
 
-    // P8.1: a flattened tree row rendered inside a ListView — `list-item` is
+    // a flattened tree row rendered inside a ListView — `list-item` is
     // the closest role Slint 1.17 offers (no distinct tree-item role); label
     // is the connection/group name, per the contract's dynamic-content rule.
     accessible-role: list-item;
@@ -711,8 +696,8 @@ component ConnectionRow inherits Rectangle {
     accessible-item-selected: data.selected;
     accessible-action-default => { if (data.is-group) { root.toggled(); } else { root.activated(); } }
 
-    // P9.5 #1: latched by each action button's `hover-changed` callback
-    // (see IconButton in components.slint) -- one property per button since
+    // latched by each action button's `hover-changed` callback
+    // (see IconButton in components.slint) - one property per button since
     // they're all conditionally instantiated `if root.action-hover`, and
     // Slint won't let `action-hover`'s own formula read a conditional
     // instance's property from outside its conditional ("Cannot access
@@ -724,16 +709,15 @@ component ConnectionRow inherits Rectangle {
     property <bool> edit-hover: false;
     property <bool> delete-hover: false;
 
-    // Whether ANY part of the row -- background OR the action-icon strip
-    // itself -- currently has the pointer over it. `touch` (below) no
-    // longer extends under the icon strip at all (P9.5 #1 follow-up, see
+    // Whether ANY part of the row - background OR the action-icon strip
+    // itself - currently has the pointer over it. `touch` (below) no
     // `content`'s comment), so this OR exists only to keep the strip
     // latched-visible across the hand-off from `touch`'s cell to a button's
-    // own cell as the pointer crosses that (now non-overlapping) boundary --
+    // own cell as the pointer crosses that (now non-overlapping) boundary -
     // without it, `touch.has-hover` alone would drop to false the instant
     // the cursor leaves `touch`'s cell and enters the icon strip's, which
     // would destroy the `if root.action-hover` strip out from under the
-    // pointer (the original P9.5 #1 flicker bug). ORing in every button's
+    // pointer (the original flicker bug). ORing in every button's
     // latched hover state keeps the combined signal true continuously as
     // the pointer crosses that boundary: exactly one of these TouchAreas is
     // hovering the pointer at any instant, so the OR never has a gap.
@@ -760,14 +744,13 @@ component ConnectionRow inherits Rectangle {
         padding-right: Theme.space-1;
         spacing: Theme.space-2;
 
-        // P9.5 #1 follow-up (.99 GPU visual verify, Bug A -- "hover icons
         // are stable but unclickable"): `touch` used to be a bare sibling of
-        // this WHOLE HorizontalLayout, sized to cover the entire row --
+        // this WHOLE HorizontalLayout, sized to cover the entire row -
         // including the pixels the hover action-icon strip (below) renders
         // into once it exists. That left `touch` and the icon strip as
         // OVERLAPPING siblings whose relative click priority depended on
         // Slint's FrontToBack sibling-traversal order (last-declared visited
-        // first) -- correct on paper (confirmed by reading i-slint-core's
+        // first) - correct on paper (confirmed by reading i-slint-core's
         // actual `send_mouse_event_to_item`/`TouchArea::input_event`), but a
         // real pointer on real GPU-backed hardware still couldn't reliably
         // land clicks on the icons, and this headless harness can't
@@ -775,7 +758,7 @@ component ConnectionRow inherits Rectangle {
         // suite_connections_tree.rs's own note: every existing suite drives
         // callbacks directly, never literal pointer coordinates). Rather
         // than keep correctness resting on that traversal-order subtlety,
-        // mirror ../SafeTunnel's pattern (apps/windows/ui/detail_pane.slint):
+        // mirror the adjacent pane implementation's pattern:
         // give the clickable row body and the action-icon strip their OWN
         // adjacent, NON-OVERLAPPING cells in this layout, so a click
         // physically cannot land on both. `content` below scopes `touch` to
@@ -784,13 +767,13 @@ component ConnectionRow inherits Rectangle {
         content := Rectangle {
             horizontal-stretch: 1;
 
-            // Base touch -- click/double-click for select/launch/toggle.
-            // P9.5 #2: single click selects a leaf row; double click
+            // Base touch - click/double-click for select/launch/toggle.
+            // single click selects a leaf row; double click
             // launches it (`clicked` fires on every physical click,
             // `double-clicked` fires additionally on the 2nd/4th/... click
-            // of a rapid sequence -- Slint's own click-count tracking, no
+            // of a rapid sequence - Slint's own click-count tracking, no
             // hand-rolled timer needed). Groups keep single-click-to-toggle,
-            // unaffected -- that was never the "launches accidentally"
+            // unaffected - that was never the "launches accidentally"
             // complaint.
             touch := TouchArea {
                 clicked => {
@@ -852,7 +835,7 @@ component ConnectionRow inherits Rectangle {
 
         // Hover action buttons (shown only while the pointer is over the
         // row). Gated on `root.action-hover`, not the base `touch.has-hover`
-        // alone -- see the property's doc comment above for why (P9.5 #1). A
+        // alone - see the property's doc comment above for why. A
         // separate cell from `content` above, never overlapping it, so a
         // click here can never also land on `touch`.
         if root.action-hover : HorizontalLayout {
@@ -899,7 +882,6 @@ component ConnectionRow inherits Rectangle {
         }
     }
 
-    // P9.12 #1 (regression from Bug A `269a5e5`, fixed): right-click on a
     // connection row stopped opening this menu after `touch` moved from a
     // bare row-spanning sibling into the `content` cell above. Root cause,
     // confirmed against i-slint-core: mouse dispatch visits siblings
@@ -909,24 +891,23 @@ component ConnectionRow inherits Rectangle {
     // `GrabMouse` regardless of `button`). Before `269a5e5`, this
     // `ContextMenuArea` was declared BEFORE the row's content, so it was
     // visited (and got first crack at every click, including right-clicks)
-    // BEFORE `touch`. Wrapping `touch` inside `content` (still needed --
+    // BEFORE `touch`. Wrapping `touch` inside `content` (still needed -
     // that fix is correct and unrelated) left `ContextMenuArea` declared
     // BEFORE the HorizontalLayout that now contains `touch`, inverting the
     // priority: `touch` got visited first and grabbed the right-click before
     // `ContextMenuArea` ever saw it. Fix: declare `ContextMenuArea` LAST
     // (after the row's whole HorizontalLayout) instead of nesting it around
-    // the content -- nesting alone wouldn't help, since `touch` would still
+    // the content - nesting alone wouldn't help, since `touch` would still
     // be reached (and still grab) as a DESCENDANT before `ContextMenuArea`'s
     // own fallback `input_event` ever runs. Declaring it last means it's
     // visited FIRST: for a right-click, its own `input_event` (`items.rs`'s
     // `ContextMenu` impl) matches `PointerEventButton::Right` immediately and
     // accepts, before `touch` is ever reached. For anything else (left
     // click), it returns `EventIgnored`, which continues the sibling walk to
-    // the HorizontalLayout/`touch`/icon-strip exactly as before -- so
+    // the HorizontalLayout/`touch`/icon-strip unchanged - so
     // left-click select, double-click launch, and the hover-icon clicks
     // (the whole Bug-A/A' set) are all unaffected; verified via the full
     // existing element-suite pass, which still exercises every one of those
-    // paths and stayed green. Items/callbacks below are unchanged.
     ContextMenuArea {
         Menu {
             if !data.is-group : MenuItem {
@@ -971,9 +952,9 @@ component ConnectionRow inherits Rectangle {
 // ── CredTreeRow — Keys panel tree row ─────────────────────────────────────
 component CredTreeRow inherits Rectangle {
     in property <CredRow> data;
-    // P5.3b: keyboard-navigation cursor highlight.
+    // keyboard-navigation cursor highlight.
     in property <bool> highlighted: false;
-    // P8.1: position within the flattened folder tree, supplied by the `for` loop.
+    // position within the flattened folder tree, supplied by the `for` loop.
     in property <int> row-index: 0;
     in property <int> row-count: 0;
     callback activated();
@@ -981,7 +962,7 @@ component CredTreeRow inherits Rectangle {
     callback new-sub();
     callback delete-clicked();
 
-    // P8.1: same list-item rationale as ConnectionRow — label is the
+    // same list-item rationale as ConnectionRow — label is the
     // credential/folder name (dynamic content).
     accessible-role: list-item;
     accessible-label: data.label;
@@ -993,9 +974,8 @@ component CredTreeRow inherits Rectangle {
     accessible-item-selected: data.selected;
     accessible-action-default => { if (data.is-folder) { root.toggled(); } else { root.activated(); } }
 
-    // P9.5 #1 (closing the identical latent bug flagged in the connection
     // tree's own fix): same reasoning as `ConnectionRow::action-hover` in
-    // this file -- `touch` (now scoped to `content`, see below) and the
+    // this file - `touch` (now scoped to `content`, see below) and the
     // action-icon strip are adjacent, non-overlapping cells, so gating the
     // strip's existence on `touch.has-hover` alone is unstable across that
     // cell boundary (Slint hands the pointer to whichever button is
@@ -1021,15 +1001,14 @@ component CredTreeRow inherits Rectangle {
         padding-right: Theme.space-1;
         spacing: Theme.space-2;
 
-        // P9.11: mirrors `ConnectionRow`'s identical `content` cell (Bug A,
-        // `269a5e5`) -- `touch` used to be a bare sibling of this whole
+        // `269a5e5`) - `touch` used to be a bare sibling of this whole
         // HorizontalLayout, sized to cover the entire row including the
         // pixels the hover action-icon strip (below) renders into once it
         // exists, leaving `touch` and the strip as OVERLAPPING siblings
         // whose relative click priority depended on Slint's FrontToBack
         // sibling-traversal order. See `ConnectionRow`'s `content` comment
         // for the full investigation (i-slint-core's `send_mouse_event_to_
-        // item`/`TouchArea::input_event`) -- correctness now rests on
+        // item`/`TouchArea::input_event`) - correctness now rests on
         // non-overlapping geometry instead: `content` scopes `touch` to the
         // tree-icon/label/tag cell only; the icon strip is a separate later
         // cell entirely outside `touch`'s geometry.
@@ -1089,7 +1068,7 @@ component CredTreeRow inherits Rectangle {
                 }
 
                 // Keep dense metadata from forcing the row wider than the
-                // side panel.  The username remains visible (and elides) at
+                // side panel. The username remains visible (and elides) at
                 // minimum width; compact badges progressively appear when
                 // there is actual room for them.
                 if !root.action-hover && root.width >= 230px && !data.is-folder && data.kind != "" : VerticalLayout {
@@ -1112,7 +1091,7 @@ component CredTreeRow inherits Rectangle {
                     }
                 }
 
-                // P9.5 #6: "used by N connections" indicator -- mirrors the
+                // "used by N connections" indicator - mirrors the
                 // `kind` tag immediately above; hidden (empty label) for
                 // folders and for a credential nothing currently references
                 // directly.
@@ -1138,10 +1117,10 @@ component CredTreeRow inherits Rectangle {
             }
         }
 
-        // Gated on `root.action-hover`, not bare `touch.has-hover` -- see the
-        // property's doc comment above (P9.5 #1). A separate cell from
+        // Gated on `root.action-hover`, not bare `touch.has-hover` - see the
+        // property's doc comment above. A separate cell from
         // `content` above, never overlapping it, so a click here can never
-        // also land on `touch` (P9.11).
+        // also land on `touch`.
         if root.action-hover : HorizontalLayout {
             spacing: Theme.gap-hairline;
             alignment: center;
@@ -1170,8 +1149,7 @@ component CredTreeRow inherits Rectangle {
         }
     }
 
-    // P9.12 #1 (regression from Bug A's `content`/`touch` restructure,
-    // ported to CredTreeRow in P9.11 -- see `ConnectionRow`'s identical
+    // ported to CredTreeRow in - see `ConnectionRow`'s identical
     // comment for the full i-slint-core mechanism): declared LAST so
     // FrontToBack visits it FIRST, before `touch` (a descendant of the
     // HorizontalLayout above) ever gets a chance to grab the right-click.
@@ -1194,10 +1172,10 @@ component CredTreeRow inherits Rectangle {
     }
 }
 
-// ── PaneSlot (P5.1; generalized to N panes + RDP-in-pane in P6.11) ─────────
+// ── PaneSlot ─────────
 // Wraps either a TerminalSurface or an RdpSurface (picked by `is-rdp`) with
 // pane-index identity so multi-pane layouts can track focus and route events
-// per pane. TerminalSurface/RdpSurface internals are FROZEN (P2.4/P4.2);
+// per pane. TerminalSurface/RdpSurface internals are FROZEN;
 // PaneSlot adds only an outer border + `pane-focused` routing + the
 // terminal/RDP callback forwarding, unified under one set of names.
 component PaneSlot inherits Rectangle {
@@ -1206,8 +1184,8 @@ component PaneSlot inherits Rectangle {
     in property <int>    pane-index;
     in property <bool>   is-rdp;
     in property <int>    focus-request: 0;
-    // P9.10 #2: true only when this pane is one of several in a split (the
-    // repeater sets it from `pane-cells.length > 1`) -- a single-pane tab has
+    // true only when this pane is one of several in a split (the
+    // repeater sets it from `pane-cells.length > 1`) - a single-pane tab has
     // nothing to "disconnect FROM" without closing the whole tab, so there is
     // no affordance to show there at all.
     in property <bool>   show-disconnect: false;
@@ -1220,19 +1198,19 @@ component PaneSlot inherits Rectangle {
     callback scroll(length, length);                        // terminal panes
     callback rdp-scroll(length, length, length, length);    // RDP panes
     callback resized(length, length);
-    // P9.10 #2: per-pane disconnect -- arg is `root.pane-index` (this pane's
+    // per-pane disconnect - arg is `root.pane-index` (this pane's
     // real id), not the repeater's own iteration index.
     callback pane-disconnect(int);
 
     // Hairline border always visible (panes are placed edge-to-edge with no
-    // separate divider rectangle — P6.11's absolutely-positioned N-way
+    // separate divider rectangle — 's absolutely-positioned N-way
     // layout replaces the old HorizontalLayout/VerticalLayout dividers);
     // accent + thicker when focused.
     border-width: root.is-focused ? 1.5px : 1px;
     border-color: root.is-focused ? Theme.color-accent : Theme.color-stroke;
     clip: true;
 
-    // Split-pane actions live in an explicit chrome row.  Keeping this inset
+    // Split-pane actions live in an explicit chrome row. Keeping this inset
     // outside `pane-content` is important: an overlaid TouchArea steals real
     // terminal/RDP pointer input, while a merely painted overlay hides cells.
     property <length> chrome-height: root.show-disconnect ? 28px : 0px;
@@ -1273,7 +1251,7 @@ component PaneSlot inherits Rectangle {
         }
     }
 
-    // P9.10 #2: per-pane disconnect affordance. Always visible in a split,
+    // per-pane disconnect affordance. Always visible in a split,
     // but now in reserved chrome rather than layered over session pixels.
     if root.show-disconnect : pane-chrome := Rectangle {
         x: 0px; y: 0px;
@@ -1284,7 +1262,7 @@ component PaneSlot inherits Rectangle {
             padding-right: Theme.space-1;
             Rectangle { horizontal-stretch: 1; }
             IconButton {
-                glyph: "\u{EA76}"; // cod-close -- same glyph as the tab strip's close button
+                glyph: "\u{EA76}"; // cod-close - same glyph as the tab strip's close button
                 size: 24px;
                 glyph-size: Theme.icon-xs;
                 tooltip: "Disconnect this pane";
@@ -1412,9 +1390,9 @@ export component AppWindow inherits Window {
     background: Theme.color-base;
     // Note: forward-focus is intentionally NOT set here because the active session
     // surface (terminal or RDP) is conditional. Each surface's FocusScope grabs focus
-    // on the first pointer click via fs.focus() / rdp-fs.focus().
+    // on the first pointer click via fs.focus / rdp-fs.focus.
 
-    // ── Session / tabs (P2.4 contract unchanged) ──────────────────────
+    // ── Session / tabs ──────────────────────
     in property <[TabItem]> tabs;
     in property <int>       active-tab;
     in property <image>     frame;
@@ -1422,7 +1400,7 @@ export component AppWindow inherits Window {
         + max(0, tabs.length - 1) * Theme.space-1;
     // Fixed-width tabs make the active-tab reveal a one-way calculation:
     // right-align the active item only once its right edge exceeds the
-    // viewport, then clamp at the end of the strip.  No mutable layout
+    // viewport, then clamp at the end of the strip. No mutable layout
     // feedback is involved, so model and window-size changes are immediate.
     property <length> tab-strip-offset: min(
         0px,
@@ -1430,7 +1408,7 @@ export component AppWindow inherits Window {
             tabs-viewport.width - root.tab-strip-content-width,
             tabs-viewport.width - (root.active-tab + 1) * (180px + Theme.space-1)
                 + Theme.space-1));
-    // ── RDP surface (P4.2) ────────────────────────────────────────────
+    // ── RDP surface ────────────────────────────────────────────
     // rdp-frame: the decoded RGBA image from the active RDP session.
     // rdp-active: true while an RDP tab is the active tab.
     in property <image>     rdp-frame;
@@ -1440,20 +1418,19 @@ export component AppWindow inherits Window {
     in property <[ConnRow]> connections;
     in-out property <int>   active-panel: 0;
     in-out property <bool>  sidebar-collapsed: false;
-    // P6.9 (gap 11): live + persisted side-panel width in logical px. Plain
     // `int` (not `length`) — the Rust side stores/round-trips it as a plain
     // pixel integer via the settings table, same as every other persisted
-    // int preference (theme-mode, density, ...).
+    // int preference (theme-mode, density,...).
     in-out property <int>   sidebar-width: Theme.side-panel-width / 1px;
     // Fired once per drag gesture (on pointer-up), not on every intermediate
     // move — avoids spamming the settings DB while dragging.
     callback sidebar-width-changed(int);
-    // P5.3b: live search/filter for the connection tree and keys tree.
+    // live search/filter for the connection tree and keys tree.
     in-out property <string> conn-filter: "";
     in-out property <string> cred-filter: "";
     callback conn-filter-changed(string);
     callback cred-filter-changed(string);
-    // P5.3b: toast notifications for background events.
+    // toast notifications for background events.
     in property <[ToastEntry]> toasts;
     callback toast-dismissed(int);  // arg = ToastEntry.id
 
@@ -1473,13 +1450,13 @@ export component AppWindow inherits Window {
     in property <string>  session-identity: "";
     in-out property <bool> broadcast-active: false;
 
-    // ── P5.1 / P6.11: Split panes (generalized 2-pane → N-pane) ────────
-    // pane-layout: legacy display value (0=single, 1=H-split, 2=V-split) --
+    // ── Split panes (generalized 2-pane → N-pane) ────────────
+    // pane-layout: legacy display value (0=single, 1=H-split, 2=V-split) -
     // kept for the single-pane (0) case and informational display; N-way
     // geometry (3+ panes, or any RDP-in-pane mix) is driven entirely by
     // `pane-cells` below instead.
     in property <int>    pane-layout: 0;
-    // P6.11: one entry per pane in the active tab (empty/1 entry when the
+    // one entry per pane in the active tab (empty/1 entry when the
     // tab isn't split — see `PaneCell`'s doc comment). Renders via the N-way
     // repeater in the session area, replacing the old fixed 2-pane
     // HSplit/VSplit branches.
@@ -1495,17 +1472,17 @@ export component AppWindow inherits Window {
     callback detach-session();
     callback pane-focused(int);
     callback pane-resized(int, length, length);
-    // P9.10 #2: per-pane disconnect inside a split -- arg is the pane id
+    // per-pane disconnect inside a split - arg is the pane id
     // (`PaneCell.pane`, same identity `pane-resized` already forwards),
     // never "whichever pane is focused" like `close-pane` above (a
     // right-clicked/hover-clicked pane need not be the focused one).
     callback pane-disconnect(int);
-    // RDP-in-pane (P6.11): key/scroll callbacks fired from ANY pane's
+    // RDP-in-pane: key/scroll callbacks fired from ANY pane's
     // RdpSurface, not only a whole-tab-is-RDP primary. Reuses the exact same
     // names the primary RDP surface already had (`rdp-key-down` etc., see
     // below) — the Rust handler routes by focused-pane id either way.
 
-    // ── P6.11 (gap 14): broadcast targeting menu ────────────────────────
+    // ── Broadcast targeting menu ────────────────────────────────────────
     // Never-silent status/broadcast-bar label naming the active target set
     // ("all panes" / "2 of 4 panes" / "group: <name>").
     in property <string> broadcast-target-label: "all panes";
@@ -1532,7 +1509,6 @@ export component AppWindow inherits Window {
     in-out property <int>            palette-selected: 0;
 
     // One contextual menu for the active tab's focused pane. The controller
-    // snapshots surface kind and selection state when opening it.
     in-out property <bool> session-actions-open: false;
     in property <bool> session-actions-terminal: false;
     in property <bool> session-actions-rdp: false;
@@ -1548,7 +1524,7 @@ export component AppWindow inherits Window {
     callback session-rdp-alt-tab();
     callback session-rdp-release-modifiers();
 
-    // ── Terminal search overlay (P6.7, Ctrl⇧F) ─────────────────────────
+    // ── Terminal search overlay ─────────────────────────
     in-out property <bool>   terminal-search-open: false;
     in-out property <string> terminal-search-query: "";
     // Total hits in the active tab's buffer, and the 0-based index of the
@@ -1565,39 +1541,36 @@ export component AppWindow inherits Window {
     in-out property <bool>   overlay-connecting: false;
     in-out property <bool>   overlay-error: false;
     in-out property <bool>   launchpad-open: false;
-    // P6.9 (gap 16): the session layer only reports coarse `SessionStatus`
     // (Connecting/Connected/Failed/...) with no auth-stage sub-events, so the
     // overlay shows one honest live line ("Establishing an SSH connection…")
     // tagged with the real protocol kind, instead of a fake 3-step checklist
     // that used to sit stuck on a literal "Authenticating · ed25519" string.
-    // See docs/devel/tasks/P6.9-shell-truth-ergonomics.md ("Out" scope note).
     in property <string>     connecting-kind: "";
     // Explicit security property for plain Telnet. It is refreshed from the
     // active tab, never inferred from titles or failure state.
     in property <bool>       session-insecure: false;
     in property <string>     error-reason: "";
     in property <string>     error-detail: "";
-    // P9.12 #3: `ErrorOverlay` used to show the same "Connection failed"
+    // `ErrorOverlay` used to show the same "Connection failed"
     // title + red error styling for a genuine `Failed` session AND a clean
-    // `Disconnected`/`Exited` end -- misleading (exiting a shell normally
+    // `Disconnected`/`Exited` end - misleading (exiting a shell normally
     // looked like a failure). `true` only for a real `Failed` status;
     // `false` for `Disconnected`/`Exited` (see `overlays::update_overlays_
     // from_status`), which get a neutral "Session ended" title instead.
     in property <bool>       error-is-failure: true;
     in property <[RecentItem]> launchpad-recents;
     in-out property <string> launchpad-query: "";
-    // P6.14: a real (time-of-day) greeting computed in Rust, replacing the
+    // a real (time-of-day) greeting computed in Rust, replacing the
     // component's literal "Welcome back, ops" default.
     in property <string> launchpad-greeting: "Welcome back.";
     callback reconnect();
-    // P6.9 (gap 16): opens the failed profile's editor (falls back to
     // quick-connect when the failed session has no originating stored
     // profile, e.g. a quick-connect session).
     callback edit-failed-profile();
     callback launchpad-edited(string);
     callback open-recent(int);
 
-    // ── Quick-connect form (P3.2; P6.12 gap 20 adds the kind selector) ──
+    // ── Quick-connect form ──
     in-out property <bool>   quick-connect-open: false;
     // 0 = SSH · 1 = RDP · 2 = Telnet · 3 = Local.
     in-out property <int>    qc-kind: 0;
@@ -1617,7 +1590,7 @@ export component AppWindow inherits Window {
     in-out property <string> qc-local-cwd: "";
     callback qc-connect();
 
-    // ── Host-key dialog (P3.2) ────────────────────────────────────────
+    // ── Host-key dialog ────────────────────────────────────────
     in-out property <bool>   host-key-open: false;
     in property <bool>       host-key-mismatch: false;
     in property <string>     host-key-host: "";
@@ -1627,7 +1600,7 @@ export component AppWindow inherits Window {
     callback host-key-accept();
     callback host-key-reject();
 
-    // ── RDP cert dialog (P4.2) ───────────────────────────────────────
+    // ── RDP cert dialog ───────────────────────────────────────
     in-out property <bool>   cert-dialog-open: false;
     in property <bool>       cert-dialog-mismatch: false;
     in property <string>     cert-dialog-host: "";
@@ -1637,7 +1610,7 @@ export component AppWindow inherits Window {
     callback cert-accept();
     callback cert-reject();
 
-    // ── SSH keyboard-interactive dialog (P6.13) ───────────────────────
+    // ── SSH keyboard-interactive dialog ───────────────────────
     in-out property <bool>          kbd-open: false;
     in property <string>            kbd-name: "";
     in property <string>            kbd-instructions: "";
@@ -1646,7 +1619,7 @@ export component AppWindow inherits Window {
     callback kbd-submit();
     callback kbd-cancel();
 
-    // ── mRemoteNG import password prompt (P9.4) ───────────────────────
+    // ── mRemoteNG import password prompt ───────────────────────
     in-out property <bool>   import-password-open: false;
     in property <string>     import-password-file-name: "";
     callback import-password-edited(string);
@@ -1670,7 +1643,7 @@ export component AppWindow inherits Window {
     in-out property <bool> close-confirm-dont-ask: false;
     in property <bool> close-confirm-allow-dont-ask: true;
     // Remains true between a modal-owned key-down and its matching key-up,
-    // even if Escape/mouse closes the modal between those phases.
+    // even if Escape/mouse closes the modal between those transitions.
     in-out property <bool> close-confirm-key-guard-active: false;
     // One owner for every global tab-navigation chord. The delayed switch
     // avoids removing a focused conditional session surface during its own
@@ -1728,20 +1701,20 @@ export component AppWindow inherits Window {
     callback close-confirm-key-down(string, int /* command */);
     callback close-confirm-key-up(string);
 
-    // ── Appearance (P5.2: full settings exposed here) ────────────────
+    // ── Appearance (full settings exposed here) ────────────────
     in-out property <int>   theme-mode: 2;
     in-out property <int>   density    <=> Theme.density;
     in-out property <int>   accent-index: 0;
     in-out property <bool>  dark-mode  <=> Theme.dark-mode;
     in-out property <color> accent     <=> Theme.accent;
-    // Keep std-widgets' native styling (LineEdit, ComboBox, ...) in sync with
+    // Keep std-widgets' native styling (LineEdit, ComboBox,...) in sync with
     // the app's own dark/light token switch. `Theme.dark-mode` is our own
-    // global and does NOT by itself affect native-widget styling -- that's
+    // global and does NOT by itself affect native-widget styling - that's
     // driven by std-widgets' `Palette.color-scheme`. Without this, inputs
-    // (e.g. the profile editor's LineEdits, P7.2) keep rendering with the
+    // (e.g. the profile editor's LineEdits) keep rendering with the
     // environment's default scheme even after the user picks Dark/Light in
     // Settings, or after startup restores a persisted dark/light choice
-    // (P6.17 gap V2).
+    // Settings changes therefore update both token and native-widget styling.
     changed dark-mode => {
         Palette.color-scheme = self.dark-mode ? ColorScheme.dark : ColorScheme.light;
     }
@@ -1766,7 +1739,7 @@ export component AppWindow inherits Window {
     in property <string> settings-shell-cwd-placeholder: "Home directory";
     // Startup behavior: 0 = clean start, 1 = restore last session
     in-out property <int>    startup-behavior: 0;
-    // Renderer backend (P7.1 cont.): 0 auto · 1 software · 2 hardware.
+    // Renderer backend: 0 auto · 1 software · 2 hardware.
     // Applied on next launch; persisted to render.backend by the controller.
     in-out property <int>    render-backend: 0;
     // Mirrored settings values. The settings panel owns the normal toggles;
@@ -1778,9 +1751,9 @@ export component AppWindow inherits Window {
     in property <string> settings-build-version: "";
     in property <string> settings-build-details: "";
 
-    // ── Automation / Agent mode (P8.6-B) ──────────────────────────────
+    // ── Automation / Agent mode ──────────────────────────────
     // See SettingsPanel's identically-named properties for the full doc
-    // comments -- these just relay them between the controller and the panel.
+    // comments - these just relay them between the controller and the panel.
     in property <bool>    agent-mode-available: false;
     in-out property <bool> agent-mode-enabled: false;
     in-out property <bool> agent-mode-scope-read: false;
@@ -1792,17 +1765,17 @@ export component AppWindow inherits Window {
     callback agent-mode-scope-write-changed(bool);
     callback agent-mode-scope-execute-changed(bool);
 
-    // ── P1.4: Profile editor modal ───────────────────────────────────
+    // ── Profile editor modal ───────────────────────────────────
     in-out property <bool>        profile-editor-open: false;
     in-out property <ConnProfile> profile-form;
     callback profile-save();
 
-    // ── P1.4: Group editor modal ──────────────────────────────────────
+    // ── Group editor modal ──────────────────────────────────────
     in-out property <bool>      group-editor-open: false;
     in-out property <GroupForm> group-form;
     callback group-save();
 
-    // ── P1.4: Credential editor modal ────────────────────────────────
+    // ── Credential editor modal ────────────────────────────────
     in-out property <bool>         cred-editor-open: false;
     in-out property <CredFormData> cred-form;
     callback cred-save();
@@ -1819,9 +1792,9 @@ export component AppWindow inherits Window {
     }
     callback move-tab(int, int);
     callback close-tab(int);
-    // P9.10 #1: the tab strip's right-click context menu (mirrors the
+    // the tab strip's right-click context menu (mirrors the
     // connection tree row's ContextMenuArea/MenuItem shape). Home suppresses
-    // these entirely (see the `Tab` instantiation below) -- there is no
+    // these entirely (see the `Tab` instantiation below) - there is no
     // session to reconnect/disconnect/duplicate.
     callback tab-reconnect(int);
     callback tab-disconnect(int);
@@ -1832,7 +1805,7 @@ export component AppWindow inherits Window {
     callback open-palette();
     callback quick-connect();
     callback row-activated(int);
-    // P9.5 #2: fired on a single click on a leaf connection row (select,
+    // fired on a single click on a leaf connection row (select,
     // as opposed to `row-activated`'s double-click launch).
     callback row-selected(int);
     callback toggle-broadcast();
@@ -1841,16 +1814,14 @@ export component AppWindow inherits Window {
     callback theme-changed(int);
     callback density-changed(int);
     callback accent-changed(int);
-    // P5.2 fix: restore persisted accent color at launch (called from Rust startup).
-    // P6.8 (gap 10): a persisted "OS accent" selection (accent-index ==
+    // fix: restore persisted accent color at launch (called from Rust startup).
     // Theme.os-accent-index) resolves to the live OS color instead of a preset.
     callback apply-accent-index(int);
     apply-accent-index(idx) => {
         Theme.accent = idx == Theme.os-accent-index
             ? Theme.os-accent-color : Theme.accent-presets[idx];
     }
-    // P6.8 (gap 10): pushes the live OS accent value read by `cm_platform::accent`
-    // into `Theme.os-accent-color` -- called once at startup and, where the
+    // into `Theme.os-accent-color` - called once at startup and, where the
     // platform has a live signal, again on every OS accent change. Keeps the
     // accent live if the user currently has the "OS accent" swatch selected.
     callback set-os-accent(color);
@@ -1879,49 +1850,48 @@ export component AppWindow inherits Window {
     callback startup-behavior-changed(int);
     callback render-backend-changed(int);
 
-    // P1.4 — Connections panel CRUD.
+    // — Connections panel CRUD.
     callback toggle-conn-row(int);       // idx → expand/collapse group
     callback new-connection(int);        // parent group_id (0=root)
     callback new-group(int);             // parent group_id (0=root)
     callback edit-conn(int);             // connection id → profile editor
     callback edit-group(int);            // group id → group editor
-    callback duplicate-conn-row(int);    // connection id (P6.10 gap 15)
-    // Connection id → open into the active tab's next pane slot (P6.10 fix
-    // round 2 / P6.11). SSH/Local/RDP all supported since P6.11.
+    callback duplicate-conn-row(int);    // connection id
+    // Connection id → open into the active tab's next pane slot. SSH/Local/RDP
+    // are all supported.
     callback connect-in-split-row(int);
     callback delete-conn-row(int, bool); // id, is_group
-    // P1.4 — Reorder (up/down within the same parent) + move-between-groups.
+    // — Reorder (up/down within the same parent) + move-between-groups.
     // Reorder is wired from hover ↑/↓ buttons; move-between-groups is exposed
     // via the group/parent-group ComboBoxes in the profile and group editors.
     callback reorder-conn-row(int, int);  // conn_id, direction (-1=up, +1=down)
     callback reorder-group-row(int, int); // group_id, direction
 
-    // P1.4 — Keys panel CRUD.
+    // — Keys panel CRUD.
     callback toggle-cred-row(int);        // idx → expand/collapse folder
     callback new-cred-folder(int);        // parent_folder_id (0=root)
     callback new-cred(int);               // folder_id (0=root)
     callback edit-cred(int);              // credential id
     callback delete-cred-row(int, bool);  // id, is_folder
 
-    // TerminalSurface passthrough (UNCHANGED from P2.4).
     callback key-input(string, int, int);
     callback pointer(int, int, length, length, int);
     callback scroll(length, length);
     callback surface-resized(length, length);
-    // RDP scroll with actual pointer coordinates (carry-over fix c).
+    // RDP scroll with actual pointer coordinates .
     callback rdp-scroll(length /* x */, length /* y */, length /* dx */, length /* dy */);
 
-    // RDP surface key events (P4.2) — separate from terminal because RDP needs
+    // RDP surface key events — separate from terminal because RDP needs
     // both key-down and key-up PDUs (key-released fires key-up).
     callback rdp-key-down(string /* text */, int /* special */, int /* mods */);
     callback rdp-key-up(string /* text */, int /* special */, int /* mods */);
     callback rdp-release-keys();
 
-    // ── Main shell (P7.3) ───────────────────────────────────────────────
+    // ── Main shell ───────────────────────────────────────────────
     // Two-column shell: a full-height NAV column (activity bar + side panel,
     // spanning top-to-bottom) on the left, and a RIGHT column (tab strip +
     // session + status bar, status bar scoped to this column only) — an
-    // mRemoteNG-style split that replaces the P2.4-era "tab strip spans the
+    // mRemoteNG-style split that replaces the "tab strip spans the
     // full window width above everything" layout. See GUI_DESIGN.md §2.
     global-shortcuts := FocusScope {
         width: 100%;
@@ -1995,7 +1965,6 @@ export component AppWindow inherits Window {
                         tooltip: "Settings";
                         clicked => { root.select-panel(2); }
                     }
-                    // P6.9 (gap 11): chrome collapse toggle beyond the palette-only
                     // path ("Toggle sidebar" in the command palette). Same glyph as
                     // that palette action (cod-three_bars); `active` mirrors the
                     // current collapsed state so the rail lights up when hidden.
@@ -2040,7 +2009,7 @@ export component AppWindow inherits Window {
                             clicked => { root.new-connection(0); }
                         }
                     }
-                    // P5.3b: Search/filter box.
+                    // Search/filter box.
                     HorizontalLayout {
                         padding-left: Theme.space-3; padding-right: Theme.space-3;
                         padding-bottom: Theme.space-2;
@@ -2059,11 +2028,10 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // P5.3b: FocusScope for keyboard navigation in the connection tree.
+                    // FocusScope for keyboard navigation in the connection tree.
                     // Clicking inside the tree area gives focus to this scope so
                     // arrow keys navigate rows without disturbing the terminal.
                     //
-                    // P6.10 (gap 15): wrapped in a `ContextMenuArea` so the keyboard
                     // Menu key (Slint fires it natively once an inner `FocusScope`
                     // holds focus — no key detection code needed here) opens a menu
                     // for the arrow-key-highlighted row, and a right-click that lands
@@ -2071,10 +2039,10 @@ export component AppWindow inherits Window {
                     // `ContextMenuArea`, which wins first for on-row clicks) offers
                     // "New connection" / "New group".
                     //
-                    // "Connect in split" (P6.10 fix round 2 / P6.11): same
+                    // "Connect in split": same
                     // callback as the per-row ConnectionRow menu above — see
                     // its comment for the full rationale (SSH/Local/RDP all
-                    // supported since P6.11).
+                    // supported since).
                     ContextMenuArea {
                         vertical-stretch: 1;
                         Menu {
@@ -2229,7 +2197,7 @@ export component AppWindow inherits Window {
                             clicked => { root.new-cred(0); }
                         }
                     }
-                    // P5.3b: Search/filter box.
+                    // Search/filter box.
                     HorizontalLayout {
                         padding-left: credentials-panel.width < 220px ? Theme.space-2 : Theme.space-3;
                         padding-right: credentials-panel.width < 220px ? Theme.space-2 : Theme.space-3;
@@ -2251,8 +2219,7 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // P5.3b: FocusScope for keyboard navigation in the keys tree.
-                    // P6.10 (gap 15): wrapped in a `ContextMenuArea` — same rationale
+                    // FocusScope for keyboard navigation in the keys tree.
                     // as the connections tree above (keyboard Menu key on the
                     // highlighted row; empty-area right-click → New credential/folder).
                     ContextMenuArea {
@@ -2336,7 +2303,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // ── Settings panel (P5.2) ──────────────────────────
+                // ── Settings panel ──────────────────────────
                 if active-panel == 2 : SettingsPanel {
                     theme-mode          <=> root.theme-mode;
                     density             <=> root.density;
@@ -2400,7 +2367,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Side-panel drag handle (P6.9, gap 11). Live-resizes `sidebar-width`
+            // Side-panel drag handle. Live-resizes `sidebar-width`
             // (clamped to Theme's min/max) while dragging; commits the final width
             // via `sidebar-width-changed` on release so the DB is written once per
             // gesture, not once per pixel.
@@ -2411,7 +2378,7 @@ export component AppWindow inherits Window {
                           : transparent;
                 property <int> drag-base-width: 0;
                 sb-resize := TouchArea {
-                    // P8.1: no dedicated "separator/resize handle" role exists in
+                    // no dedicated "separator/resize handle" role exists in
                     // Slint 1.17's enum; `slider` is the closest value-bearing fit
                     // for a 1-D drag control.
                     accessible-role: slider;
@@ -2435,7 +2402,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-        // ── Hairline divider (P7.3, fixes #5) ───────────────────────────
+        // ── Hairline divider ───────────────────────────
         // A clean, deliberate seam between the nav column and the tab-strip/
         // session/status column — replaces the old zero-gap "first tab flush
         // to the window corner" join.
@@ -2453,7 +2420,7 @@ export component AppWindow inherits Window {
             tab-strip := Rectangle {
                 height: 40px;
                 background: Theme.color-strip;
-                // Compare against the stable no-navigation viewport.  Every
+                // Compare against the stable no-navigation viewport. Every
                 // child below is absolutely positioned, so showing the
                 // controls cannot feed back into this Rectangle's layout
                 // width (the loop produced by a conditional HorizontalLayout).
@@ -2556,11 +2523,11 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Session area (P6.10 / P6.17 R2: wrapped in a plain Rectangle so the
+            // Session area ( / R2: wrapped in a plain Rectangle so the
             // session-state overlays below can be layered ABOVE the surface/broadcast
             // bar but stay confined to this cell — they no longer paint over the tab
             // strip or status bar, which used to happen when they were mounted as
-            // 100%x100% siblings of the whole AppWindow (app.slint:1372-1389 pre-P6.10).
+            // 100%x100% siblings of the whole AppWindow (app.slint:1372-1389 pre-).
             session-area := Rectangle {
                 vertical-stretch: 1;
                 clip: true;
@@ -2569,7 +2536,7 @@ export component AppWindow inherits Window {
                 width: 100%; height: 100%;
                 spacing: 0px;
 
-                // ── Single-pane terminal (P2.4; FROZEN — no split, no RDP) ──────
+                // ── Single-pane terminal ──────
                 if !rdp-active && pane-cells.length <= 1 : TerminalSurface {
                     vertical-stretch: 1;
                     frame: root.frame;
@@ -2580,7 +2547,7 @@ export component AppWindow inherits Window {
                     resized(w, h) => { root.surface-resized(w, h); }
                 }
 
-                // ── RDP surface (P4.2; only shown when an unsplit RDP tab is
+                // ── RDP surface (only shown when an unsplit RDP tab is
                 // active — a split tab, even one containing an RDP pane,
                 // renders through the N-way repeater below instead) ────────
                 if rdp-active && pane-cells.length <= 1 : RdpSurface {
@@ -2595,12 +2562,12 @@ export component AppWindow inherits Window {
                     resized(w, h)     => { root.surface-resized(w, h); }
                 }
 
-                // ── N-way split (P6.11): one PaneSlot per `pane-cells` entry,
+                // ── N-way split: one PaneSlot per `pane-cells` entry,
                 // absolutely positioned from Rust-computed fractional
-                // geometry (`PaneGroup::rects()`) — replaces the old fixed
+                // geometry (`PaneGroup::rects`) —
                 // 2-pane HSplit/VSplit branches. Each cell carries its own
                 // `is-rdp` flag, so a split can freely mix terminal and RDP
-                // panes (RDP-in-pane, P6.11's second scope item).
+                // panes (RDP-in-pane support).
                 if pane-cells.length > 1 : Rectangle {
                     vertical-stretch: 1;
                     clip: true;
@@ -2614,7 +2581,7 @@ export component AppWindow inherits Window {
                         is-focused: root.active-pane == cell.pane;
                         focus-request: root.session-focus-request;
                         pane-index: cell.pane;
-                        // P9.10 #2: a split (more than one cell) is the only
+                        // a split (more than one cell) is the only
                         // time there's another pane to fall back to.
                         show-disconnect: root.pane-cells.length > 1;
                         pane-focused(i) => { root.pane-focused(i); }
@@ -2647,7 +2614,6 @@ export component AppWindow inherits Window {
                             font-weight: 600;
                             vertical-alignment: center;
                         }
-                        // P6.11 (gap 14): targeting menu trigger — always shows
                         // the active target ("never silent"), clickable to
                         // change it. Implicit width from the HorizontalLayout
                         // child (same pattern as the status-bar pills below);
@@ -2689,7 +2655,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ── Broadcast targeting popup (P6.11, gap 14) ────────────────────
+            // ── Broadcast targeting popup ────────────────────
             // A small anchored popup off the broadcast-bar trigger (not a
             // full-screen Modal — the spec calls for "a small popup off the
             // broadcast affordance"). Mounted at the `session-area` level
@@ -2819,9 +2785,8 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ── Session-state overlays (P6.10 / P6.17 R2) ──────────────────
+            // ── Session-state overlays ──────────────────
             // Moved from window-level 100%x100% siblings (which painted over the
-            // tab strip and status bar — shots 21/25/34/38 in the P6.17 memo) to
             // this cell: still full-bleed over the surface/broadcast bar, but the
             // tab strip above and the status bar below stay visible and honest
             // while a tab is connecting/failed/empty.
@@ -2829,7 +2794,7 @@ export component AppWindow inherits Window {
                 x: 0; y: 0; width: 100%; height: 100%;
                 identity: session-identity;
                 kind: connecting-kind;
-                // P7.3: Cancel aborts the held connect via the same
+                // Cancel aborts the held connect via the same
                 // close-tab path the tab strip's ✕ uses (terminates the
                 // in-flight session, selects the next tab / falls back to
                 // the empty/launchpad tab).
@@ -2852,7 +2817,7 @@ export component AppWindow inherits Window {
                 edited(q) => { root.launchpad-edited(q); }
                 open-recent(i) => { root.open-recent(i); }
             }
-            // ── P6.7: terminal search overlay ────────────────────────────────
+            // ── terminal search overlay ────────────────────────────────
             // Floats over the live terminal (top-right), not full-bleed like the
             // overlays above — the terminal underneath stays visible/live.
             if terminal-search-open : SearchOverlay {
@@ -2868,7 +2833,7 @@ export component AppWindow inherits Window {
             }
             }
 
-            // Status bar (P7.3: scoped to this column only — NOT full window
+            // Status bar (scoped to this column only — NOT full window
             // width, so it never draws under/past the nav column).
             Rectangle {
                 height: Theme.status-bar-height;
@@ -2880,7 +2845,6 @@ export component AppWindow inherits Window {
                         alignment: center;
                         StatusPill {
                             state: session-status;
-                            // P6.9 (gap 13): the label now tracks the live status instead
                             // of a hardcoded "Connected · " prefix — a Failed/Disconnected
                             // tab used to read "Connected · host" while showing a red dot.
                             text: session-identity == "" ? "No active session"
@@ -2941,7 +2905,7 @@ export component AppWindow inherits Window {
                             clicked => { root.open-palette(); }
                         }
                     }
-                    // Broadcast indicator in the status bar (never silent — P6.11
+                    // Broadcast indicator in the status bar (never silent —
                     // names the active target, not just "BC"). Click opens the
                     // targeting menu; the dedicated dismiss button in the
                     // broadcast bar above still turns broadcast fully off.
@@ -2962,7 +2926,7 @@ export component AppWindow inherits Window {
                             clicked => { root.open-broadcast-target(); }
                         }
                     }
-                    // P8.6-B: persistent active indicator -- shown iff agent-mode is
+                    // persistent active indicator - shown iff agent-mode is
                     // both enabled AND actually listening (a non-empty connection
                     // details string means the proxy bound successfully), in the
                     // spirit of a screen-share indicator: a security signal that
@@ -3051,7 +3015,7 @@ export component AppWindow inherits Window {
         }
     }
 
-    // ── RDP cert dialog (P4.2) ────────────────────────────────────────────
+    // ── RDP cert dialog ────────────────────────────────────────────
     Modal {
         open: root.cert-dialog-open;
         dismissed => {}
@@ -3066,7 +3030,7 @@ export component AppWindow inherits Window {
         }
     }
 
-    // ── SSH keyboard-interactive dialog (P6.13) ───────────────────────────
+    // ── SSH keyboard-interactive dialog ───────────────────────────
     Modal {
         open: root.kbd-open;
         dismissed => {}
@@ -3080,7 +3044,7 @@ export component AppWindow inherits Window {
         }
     }
 
-    // ── mRemoteNG import password prompt (P9.4) ───────────────────────────
+    // ── mRemoteNG import password prompt ───────────────────────────
     Modal {
         open: root.import-password-open;
         dismissed => { root.import-password-cancel(); }
@@ -3106,11 +3070,10 @@ export component AppWindow inherits Window {
         }
     }
 
-    // ── P1.4: Profile editor modal ────────────────────────────────────────
+    // ── Profile editor modal ────────────────────────────────────────
     Modal {
         open: root.profile-editor-open;
-        // Fable follow-up (P8.6-B): Esc/scrim-click must clear the transient
-        // Inline password too, not just the explicit Cancel button below --
+        // Inline password too, not just the explicit Cancel button below -
         // mirrors ProfileEditor's own `cancel` body exactly.
         dismissed => {
             root.profile-form.inline-password = "";
@@ -3121,10 +3084,9 @@ export component AppWindow inherits Window {
             cred-name-list: root.cred-name-list;
             group-name-list: root.group-name-list;
             save   => { root.profile-save(); }
-            // Fable non-blocking note (P9.6-A Phase C): a typed-then-cancelled
             // Inline password otherwise lingers in `profile-form` until the
-            // next editor-open (save/open already clear it -- see
-            // tree_ctl::wire_profile_save / wire_edit_conn) -- close the gap
+            // next editor-open (save/open already clear it - see
+            // tree_ctl::wire_profile_save / wire_edit_conn) - close the gap
             // on cancel too.
             cancel => {
                 root.profile-form.inline-password = "";
@@ -3133,7 +3095,7 @@ export component AppWindow inherits Window {
         }
     }
 
-    // ── P1.4: Group editor modal ──────────────────────────────────────────
+    // ── Group editor modal ──────────────────────────────────────────
     Modal {
         open: root.group-editor-open;
         dismissed => { root.group-editor-open = false; }
@@ -3146,7 +3108,7 @@ export component AppWindow inherits Window {
         }
     }
 
-    // ── P1.4: Credential editor modal ─────────────────────────────────────
+    // ── Credential editor modal ─────────────────────────────────────
     Modal {
         open: root.cred-editor-open;
         dismissed => { root.cred-editor-open = false; }
@@ -3158,7 +3120,7 @@ export component AppWindow inherits Window {
         }
     }
 
-    // ── P5.3b: Toast bar (background-event notifications) ────────────────────
+    // ── Toast bar (background-event notifications) ────────────────────
     // Positioned at the bottom-center; above all chrome but below the palette.
     if toasts.length > 0 : VerticalLayout {
         x: (root.width - self.width) / 2;

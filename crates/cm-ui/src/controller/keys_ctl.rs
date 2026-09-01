@@ -291,8 +291,8 @@ fn wire_cred_save(ctx: &Ctx) {
     });
 }
 
-/// P9.5 #6: how many connections directly reference credential `cred_id` as
-/// their `CredentialSource::Object` -- NOT counting connections that only
+/// #6: how many connections directly reference credential `cred_id` as
+/// their `CredentialSource::Object` - NOT counting connections that only
 /// reach it by inheriting a group's `default_credential` (that's the
 /// "Inheriting:" concept the profile editor already shows separately).
 /// Pure/testable; `refresh_cred_model` is the only caller.
@@ -308,7 +308,7 @@ pub(super) fn credential_usage_counts(
     counts
 }
 
-/// The Keys-panel row badge text for a usage count -- `""` hides the badge
+/// The Keys-panel row badge text for a usage count - `""` hides the badge
 /// entirely (see `CredRow::used-by-label`'s doc comment, app.slint).
 pub(super) fn used_by_label(count: usize) -> String {
     match count {
@@ -351,7 +351,7 @@ pub(super) fn refresh_cred_name_list(state: &State, ui: &AppWindow) {
 
 /// Map a 1-based dropdown index back to the corresponding [`CredentialFolderId`].
 ///
-/// Index 0 (the "Root" sentinel) returns `None`.  An out-of-bounds index also
+/// Index 0 (the "Root" sentinel) returns `None`. An out-of-bounds index also
 /// returns `None` (safe degradation to root).
 pub(super) fn folder_id_from_name_idx(
     idx: i32,
@@ -392,7 +392,7 @@ pub(super) fn resolve_cred_from_idx(
     }
     // Build the same ordered credential sequence that build_cred_name_list
     // produces and index directly by position (idx-1, because index 0 is the
-    // "Inherit" sentinel).  This avoids the name-collision bug that arose from
+    // "Inherit" sentinel). This avoids the name-collision bug that arose from
     // splitting on '/' and doing a first-match lookup.
     let mut ordered: Vec<CredentialId> = Vec::new();
     // Root credentials first (no folder), sorted by name.
@@ -422,7 +422,7 @@ pub(super) fn resolve_cred_from_idx(
 mod tests {
     use super::*;
 
-    // -- resolve_cred_from_idx -------------------------------------------------
+    // resolve_cred_from_idx - -----------------------------------------------
 
     fn make_cred(id: i64, folder_id: Option<i64>, name: &str) -> Credential {
         use cm_core::{CredentialFolderId, CredentialId, CredentialKind};
@@ -487,7 +487,7 @@ mod tests {
         assert!(resolve_cred_from_idx(99, &creds, &[]).is_none());
     }
 
-    // -- folder name-list helpers ----------------------------------------------
+    // folder name-list helpers - --------------------------------------------
 
     fn make_folder_sorted(id: i64, sort: i64, name: &str) -> CredentialFolder {
         CredentialFolder {
@@ -533,7 +533,7 @@ mod tests {
         assert_eq!(folder_name_idx(None, &folders), 0);
     }
 
-    // -- credential_usage_counts / used_by_label (P9.5 #6) --------------------
+    // credential_usage_counts / used_by_label -------------------------------
 
     fn make_conn_with_source(
         id: i64,

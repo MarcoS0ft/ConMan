@@ -242,9 +242,9 @@ pub(super) fn dispatch_palette_action(
         "Focus Keys" => ui.set_active_panel(1),
         "Open Settings" => ui.set_active_panel(2),
         // ── DATA ──────────────────────────────────────────────────────────────
-        // P6.6: native save/open dialogs (`rfd`) wired to `cm_storage::json_io`.
+        // native save/open dialogs (`rfd`) wired to `cm_storage::json_io`.
         // Secrets are excluded by default on export (ARCHITECTURE §6); see
-        // `import_export.rs` and `docs/devel/memos/P6.6-rfd-dep.md`.
+        // `import_export.rs` and.
         "Export connections\u{2026}" => {
             let io = state.borrow().io.clone();
             import_export::export_via_dialog(&io);
@@ -422,7 +422,7 @@ pub(super) fn initial_palette_actions() -> Vec<PaletteAction> {
             status: SharedString::from(""),
             selected: false,
         },
-        // P6.6: export/import the full connection tree as versioned JSON
+        // export/import the full connection tree as versioned JSON
         // (secrets excluded by default; native save/open dialogs via `rfd`).
         PaletteAction {
             category: SharedString::from("DATA"),
@@ -444,7 +444,7 @@ pub(super) fn initial_palette_actions() -> Vec<PaletteAction> {
             status: SharedString::from(""),
             selected: false,
         },
-        // Split-pane + broadcast actions (P5.1).
+        // Split-pane + broadcast actions.
         PaletteAction {
             category: SharedString::from("PANES"),
             first_in_group: true,
@@ -495,9 +495,9 @@ pub(super) fn initial_palette_actions() -> Vec<PaletteAction> {
             status: SharedString::from(""),
             selected: false,
         },
-        // P6.11 (gap 14): keyboard-reachable entry point for the targeting
+        // keyboard-reachable entry point for the targeting
         // menu (which is otherwise a click-only popup off the broadcast
-        // affordance) -- also gives the QA harness / xvfb-only test runs a
+        // affordance) - also gives the QA harness / xvfb-only test runs a
         // way to open it without real X11 pointer injection.
         PaletteAction {
             category: SharedString::from("PANES"),

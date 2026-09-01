@@ -19,9 +19,7 @@ use crate::CredRow;
 /// Maximum folder-nesting depth (cycle guard).
 const MAX_DEPTH: usize = 64;
 
-// ---------------------------------------------------------------------------
 // KeysPanel
-// ---------------------------------------------------------------------------
 
 /// State for the Keys (credentials) side panel.
 ///
@@ -308,9 +306,9 @@ impl KeysPanel {
     }
 
     /// Resolve the effective credential id for a connection:
-    ///   1. `conn_cred_id` if set, else
-    ///   2. the nearest ancestor group's `default_credential`, else
-    ///   3. None.
+    /// 1. `conn_cred_id` if set, else
+    /// 2. the nearest ancestor group's `default_credential`, else
+    /// 3. None.
     ///
     /// Returns `(effective_id, inherited)` where `inherited` is true when the
     /// credential comes from a group default rather than the connection itself.
@@ -364,9 +362,7 @@ impl KeysPanel {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

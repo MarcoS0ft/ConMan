@@ -3,7 +3,7 @@
 //! Architecture (ARCHITECTURE §4): a **tokio** current-thread runtime on a
 //! dedicated OS thread drives russh (connect → host-key verify → auth → PTY +
 //! shell → channel IO). Channel bytes are forwarded over an `mpsc` to the
-//! **same `!Send` engine-owner thread** the local terminal uses ([`run_engine_owner`]);
+//! same `!Send` engine-owner thread** the local terminal uses ([`run_engine_owner`]);
 //! encoded input + engine responses flow back through a tokio channel to the
 //! driver, which writes them to the SSH channel. Only bytes + owned
 //! `GridSnapshot`s cross threads — the VT engine never moves.
@@ -33,7 +33,7 @@ use crate::engine_owner::{Msg, Transport, run_engine_owner};
 use crate::libghostty::EngineError;
 use crate::session::{ExitStatus, Session, SessionInput, SessionStatus, Surface, TerminalSession};
 use cm_core::SshSettings;
-// P6.15: the auth-input and host-key-verifier *contract* types moved to
+// the auth-input and host-key-verifier *contract* types moved to
 // `cm_core::ssh` (needed by the `SessionProvider` port, which must be
 // nameable from `cm-core` without a cm-core -> cm-session dependency). Only
 // `KnownHosts` (real file I/O) stays here. Re-exported so external callers
@@ -334,9 +334,7 @@ impl russh::client::Handler for ClientHandler {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Session
-// ---------------------------------------------------------------------------
 
 /// Outbound work for the tokio driver: bytes to write to the channel, or a
 /// window resize. (`out_tx` dropping signals shutdown.)
@@ -369,7 +367,7 @@ impl Transport for SshTransport {
 /// A live SSH terminal session. `Send`; the `!Send` engine is confined to its
 /// owner thread.
 ///
-/// Implements both [`TerminalSession`] and [`Session`] (unified P4.1 trait).
+/// Implements both [`TerminalSession`] and [`Session`] (unified trait).
 #[derive(Debug)]
 pub struct SshTerminalSession {
     control_tx: Sender<Msg>,
@@ -388,7 +386,7 @@ impl SshTerminalSession {
     ///
     /// # Errors
     /// Returns [`SshError`] only for synchronous setup failures (engine init,
-    /// thread spawn). Network/auth/host-key failures surface via `status()`.
+    /// thread spawn). Network/auth/host-key failures surface via `status`.
     /// Terminal options are captured for this session's lifetime.
     pub fn connect(
         cfg: &SshSettings,
@@ -551,10 +549,10 @@ impl Drop for SshTerminalSession {
 
 /// Unified [`Session`] implementation for [`SshTerminalSession`].
 ///
-/// `surface()` returns `Surface::TerminalGrid`; `status()` and `shutdown()`
-/// delegate to the `TerminalSession` impl; `resize_px()` approximates cell
+/// `surface` returns `Surface::TerminalGrid`; `status` and `shutdown`
+/// delegate to the `TerminalSession` impl; `resize_px` approximates cell
 /// dimensions from pixel dimensions (8×16 font size; precise resize happens
-/// via `TerminalSession::resize()` in the UI layer, P4.2).
+/// via `TerminalSession::resize` in the UI layer).
 impl Session for SshTerminalSession {
     fn surface(&self) -> &Surface {
         &self.surface
@@ -636,7 +634,7 @@ async fn drive(
     {
         Ok(()) => {}
         Err(e) => {
-            // P9.8 C16: catch-all so no SshError variant is ever silent --
+            // C16: catch-all so no SshError variant is ever silent -
             // every failure that reaches here gets one WARN line before the
             // status flips to Failed.
             tracing::warn!(host = %cfg.host, error = %e, "ssh: session failed");
@@ -694,7 +692,7 @@ async fn drive_inner(
 
     // fix-connect-credential-logging: debug-build-only diagnostic for the
     // effective username actually handed to SSH auth. NEVER the
-    // password/key/passphrase carried in `auth` -- only the username.
+    // password/key/passphrase carried in `auth` - only the username.
     #[cfg(debug_assertions)]
     tracing::info!(
         username = %cfg.username,
@@ -804,7 +802,7 @@ async fn authenticate(
     user: &str,
     auth: SshAuthInput,
 ) -> Result<bool, SshError> {
-    // P9.8 C6: which method is attempted, not any secret material.
+    // C6: which method is attempted, not any secret material.
     #[cfg(debug_assertions)]
     {
         let method = match &auth {
@@ -831,14 +829,14 @@ async fn authenticate(
                 .as_ref()
                 .map(|s| String::from_utf8_lossy(s.expose()).into_owned());
             let key = load_secret_key(&path, pass.as_deref()).map_err(|e| {
-                // P9.8 C9: path is a filesystem location, not secret material
-                // -- fine to log. The key bytes/passphrase never are.
+                // C9: path is a filesystem location, not secret material
+                // fine to log. The key bytes/passphrase never are.
                 tracing::warn!(path = %path.display(), error = %e, "ssh: key load failed");
                 SshError::Key(e.to_string())
             })?;
             authenticate_publickey_negotiated(handle, user, Arc::new(key)).await
         }
-        // P6.4: a stored credential's key material, fetched from the keychain
+        // a stored credential's key material, fetched from the keychain
         // (no path on disk — decode the PEM text directly).
         SshAuthInput::KeyMaterial {
             key_pem,
@@ -849,14 +847,14 @@ async fn authenticate(
                 .as_ref()
                 .map(|s| String::from_utf8_lossy(s.expose()).into_owned());
             let key = decode_secret_key(&pem, pass.as_deref()).map_err(|e| {
-                // P9.8 C9: no path (there is none) and NEVER the PEM text.
+                // C9: no path (there is none) and NEVER the PEM text.
                 tracing::warn!(error = %e, "ssh: key load failed");
                 SshError::Key(e.to_string())
             })?;
             authenticate_publickey_negotiated(handle, user, Arc::new(key)).await
         }
         // ssh-agent: Unix reaches it via the domain socket in `SSH_AUTH_SOCK`;
-        // Windows (P6.13) via the OpenSSH agent named pipe. Either way, an
+        // Windows via the OpenSSH agent named pipe. Either way, an
         // absent/unreachable agent fails soft to `SshError::Auth` — never a
         // panic — so the caller sees a clear error instead of a hang.
         #[cfg(unix)]
@@ -891,7 +889,7 @@ async fn authenticate(
     }
 }
 
-/// The Windows OpenSSH agent's well-known named pipe path (P6.13). The
+/// The Windows OpenSSH agent's well-known named pipe path. The
 /// service listens here when `ssh-agent` is running (Services.msc /
 /// `Set-Service ssh-agent -StartupType Automatic`).
 #[cfg(windows)]
@@ -978,7 +976,7 @@ async fn keyboard_interactive_auth(
                         })
                         .collect(),
                 };
-                // P9.8 C10: round/prompt-count/name only -- NEVER the prompt
+                // C10: round/prompt-count/name only - NEVER the prompt
                 // text or the user's answers.
                 tracing::debug!(
                     round,
@@ -1051,8 +1049,8 @@ async fn pump(
         }
     }
 
-    // P9.8 C15: a clean session end (server sent ExitStatus, or the channel
-    // just closed) previously logged nothing at all -- only C16's catch-all
+    // C15: a clean session end (server sent ExitStatus, or the channel
+    // just closed) previously logged nothing at all - only C16's catch-all
     // covers failures. `exit_code` is `?`-debug-formatted since it's an
     // `Option<u32>`, not secret.
     tracing::info!(host, exit_code = ?exit_code, "ssh: session ended");
@@ -1223,7 +1221,7 @@ mod tests {
         );
     }
 
-    // -- P6.13: keyboard-interactive prompt-collection model ----------------
+    // Keyboard-interactive prompt-collection model.
 
     /// N prompts (with echo flags preserved) map to N answers, and a
     /// mismatched-length handler response is padded/truncated rather than

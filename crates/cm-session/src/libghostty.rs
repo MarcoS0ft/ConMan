@@ -7,13 +7,11 @@
 //!
 //! Threading: like the underlying `Terminal`, [`LibghosttyEngine`] is
 //! `!Send + !Sync` (it holds an FFI pointer). It is owned by a single thread;
-//! only bytes and [`GridSnapshot`]s cross thread boundaries (ARCHITECTURE §4,
-//! validated in P0.2).
+//! only bytes and [`GridSnapshot`]s cross thread boundaries (ARCHITECTURE §4).
 //!
 //! Build note: this adapter is compiled from Ghostty source via zig **0.15.2**
 //! (not 0.16.0). On Windows debug builds set
-//! `LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseSafe` to avoid a Debug-mode crash. See
-//! `docs/devel/AI_GUIDANCE.md` and the P0.2 verdict memo.
+//! `LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseSafe` to avoid a Debug-mode crash.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,7 +27,7 @@ use libghostty_vt::terminal::{Mode, Options, Point, PointCoordinate, Terminal};
 use libghostty_vt::{key, mouse};
 
 /// Nominal cell pixel size used for `resize` (libghostty wants pixel metrics
-/// for in-band size reports). The renderer supplies real metrics in P2.3; until
+/// for in-band size reports). The renderer supplies real metrics in; until
 /// then these placeholders only affect pixel-coordinate reporting.
 const NOMINAL_CELL_PX_W: u32 = 8;
 const NOMINAL_CELL_PX_H: u32 = 16;
@@ -110,7 +108,7 @@ impl LibghosttyEngine {
         })
     }
 
-    /// Read one cell at `point` (P6.7: generalized from the P2.1
+    /// Read one cell at `point` (generalized from the
     /// `Point::Active`-only form so [`snapshot`](TerminalEngine::snapshot) can
     /// address `Point::Screen` rows for a scrolled-back view too).
     fn read_cell(&self, point: Point) -> Cell {
@@ -222,8 +220,8 @@ impl TerminalEngine for LibghosttyEngine {
 
         let mut cells = Vec::with_capacity(self.size.cell_count());
         if offset == 0 {
-            // Live tail: identical to the pre-P6.7 `Point::Active` reads, kept
-            // as its own branch so the well-exercised P2.1 behavior/tests are
+            // Live tail: identical to the earlier `Point::Active` reads, kept
+            // as its own branch so the well-exercised behavior/tests are
             // untouched when nobody has scrolled.
             for y in 0..self.size.rows {
                 for x in 0..self.size.cols {
@@ -258,7 +256,7 @@ impl TerminalEngine for LibghosttyEngine {
             // scrolled back; DECTCEM visibility only matters at the tail.
             visible: offset == 0 && self.term.is_cursor_visible().unwrap_or(true),
             // DECSCUSR cursor shape is exposed via libghostty's render-state
-            // API, wired with the renderer in P2.3; default to Block for now.
+            // API, wired with the renderer in; default to Block for now.
             shape: CursorShape::Block,
         };
 
@@ -442,7 +440,7 @@ fn function_key(n: u8) -> key::Key {
 /// Map a logical key + mods to `(physical key, optional utf8 text, optional
 /// unshifted codepoint)`. For printable characters without Ctrl/Alt we pass the
 /// text through; with Ctrl/Alt we pass `None` and let the encoder derive the
-/// control sequence from the logical key (matching the P0.2-validated vectors).
+/// control sequence from the logical key (matching the vectors).
 fn map_key(key: Key, mods: KeyModifiers) -> (key::Key, Option<String>, Option<char>) {
     match key {
         Key::Char(c) => {
@@ -685,7 +683,7 @@ mod tests {
         assert!(!e.bracketed_paste_enabled());
     }
 
-    // ── P6.7: scrollback offset / follow-tail / search text ────────────────
+    // ──: scrollback offset / follow-tail / search text ────────────────
 
     /// Feed `n` numbered lines ("L0".."L{n-1}"), each on its own row.
     fn feed_numbered_lines(e: &mut LibghosttyEngine, n: usize) {

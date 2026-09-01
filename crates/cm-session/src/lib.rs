@@ -5,14 +5,13 @@
 //! 1. **Terminal sessions** — local PTY shell ([`LocalTerminalSession`]) and
 //!    SSH/TELNET remote terminals ([`SshTerminalSession`],
 //!    [`TelnetTerminalSession`]). All implement [`TerminalSession`]
-//!    and [`Session`] (ARCHITECTURE §4, P3.x / P4.1). Gated on
+//!    and [`Session`] (ARCHITECTURE §4). Gated on
 //!    `engine-libghostty`.
 //!
 //! 2. **RDP session** — [`RdpSession`] driven by IronRDP over tokio. Implements
-//!    [`Session`] (Framebuffer surface, P4.1). Always available.
+//!    [`Session`] (Framebuffer surface). Always available.
 //!
-//! The libghostty engine requires the zig 0.15.2 toolchain; see
-//! `docs/devel/AI_GUIDANCE.md`.
+//! The libghostty engine requires the zig 0.15.2 toolchain.
 
 mod pane;
 pub use pane::{FocusDir, MAX_PANES, PaneGroup, PaneLayout, PaneRect};
@@ -53,7 +52,7 @@ pub use ssh::{
 #[cfg(feature = "engine-libghostty")]
 pub use telnet::{TelnetError, TelnetTerminalSession};
 
-// P6.15: the `SessionProvider` port adapter needs `LocalTerminalSession`
+// the `SessionProvider` port adapter needs `LocalTerminalSession`
 // (local.rs) and `SshTerminalSession` (ssh.rs), both gated on
 // `engine-libghostty` — so the adapter is gated the same way (mirrors the
 // existing "zig-free build has no complete session story yet" shape; see

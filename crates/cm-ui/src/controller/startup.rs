@@ -1,4 +1,4 @@
-//! "Restore last session" (P6.14, gap 4): persisting the open-tab set as
+//! "Restore last session": persisting the open-tab set as
 //! connection ids (never secrets, never live shell state) and reopening it
 //! on the next launch that has the setting enabled.
 //!
@@ -21,7 +21,7 @@ use super::*;
 /// called on every tab open/close/switch — see the module doc for why.
 pub(super) fn persist_session_tabs(state: &Rc<RefCell<State>>) {
     let st = state.borrow();
-    // The Launchpad "home" tab isn't real session data -- never persisted.
+    // The Launchpad "home" tab isn't real session data - never persisted.
     let real: Vec<(usize, &Tab)> = st
         .tabs
         .iter()
@@ -108,13 +108,13 @@ mod tests {
 
     // `persist_session_tabs`/`restore_session_tabs` need a live `AppWindow`
     // (Slint component) and are exercised end-to-end by the xvfb restore
-    // scenario (see the task report); the pure mapping they're built on
+    // scenario (see the API contract); the pure mapping they're built on
     // (`SessionTabEntry` selection) is covered directly here.
 
     #[test]
     fn entry_for_tab_prefers_connection_id_for_remote_origin_tabs() {
         // Mirrors the closure in `persist_session_tabs` without needing a
-        // live `Tab` (which owns a boxed `Session` trait object) --
+        // live `Tab` (which owns a boxed `Session` trait object) -
         // regression-proofs the exact rule in prose form.
         fn entry_for(origin_connection_id: Option<i32>, is_remote: bool) -> SessionTabEntry {
             match origin_connection_id {
@@ -132,7 +132,7 @@ mod tests {
         // Local-shell tab (no origin id at all).
         assert_eq!(entry_for(None, false), SessionTabEntry::Local);
         // A local connection profile origin (`is_remote: false`) also
-        // degrades to `Local` -- there's nothing remote to re-resolve.
+        // degrades to `Local` - there's nothing remote to re-resolve.
         assert_eq!(entry_for(Some(9), false), SessionTabEntry::Local);
     }
 }

@@ -1,11 +1,11 @@
 // ConMan — Session-state overlays (GUI_DESIGN §5). Rendered in the session area in place
 // of the TerminalSurface while a tab is NOT Connected (the redraw timer paints the grid
-// only once Connected — P3.2). One overlay per non-live state.
+// only once Connected —). One overlay per non-live state.
 //
-// Also home to `SearchOverlay` (P6.7): unlike the two below, it floats *above* a live
+// Also home to `SearchOverlay`: unlike the two below, it floats *above* a live
 // terminal (small, top-right) rather than replacing it.
 //
-//   import { ConnectingOverlay, ErrorOverlay, SearchOverlay } from "screens/session_overlays.slint";
+// import { ConnectingOverlay, ErrorOverlay, SearchOverlay } from "screens/session_overlays.slint";
 
 import { Theme } from "../theme.slint";
 import { PrimaryButton, SecondaryButton, IconButton } from "../components.slint";
@@ -14,13 +14,12 @@ import { LineEdit } from "std-widgets.slint";
 // ── ConnectingOverlay ─────────────────────────────────────────────────────────
 // 8-dot orbital spinner + "Connecting to user@host…" + one live status line.
 //
-// P6.9 (gap 16): this used to be a 3-step checklist ("Resolving host" / "TCP
-// handshake · :22" / "Authenticating · ed25519") driven by a `step` index that
+// handshake / authentication messages driven by a `step` index that
 // Rust never advanced past 0 — the labels were fiction dressed up as progress.
 // `cm_session::SessionStatus` only reports coarse state (Connecting/Connected/
 // Failed/Disconnected/Exited) with no auth-stage sub-events to drive real
 // per-step transitions, and inventing a new session-layer event protocol is
-// out of scope here (see the task spec's "Out" section). So this overlay now
+// out of scope here (see the API contract's "Out" section). So this overlay now
 // shows exactly what is true: we are waiting on a remote protocol handshake
 // for `identity`, nothing more specific.
 //
@@ -32,12 +31,11 @@ export component ConnectingOverlay inherits Rectangle {
     in property <string> kind: "session";
     // Spinner state: 0-7 cycles clockwise through eight orbital dot positions.
     property <int> spin-tick: 0;
-    // P7.3 (win-ui-investigation #4): an explicit way to abort a slow/held
     // connect and return, instead of relying solely on the tab's own ✕. Wired
     // in app.slint to the same `close-tab` path the tab close button uses.
     callback cancel();
 
-    // P8.1: not a dialog (it replaces the session surface in place, not a
+    // not a dialog (it replaces the session surface in place, not a
     // modal), but still a distinct region a screen reader should be able to
     // land on — a live, human-meaningful status line.
     accessible-role: region;
@@ -48,22 +46,22 @@ export component ConnectingOverlay inherits Rectangle {
     // ── 8-dot orbital spinner (r=15px, 40×40 container, dots 5×5px) ──────────
     // Positions (top-left of 5×5 dot) for N, NE, E, SE, S, SW, W, NW on a 15px radius
     // centered at (20, 20) in the 40px container. Alpha trail: head=1.0, -1=0.65, -2=0.35,
-    // dim=0.12. Conditions are spelled out per dot to avoid needing mod() in property exprs.
+    // dim=0.12. Conditions are spelled out per dot to avoid needing mod in property exprs.
     Rectangle {
         width: 40px; height: 40px;
         x: (parent.width - self.width) / 2;
         y: (parent.height / 2) - 60px;
-        // N  (0°)   center=(20, 5)
+        // N (0°) center=(20, 5)
         Rectangle { width: 5px; height: 5px; border-radius: 2.5px; x: 17px; y: 2px;
             background: Theme.color-accent.with-alpha(
                 root.spin-tick == 0 ? 1.0 : root.spin-tick == 1 ? 0.65
                     : root.spin-tick == 2 ? 0.35 : 0.12); }
-        // NE (45°)  center=(30.6, 9.4)
+        // NE (45°) center=(30.6, 9.4)
         Rectangle { width: 5px; height: 5px; border-radius: 2.5px; x: 28px; y: 7px;
             background: Theme.color-accent.with-alpha(
                 root.spin-tick == 1 ? 1.0 : root.spin-tick == 2 ? 0.65
                     : root.spin-tick == 3 ? 0.35 : 0.12); }
-        // E  (90°)  center=(35, 20)
+        // E (90°) center=(35, 20)
         Rectangle { width: 5px; height: 5px; border-radius: 2.5px; x: 32px; y: 17px;
             background: Theme.color-accent.with-alpha(
                 root.spin-tick == 2 ? 1.0 : root.spin-tick == 3 ? 0.65
@@ -73,7 +71,7 @@ export component ConnectingOverlay inherits Rectangle {
             background: Theme.color-accent.with-alpha(
                 root.spin-tick == 3 ? 1.0 : root.spin-tick == 4 ? 0.65
                     : root.spin-tick == 5 ? 0.35 : 0.12); }
-        // S  (180°) center=(20, 35)
+        // S (180°) center=(20, 35)
         Rectangle { width: 5px; height: 5px; border-radius: 2.5px; x: 17px; y: 32px;
             background: Theme.color-accent.with-alpha(
                 root.spin-tick == 4 ? 1.0 : root.spin-tick == 5 ? 0.65
@@ -83,7 +81,7 @@ export component ConnectingOverlay inherits Rectangle {
             background: Theme.color-accent.with-alpha(
                 root.spin-tick == 5 ? 1.0 : root.spin-tick == 6 ? 0.65
                     : root.spin-tick == 7 ? 0.35 : 0.12); }
-        // W  (270°) center=(5, 20)
+        // W (270°) center=(5, 20)
         Rectangle { width: 5px; height: 5px; border-radius: 2.5px; x: 2px; y: 17px;
             background: Theme.color-accent.with-alpha(
                 root.spin-tick == 6 ? 1.0 : root.spin-tick == 7 ? 0.65
@@ -129,7 +127,7 @@ export component ConnectingOverlay inherits Rectangle {
                 font-family: Theme.font-family-mono;
             }
         }
-        // P7.3: Cancel affordance — aborts the held connect and returns
+        // Cancel affordance — aborts the held connect and returns
         // (closes this tab via the same path as the tab strip's ✕).
         HorizontalLayout {
             alignment: center;
@@ -148,16 +146,16 @@ export component ErrorOverlay inherits Rectangle {
     in property <string> identity: "ops@web-prod-01:22";
     in property <string> reason: "Connection refused · ECONNREFUSED";
     in property <string> detail: "after 4.2s";
-    // P9.12 #3: `true` for a genuine `SessionStatus::Failed` (red "Connection
+    // `true` for a genuine `SessionStatus::Failed` (red "Connection
     // failed" framing); `false` for a clean `Disconnected`/`Exited` end (a
-    // neutral "Session ended" title + neutral accent color) -- exiting a
+    // neutral "Session ended" title + neutral accent color) - exiting a
     // shell normally must not look like a failure. Reconnect stays available
     // either way (see `root.reconnect` below).
     in property <bool> is-failure: true;
     callback reconnect();
     callback edit();
 
-    // P8.1: same region rationale as ConnectingOverlay.
+    // same region rationale as ConnectingOverlay.
     accessible-role: region;
     accessible-label: (root.is-failure ? "Connection error for " : "Session ended for ") + root.identity;
 
@@ -185,7 +183,7 @@ export component ErrorOverlay inherits Rectangle {
             font-family: Theme.font-family; font-weight: 600; horizontal-alignment: center; }
         HorizontalLayout {
             alignment: center;
-            // P7.5: some reasons (e.g. the legacy-Standard-RDP-Security message)
+            // some reasons (e.g. the legacy-Standard-RDP-Security message)
             // are full sentences, not a short connector string — bound the
             // width and wrap so they don't get clipped to one line.
             VerticalLayout {
@@ -209,7 +207,7 @@ export component ErrorOverlay inherits Rectangle {
 }
 
 // ── SearchOverlay ──────────────────────────────────────────────────────────────
-// Whole-buffer terminal search (P6.7, Ctrl⇧F): a small floating find-bar over the
+// Whole-buffer terminal search: a small floating find-bar over the
 // top-right of a live terminal (not full-bleed — the terminal underneath stays
 // visible and live). Typed keys normally reach this via the terminal FocusScope
 // forwarding to Rust (`sessions.rs`'s `wire_key_input` → `search::handle_search_key`,
@@ -225,7 +223,7 @@ export component SearchOverlay inherits Rectangle {
     callback prev();
     callback close();
 
-    // P8.1: a small finder popup — dialog-like but not modal; groupbox +
+    // a small finder popup — dialog-like but not modal; groupbox +
     // static label (its own content, the query text, is separately labeled
     // on the input field below).
     accessible-role: groupbox;

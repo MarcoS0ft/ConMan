@@ -111,13 +111,13 @@ fn wire_close_tab(ctx: &Ctx) {
     });
 }
 
-/// P9.10 #1: the tab context menu's "Reconnect" -- `sessions::reconnect_tab`
+/// #1: the tab context menu's "Reconnect" - `sessions::reconnect_tab`
 /// does the real work (shared with the ErrorOverlay's own Reconnect button),
 /// but it writes AppWindow-level properties that are shared by whichever
 /// tab is ACTIVE, not per-tab (see `reconnect_tab`'s own doc comment). Bring
-/// the right-clicked tab into view first -- mirrors how choosing "Connect"
+/// the right-clicked tab into view first - mirrors how choosing "Connect"
 /// on a tree row already opens+focuses a new tab rather than acting
-/// off-screen -- so those properties land on the tab the user actually
+/// off-screen - so those properties land on the tab the user actually
 /// asked to reconnect.
 fn wire_tab_reconnect(ctx: &Ctx) {
     ctx.ui.on_tab_reconnect({
@@ -148,7 +148,7 @@ fn wire_tab_reconnect(ctx: &Ctx) {
     });
 }
 
-/// P9.10 #1: the tab context menu's "Disconnect" -- same active-tab-first
+/// #1: the tab context menu's "Disconnect" - same active-tab-first
 /// reasoning as [`wire_tab_reconnect`] (`sessions::disconnect_tab` writes
 /// the same kind of AppWindow-shared overlay properties via
 /// `fail_reconnect_in_place`).
@@ -169,7 +169,7 @@ fn wire_tab_disconnect(ctx: &Ctx) {
     });
 }
 
-/// P9.10 #1: the tab context menu's "Duplicate" -- reuses
+/// #1: the tab context menu's "Duplicate" - reuses
 /// `sessions::launch_saved_connection` (the exact same stored-credential
 /// connect path a tree-row double-click/Enter/context-menu Connect already
 /// goes through) for a tab whose `origin_connection_id` is known, or
@@ -266,15 +266,15 @@ pub(super) struct PushTabArgs {
     pub(super) is_remote: bool,
     pub(super) title: String,
     pub(super) initial_status: &'static str,
-    /// The stored connection id this tab was launched from, if any (P6.9 gap 16;
+    /// The stored connection id this tab was launched from, if any (
     /// see `Tab::origin_connection_id`).
     pub(super) origin_connection_id: Option<i32>,
-    /// See `Tab::is_empty` (P6.14 gap 3). `false` for every real connect path.
+    /// See `Tab::is_empty`. `false` for every real connect path.
     pub(super) is_empty: bool,
-    /// See `Tab::identity` (P9.5 #3). Whatever the caller is about to (or
+    /// See `Tab::identity` ( #3). Whatever the caller is about to (or
     /// just did) pass to `ui.set_session_identity`.
     pub(super) identity: String,
-    /// See `Tab::kind` (P9.5 #3). `"SSH"`/`"RDP"`, or empty for local shells.
+    /// See `Tab::kind` ( #3). `"SSH"`/`"RDP"`, or empty for local shells.
     pub(super) kind: String,
     /// See `Tab::insecure_transport`. True only for plain Telnet.
     pub(super) insecure_transport: bool,
@@ -306,7 +306,7 @@ pub(super) fn push_tab(
         &st.font_family,
         st.font_size_px,
         scale,
-        // P6.8 (gap 9): pick dark/light from the live app theme at spawn time
+        // pick dark/light from the live app theme at spawn time
         // instead of always hardcoding dark.
         util::terminal_theme_for(ui),
     );
@@ -359,18 +359,18 @@ pub(super) fn push_tab(
         id: num as i32,
         status: SharedString::from(initial_status),
         pane_count: 1,
-        // P9.10 #3: mirrors this exact tab's own `is_empty` -- the Home tab
+        // #3: mirrors this exact tab's own `is_empty` - the Home tab
         // (and only the Home tab) is pushed with `is_empty: true`.
         is_home: is_empty,
-        // P9.10 #1: see `TabItem::can_duplicate`'s doc comment.
+        // #1: see `TabItem::can_duplicate`'s doc comment.
         can_duplicate: origin_connection_id.is_some() || !is_remote,
     });
     ui.set_active_tab(active as i32);
     ui.set_session_status(SharedString::from(initial_status));
     ui.set_connecting_kind(SharedString::from(kind));
     ui.set_session_insecure(insecure_transport);
-    // P6.14: keep the "restore last session" snapshot current on every tab
-    // open (write-through rather than a single on-exit hook -- robust
+    // keep the "restore last session" snapshot current on every tab
+    // open (write-through rather than a single on-exit hook - robust
     // against a crash/kill, matching how other UI prefs already persist
     // eagerly on change, e.g. `sidebar_collapsed`/`active_panel`).
     startup::persist_session_tabs(state);
@@ -385,10 +385,10 @@ pub(super) fn open_local_tab(
     open_local_tab_inner(state, tab_model, ui, false);
 }
 
-/// P6.14 (gap 3): opens a tab backed by the same plain local shell, but
+/// opens a tab backed by the same plain local shell, but
 /// fronted by the Launchpad ("home" state) until the user picks something
 /// from it. Used for the app's empty-workspace slot (non-first-launch
-/// startup with nothing to restore) and for "explicitly emptied" -- closing
+/// startup with nothing to restore) and for "explicitly emptied" - closing
 /// the last real tab lands here instead of quitting (see `close_tab`).
 pub(super) fn open_empty_tab(
     state: &Rc<RefCell<State>>,
@@ -411,9 +411,9 @@ fn open_local_tab_inner(
     spawn_local_tab(state, tab_model, ui, ls, size, is_empty);
 }
 
-/// P6.12 (gap 20): opens a local-shell tab for the quick-connect dialog's
+/// opens a local-shell tab for the quick-connect dialog's
 /// "Local" kind, using the settings typed directly into the dialog instead
-/// of the app-wide `local_settings` default. Never persisted -- mirrors how
+/// of the app-wide `local_settings` default. Never persisted - mirrors how
 /// quick-connect SSH/RDP auth is `Direct`-provenance, in-memory only.
 pub(super) fn open_local_tab_quick(
     state: &Rc<RefCell<State>>,
@@ -448,8 +448,8 @@ fn spawn_local_tab(
     };
     let used: Vec<u32> = state.borrow().tabs.iter().map(|t| t.num).collect();
     let num = lowest_free_number(&used);
-    // P6.14 (gap 3): the Launchpad-fronted empty/"home" tab isn't a shell the
-    // user asked for -- it must never pick up the "shell N" numbering real
+    // the Launchpad-fronted empty/"home" tab isn't a shell the
+    // user asked for - it must never pick up the "shell N" numbering real
     // local-terminal tabs use (that's `Tab::num`/`lowest_free_number`'s job).
     // Give it an explicit, non-shell title instead of falling through to the
     // shell default below.
@@ -503,13 +503,13 @@ pub(super) fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
     let status = st.tabs[idx].session.status();
     let tab = &st.tabs[idx];
     overlays::update_overlays_from_status(ui, tab, &status);
-    // P9.5 #3: re-push THIS tab's own cached identity/kind (Tab::identity /
-    // Tab::kind) -- these two are the only overlay-relevant properties
+    // #3: re-push THIS tab's own cached identity/kind (Tab::identity /
+    // Tab::kind) - these two are the only overlay-relevant properties
     // `update_overlays_from_status` doesn't already refresh from live status
     // (it derives `overlay_connecting`/`overlay_error`/`error_reason`/
     // `error_detail` fresh every call), so without this a switch to a tab
     // that's also Connecting/Failed kept showing whichever OTHER tab last
-    // called `set_session_identity`/`set_connecting_kind` -- the tab-content
+    // called `set_session_identity`/`set_connecting_kind` - the tab-content
     // bleed the user reported.
     ui.set_session_identity(SharedString::from(tab.identity.as_str()));
     ui.set_connecting_kind(SharedString::from(tab.kind.as_str()));
@@ -665,7 +665,7 @@ fn disposition(s: &dyn Session) -> Disposition {
 ///
 /// `Session::shutdown` joins the driver thread, but a `Connecting` SSH/RDP
 /// driver may be blocked inside the TCP connect/handshake (a blackholed host
-/// can hold it for the OS-level connect timeout -- tens of seconds). Calling
+/// can hold it for the OS-level connect timeout - tens of seconds). Calling
 /// `shutdown` straight from the UI callback would freeze the whole app for
 /// that long. Move the join to a detached thread instead: the connect
 /// attempt still tears down completely (no leaked driver thread/socket),
@@ -714,8 +714,8 @@ pub(super) fn close_tab(
 
     if st.tabs.is_empty() {
         drop(st);
-        // P6.14 (gap 3): closing the last real tab lands on the Launchpad
-        // home tab ("explicitly emptied") instead of quitting the app --
+        // closing the last real tab lands on the Launchpad
+        // home tab ("explicitly emptied") instead of quitting the app -
         // `open_empty_tab` persists its own snapshot (empty tab list).
         open_empty_tab(state, tab_model, ui);
         return;
@@ -782,7 +782,7 @@ pub(super) fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {
                 tab.session.resize_px(pw, ph);
             }
         }
-        // P5.1: Resize extra panes using their own reported dimensions.
+        // Resize extra panes using their own reported dimensions.
         for ep in &mut tab.extra_panes {
             if ep.surface_w <= 0.0 || ep.surface_h <= 0.0 {
                 continue;
@@ -800,7 +800,7 @@ pub(super) fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {
                         ep.rows = ep_size.rows;
                     }
                 }
-                // P6.11: RDP-in-pane resize reactivation, mirroring the
+                // RDP-in-pane resize reactivation, mirroring the
                 // primary pane's `Framebuffer` arm above.
                 Surface::Framebuffer(_) => {
                     let pw = (ep.surface_w * scale).round().max(1.0) as u32;
@@ -819,7 +819,7 @@ mod tests {
     use cm_session::{ExitStatus, SessionInput};
     use std::sync::mpsc;
 
-    /// A session whose `status()` is fixed at construction, for exercising
+    /// A session whose `status` is fixed at construction, for exercising
     /// [`disposition`] against every [`SessionStatus`] variant without a real
     /// transport.
     struct FakeSession {
@@ -894,8 +894,8 @@ mod tests {
         assert!(validated_move_plan(&state, &model, 3, 0, 1, 2).is_none());
     }
 
-    /// P7.6 (fixes P7.3-b): a `Connecting` session must abort, never detach
-    /// -- this is the crux of the Cancel/close-during-Connecting fix.
+    /// (fixes): a `Connecting` session must abort, never detach
+    /// - this is the crux of the Cancel/close-during-Connecting fix.
     #[test]
     fn disposition_aborts_connecting_instead_of_detaching() {
         let s = FakeSession::with_status(SessionStatus::Connecting);

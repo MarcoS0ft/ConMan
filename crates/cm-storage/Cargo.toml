@@ -6,8 +6,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-# P9.4 mRemoteNG decrypt (memos/P9.4-mremoteng-deps.md), all RustCrypto (MIT/
-# Apache-2.0). Pinned to `=0.11.0-rc.4` to match the exact pre-release
+# mRemoteNG decryption uses RustCrypto (MIT/Apache-2.0). Pinned to
+# `=0.11.0-rc.4` to match the exact pre-release
 # `ironrdp-connector`'s vendored `picky` already locks the workspace to
 # (Cargo.lock) — any other version range fails resolution (two `aes-gcm`
 # majors can't coexist here) and this avoids a second copy of the crate.
@@ -16,20 +16,20 @@ aes-gcm = "=0.11.0-rc.4"
 # workspace tree at this version (transitively) — matched, not a new copy.
 base64 = "0.22.1"
 cm-core = { path = "../cm-core" }
-# CSV reader for the P9.3 `.csv` importer (memos/P9.3-csv-dep.md) — RFC 4180
+# CSV reader for the `.csv` importer — RFC 4180
 # quoting/escaping (needed for the multi-line PEM in `ssh_private_key_pem`)
 # plus free line-number tracking for accurate "row N" warnings. MIT OR
 # Unlicense.
 csv = "1"
-# PBKDF2-HMAC-SHA1 key derivation (P9.4). hmac/pbkdf2/sha1 versions matched
+# PBKDF2-HMAC-SHA1 key derivation. hmac/pbkdf2/sha1 versions match
 # to what's already resolved in the workspace tree (transitively, via the
 # same picky/sspi vendor path as aes-gcm) to avoid duplicate copies.
 hmac = "0.13.0"
 pbkdf2 = "0.13.0"
-# XML pull-parser for mRemoteNG's `confCons.xml` (P9.4) — attribute reads on
+# XML pull-parser for mRemoteNG's `confCons.xml` — attribute reads on
 # `<Node>` elements. Version matched to the workspace's existing resolution.
 quick-xml = "0.39.4"
-# rusqlite with bundled SQLite — approved dep (P1.1 spec).
+# rusqlite with bundled SQLite.
 # "bundled" links the SQLite amalgamation; no system SQLite dependency.
 rusqlite = { version = "0.32", features = ["bundled"] }
 # serde is already a workspace dep (via cm-core); made direct here so
@@ -38,7 +38,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.11.0"
 thiserror = "2"
-# Structured logging (P9.8): DB open/migration/import diagnostics. The
+# Structured logging: DB open/migration/import diagnostics. The
 # composition root (`conman`) installs the subscriber; this crate only calls
 # the `tracing::*` macros.
 tracing = "0.1"

@@ -8,7 +8,7 @@
 //! Modifiers cross from `.slint` packed into a small bitmask (`MOD_*`) to keep the callback
 //! arities low; [`mods_from_bits`] unpacks them.
 //!
-//! P4.2 additions:
+//! RDP input mappings:
 //! - [`char_to_ps2_scancode`]: US keyboard layout scancode table (text → `(u8, bool)`)
 //! - [`map_rdp_key_down`] / [`map_rdp_key_up`]: produce `RdpInputEvent` key sequences
 //! - [`map_rdp_mouse`]: produce `RdpInputEvent` pointer sequences with coordinate mapping
@@ -159,7 +159,7 @@ pub(crate) fn map_scroll(delta_y: f32, row: u16, col: u16, mods_bits: i32) -> Op
 /// special key delivered by the Slint FocusScope.
 ///
 /// `text` is the UTF-8 string from `e.text`; `special` is the numeric
-/// discriminant produced in `.slint` (see `RdpSurface`).  Returns `None` for
+/// discriminant produced in `.slint` (see `RdpSurface`). Returns `None` for
 /// characters not in the US-keyboard layout (accented, CJK, emoji, …) or for
 /// modifier keys alone.
 ///
@@ -482,7 +482,7 @@ impl RdpCoords {
 /// scaled to the RDP desktop resolution via [`RdpCoords`].
 ///
 /// `button`: 1=left, 2=right, 3=middle, 0=none (move).
-/// `kind`:   1=down, 2=up, 3=move.
+/// `kind`: 1=down, 2=up, 3=move.
 #[must_use]
 pub(crate) fn map_rdp_mouse(
     button: i32,

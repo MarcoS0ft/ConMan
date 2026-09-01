@@ -1,8 +1,8 @@
 //! macOS data-protection Keychain adapter.
 //!
-//! ConMan deliberately does not query the legacy file-based Keychain.  Every
+//! ConMan deliberately does not query the legacy file-based Keychain. Every
 //! operation targets the data-protection Keychain and the shared access group
-//! granted to the signed GUI and `conmanctl` bundles.  Consequently, an old
+//! granted to the signed GUI and `conmanctl` bundles. Consequently, an old
 //! legacy item is neither migrated nor silently adopted.
 
 use std::fmt;
@@ -18,7 +18,7 @@ use security_framework_sys::base::{
 
 /// Keychain access group shared by the GUI and the bundled command-line tool.
 ///
-/// This value must match both executables' signed entitlements.  Apple's data-
+/// This value must match both executables' signed entitlements. Apple's data-
 /// protection Keychain rejects access when the entitlement or its authorizing
 /// provisioning profile is absent; there is intentionally no insecure or
 /// legacy fallback.

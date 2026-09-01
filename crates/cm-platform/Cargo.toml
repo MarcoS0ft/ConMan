@@ -8,7 +8,7 @@ publish.workspace = true
 [dependencies]
 cm-core = { path = "../cm-core" }
 # Resolves per-OS standard user directories (data, config, cache).
-# P6.3 (gap 29): consolidated on `dirs` — the same crate already used by
+# Consolidated on `dirs` — the same crate already used by
 # cm-session and cm-ui — replacing `directories`, which only had this one
 # call site here. No memo required (dep already approved/present workspace-wide).
 dirs = "6"
@@ -20,12 +20,11 @@ same-file = "1"
 sha2 = "0.10"
 thiserror = "2"
 tempfile = "3"
-# Structured logging facade (P6.3). The composition root (`conman`) installs
+# Structured logging facade. The composition root (`conman`) installs
 # the actual subscriber; libraries only ever call the `tracing::*` macros.
 tracing = "0.1"
 
-# P6.8 (gap 10, OS accent read) — new-dep memo:
-# docs/devel/memos/P6.8-accent-platform-deps.md. Both are already present in
+# The OS-specific dependencies are already present in
 # the resolved workspace lockfile transitively (via Slint's winit backend on
 # their respective OS), MIT-licensed, target-gated so neither OS pulls the
 # other's dependency.

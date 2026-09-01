@@ -1,20 +1,20 @@
 // ConMan — Modal base + feature dialogs (GUI_DESIGN §4).
-//   Modal                — scrim + centered card; Esc cancels (wire at the window level).
-//   QuickConnectForm     — host/port/username + auth SegmentedControl + conditional secret (P3.2).
-//   HostKeyDialog        — TOFU accept (unknown) and the loud mismatch warning (P3.1 policy).
-//   CertDialog           — RDP TOFU accept (unknown/self-signed) and the loud mismatch warning (P4.2).
-//   KbdInteractiveDialog — SSH keyboard-interactive challenge/response prompt (P6.13).
-//   ImportPasswordDialog — mRemoteNG import password prompt (P9.4).
-//   DeleteConfirmationDialog — destructive connection/group confirmation.
+// Modal — scrim + centered card; Esc cancels (wire at the window level).
+// QuickConnectForm — host/port/username + auth SegmentedControl + conditional secret.
+// HostKeyDialog — TOFU accept (unknown) and the loud mismatch warning.
+// CertDialog — RDP TOFU accept (unknown/self-signed) and the loud mismatch warning.
+// KbdInteractiveDialog — SSH keyboard-interactive challenge/response prompt.
+// ImportPasswordDialog — mRemoteNG import password prompt.
+// DeleteConfirmationDialog — destructive connection/group confirmation.
 //
-//   import { Modal, QuickConnectForm, HostKeyDialog, CertDialog, KbdInteractiveDialog, KbdPromptRow, ImportPasswordDialog, DeleteConfirmationDialog } from "screens/dialogs.slint";
+// import { Modal, QuickConnectForm, HostKeyDialog, CertDialog, KbdInteractiveDialog, KbdPromptRow, ImportPasswordDialog, DeleteConfirmationDialog } from "screens/dialogs.slint";
 
 import { Theme } from "../theme.slint";
 import { PrimaryButton, SecondaryButton, SegmentedControl, FormField, StatusDot } from "../components.slint";
 
 // ── Modal ───────────────────────────────────────────────────────────────────
 // Full-window scrim that centers its @children (a Card). Mount as the LAST child of
-// the window so it floats above the shell. Esc → dismissed() is wired by the parent.
+// the window so it floats above the shell. Esc → dismissed is wired by the parent.
 export component Modal inherits Rectangle {
     in property <bool> open: false;
     callback dismissed();
@@ -43,7 +43,7 @@ export component Modal inherits Rectangle {
 // a local quick-connect has no secret at all, it just spawns a shell.
 //
 // SSH auth-method: 0 Public key · 1 Password · 2 Agent · 3 Keyboard interactive
-// (conditional field below; P6.13 adds option 3, no upfront secret — the challenge
+// (conditional field below; adds option 3, no upfront secret — the challenge
 // is answered live via KbdInteractiveDialog once the server asks for it).
 export component QuickConnectForm inherits Rectangle {
     // Resolved AppWindow width supplied at the mount. Keeping this explicit
@@ -64,7 +64,7 @@ export component QuickConnectForm inherits Rectangle {
     callback connect();
     callback cancel();
 
-    // P8.1: no dialog role exists in Slint 1.17 — dialog root = groupbox +
+    // no dialog role exists in Slint 1.17 — dialog root = groupbox +
     // "<Title> dialog" label (the contract's rule). Title text is dynamic
     // per kind, so the label follows it.
     accessible-role: groupbox;
@@ -227,7 +227,7 @@ export component QuickConnectForm inherits Rectangle {
 }
 
 // ── HostKeyDialog ─────────────────────────────────────────────────────────────
-// Realizes the P3.1 HostKeyVerifier decision. mismatch=false → unknown-host TOFU
+// Realizes the HostKeyVerifier decision. mismatch=false → unknown-host TOFU
 // (Reject / Accept & continue). mismatch=true → loud warning showing stored-vs-presented
 // fingerprints (Reject default / Accept & replace, destructive). "Accept & replace"
 // updates ConMan's own known-hosts ONLY — never ~/.ssh/known_hosts.
@@ -338,14 +338,14 @@ export component HostKeyDialog inherits Rectangle {
 }
 
 // ── CertDialog ────────────────────────────────────────────────────────────────
-// Realizes the P4.2 CertVerifier decision for RDP connections.
+// Realizes the CertVerifier decision for RDP connections.
 //
 // mismatch=false → unknown / self-signed certificate TOFU prompt
-//   Reject / "Accept & remember" (stores fingerprint in the persistent cert store).
-// mismatch=true  → fingerprint changed (MITM warning).
-//   Reject (default / primary) / "Accept & replace" (destructive).
+// Reject / "Accept & remember" (stores fingerprint in the persistent cert store).
+// mismatch=true → fingerprint changed (MITM warning).
+// Reject (default / primary) / "Accept & replace" (destructive).
 //
-// subject    — certificate Subject DN or Common Name.
+// subject — certificate Subject DN or Common Name.
 // fingerprint — SHA-256 fingerprint of the presented certificate.
 // stored-fingerprint — previously stored fingerprint (shown only when mismatch=true).
 export component CertDialog inherits Rectangle {
@@ -461,7 +461,7 @@ export component CertDialog inherits Rectangle {
 }
 
 // ── KbdInteractiveDialog ─────────────────────────────────────────────────────
-// Realizes the P6.13 KbdInteractiveHandler round trip for SSH keyboard-
+// Realizes the KbdInteractiveHandler round trip for SSH keyboard-
 // interactive auth: the server sends a name/instructions plus N prompts (each
 // with an echo flag); this dialog collects one answer per prompt and submits
 // them all together. The server may issue several rounds in sequence (e.g. a
@@ -530,16 +530,16 @@ export component KbdInteractiveDialog inherits Rectangle {
     }
 }
 
-// ── ImportPasswordDialog (P9.4) ─────────────────────────────────────────────
+// ── ImportPasswordDialog ─────────────────────────────────────────────
 // mRemoteNG (`.xml`) import prompt: shown when `cm_storage::import` tried the
 // built-in default password and the file's secrets need a custom one
 // (`ImportExportError::PasswordRequired`, see `controller/import_export.rs`).
 // One masked field + OK/Cancel, mirroring KbdInteractiveDialog's shape above
 // (opaque card, click-absorbing TouchArea, `edited` callback rather than a
-// two-way-bound property -- same no-leak pattern its answers already use).
+// two-way-bound property - same no-leak pattern its answers already use).
 // Exactly one retry: the controller re-invokes
 // `import_from_path_with_password` once on submit and reports whatever it
-// gets back (success or still-wrong) as the normal import toast -- this
+// gets back (success or still-wrong) as the normal import toast - this
 // dialog never reopens itself for a second attempt.
 export component ImportPasswordDialog inherits Rectangle {
     in property <string> file-name: "";

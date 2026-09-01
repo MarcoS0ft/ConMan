@@ -1,6 +1,6 @@
-// B1: run as a Windows GUI app in release (no allocated console window).
-// Debug keeps the console so the `tracing` stderr layer stays visible (see
-// `logging.rs`); release logs to a rotating file instead.
+// Run as a Windows GUI app in release (no allocated console window). Debug
+// keeps the console so the `tracing` stderr layer stays visible; release logs
+// to a rotating file instead.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 //! `conman` — the application binary and composition root.
@@ -12,27 +12,27 @@
 //! Dev-only convenience: behind the off-by-default `demo-seed` cargo feature,
 //! a small demo dataset is seeded into an otherwise-empty DB on the very
 //! first launch. Never present in a shipped/release artifact — opt in with
-//! `cargo build -p conman --features demo-seed` (same posture as
+//! `cargo build -p conman - features demo-seed` (same posture as
 //! `automation`).
 //!
-//! P6.16: before touching its selected config/database paths, acquires an
+//! Before touching its selected config/database paths, acquires an
 //! identity-scoped primary-instance lock (`cm_platform::single_instance`). A
 //! second launch for the same paths activates that primary and exits; a launch
 //! for another path pair remains independent.
 //!
-//! P6.3: installs the `tracing` subscriber before threaded startup begins (see
-//! `logging.rs`) — a rotating file layer under `cm_platform::app_log_dir()` in
-//! both builds (P9.8 §2a: debug used to be stderr-only, losing repros), plus a
+//! Installs the `tracing` subscriber before threaded startup begins (see
+//! `logging.rs`) — a rotating file layer under `cm_platform::app_log_dir` in
+//! both builds, plus a
 //! console layer in debug (`windows_subsystem = "windows"` swallows stderr in
 //! release, so the console layer is debug-only).
 //!
-//! P7.1: before logging or any Slint initialization, decides the renderer
+//! Before logging or any Slint initialization, decides the renderer
 //! (`render_backend::resolve`) — honors `SLINT_BACKEND`, then the editable
 //! renderer preference, then machine-local probe state; automatic mode probes
 //! the accelerated (winit+femtovg) renderer in a disposable
 //! child process and forces the software renderer if it doesn't come up
 //! (e.g. no usable hardware OpenGL), so the app renders instead of crashing.
-//! This must run **before** `logging::init()` (see `render_backend`'s module
+//! This must run **before** `logging::init` (see `render_backend`'s module
 //! docs) — the decision is logged afterward, once a subscriber exists.
 
 #[cfg(feature = "agent-mode")]
@@ -85,7 +85,7 @@ fn main() -> ExitCode {
         }
     };
 
-    // P7.1: the disposable renderer-probe child takes this branch and exits
+    // The disposable renderer-probe child takes this branch and exits
     // immediately — no logging subscriber, no single-instance guard, no
     // storage, no keyring. See the `render_backend` module docs.
     if std::env::var_os(render_backend::PROBE_ENV_VAR).is_some() {
@@ -191,9 +191,9 @@ fn main() -> ExitCode {
         }
     };
 
-    // P7.1 cont.: open storage *before* the renderer probe so the machine-local
+    // Open storage *before* the renderer probe so the machine-local
     // renderer-backend cache can be consulted. Path preparation and
-    // `SqliteRepository::open()` do not add any further background work. The
+    // `SqliteRepository::open` do not add any further background work. The
     // only live worker is the deliberately environment-blind single-instance
     // responder; see `render_backend::force_software_backend`'s invariant.
     let db_path = match prepare_app_db_path(startup_paths.database_path.clone()) {
@@ -215,7 +215,7 @@ fn main() -> ExitCode {
         .and_then(|repo| AppStateService::new(repo).load_renderer_probe_cache().ok())
         .flatten();
 
-    // P7.1: resolve (and, if needed, apply) the renderer choice *before*
+    // Resolve (and, if needed, apply) the renderer choice *before*
     // installing the logging subscriber. Forcing the software fallback needs
     // `std::env::set_var`; the already-running single-instance responder is
     // audited never to inspect or mutate the environment. See
@@ -225,7 +225,7 @@ fn main() -> ExitCode {
     let renderer_decision =
         render_backend::resolve(loaded_settings.settings.renderer_backend, cached_renderer);
 
-    // P8.6-A: same environment-safe window as the renderer decision above —
+    // This is the same environment-safe window as the renderer decision above —
     // if agent-mode is enabled, this sets `SLINT_MCP_PORT` via `unsafe
     // std::env::set_var` before the Slint backend (which reads it) ever
     // initializes. See `agent_mode::prepare`'s doc comment.
@@ -282,7 +282,7 @@ fn main() -> ExitCode {
     };
 
     // Install the platform-native keyring backend before any KeyringStore is
-    // constructed.  Falls back to the in-memory mock backend if the native
+    // constructed. Falls back to the in-memory mock backend if the native
     // backend is unavailable (headless CI, missing daemon, etc.) so startup
     // never fails due to keychain issues.
     cm_secrets::initialize_native_keyring();
@@ -304,17 +304,17 @@ fn main() -> ExitCode {
         tracing::warn!("could not persist renderer probe cache: {error}");
     }
 
-    // P8.6-A: start the scope-enforcement proxy's accept-loop thread now
+    // Start the scope-enforcement proxy's accept-loop thread now
     // that a subscriber exists and thread-spawning is unrestricted — the
-    // env-var-setting half already ran above, before `logging::init()`. A
+    // env-var-setting half already ran above, before `logging::init`. A
     // `None` here (agent-mode disabled, or the feature isn't compiled in)
     // means no listener at all.
     #[cfg(feature = "agent-mode")]
     let agent_mode_handle = agent_mode_prepared.map(agent_mode::spawn);
 
-    // P8.6-B: mirror the handle's cm-ui-relevant fields into the
+    // Mirror the handle's cm-ui-relevant fields into the
     // cm-ui-owned `AgentModeConfig` (cm-ui cannot depend on conman's
-    // `agent_mode::AgentModeHandle` directly -- see that type's doc comment).
+    // `agent_mode::AgentModeHandle` directly - see that type's doc comment).
     // Always constructed (as `None` outside the feature) so `build_config`'s
     // signature stays the same regardless of which features this binary was
     // built with.
@@ -489,10 +489,10 @@ fn load_startup_settings(store: &dyn AppConfigStore) -> Result<StartupSettings, 
 /// small demo dataset seeded into a brand-new database; shipped builds leave
 /// it empty for the Launchpad/welcome flow.
 ///
-/// `activation_rx` (P6.16) is threaded straight through from the
+/// `activation_rx` is threaded straight through from the
 /// single-instance guard acquired in `main` into the returned [`AppConfig`].
 ///
-/// `agent_mode` (P8.6-B) is likewise threaded straight through -- `None`
+/// `agent_mode` is likewise threaded straight through - `None`
 /// unless `main` built (and the user enabled) the agent-mode proxy.
 struct AppServices {
     repo: Arc<dyn cm_core::ConnectionRepository>,
@@ -540,7 +540,6 @@ fn build_config(
     let (secure_clipboard_root, provider_clipboard_root) =
         compose_clipboard_dependencies(cm_platform::secure_temp::SecureClipboardRoot::bootstrap);
 
-    // ── Session provider (P6.15, gap 27) ────────────────────────────────────
     let session_provider: Arc<dyn cm_core::SessionProvider> =
         Arc::new(SessionProviderImpl::new(provider_clipboard_root));
 
@@ -1033,7 +1032,7 @@ mod demo_seed_gating_tests {
     }
 
     /// Default build (feature OFF, the release posture): first launch on a
-    /// brand-new DB must leave the groups list empty -- no demo seed -- while
+    /// brand-new DB must leave the groups list empty - no demo seed - while
     /// still reporting a genuine `first_launch` so the Launchpad/welcome flow
     /// still shows.
     #[cfg(not(feature = "demo-seed"))]

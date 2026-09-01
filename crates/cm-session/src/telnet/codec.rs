@@ -244,7 +244,7 @@ impl TelnetCodec {
         }
     }
 
-    /// Offer/request the P10.1 option set. Repeated calls are idempotent.
+    /// Offer/request the option set. Repeated calls are idempotent.
     #[must_use]
     pub(crate) fn start_negotiation(&mut self) -> Vec<u8> {
         let mut out = Vec::with_capacity(21);

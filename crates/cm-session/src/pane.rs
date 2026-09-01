@@ -1,16 +1,15 @@
-//! Pane-group abstraction for split-pane tabs (P5.1; generalized to N panes
-//! in P6.11).
+//! Pane-group abstraction for split-pane tabs.
 //!
 //! A [`PaneGroup`] models the layout and focus of an arbitrary number (up to
 //! [`MAX_PANES`]) of panes within a tab as a **recursive binary split tree**
-//! (the "PaneGroup of N" vision — see HANDOFF §6). Each leaf carries a dense
-//! pane id in `0..count()`; id `0` is always the tab's "primary" pane (the
+//! Each leaf carries a dense
+//! pane id in `0..count`; id `0` is always the tab's "primary" pane (the
 //! controller keeps its session/renderer in `Tab` fields directly, while ids
-//! `1..count()` live in `Tab::extra_panes` — see `cm-ui/src/controller/mod.rs`).
+//! `1..count` live in `Tab::extra_panes` — see `cm-ui/src/controller/mod.rs`).
 //! The PaneGroup itself carries no session references (ARCHITECTURE §4 — the
 //! controller is the session owner); it only tracks geometry and focus.
 //!
-//! Ids stay dense on every mutation: splitting always allocates `count()` as
+//! Ids stay dense on every mutation: splitting always allocates `count` as
 //! the new leaf's id (append), and closing a leaf renumbers every id above
 //! the closed one down by one — this mirrors `Vec::remove`'s shifting
 //! behavior exactly, so the controller's parallel `Vec<ExtraPaneState>`
@@ -18,12 +17,12 @@
 
 use std::collections::HashMap;
 
-/// Split direction used both as the `split()` argument and to label a split
+/// Split direction used both as the `split` argument and to label a split
 /// node in the tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneLayout {
     /// Single pane (no split) — only ever the *group's* apparent layout when
-    /// `count() == 1`; a tree with 2+ leaves has one `PaneLayout` per split
+    /// `count == 1`; a tree with 2+ leaves has one `PaneLayout` per split
     /// node instead of a single group-wide value (see [`PaneGroup::rects`]).
     Single,
     /// Side-by-side (left / right).
@@ -32,14 +31,14 @@ pub enum PaneLayout {
     VSplit,
 }
 
-/// Maximum number of panes a [`PaneGroup`] will hold (P6.11: 6 — generalized
-/// from P5.1's hard cap of 2; keyboard/equal-split only, no drag-resize, so a
+/// Maximum number of panes a [`PaneGroup`] will hold. Keyboard/equal-split only,
+/// no drag-resize, so a
 /// higher cap stays usable without per-pane resize affordances).
 pub const MAX_PANES: usize = 6;
 
 /// A fractional (0.0..=1.0) rectangle for one pane, relative to the session
 /// area's top-left corner — the shape the UI layer positions a `PaneSlot` at
-/// (`x * area.width`, `y * area.height`, ...). Indexed by pane id: see
+/// (`x * area.width`, `y * area.height`,...). Indexed by pane id: see
 /// [`PaneGroup::rects`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PaneRect {
@@ -88,7 +87,7 @@ impl Node {
     /// Remove the leaf with id `target`, promoting its sibling in place of
     /// the parent `Split` node. Returns `true` if removed. The root itself
     /// can never be removed this way (a lone root `Leaf` has no parent to
-    /// collapse into) — callers must check `count() > 1` first.
+    /// collapse into) — callers must check `count > 1` first.
     fn remove_leaf(&mut self, target: usize) -> bool {
         if let Node::Split { a, b, .. } = self {
             if let Node::Leaf(id) = a.as_ref()
@@ -163,7 +162,7 @@ impl Node {
 }
 
 /// Logical grouping of panes for one tab: a recursive binary split tree
-/// (P6.11) tracking up to [`MAX_PANES`] leaves, plus the focused leaf's id.
+/// tracking up to [`MAX_PANES`] leaves, plus the focused leaf's id.
 /// The controller maps leaf ids to concrete [`Session`] references.
 ///
 /// [`Session`]: crate::Session
@@ -192,8 +191,8 @@ impl PaneGroup {
 
     /// Split the focused pane with the given direction, appending a new leaf.
     ///
-    /// Returns the id of the newly created pane (always `count() - 1` after
-    /// the split, i.e. the previous `count()`), or `None` if the group is
+    /// Returns the id of the newly created pane (always `count - 1` after
+    /// the split, i.e. the previous `count`), or `None` if the group is
     /// already at [`MAX_PANES`].
     pub fn split(&mut self, layout: PaneLayout) -> Option<usize> {
         if self.count >= MAX_PANES {
@@ -249,7 +248,7 @@ impl PaneGroup {
     /// along the primary axis (ties broken by the smallest perpendicular
     /// offset — i.e. the most "directly adjacent" pane). If no pane lies in
     /// that direction (the focused pane is already at that edge), focus is
-    /// unchanged (clamp, not wrap — the pinned P6.11 behavior).
+    /// unchanged (clamp, not wrap — the pinned behavior).
     ///
     /// Returns the (possibly unchanged) focused pane id.
     pub fn focus_dir(&mut self, dir: FocusDir) -> usize {
@@ -312,12 +311,12 @@ impl PaneGroup {
     }
 
     /// The split direction of the group when it has exactly 2 panes
-    /// (backward-compatible surface for the P5.1-era 2-pane callers).
+    /// (backward-compatible surface for the 2-pane callers).
     /// Returns [`PaneLayout::Single`] for 1 pane; for 3+ panes there is no
     /// single group-wide direction (each split node has its own), so this
     /// returns the direction of the split that produced the *currently
     /// focused* pane's parent — a reasonable "most relevant" answer, used
-    /// only for legacy display purposes, not for `rects()`-based rendering.
+    /// only for legacy display purposes, not for `rects`-based rendering.
     pub fn layout(&self) -> PaneLayout {
         if self.count <= 1 {
             return PaneLayout::Single;
@@ -339,7 +338,7 @@ impl PaneGroup {
     }
 
     /// Compute fractional (0.0..=1.0) rects for every pane, indexed by pane
-    /// id (`result[i]` is always `PaneRect { pane: i, .. }`) — the shape the
+    /// id (`result[i]` is always `PaneRect { pane: i,.. }`) — the shape the
     /// UI layer consumes to position each `PaneSlot` absolutely within the
     /// session area.
     pub fn rects(&self) -> Vec<PaneRect> {
@@ -471,7 +470,7 @@ mod tests {
         pg.split(PaneLayout::VSplit).unwrap(); // splits 0 -> 0(top) / new(bottom)
         pg.set_focused(1); // the original right pane (id shifted? check by rects)
         // After first split: ids {0,1}. After second split (focused=0 at
-        // that time): 0 -> {0 top, 2 bottom} (new id = count() = 2). So ids
+        // that time): 0 -> {0 top, 2 bottom} (new id = count = 2). So ids
         // are now {0 (top-left), 1 (right), 2 (bottom-left)}.
         assert_eq!(pg.count(), 3);
         let rects = pg.rects();

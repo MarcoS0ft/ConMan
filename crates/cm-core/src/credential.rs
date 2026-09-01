@@ -5,9 +5,7 @@ use zeroize::Zeroize;
 
 use crate::ids::{CredentialFolderId, CredentialId};
 
-// ---------------------------------------------------------------------------
 // CredentialKind
-// ---------------------------------------------------------------------------
 
 /// The kind of secret material stored for a [`Credential`].
 ///
@@ -26,9 +24,7 @@ pub enum CredentialKind {
     SshKeyWithPassphrase,
 }
 
-// ---------------------------------------------------------------------------
 // Credential and CredentialFolder entities
-// ---------------------------------------------------------------------------
 
 /// A first-class, shareable credential object. Carries only non-secret
 /// metadata; the actual secret lives in the OS keychain keyed by
@@ -43,11 +39,11 @@ pub struct Credential {
     pub kind: CredentialKind,
     /// The credential folder this credential belongs to; `None` means root.
     pub folder_id: Option<CredentialFolderId>,
-    /// The login username stored alongside the credential (not a secret --
+    /// The login username stored alongside the credential (not a secret -
     /// the password/key material lives in the keychain, keyed separately).
     /// BUG-cred-username-auth: this is now the *authoritative* auth username
     /// once a credential is assigned to a connection (own, or inherited via
-    /// [`crate::resolve_effective_credential`]) -- see
+    /// [`crate::resolve_effective_credential`]) - see
     /// `cm_ui::controller::sessions::effective_auth_username`. A connection's
     /// inline `settings.username` is only the fallback for connections with
     /// no credential assigned (e.g. Quick Connect with a typed username).
@@ -56,7 +52,7 @@ pub struct Credential {
 
 /// A node in the credential folder tree. Folders nest arbitrarily via
 /// `parent_id`; a `None` parent is a root-level folder. The storage layer
-/// (P1.1) enforces the no-cycle constraint.
+/// enforces the no-cycle constraint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialFolder {
     pub id: CredentialFolderId,
@@ -67,14 +63,12 @@ pub struct CredentialFolder {
     pub sort: i64,
 }
 
-// ---------------------------------------------------------------------------
 // CredentialPurpose
-// ---------------------------------------------------------------------------
 
 /// What a stored secret is used for. The string forms (`"password"`,
 /// `"ssh-key"`, `"ssh-passphrase"`) are part of the [`CredentialRef`] account
 /// format (`"cred:<id>:<purpose>"`) and are a contract the keychain adapter
-/// (P1.3) relies on.
+/// relies on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CredentialPurpose {
     Password,
@@ -93,14 +87,12 @@ impl CredentialPurpose {
     }
 }
 
-// ---------------------------------------------------------------------------
 // CredentialRef
-// ---------------------------------------------------------------------------
 
 /// An opaque, stable key identifying a secret in the OS keychain. It is a
 /// `service` + `account` pair; the secret itself is **never** stored here.
 ///
-/// The format is a contract the keychain adapter (P1.3) relies on: the service
+/// The format is a contract the keychain adapter relies on: the service
 /// is fixed ([`CredentialRef::SERVICE`]) and the account is
 /// `"cred:<credential-id>:<purpose>"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -122,7 +114,7 @@ impl CredentialRef {
     }
 
     /// Builds the reference for a **connection-scoped** inline secret
-    /// (P9.6-A `CredentialSource::Inline`) — account
+    /// ( `CredentialSource::Inline`) — account
     /// `"conn:<connection-id>:<purpose>"`, distinct from [`Self::new`]'s
     /// `"cred:<credential-id>:<purpose>"` so inline secrets never collide
     /// with a credential object's keychain slot even if the numeric ids
@@ -146,7 +138,7 @@ impl CredentialRef {
 
     /// The purpose suffix parsed out of the account string
     /// (`"cred:<id>:<purpose>"` / `"conn:<id>:<purpose>"`) — the one piece of
-    /// a `CredentialRef` that's safe and useful to log (P9.8 §3: never log
+    /// a `CredentialRef` that's safe and useful to log ( §3: never log
     /// the full [`Self::account`], which encodes id material, but the
     /// purpose component alone is fine — it's one of
     /// [`CredentialPurpose::as_str`]'s three fixed strings). `None` if the
@@ -157,9 +149,7 @@ impl CredentialRef {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Secret
-// ---------------------------------------------------------------------------
 
 /// A secret value (e.g. a password or key) held only transiently at the
 /// boundary between a [`crate::CredentialStore`] and its consumers.

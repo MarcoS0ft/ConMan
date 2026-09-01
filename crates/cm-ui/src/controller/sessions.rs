@@ -68,7 +68,7 @@ fn wire_key_input(ctx: &Ctx) {
                 // modifier snapshots cannot leak through menu navigation.
                 return;
             }
-            // P6.7: while the terminal search overlay is open, the terminal
+            // while the terminal search overlay is open, the terminal
             // FocusScope still forwards keys here — route them to the query
             // box instead of the session/Ctrl+Shift dispatch below. `Ctrl⇧F` closes it (handled
             // inside `handle_search_key`); opening it is the ordinary
@@ -78,9 +78,9 @@ fn wire_key_input(ctx: &Ctx) {
                 return;
             }
 
-            // ── P5.1: Ctrl+Shift shortcut layer (reserved by GUI_DESIGN §5) ──
+            // ──: Ctrl+Shift shortcut layer (reserved by GUI_DESIGN §5) ──
             // These are intercepted before forwarding to the session so they
-            // never reach the remote shell.  The terminal FocusScope passes all
+            // never reach the remote shell. The terminal FocusScope passes all
             // Ctrl+Shift events to `key-input` (only Ctrl+K is intercepted in
             // Slint); we catch them here.
             let ctrl_shift =
@@ -89,7 +89,7 @@ fn wire_key_input(ctx: &Ctx) {
                 let t = text.as_str();
                 match (special, t) {
                     // Ctrl+Shift+F → open the terminal search overlay
-                    // (P6.7). Closing it is handled inside
+                    //. Closing it is handled inside
                     // `search::handle_search_key`, reached via the
                     // `terminal_search_open` check above once it's open.
                     (0, "f" | "F") => {
@@ -112,7 +112,7 @@ fn wire_key_input(ctx: &Ctx) {
                         return;
                     }
                     // Ctrl+Shift+Up/Down/Left/Right → move focus using real
-                    // pane geometry (P6.11: `focus_dir` picks the nearest
+                    // pane geometry (`focus_dir` picks the nearest
                     // pane in that screen direction, not merely "prev/next
                     // id" — correct once panes are arranged in more than one
                     // row/column, which a plain delta could not do).
@@ -142,19 +142,19 @@ fn wire_key_input(ctx: &Ctx) {
                         }
                         return;
                     }
-                    // Ctrl+Shift+C → copy the focused pane's selection (P6.5).
+                    // Ctrl+Shift+C → copy the focused pane's selection.
                     (0, "c" | "C") if focused_pane_is_terminal(&state.borrow()) => {
                         do_copy(&state);
                         return;
                     }
-                    // Ctrl+Shift+V → paste the OS clipboard (P6.5).
+                    // Ctrl+Shift+V → paste the OS clipboard.
                     (0, "v" | "V") if focused_pane_is_terminal(&state.borrow()) => {
                         do_paste(&state);
                         return;
                     }
                     _ => {}
                 }
-                // P6.9 (gap 17) — direct shortcuts on this same reserved layer, kept
+                // — direct shortcuts on this same reserved layer, kept
                 // as a separate pure classifier (`classify_ctrl_shift_shortcut`) so
                 // the dispatch decision is unit-testable without a live UI/session.
                 match classify_ctrl_shift_shortcut(special, t) {
@@ -207,7 +207,7 @@ fn wire_key_input(ctx: &Ctx) {
                 }
             }
 
-            // P6.7: Shift+PageUp/PageDown scroll the terminal's own
+            // Shift+PageUp/PageDown scroll the terminal's own
             // scrollback by one page, intercepted before they would
             // otherwise be forwarded as a PageUp/PageDown key. Plain
             // (non-Shift, non-Ctrl) PageUp/PageDown still reach the session
@@ -239,16 +239,16 @@ fn wire_key_input(ctx: &Ctx) {
                     return;
                 }
                 // ── Broadcast: fan to the targeted pane sessions ─────────────
-                // P6.11 (gap 14): targeted, not always "all panes" — resolves
+                // targeted, not always "all panes" — resolves
                 // `Tab::broadcast_target` (Visible/Custom) against the tab's
                 // *current* pane count so a stale custom selection never
                 // sends to a closed pane. Defaults to `Visible` (every pane),
-                // identical to the pre-P6.11 "always all panes" behavior. See
+                // identical to the earlier "always all panes" behavior. See
                 // `panes::broadcast_fan_out` for the (unit-tested) targeting logic.
                 if ui.get_broadcast_active() {
-                    // P8.6-B item 4: the execute-scope gate also covers
+                    // the execute-scope gate also covers
                     // broadcast (fanning input out to multiple already-open
-                    // sessions at once) -- see open_ssh_tab's identical
+                    // sessions at once) - see open_ssh_tab's identical
                     // comment for the mechanism/rationale.
                     if agent_mode_execute_blocked(&st.agent_mode) {
                         tracing::warn!(
@@ -291,7 +291,7 @@ fn wire_key_input(ctx: &Ctx) {
     });
 }
 
-/// P6.11: move focus in the active tab's pane group by screen direction
+/// move focus in the active tab's pane group by screen direction
 /// (`Ctrl⇧Arrows`) and push the new focused pane id to the UI.
 fn dispatch_focus_dir(state: &Rc<RefCell<State>>, ui: &AppWindow, dir: FocusDir) {
     let new_focus = {
@@ -305,8 +305,8 @@ fn dispatch_focus_dir(state: &Rc<RefCell<State>>, ui: &AppWindow, dir: FocusDir)
     ui.set_active_pane(new_focus as i32);
 }
 
-/// The new P6.9 (gap 17) Ctrl+Shift shortcuts, as a pure `(special, text)` ->
-/// action classifier -- kept separate from `wire_key_input`'s dispatch so the
+/// The new Ctrl+Shift shortcuts, as a pure `(special, text)` ->
+/// action classifier - kept separate from `wire_key_input`'s dispatch so the
 /// decision is unit-testable without a live `AppWindow`/session `State`.
 /// `special`/`text` are the same encoding `TerminalSurface.key-pressed`
 /// packs in `app.slint` (see `crate::input::map_key`'s doc comment).
@@ -317,7 +317,7 @@ pub(super) enum CtrlShiftAction {
     /// Ctrl+Shift+E — toggle the side panel.
     ToggleSidebar,
     /// Not one of this layer's direct shortcuts (falls through to the older
-    /// P5.1 split/broadcast/close/detach/focus-move arms, or to the session).
+    /// split/broadcast/close/detach/focus-move arms, or to the session).
     None,
 }
 
@@ -358,7 +358,7 @@ fn classify_terminal_clipboard_shortcut(
     }
 }
 
-/// P6.5: copy the focused pane's live selection to the OS clipboard
+/// copy the focused pane's live selection to the OS clipboard
 /// (`Ctrl+C` with a selection, or `Ctrl⇧C`). A no-op when nothing is selected
 /// — never overwrites the clipboard with an empty string. The originating
 /// selection is cleared later, and only if this exact asynchronous write
@@ -414,9 +414,9 @@ fn submit_terminal_selection_copy(
     }
 }
 
-/// P6.5: paste the OS clipboard into the focused pane (keyboard aliases, or
+/// paste the OS clipboard into the focused pane (keyboard aliases, or
 /// a locally-owned right/middle click — see [`wire_pointer`]). Routed through
-/// `SessionInput::Paste` -> `TerminalSession::paste()`, which
+/// `SessionInput::Paste` -> `TerminalSession::paste`, which
 /// bracketed-paste-wraps at the engine/session layer when the app enabled
 /// DECSET 2004 (raw otherwise — see `cm_session::engine_owner::wrap_paste`).
 fn do_paste(state: &Rc<RefCell<State>>) {
@@ -759,12 +759,12 @@ pub(super) fn release_pointer_capture_for_endpoint(
 
 /// `special` codes for PageUp/PageDown (see `input::map_key`'s doc comment
 /// for the full table — these two are intercepted here, before
-/// `input::map_key`, for the P6.7 Shift+PageUp/PageDown scroll shortcut).
+/// `input::map_key`, for the Shift+PageUp/PageDown scroll shortcut).
 const PAGE_UP: i32 = 11;
 const PAGE_DOWN: i32 = 12;
 
 /// Lines scrolled per wheel notch when the app hasn't claimed the wheel via
-/// mouse tracking (P6.7 — see `wire_scroll`).
+/// mouse tracking; see `wire_scroll`.
 const WHEEL_SCROLL_LINES: u32 = 3;
 
 /// The scroll offset to request given the current one plus a signed `delta`
@@ -775,7 +775,7 @@ fn clamp_scroll(current: &GridSnapshot, delta: i64) -> u32 {
     (i64::from(current.scroll_offset) + delta).clamp(0, i64::from(current.scrollback_len)) as u32
 }
 
-/// P6.7: request a scroll-offset change for the active tab's **primary**
+/// request a scroll-offset change for the active tab's **primary**
 /// terminal session (matches `wire_scroll`'s pre-existing "always the active
 /// tab's `session`, not whichever pane is focused" scope — see the task
 /// report). No-op before the first snapshot arrives, or for a non-terminal
@@ -838,12 +838,12 @@ fn wire_pointer(ctx: &Ctx) {
             let Some(tab) = st.tabs.get_mut(active) else {
                 return;
             };
-            // P6.8 bundled fix (F-perf, P6.17 finding R1): only the
+            // bundled fix (F-perf, finding R1): only the
             // selection-highlight path below needs a forced render (the
             // engine's own output still drives the normal tick-loop redraw).
             // Tracking whether *this* event actually changed the selection
-            // means a plain button-less hover move -- no selection, no mouse
-            // event forwarded -- no longer forces a full-grid raster.
+            // means a plain button-less hover move - no selection, no mouse
+            // event forwarded - no longer forces a full-grid raster.
             let mut selection_changed = false;
             let mut paste_target = None;
             let mut completed_copy = None;
@@ -852,7 +852,7 @@ fn wire_pointer(ctx: &Ctx) {
 
             if focused == 0 || tab.extra_panes.get(focused - 1).is_none() {
                 // Primary pane (or an out-of-range focus index — defensive
-                // fallback matching the pre-P6.5 behavior).
+                // fallback matching the earlier behavior).
                 match tab.session.surface() {
                     Surface::TerminalGrid(_) => {
                         let (row, col) = tab.renderer.cell_at(x * base_scale, y * base_scale);
@@ -1034,7 +1034,7 @@ fn wire_pointer(ctx: &Ctx) {
                             crate::selection::PointerRoute::Ignore => {}
                         }
                     }
-                    // P6.11: RDP-in-pane pointer routing (lifts P6.10's
+                    // RDP-in-pane pointer routing (lifts 's
                     // deferral) — same coordinate mapping `wire_pointer` uses
                     // for a primary-pane RDP surface, scoped to this pane's
                     // own reported size instead of the whole window's.
@@ -1103,12 +1103,12 @@ fn wire_pointer(ctx: &Ctx) {
                 submit_terminal_selection_copy(&mut st, target, selection_generation, text);
             }
 
-            // P6.5: a selection change has no new `GridSnapshot` of its own
+            // a selection change has no new `GridSnapshot` of its own
             // (nothing was typed), so the tick loop's snapshot-driven redraw
             // would never pick it up — force one render now against the
             // pane's last known snapshot so the highlight (or its removal)
             // appears immediately rather than waiting for the next
-            // unrelated output event. P6.8: gated on `selection_changed` so a
+            // unrelated output event.: gated on `selection_changed` so a
             // hover-only move (no selection, no forwarded mouse event) no
             // longer pays for a render it doesn't need.
             if selection_changed && let Some(ui) = weak.upgrade() {
@@ -1139,13 +1139,13 @@ fn wire_scroll(ctx: &Ctx) {
             if last.mouse_tracking {
                 // The app has grabbed the wheel (e.g. less/vim/htop with
                 // mouse reporting on) — forward it as a wheel-button mouse
-                // event, exactly like pre-P6.7 behavior.
+                // event, exactly like earlier behavior.
                 if let Some(ev) = input::map_scroll(dy, 0, 0, 0) {
                     tab.session.send_input(SessionInput::Mouse(ev));
                 }
                 return;
             }
-            // P6.7: no mouse-tracking app has claimed the wheel — scroll our
+            // no mouse-tracking app has claimed the wheel — scroll our
             // own scrollback viewport instead. Previously this silently did
             // nothing useful: `encode_mouse` returns empty bytes with no
             // mouse mode active, so a wheel notch was a no-op.
@@ -1216,7 +1216,7 @@ fn wire_quick_connect(ctx: &Ctx) {
     });
 }
 
-/// P6.12 (gap 20): the quick-connect dialog's kind selector — `qc-kind` in
+/// the quick-connect dialog's kind selector — `qc-kind` in
 /// `app.slint` (`QuickConnectForm`'s `kind` property, plumbed straight
 /// through). Kept as a real enum (rather than matching the raw `i32` at every
 /// call site) so an out-of-range value has one obvious fallback (`Ssh`,
@@ -1265,7 +1265,7 @@ fn wire_qc_connect(ctx: &Ctx) {
 /// Closes the quick-connect dialog and clears every secret-bearing field.
 /// Shared by the per-kind dispatchers so a typed password/
 /// passphrase never lingers in the dialog's in-memory Slint properties past
-/// the connect attempt that used it -- the pre-P6.12 SSH-only behavior,
+/// the connect attempt that used it - the earlier SSH-only behavior,
 /// generalized.
 fn close_and_clear_qc_secrets(ui: &AppWindow) {
     ui.set_quick_connect_open(false);
@@ -1273,9 +1273,9 @@ fn close_and_clear_qc_secrets(ui: &AppWindow) {
     ui.set_qc_passphrase(Default::default());
 }
 
-/// Pure builder behind the SSH arm of quick-connect (P6.12): turns the raw
+/// Pure builder behind the SSH arm of quick-connect: turns the raw
 /// dialog fields into `SshSettings`, or `None` if the connect is invalid
-/// (host/username empty) -- the same guard `wire_qc_connect`'s SSH path has
+/// (host/username empty) - the same guard `wire_qc_connect`'s SSH path has
 /// always had, just made independently testable.
 fn qc_ssh_settings(host: &str, port: &str, username: &str) -> Option<SshSettings> {
     let host = host.trim();
@@ -1318,7 +1318,7 @@ fn qc_connect_ssh(
             },
         },
         1 => SshAuthInput::Password(Secret::from_string(secret_raw)),
-        // P6.13: auth-method 3 is "Keyboard interactive" — no upfront
+        // auth-method 3 is "Keyboard interactive" — no upfront
         // secret; the handler prompts live once the server issues its
         // first challenge round.
         3 => SshAuthInput::KeyboardInteractive {
@@ -1344,12 +1344,12 @@ fn qc_connect_ssh(
     );
 }
 
-/// P6.12: parses a "WIDTHxHEIGHT" resolution field (e.g. "1920x1080") into RDP
+/// parses a "WIDTHxHEIGHT" resolution field (e.g. "1920x1080") into RDP
 /// width/height. Falls back to `RdpSettings::DEFAULT_WIDTH`/`DEFAULT_HEIGHT`
-/// for anything that doesn't parse cleanly -- empty field, garbage text, or a
-/// zero dimension -- so a malformed typed value can never turn into a
+/// for anything that doesn't parse cleanly - empty field, garbage text, or a
+/// zero dimension - so a malformed typed value can never turn into a
 /// zero-sized desktop request. `pub(super)`: also reused by the profile
-/// editor's RDP field mapping (`tree_ctl::settings_from_form`, P7.2) so the
+/// editor's RDP field mapping (`tree_ctl::settings_from_form`) so the
 /// two RDP forms parse resolution identically.
 pub(super) fn parse_qc_resolution(s: &str) -> (u16, u16) {
     let defaults = (RdpSettings::DEFAULT_WIDTH, RdpSettings::DEFAULT_HEIGHT);
@@ -1361,9 +1361,9 @@ pub(super) fn parse_qc_resolution(s: &str) -> (u16, u16) {
     if w == 0 || h == 0 { defaults } else { (w, h) }
 }
 
-/// Pure builder behind the RDP arm of quick-connect (P6.12, gap 20): turns
+/// Pure builder behind the RDP arm of quick-connect: turns
 /// the raw dialog fields into `RdpSettings`, or `None` if the connect is
-/// invalid (host/username empty) -- mirrors [`qc_ssh_settings`].
+/// invalid (host/username empty) - mirrors [`qc_ssh_settings`].
 fn qc_rdp_settings(
     host: &str,
     port: &str,
@@ -1461,10 +1461,10 @@ fn qc_connect_telnet(
     open_telnet_tab(state, tab_model, ui, settings, None);
 }
 
-/// Pure builder behind the Local arm of quick-connect (P6.12, gap 20): a
+/// Pure builder behind the Local arm of quick-connect: a
 /// local quick-connect just spawns a shell, so unlike the SSH/RDP builders
 /// this never fails (an empty program falls back to the OS default shell,
-/// same as the Settings panel's own local-shell defaults --
+/// same as the Settings panel's own local-shell defaults -
 /// `settings_ctl::local_settings_from_app`, which this mirrors).
 fn qc_local_settings(program: &str, args: &str, cwd: &str) -> LocalSettings {
     let program = program.trim();
@@ -1491,7 +1491,7 @@ fn qc_local_settings(program: &str, args: &str, cwd: &str) -> LocalSettings {
 
 /// `pub(super)` (rather than private, like the SSH/RDP dispatchers) so
 /// `util::wire_local_qc_autoconnect`'s headless QA hook can drive the exact
-/// same dispatch a real "Connect" click would (P6.12 xvfb screenshot gate:
+/// same dispatch a real "Connect" click would ( xvfb screenshot gate:
 /// "a Local quick-connect reaching a live shell").
 pub(super) fn qc_connect_local(
     state: &Rc<RefCell<State>>,
@@ -1511,7 +1511,7 @@ fn wire_host_key_accept(ctx: &Ctx) {
         let pending = ctx.hk_pending.clone();
         let weak = ctx.ui.as_weak();
         move || {
-            // Pop the front sender (oldest pending request) — carry-over fix (a).
+            // Pop the front sender (oldest pending request) — (a).
             if let Ok(mut q) = pending.lock()
                 && let Some(tx) = q.pop_front()
             {
@@ -1529,7 +1529,7 @@ fn wire_host_key_reject(ctx: &Ctx) {
         let pending = ctx.hk_pending.clone();
         let weak = ctx.ui.as_weak();
         move || {
-            // Pop the front sender (oldest pending request) — carry-over fix (a).
+            // Pop the front sender (oldest pending request) — (a).
             if let Ok(mut q) = pending.lock()
                 && let Some(tx) = q.pop_front()
             {
@@ -1577,7 +1577,7 @@ fn wire_cert_reject(ctx: &Ctx) {
 }
 
 /// The user edited one answer field in the keyboard-interactive dialog
-/// (P6.13). Mutates the live `kbd-prompts` model in place — the value is only
+///. Mutates the live `kbd-prompts` model in place — the value is only
 /// ever read back out of it at submit time, never re-displayed or logged.
 fn wire_kbd_answer_edited(ctx: &Ctx) {
     ctx.ui.on_kbd_answer_edited({
@@ -1638,7 +1638,7 @@ fn wire_kbd_cancel(ctx: &Ctx) {
     });
 }
 
-/// Realizes the P6.13 [`KbdInteractiveHandler`] round trip: shows
+/// Realizes the [`KbdInteractiveHandler`] round trip: shows
 /// [`KbdInteractiveDialog`](crate) and blocks the calling (session driver)
 /// thread until the user submits or cancels. Modeled directly on
 /// [`UiHostKeyVerifier`] below — same pending-queue + `invoke_from_event_loop`
@@ -1680,7 +1680,7 @@ impl KbdInteractiveHandler for UiKbdInteractiveHandler {
 }
 
 /// Send transport-neutral input to whichever pane is focused in `tab` (id 0
-/// = the primary session; id 1+ = `extra_panes[id - 1]`). P6.11: RDP-in-pane
+/// = the primary session; id 1+ = `extra_panes[id - 1]`).: RDP-in-pane
 /// means the RDP key/scroll callbacks (fired from *any* pane's `RdpSurface`,
 /// not just a whole-tab-is-RDP primary) must route by focus like the
 /// terminal key-input path already does, instead of always assuming the
@@ -1814,12 +1814,12 @@ fn wire_row_activated(ctx: &Ctx) {
 }
 
 /// Resolves and opens (or fails) a tab for a saved connection: the shared
-/// stored-credential connect path (P6.4) used by both a tree-row click
+/// stored-credential connect path used by both a tree-row click
 /// ([`wire_row_activated`]) and the `CONMAN_TREE_AUTOLAUNCH` QA hook
 /// (`controller/util.rs`) — both must exercise the identical
 /// resolve-then-connect logic, never a placeholder/empty credential.
 ///
-/// Also sets `origin_connection_id` (P6.9 gap 16) on every tab this produces —
+/// Also sets `origin_connection_id` on every tab this produces —
 /// including the auth-error `Failed` tab — so the ErrorOverlay "Edit…" button
 /// can reopen the originating profile even when the failure was a
 /// credential-resolution error rather than a network/protocol one.
@@ -1836,8 +1836,8 @@ pub(super) fn launch_saved_connection(
 ) {
     let conn_id = conn.id;
     let tab_count_before = state.borrow().tabs.len();
-    // P6.14: record this as a recently-opened connection for the Launchpad
-    // (recency only; best-effort -- a failure here never blocks or fails the
+    // record this as a recently-opened connection for the Launchpad
+    // (recency only; best-effort - a failure here never blocks or fails the
     // connect attempt itself). This is the single shared entry point for
     // every way of opening a saved connection (tree click,
     // `CONMAN_TREE_AUTOLAUNCH`, the Launchpad's own "open recent", and
@@ -1848,7 +1848,7 @@ pub(super) fn launch_saved_connection(
             tracing::warn!("record_recent: {e}");
         }
     }
-    // P6.9 (gap 16): remember which stored profile this tab came from so the
+    // remember which stored profile this tab came from so the
     // ErrorOverlay "Edit…" button can reopen it on failure.
     let origin_connection_id = Some(conn.id.get() as i32);
     match &conn.settings {
@@ -1879,7 +1879,7 @@ pub(super) fn launch_saved_connection(
                     // BUG-cred-username-auth: the settings actually used to
                     // connect/log/identify carry the *effective* username
                     // (credential's own username wins over the inline field
-                    // when a credential is assigned) -- see
+                    // when a credential is assigned) - see
                     // `effective_ssh_settings`.
                     let effective_settings = {
                         let st = state.borrow();
@@ -2063,15 +2063,15 @@ fn reconnect_display_label(
 }
 
 /// Resolves the provenance + auth material for reconnecting an SSH tab
-/// (P6.4): `Direct` (quick-connect) clones the cached [`SshAuthInput`]
+/// `Direct` (quick-connect) clones the cached [`SshAuthInput`]
 /// verbatim; `Credential` (tree-launched) re-resolves fresh via
-/// [`resolve_ssh_auth`] against the live credential store -- the fetched
+/// [`resolve_ssh_auth`] against the live credential store - the fetched
 /// secret never lingers in `Tab` state longer than one connect attempt.
-/// Pure and mock-testable (no live `AppWindow`/session needed) -- extracted
-/// from [`wire_reconnect`]'s inline match (P6.12 prep, no behavior change).
+/// Pure and mock-testable (no live `AppWindow`/session needed) - extracted
+/// from [`wire_reconnect`]'s inline match ( prep, no behavior change).
 ///
 /// BUG-cred-username-auth: also returns the [`SshSettings`] actually used to
-/// reconnect, with `username` re-derived via [`effective_ssh_settings`] --
+/// reconnect, with `username` re-derived via [`effective_ssh_settings`] -
 /// without this, a reconnect would keep whatever username the tab's cached
 /// `SshConnectInfo` happened to carry rather than re-applying the
 /// credential-wins precedence, and a credentialed reconnect could regress to
@@ -2103,7 +2103,7 @@ fn resolve_ssh_reconnect(
     }
 }
 
-/// RDP counterpart to [`resolve_ssh_reconnect`] (P6.12, gap 19) -- same
+/// RDP counterpart to [`resolve_ssh_reconnect`] - same
 /// `Direct`-clones / `Credential`-re-resolves-fresh rule, via
 /// [`resolve_rdp_auth`]. No settings re-derivation needed here (unlike SSH):
 /// [`RdpAuthInput::username`] already carries the effective username, and
@@ -2155,11 +2155,11 @@ fn wire_reconnect(ctx: &Ctx) {
 }
 
 /// The ErrorOverlay's "Reconnect" button (above) and the tab context menu's
-/// "Reconnect" item (P9.10 #1, `controller::tabs::wire_tab_reconnect`) share
-/// this exact logic -- the only difference is which `tab_idx` they target
+/// "Reconnect" item ( #1, `controller::tabs::wire_tab_reconnect`) share
+/// this exact logic - the only difference is which `tab_idx` they target
 /// (always `active` for the overlay button; whichever tab was right-clicked
 /// for the menu item). **Callers that might target a non-active tab must
-/// bring it into view first** (`tabs::select_tab`) before calling this --
+/// bring it into view first** (`tabs::select_tab`) before calling this -
 /// every downstream function here (`reconnect_ssh_tab`/`reconnect_rdp_tab`/
 /// `fail_reconnect_in_place`) writes AppWindow-level properties shared by
 /// whichever tab is active (the exact single-shared-property shape Bug B's
@@ -2177,7 +2177,7 @@ pub(super) fn reconnect_tab(
     secrets: &Arc<dyn cm_core::CredentialStore>,
     tab_idx: usize,
 ) {
-    // P6.4/P6.12: `Credential`-sourced auth is re-resolved fresh here
+    // /: `Credential`-sourced auth is re-resolved fresh here
     // (never cached as plaintext in `Tab` state) — `Direct`
     // (quick-connect) just clones the typed input as before. SSH and
     // RDP each carry their own settings/auth types, so the two kinds
@@ -2251,13 +2251,13 @@ pub(super) fn reconnect_tab(
     }
 }
 
-/// P9.10 #1: the tab context menu's "Disconnect" -- tears the session(s)
+/// #1: the tab context menu's "Disconnect" - tears the session(s)
 /// down but keeps the tab open, dropping it into the same Failed/
 /// error-overlay state a spontaneous disconnect or a failed reconnect
 /// already leaves a tab in (`fail_reconnect_in_place`), so "Reconnect" works
 /// from the very same tab afterward. Shuts down every pane's session
-/// (primary + any split extra panes) -- this is a whole-TAB disconnect;
-/// disconnecting a single pane within a split is Item 2's own, separate
+/// (primary + any split extra panes) - this is a whole-TAB disconnect;
+/// disconnecting a single pane within a split is 's own, separate
 /// affordance. Caller must bring `tab_idx` into view first, same reasoning
 /// as [`reconnect_tab`].
 pub(super) fn disconnect_tab(
@@ -2377,7 +2377,7 @@ impl HostKeyVerifier for UiHostKeyVerifier {
     }
 }
 
-/// Shows the cert-accept dialog (P4.2 slint UI) and blocks the RDP connection
+/// Shows the cert-accept dialog ( slint UI) and blocks the RDP connection
 /// thread until the user accepts or rejects.
 ///
 /// When `auto_accept` is true, the verifier immediately returns
@@ -2465,7 +2465,7 @@ pub(super) fn render_frame(
     Image::from_rgba8(buf)
 }
 
-/// P6.7: the active tab's search matches that fall within `snap`'s currently
+/// the active tab's search matches that fall within `snap`'s currently
 /// displayed viewport window, translated to the index `render_to_full`
 /// expects for `current_match` — `terminal_renderer::render_to_full`'s doc
 /// asks callers to pre-filter for exactly this reason (an unfiltered 10k-line
@@ -2504,9 +2504,7 @@ pub(crate) fn drain_latest<T>(rx: &Receiver<T>) -> Option<T> {
     latest
 }
 
-// ---------------------------------------------------------------------------
-// Stored-credential resolution (P6.4)
-// ---------------------------------------------------------------------------
+// Stored-credential resolution
 
 /// Why resolving a saved connection's stored credential into real auth
 /// material failed. Never carries secret bytes — only enough to build the
@@ -2536,33 +2534,31 @@ impl std::fmt::Display for AuthResolveError {
     }
 }
 
-// P9.6-A Phase C: `fetch_secret`/`require_secret` (the old Object-only,
-// credential-id-keyed keychain fetch) are gone -- `resolve_auth` below wraps
-// `cm_core::resolve_connection_auth`, which does the equivalent lookup for
-// every credential source (Object/Inline/Prompt/inherit) uniformly.
+// `resolve_auth` wraps `cm_core::resolve_connection_auth`, which performs
+// the keychain lookup uniformly for every credential source.
 
 /// BUG-cred-username-auth: the effective username actually sent to
-/// authenticate a connection. Precedence (see `cm_core::Credential::username`
-/// doc comment), extended for P9.6-A's `CredentialSource` without pulling in
+/// authenticate a connection. Precedence follows `cm_core::Credential::username`
+/// and the connection's `CredentialSource`, without pulling in
 /// a `CredentialStore` (this function is display/settings-only, no keychain
-/// I/O, so its signature -- and every caller that has no store handy, e.g.
-/// tree/profile-editor display -- stays unchanged):
+/// I/O, so its signature - and every caller that has no store handy, e.g.
+/// tree/profile-editor display - stays unchanged):
 ///
 /// 1. [`cm_core::CredentialSource::Inline`]'s own `username`, when non-empty
-///    -- the mode-selector's Inline fields are authoritative once chosen,
-///    same "most specific wins" the object case already followed.
-/// 2. else, for `Object`/inherit (the only sources that existed before
-///    P9.6-A): the resolved credential's own `username` -- when
+/// - the mode-selector's Inline fields are authoritative once chosen,
+///   same "most specific wins" the object case already followed.
+/// 2. else, for `Object`/inherit: the resolved credential's own `username` -
+///    when
 ///    [`resolve_effective_credential`] (own credential, or inherited from the
 ///    nearest ancestor group's default) finds one, AND its `username` is
 ///    non-empty. The credential object is the source of truth once assigned:
 ///    this is what makes a credentialed RoyalTS-imported connection (which
 ///    carries no inline username at all) authenticate with the right user
 ///    instead of an empty one.
-/// 3. else `inline_username` -- the connection's own typed username (Quick
+/// 3. else `inline_username` - the connection's own typed username (Quick
 ///    Connect with inline creds, an explicit override, `Prompt` mode, or any
 ///    connection with no credential assigned).
-/// 4. else empty -- unchanged behavior for callers that require a non-empty
+/// 4. else empty - unchanged behavior for callers that require a non-empty
 ///    username (surfaces as the existing auth error).
 ///
 /// [`resolve_effective_credential`]: cm_core::resolve_effective_credential
@@ -2588,7 +2584,7 @@ pub(super) fn effective_auth_username(
 }
 
 /// SSH counterpart-helper: [`SshAuthInput`] carries no username field (unlike
-/// [`RdpAuthInput`]) -- the username actually used to connect lives entirely
+/// [`RdpAuthInput`]) - the username actually used to connect lives entirely
 /// on [`SshSettings::username`], which is what [`cm_session`]'s SSH backend
 /// reads directly. This builds the [`SshSettings`] actually used to connect:
 /// identical to `settings` except `username`, which follows
@@ -2606,15 +2602,15 @@ pub(super) fn effective_ssh_settings(
     settings
 }
 
-/// P9.6-A Phase C: whether `conn` has ANY credential source that could
-/// actually produce a secret -- i.e. `resolve_connection_auth` finding no
+/// whether `conn` has ANY credential source that could
+/// actually produce a secret - i.e. `resolve_connection_auth` finding no
 /// secret means "this purpose was never stored" (`NotFoundInKeychain`)
 /// rather than "nothing is configured at all" (`NoCredentialAssigned`).
 /// `Prompt` counts as "nothing assigned" here: it explicitly opts out of any
 /// stored secret, and ConMan has no live connect-time prompt UX yet (per the
-/// P9.6 design brief's non-goals) -- so today it fails exactly like an
+/// design brief's non-goals) - so today it fails exactly like an
 /// unassigned connection always has, surfacing the same auth-error overlay
-/// rather than inventing a prompt flow this phase doesn't build.
+/// rather than inventing a prompt flow this 't build.
 fn has_assigned_credential_source(conn: &Connection, groups: &[Group]) -> bool {
     match &conn.credential_source {
         Some(cm_core::CredentialSource::Object(_)) => true,
@@ -2624,11 +2620,11 @@ fn has_assigned_credential_source(conn: &Connection, groups: &[Group]) -> bool {
     }
 }
 
-/// P9.8 E1/E3: a non-secret, human-readable tag for *how* `conn` gets its
-/// credential -- `"object:<name>#<id>"` (own or inherited), `"inline"`,
+/// E1/E3: a non-secret, human-readable tag for *how* `conn` gets its
+/// credential - `"object:<name>#<id>"` (own or inherited), `"inline"`,
 /// `"prompt"`, or `"none"` (nothing configured at all). Shared by the
 /// release-safe launch log ([`log_ssh_launch_auth`]/[`log_rdp_launch_auth`])
-/// and the E3 keychain-miss warning in [`no_secret_error`] -- never the
+/// and the E3 keychain-miss warning in [`no_secret_error`] - never the
 /// secret itself, just which source it would have come from.
 fn cred_source_label(
     conn: &Connection,
@@ -2655,9 +2651,9 @@ fn cred_source_label(
 }
 
 /// Maps a missing secret from [`cm_core::resolve_connection_auth`] to the
-/// right [`AuthResolveError`] variant -- see
-/// [`has_assigned_credential_source`] for the distinction -- and logs the
-/// matching P9.8 E2/E3 release-safe warning (never the secret itself; E3
+/// right [`AuthResolveError`] variant - see
+/// [`has_assigned_credential_source`] for the distinction - and logs the
+/// matching E2/E3 release-safe warning (never the secret itself; E3
 /// carries [`cred_source_label`], not the credential/keychain contents).
 fn no_secret_error(
     conn: &Connection,
@@ -2696,8 +2692,8 @@ fn resolve_auth(
         .map_err(|e| AuthResolveError::Backend(e.to_string()))
 }
 
-/// Resolves the real [`SshAuthInput`] for a tree-launched SSH connection --
-/// P9.6-A Phase C: a thin adapter over [`cm_core::resolve_connection_auth`]
+/// Resolves the real [`SshAuthInput`] for a tree-launched SSH connection -
+/// a thin adapter over [`cm_core::resolve_connection_auth`]
 /// (Object/inherit, Inline, and Prompt credential sources), per
 /// `settings.auth_method`. Never falls back to an empty/placeholder password
 /// — a missing assignment or keychain entry is a typed [`AuthResolveError`]
@@ -2710,7 +2706,7 @@ pub(super) fn resolve_ssh_auth(
     secrets: &dyn cm_core::CredentialStore,
     credentials: &[cm_core::Credential],
 ) -> Result<SshAuthInput, AuthResolveError> {
-    // Agent auth needs no stored secret (Windows ssh-agent support is P6.13).
+    // Agent auth needs no stored secret (Windows ssh-agent support is).
     if matches!(settings.auth_method, SshAuthMethod::Agent) {
         return Ok(SshAuthInput::Agent);
     }
@@ -2739,9 +2735,9 @@ pub(super) fn resolve_ssh_auth(
             let key_pem = resolved_key
                 .secret
                 .ok_or_else(|| no_secret_error(conn, groups, "ssh", credentials))?;
-            // Passphrase is optional -- CredentialKind::SshKey has none, and
+            // Passphrase is optional - CredentialKind::SshKey has none, and
             // Inline never carries a key/passphrase at all (password-only,
-            // per the P9.6 non-goals) -- either way a miss here is `None`,
+            // per the non-goals) - either way a miss here is `None`,
             // not an error, matching `fetch_secret`'s old optional-purpose
             // contract.
             let passphrase = resolve_auth(
@@ -2761,16 +2757,16 @@ pub(super) fn resolve_ssh_auth(
     }
 }
 
-/// Resolves the real [`RdpAuthInput`] for a tree-launched RDP connection --
-/// P9.6-A Phase C: a thin adapter over [`cm_core::resolve_connection_auth`],
+/// Resolves the real [`RdpAuthInput`] for a tree-launched RDP connection -
+/// a thin adapter over [`cm_core::resolve_connection_auth`],
 /// password-only (ConMan has no RDP key-based auth), same credential-source
 /// coverage as [`resolve_ssh_auth`].
 ///
 /// `domain`: [`cm_core::ResolvedAuth::domain`] is populated ONLY for
 /// `Inline` (a credential object has no domain field, and `Prompt`/inherit
-/// carry none either) -- so an Inline connection's own typed domain wins,
+/// carry none either) - so an Inline connection's own typed domain wins,
 /// and everything else falls back to the connection's own
-/// [`RdpSettings::domain`] exactly as before P9.6-A.
+/// [`RdpSettings::domain`] unchanged.
 pub(super) fn resolve_rdp_auth(
     conn: &Connection,
     groups: &[Group],
@@ -2795,8 +2791,8 @@ pub(super) fn resolve_rdp_auth(
     })
 }
 
-/// P9.8 E1: logs the *non-secret* auth context a successfully-resolved SSH
-/// launch is about to use -- which credential (object name + id) or
+/// E1: logs the *non-secret* auth context a successfully-resolved SSH
+/// launch is about to use - which credential (object name + id) or
 /// fallback source (`ssh-agent`/`inline`/`prompt`/`none`), and which
 /// username, are actually being handed to
 /// [`cm_session::SessionProvider::connect_ssh`]. Fires from every launch path
@@ -2805,18 +2801,18 @@ pub(super) fn resolve_rdp_auth(
 /// (`controller/panes.rs`).
 ///
 /// BUG-cred-username-auth: `username` is computed via
-/// [`effective_auth_username`] -- the *effective* username actually sent
+/// [`effective_auth_username`] - the *effective* username actually sent
 /// (credential's own username when one is assigned and non-empty, else
-/// `settings.username`) -- not `settings.username` directly, so the log is
+/// `settings.username`) - not `settings.username` directly, so the log is
 /// truthful regardless of whether the caller already applied the same
 /// precedence to the `settings` it passes in.
 ///
-/// ABSOLUTE RULE: never log the password/secret/passphrase/key material --
+/// ABSOLUTE RULE: never log the password/secret/passphrase/key material -
 /// only the credential's name/id, the resolved username, and connection
-/// metadata (host/port). Release-safe (P9.8 E1, promoted from the old
+/// metadata (host/port). Release-safe ( E1, promoted from the old
 /// `#[cfg(debug_assertions)]`-only line): operators debugging
 /// "authed as the wrong user" (the exact BUG-cred-username-auth class) need
-/// this signal outside dev builds too. None of these fields are secret --
+/// this signal outside dev builds too. None of these fields are secret -
 /// see the rule above and [`cred_source_label`]'s own doc comment.
 pub(super) fn log_ssh_launch_auth(
     conn: &Connection,
@@ -2841,8 +2837,8 @@ pub(super) fn log_ssh_launch_auth(
     );
 }
 
-/// RDP counterpart to [`log_ssh_launch_auth`] -- same rule, plus `domain`
-/// (RDP-specific auth context, always from `settings` -- credentials have no
+/// RDP counterpart to [`log_ssh_launch_auth`] - same rule, plus `domain`
+/// (RDP-specific auth context, always from `settings` - credentials have no
 /// domain field). BUG-cred-username-auth: `username` is likewise the
 /// *effective* username via [`effective_auth_username`], not
 /// `settings.username` directly (see [`resolve_rdp_auth`]).
@@ -2871,11 +2867,11 @@ pub(super) fn log_rdp_launch_auth(
     );
 }
 
-/// Sets the error-overlay UI state for `reason` -- shared by the synchronous
-/// connect-failure branches and the P6.4 credential-resolution failure paths
+/// Sets the error-overlay UI state for `reason` - shared by the synchronous
+/// connect-failure branches and the credential-resolution failure paths
 /// below. Every caller here is a genuine failure (a synchronous connect
 /// error, a missing/unresolvable credential, an agent-mode execute-gate
-/// denial) -- P9.12 #3's neutral "Session ended" framing is only for a
+/// denial) - #3's neutral "Session ended" framing is only for a
 /// clean `Disconnected`/`Exited` end (`overlays::update_overlays_from_status`),
 /// never for these, so this always marks the overlay as a real failure.
 fn set_error_overlay(ui: &AppWindow, reason: &str) {
@@ -2887,10 +2883,10 @@ fn set_error_overlay(ui: &AppWindow, reason: &str) {
     ui.set_error_detail(SharedString::from(""));
 }
 
-/// Pushes a new `Failed` tab for a credential-resolution error (P6.4) --
+/// Pushes a new `Failed` tab for a credential-resolution error -
 /// mirrors the synchronous-setup-error handling in [`open_ssh_tab`] but never
 /// attempts a network connection with a placeholder/empty credential.
-/// `origin_connection_id` is threaded through unchanged (P6.9 gap 16) so the
+/// `origin_connection_id` is threaded through unchanged so the
 /// ErrorOverlay "Edit…" button reopens the originating profile even when the
 /// failure never reached the network layer.
 fn push_auth_failed_tab(
@@ -2953,7 +2949,7 @@ fn push_failed_remote_tab(
 }
 
 /// Replaces the active tab's session with a `Failed` one after a reconnect's
-/// credential re-resolution fails (P6.4). The caller has already shut down
+/// credential re-resolution fails. The caller has already shut down
 /// the old session; this never attempts to reconnect with stale/empty auth.
 /// The tab's own `origin_connection_id` is untouched (only `session`/`last`
 /// are replaced), so the ErrorOverlay "Edit…" button still works afterward.
@@ -2978,7 +2974,7 @@ fn fail_reconnect_in_place(
     set_error_overlay(ui, &reason);
 }
 
-/// P8.6-B item 4: the execute-scope launch/broadcast gate. True only when
+/// the execute-scope launch/broadcast gate. True only when
 /// an agent write-tool call (`click_element`/`invoke_accessibility_action`/
 /// `dispatch_key_event`) is *actually in flight* through the proxy
 /// (`AgentModeConfig::mcp_interaction_active`) AND `execute` isn't granted.
@@ -2989,7 +2985,7 @@ fn fail_reconnect_in_place(
 /// fail-safe over-restriction documented on `mcp_interaction_active`: a
 /// human click that happens to land in the same (short, tens-of-
 /// milliseconds) window as an unrelated agent write-tool call is spuriously
-/// refused too -- over-restricting, never under-restricting, and rare
+/// refused too - over-restricting, never under-restricting, and rare
 /// enough (and cheap enough to just retry) to accept for v1.
 pub(super) fn agent_mode_execute_blocked(agent_mode: &Option<crate::AgentModeConfig>) -> bool {
     match agent_mode {
@@ -3021,9 +3017,9 @@ pub(super) fn open_ssh_tab(
     };
     let identity = format!("{}@{}:{}", settings.username, settings.host, settings.port);
     let title = format!("SSH {}", settings.host);
-    // P8.6-B item 4: the execute-scope launch gate. Covers every caller of
-    // this function -- tree-launched connections, split-pane connects,
-    // quick-connect, and the debug autoinit hook -- since they all funnel
+    // the execute-scope launch gate. Covers every caller of
+    // this function - tree-launched connections, split-pane connects,
+    // quick-connect, and the debug autoinit hook - since they all funnel
     // through here rather than dialing `connect_ssh` themselves.
     if agent_mode_execute_blocked(&state.borrow().agent_mode) {
         tracing::warn!(
@@ -3042,8 +3038,8 @@ pub(super) fn open_ssh_tab(
         return;
     }
     // Only `Direct` (quick-connect / debug autoinit) clones the auth for
-    // reconnect -- `Credential`-sourced auth is re-resolved fresh each time
-    // (P6.4: never cache the fetched secret in `Tab` state).
+    // reconnect - `Credential`-sourced auth is re-resolved fresh each time
+    // (never cache the fetched secret in `Tab` state).
     let auth_source = match provenance {
         AuthProvenance::Direct => SshAuthSource::Direct(auth.clone()),
         AuthProvenance::Credential(id) => SshAuthSource::Credential(id),
@@ -3079,21 +3075,21 @@ pub(super) fn open_ssh_tab(
             ui.set_launchpad_open(false);
             ui.set_connecting_kind(SharedString::from("SSH"));
             ui.set_rdp_active(false);
-            // P9.12 #2: `push_tab` makes this brand-new tab active but never
-            // touches `root.frame` -- the same single AppWindow-level
+            // #2: `push_tab` makes this brand-new tab active but never
+            // touches `root.frame` - the same single AppWindow-level
             // property Bug B's fix (`de72222`) already established isn't
             // per-tab, and neither `push_tab` nor the routine tick loop
             // calls `render_active` to refresh it on a fresh launch (only
             // `select_tab`/`close_tab`/reconnect do). Without this, the
             // property stays bound to whatever the PREVIOUSLY active tab
             // last painted (typically the Home tab's local shell) until
-            // this session's own first `GridSnapshot` drains -- exactly the
+            // this session's own first `GridSnapshot` drains - exactly the
             // "local shell flashes before the remote paints" bleed. Blank
             // it immediately, mirroring `reconnect_ssh_tab`'s identical fix.
             ui.set_frame(Image::default());
         }
         Err(e) => {
-            // Carry-over fix (b): surface synchronous setup errors as a Failed
+            // (b): surface synchronous setup errors as a Failed
             // tab with the error overlay, not just an eprintln!.
             let reason = e.to_string();
             push_auth_failed_tab(
@@ -3189,9 +3185,9 @@ pub(super) fn open_telnet_tab(
 
 /// Pure decision behind [`apply_pane_resolution`]: the pane's live pixel
 /// size (`target_px`, when known) wins over whatever `(width, height)` the
-/// caller already had -- persisted profile, quick-connect typed value, or
-/// the `RdpSettings::default()` autoinit uses -- which is the "resize to
-/// window" behavior P9.5 #10 asks for. Clamped to a sane desktop-size range
+/// caller already had - persisted profile, quick-connect typed value, or
+/// the `RdpSettings::default` autoinit uses - which is the "resize to
+/// window" behavior #10 asks for. Clamped to a sane desktop-size range
 /// so a transient 0/huge readout can never produce a degenerate resolution.
 /// Falls back to `current` unchanged when no pane has ever reported its
 /// size yet (the very first tab at startup, before any `surface-resized`
@@ -3206,10 +3202,10 @@ pub(super) fn pane_resolution_override(
     }
 }
 
-/// P9.5 #10: overwrite `settings.width`/`settings.height` with the active
+/// #10: overwrite `settings.width`/`settings.height` with the active
 /// pane's live pixel size via [`pane_resolution_override`] (`State::target_px`
 /// is the same HiDPI-corrected value `apply_settled_resize` feeds to
-/// `Session::resize_px` after connect) -- negotiating the desktop at the
+/// `Session::resize_px` after connect) - negotiating the desktop at the
 /// pane's actual size is what lets `RdpSurface`'s `Image` display 1:1
 /// instead of bitmap-scaling.
 fn apply_pane_resolution(state: &Rc<RefCell<State>>, settings: &mut RdpSettings) {
@@ -3230,15 +3226,15 @@ pub(super) fn open_rdp_tab(
     verifier: Arc<dyn CertVerifier>,
     origin_connection_id: Option<i32>,
 ) {
-    // P9.5 #10: the pane's live pixel size (when known) wins over whatever
+    // #10: the pane's live pixel size (when known) wins over whatever
     // resolution the settings carried in (persisted profile / quick-connect
-    // typed value / autoinit default) -- negotiating the desktop at the
+    // typed value / autoinit default) - negotiating the desktop at the
     // pane's actual size is what lets `RdpSurface`'s `Image` display 1:1
     // instead of bitmap-scaling. See `apply_pane_resolution`.
     apply_pane_resolution(state, &mut settings);
     let title = format!("RDP {}", settings.host);
     let identity = format!("{}@{}:{}", auth.username, settings.host, settings.port);
-    // P8.6-B item 4: the execute-scope launch gate -- see open_ssh_tab's
+    // the execute-scope launch gate - see open_ssh_tab's
     // identical comment.
     if agent_mode_execute_blocked(&state.borrow().agent_mode) {
         tracing::warn!(
@@ -3257,8 +3253,8 @@ pub(super) fn open_rdp_tab(
         return;
     }
     // Only `Direct` (quick-connect / debug autoinit) clones the auth for
-    // reconnect -- `Credential`-sourced auth is re-resolved fresh each time
-    // (P6.4/P6.12: never cache the fetched secret in `Tab` state).
+    // reconnect - `Credential`-sourced auth is re-resolved fresh each time
+    // (/: never cache the fetched secret in `Tab` state).
     let auth_source = match provenance {
         AuthProvenance::Direct => RdpAuthSource::Direct(auth.clone()),
         AuthProvenance::Credential(id) => RdpAuthSource::Credential(id),
@@ -3271,9 +3267,9 @@ pub(super) fn open_rdp_tab(
     let session = match provider.connect_rdp(&settings, auth, verifier, endpoint_id) {
         Ok(s) => s,
         Err(e) => {
-            // P6.12: mirrors open_ssh_tab's synchronous-setup-error handling
-            // -- surface it as a Failed tab with the error overlay instead of
-            // silently doing nothing (the pre-P6.12 behavior here).
+            // mirrors open_ssh_tab's synchronous-setup-error handling
+            // surface it as a Failed tab with the error overlay instead of
+            // silently doing nothing (the earlier behavior here).
             tracing::warn!("RDP connect error: {e}");
             push_auth_failed_tab(
                 state,
@@ -3315,14 +3311,14 @@ pub(super) fn open_rdp_tab(
     ui.set_launchpad_open(false);
     ui.set_connecting_kind(SharedString::from("RDP"));
     ui.set_rdp_active(true);
-    // P9.12 #2: see `open_ssh_tab`'s identical comment -- `root.rdp-frame`
+    // #2: see `open_ssh_tab`'s identical comment - `root.rdp-frame`
     // is the same kind of single AppWindow-level property, and `push_tab`
     // doesn't touch it either. Blank it so this fresh RDP tab never briefly
     // shows the previously-active tab's last painted frame.
     ui.set_rdp_frame(Image::default());
 }
 
-/// RDP counterpart to [`reconnect_ssh_tab`] (P6.12, gap 19): replaces the
+/// RDP counterpart to [`reconnect_ssh_tab`]: replaces the
 /// active tab's session in place after the caller has already shut down the
 /// old one. Reuses the exact same persistent cert store [`open_rdp_tab`]
 /// uses, so an already-trusted cert never re-prompts on reconnect.
@@ -3337,20 +3333,20 @@ pub(super) fn reconnect_rdp_tab(
     provenance: AuthProvenance,
     verifier: Arc<dyn CertVerifier>,
 ) {
-    // P9.5 #10: re-apply the pane's current pixel size on every reconnect
+    // #10: re-apply the pane's current pixel size on every reconnect
     // too, so a reconnect after the user has resized the window picks up
     // the new size rather than replaying whatever resolution the original
     // connect stored in `RdpConnectInfo`.
     apply_pane_resolution(state, &mut settings);
     let endpoint_identity = format!("{}@{}:{}", auth.username, settings.host, settings.port);
     let display_label = reconnect_display_label(state, tab_idx, endpoint_identity.clone());
-    // P8.6-B (Fable review fixup): Reconnect is an execute-scope action too --
+    // Reconnect is an execute-scope action too -
     // an agent driving the ErrorOverlay's "Reconnect" button re-establishes a
     // live session with stored credentials, same as a fresh launch. See
     // `open_ssh_tab`'s identical comment for the gate's rationale/timing
     // proof. The old session is already shut down by this point (the caller,
     // `wire_reconnect`, does that before dispatching), so on a block the tab
-    // just stays in the Failed state `fail_reconnect_in_place` leaves it in --
+    // just stays in the Failed state `fail_reconnect_in_place` leaves it in -
     // never a silent no-op.
     if agent_mode_execute_blocked(&state.borrow().agent_mode) {
         tracing::warn!(
@@ -3394,13 +3390,13 @@ pub(super) fn reconnect_rdp_tab(
                     tab.session = new_session;
                     tab.connect_info = Some(ConnectInfo::Rdp(ci));
                     tab.last_frame = None;
-                    // P9.5 #3: keep the cached identity/kind (select_tab
+                    // #3: keep the cached identity/kind (select_tab
                     // re-pushes these on every switch) in step with a
                     // reconnect, same as the fresh-connect path.
                     tab.identity = display_label.clone();
                     tab.kind = "RDP".to_owned();
                     tab.insecure_transport = false;
-                    // P9.8 I2: this reconnect's own connecting -> connected
+                    // I2: this reconnect's own connecting -> connected
                     // transition needs its own start time, not the tab's
                     // original one (that would report a stale, way-too-long
                     // "perceived_ms" spanning the whole prior session).
@@ -3417,14 +3413,14 @@ pub(super) fn reconnect_rdp_tab(
             ui.set_connecting_kind(SharedString::from("RDP"));
             ui.set_session_insecure(false);
             ui.set_rdp_active(true);
-            // .99 GPU verify Bug B: `root.rdp-frame` is a single AppWindow-
+            //.99 GPU verify Bug B: `root.rdp-frame` is a single AppWindow-
             // level property (app.slint's RdpSurface reads `root.rdp-frame`
-            // for whichever tab is active) -- it is only ever WRITTEN when a
+            // for whichever tab is active) - it is only ever WRITTEN when a
             // new `FrameUpdate` actually drains for the active tab
             // (`tick_tab`'s `Surface::Framebuffer` arm, below). Clearing
             // `tab.last_frame` above (the Rust-side model) does nothing to
-            // that UI property on its own, so without this the OLD frame --
-            // from the session that was just torn down -- stays bound and
+            // that UI property on its own, so without this the OLD frame -
+            // from the session that was just torn down - stays bound and
             // visible for however long the new handshake takes to deliver
             // its first decoded frame. `reconnect_rdp_tab` only ever
             // operates on the active tab (the ErrorOverlay's Reconnect
@@ -3457,8 +3453,8 @@ pub(super) fn reconnect_ssh_tab(
     };
     let endpoint_identity = format!("{}@{}:{}", settings.username, settings.host, settings.port);
     let display_label = reconnect_display_label(state, tab_idx, endpoint_identity.clone());
-    // P8.6-B (Fable review fixup): see `reconnect_rdp_tab`'s identical
-    // comment -- Reconnect is an execute-scope action, gated the same way.
+    // See `reconnect_rdp_tab`'s identical
+    // comment - Reconnect is an execute-scope action, gated the same way.
     if agent_mode_execute_blocked(&state.borrow().agent_mode) {
         tracing::warn!(
             conn = %endpoint_identity,
@@ -3490,12 +3486,12 @@ pub(super) fn reconnect_ssh_tab(
                     tab.session = new_session;
                     tab.connect_info = Some(ConnectInfo::Ssh(ci));
                     tab.last = None;
-                    // P9.5 #3: see the RDP counterpart's identical comment
+                    // #3: see the RDP counterpart's identical comment
                     // (reconnect_rdp_tab, above).
                     tab.identity = display_label.clone();
                     tab.kind = "SSH".to_owned();
                     tab.insecure_transport = false;
-                    // P9.8 I2: see the RDP counterpart's identical comment
+                    // I2: see the RDP counterpart's identical comment
                     // (reconnect_rdp_tab, above).
                     tab.connect_started = std::time::Instant::now();
                 }
@@ -3509,8 +3505,8 @@ pub(super) fn reconnect_ssh_tab(
             ui.set_overlay_error(false);
             ui.set_connecting_kind(SharedString::from("SSH"));
             ui.set_session_insecure(false);
-            // .99 GPU verify Bug B: same stale-frame class as
-            // `reconnect_rdp_tab`'s identical comment -- `root.frame` is the
+            //.99 GPU verify Bug B: same stale-frame class as
+            // `reconnect_rdp_tab`'s identical comment - `root.frame` is the
             // same kind of single AppWindow-level property (`render_frame`'s
             // output), only ever rewritten when a new `GridSnapshot` drains
             // for the active tab. Blank it here too so a terminal reconnect
@@ -3590,7 +3586,7 @@ pub(super) fn reconnect_telnet_tab(
 /// status dot / overlays / toast, and report whether it should be queued for
 /// closing (local shell that has exited).
 ///
-/// Extracted from [`tick`]'s per-tab loop body (P6.1 function-size budget) --
+/// Extracted from [`tick`]'s per-tab loop body ( function-size budget) -
 /// pure code move, identical logic, same field-by-field mutation of `st`. The
 /// 9-parameter signature mirrors `tick`'s own (state access + the model/ui
 /// handles it forwards); bundling them would be a needless intermediate type
@@ -3607,7 +3603,7 @@ fn tick_tab(
     toast_next_id: &Rc<RefCell<i32>>,
     ui: &AppWindow,
 ) -> bool {
-    // P6.5 selection lifecycle, "clears on focus change": a pane-focus switch
+    // selection lifecycle, "clears on focus change": a pane-focus switch
     // (Ctrl+Shift+arrow, or clicking a different pane) invalidates every
     // pane's selection in this tab — cheap and simple, and correct since a
     // selection is only ever meaningful while its pane is the one receiving
@@ -3624,7 +3620,7 @@ fn tick_tab(
         st.tabs[i].last_focused_pane = focused_now;
     }
 
-    // P6.11: whether anything this tab's currently-visible panes render
+    // whether anything this tab's currently-visible panes render
     // changed this tick — gates the (only-when-split) `pane-cells` rebuild
     // below so a single-pane tab (the common case) never pays for it.
     let mut panes_updated = false;
@@ -3675,8 +3671,8 @@ fn tick_tab(
         }
     }
 
-    // Drain extra pane surfaces (pane 1+; P5.1, generalized to N in P6.11).
-    // Carry-over fix (f): collect extra panes that have Exited/Failed for collapse.
+    // Drain extra pane surfaces (pane 1+;, generalized to N in).
+    // (f): collect extra panes that have Exited/Failed for collapse.
     let mut extra_panes_to_close: Vec<usize> = Vec::new();
     for ep_idx in 0..st.tabs[i].extra_panes.len() {
         match st.tabs[i].extra_panes[ep_idx].session.surface() {
@@ -3691,7 +3687,7 @@ fn tick_tab(
                     }
                 }
             }
-            // P6.11: RDP-in-pane (lifts P6.10's deferral) — decode into this
+            // RDP-in-pane (lifts 's deferral) — decode into this
             // pane's own `last_frame`/`rdp_w`/`rdp_h`, mirroring the primary
             // pane's `Surface::Framebuffer` arm above.
             Surface::Framebuffer(rx) => {
@@ -3780,7 +3776,7 @@ fn tick_tab(
     if let Some(mut item) = tab_model.row_data(i)
         && item.status.as_str() != dot
     {
-        // P9.8 I2: the user-perceived connect duration -- only the
+        // I2: the user-perceived connect duration - only the
         // connecting -> connected edge (never local shells, which start
         // "connected" and so never see this transition; never a plain
         // reconnect-retry-loop edge, since those all still pass through
@@ -3793,7 +3789,7 @@ fn tick_tab(
                 "connection established (user-perceived)"
             );
         }
-        // P5.3b: emit a toast when a background tab disconnects/fails.
+        // emit a toast when a background tab disconnects/fails.
         if i != active
             && st.tabs[i].is_remote
             && matches!(
@@ -3827,10 +3823,10 @@ fn tick_tab(
         item.status = SharedString::from(dot);
         tab_model.set_row_data(i, item);
 
-        // P9.10 #4: refresh the connection tree's live-status overlay right
+        // #4: refresh the connection tree's live-status overlay right
         // where a tab's own status transition is ALREADY detected (this
         // `if`'s whole condition), rather than adding a new unconditional
-        // per-tick poll -- a tab with no `origin_connection_id` (a local
+        // per-tick poll - a tab with no `origin_connection_id` (a local
         // shell, or a quick-connect with nothing stored to point back to)
         // has no tree row to update, so skip the (otherwise harmless but
         // pointless) whole-tree walk for those.
@@ -4485,7 +4481,7 @@ pub(super) fn tick(
     let target = st.target_px();
     let mut to_close: Vec<usize> = Vec::new();
 
-    // P6.5 selection lifecycle, "clears on focus change": a tab switch
+    // selection lifecycle, "clears on focus change": a tab switch
     // invalidates the selection of both the tab losing view and the one
     // gaining it (a leftover highlight on the outgoing tab would look like a
     // stale/incorrect selection if the user switches back). Detected
@@ -4506,7 +4502,7 @@ pub(super) fn tick(
                 ep.sel.clear();
             }
         }
-        // P6.7: the search overlay is a single global `terminal-search-open`
+        // the search overlay is a single global `terminal-search-open`
         // property tied conceptually to the active tab's primary pane — a
         // tab switch closes it rather than leaving it open over unrelated
         // content (the per-tab `SearchState` itself, including its last
@@ -4539,7 +4535,7 @@ pub(super) fn tick(
         render_active(&mut st, ui);
     }
 
-    // P5.1: Drain detached sessions to prevent channel saturation.
+    // Drain detached sessions to prevent channel saturation.
     let mut detached_to_remove: Vec<usize> = Vec::new();
     for (di, d) in st.detached.iter().enumerate() {
         match d.session.surface() {
@@ -4618,19 +4614,19 @@ pub(super) fn render_active(st: &mut State, ui: &AppWindow) {
     if let Some(tab) = st.tabs.get_mut(active) {
         match &tab.session.surface() {
             Surface::TerminalGrid(_) => {
-                // .99 GPU verify Bug B: `root.frame`/`root.rdp-frame` are
+                //.99 GPU verify Bug B: `root.frame`/`root.rdp-frame` are
                 // single AppWindow-level properties shared by whatever tab
                 // is active (app.slint's TerminalSurface/RdpSurface both
                 // read `root.frame`/`root.rdp-frame`, never a per-tab
-                // value) -- they only get overwritten when a snapshot/frame
+                // value) - they only get overwritten when a snapshot/frame
                 // actually exists to render. Skipping the setter entirely
                 // when there isn't one yet (a brand-new tab, or one whose
                 // `last`/`last_frame` a reconnect just cleared) used to
                 // leave whatever the PREVIOUSLY active tab last rendered
-                // still bound -- the "another tab's content bleeds through"
+                // still bound - the "another tab's content bleeds through"
                 // half of the bug report. Always write it, falling back to
                 // a blank `Image` (same convention `panes.rs` already uses
-                // via `unwrap_or_default()` for a pane with no frame yet).
+                // via `unwrap_or_default` for a pane with no frame yet).
                 let img = match tab.last.clone() {
                     Some(snap) => render_frame(tab, &snap, target),
                     None => Image::default(),
@@ -4644,10 +4640,10 @@ pub(super) fn render_active(st: &mut State, ui: &AppWindow) {
             }
         }
     }
-    // P6.11: N-way pane repeater — rebuilds `pane-cells` (geometry + every
+    // N-way pane repeater — rebuilds `pane-cells` (geometry + every
     // pane's current frame) when the active tab has more than one pane; a
     // no-op (clears the model) otherwise, so single-pane tabs never pay for
-    // this beyond the `count()` check.
+    // this beyond the `count` check.
     panes::rebuild_pane_cells_for_state(st);
 }
 
@@ -4680,16 +4676,16 @@ pub(super) fn frame_to_image(frame: &FrameUpdate) -> Image {
     let copy_len = bytes.len().min(frame.rgba.len());
     bytes[..copy_len].copy_from_slice(&frame.rgba[..copy_len]);
     // The RDP desktop framebuffer is always opaque (ironrdp's own
-    // `DecodedImage` treats it that way -- see upstream ironrdp-session's
+    // `DecodedImage` treats it that way - see upstream ironrdp-session's
     // image.rs comment "Framebuffer is always opaque, so we can skip alpha
     // channel change"), but several of its fast-path bitmap/tile decoders
     // (raw 32bpp updates, RemoteFX tile copies) blit source bytes verbatim
     // and leave the 4th (alpha) byte at whatever the wire padding contained
-    // -- typically `0x00`. Slint's software renderer blits full-frame
+    // typically `0x00`. Slint's software renderer blits full-frame
     // `Image`s without honoring per-pixel alpha, so a zero alpha channel was
     // invisible there; the femtovg (GPU-accelerated) backend performs real
     // alpha blending and renders an all-zero-alpha frame as fully
-    // transparent -- i.e. a black screen showing the pane's dark background
+    // transparent - i.e. a black screen showing the pane's dark background
     // through it. Force full opacity here so the frame composites
     // identically on every rendering backend.
     for px in bytes.chunks_exact_mut(4) {
@@ -4785,10 +4781,10 @@ mod tests {
         );
     }
 
-    // ── P9.5 item 9/11: RDP black screen on the femtovg backend ─────────
+    // ── RDP black screen on the femtovg backend ─────────
     // ironrdp's fast-path bitmap/tile decoders copy raw source bytes for the
     // RGB channels but leave the alpha byte at whatever the wire padding
-    // held (typically 0x00) -- the software renderer blits full-frame
+    // held (typically 0x00) - the software renderer blits full-frame
     // `Image`s without honoring per-pixel alpha, so this went unnoticed
     // there, but femtovg alpha-blends for real and rendered an all-zero-alpha
     // frame as fully transparent (black over the pane background).
@@ -4812,12 +4808,12 @@ mod tests {
         assert_eq!(bytes, &[10, 20, 30, 0xff, 40, 50, 60, 0xff]);
     }
 
-    // ── P9.5 item 10: connect-time resolution follows the pane, not the
+    // ── connect-time resolution follows the pane, not the
     // persisted/typed value (the bitmap-scaling bug) ────────────────────
 
     #[test]
     fn pane_resolution_override_prefers_the_live_pane_size() {
-        // The pane is known to be 1024x768 -- that wins over whatever the
+        // The pane is known to be 1024x768 - that wins over whatever the
         // saved profile/quick-connect form had (a stand-in for the stored
         // 1280x720 default).
         assert_eq!(
@@ -4829,7 +4825,7 @@ mod tests {
     #[test]
     fn pane_resolution_override_falls_back_when_pane_size_unknown() {
         // No pane has reported its size yet (e.g. the very first tab at
-        // startup) -- keep whatever the caller already had.
+        // startup) - keep whatever the caller already had.
         assert_eq!(pane_resolution_override(None, (1280, 720)), (1280, 720));
     }
 
@@ -4847,7 +4843,7 @@ mod tests {
         );
     }
 
-    // ── gap 17: Ctrl+Shift direct-shortcut classifier ───────────────────
+    // ──: Ctrl+Shift direct-shortcut classifier ───────────────────
 
     #[test]
     fn ctrl_shift_t_is_new_tab() {
@@ -4967,7 +4963,7 @@ mod tests {
         );
     }
 
-    // -- P6.4: resolve_ssh_auth / resolve_rdp_auth ---------------------------
+    // resolve_ssh_auth / resolve_rdp_auth -----------------------------
 
     /// A `CredentialStore` mock: pre-seeded entries plus an optional key that
     /// always reports a backend error, so the `AuthResolveError::Backend`
@@ -5078,7 +5074,7 @@ mod tests {
     }
 
     /// BUG-cred-username-auth test helper: an RDP connection with NO inline
-    /// username -- the shape a RoyalTS import produces, where the username
+    /// username - the shape a RoyalTS import produces, where the username
     /// lives only on the assigned credential.
     fn make_rdp_conn_no_inline_username(
         group_id: Option<i64>,
@@ -5279,7 +5275,7 @@ mod tests {
             domain: Some("CORP".to_owned()),
             ..RdpSettings::default()
         };
-        // Credential #6 isn't in the credentials list here (empty slice) --
+        // Credential #6 isn't in the credentials list here (empty slice) -
         // exercises the "credential id resolves but the object itself isn't
         // found" fallback-to-inline path, same as `<deleted>` display
         // elsewhere.
@@ -5328,8 +5324,8 @@ mod tests {
         assert_eq!(err, AuthResolveError::NotFoundInKeychain);
     }
 
-    // -- BUG-cred-username-auth: effective_auth_username / effective_ssh_settings
-    // / resolve_rdp_auth username precedence ---------------------------------
+    // BUG-cred-username-auth: effective_auth_username / effective_ssh_settings
+    // / resolve_rdp_auth username precedence - -------------------------------
 
     #[test]
     fn effective_auth_username_credential_wins_when_assigned_and_non_empty() {
@@ -5383,12 +5379,12 @@ mod tests {
 
     /// THE regression test for BUG-cred-username-auth (RDP half): a
     /// credentialed RDP connection with an EMPTY inline `settings.username`
-    /// (exactly the RoyalTS-imported shape -- the username lives on the
+    /// (exactly the RoyalTS-imported shape - the username lives on the
     /// credential object, not inline) plus a credential whose `username` is
     /// "admin" must resolve `RdpAuthInput.username == "admin"`, not empty.
-    /// **Must FAIL on master**: pre-fix, `resolve_rdp_auth` used
-    /// `settings.username.clone().unwrap_or_default()` verbatim and never
-    /// looked at the credential's `username` at all -- the live bug
+    /// **Must FAIL on master**: earlier, `resolve_rdp_auth` used
+    /// `settings.username.clone.unwrap_or_default` verbatim and never
+    /// looked at the credential's `username` at all - the live bug
     /// (`username=` blank in the auth log).
     #[test]
     fn resolve_rdp_auth_credential_username_wins_over_empty_inline_username() {
@@ -5401,7 +5397,7 @@ mod tests {
         let credentials = vec![make_credential(6, Some("admin"))];
         let settings = RdpSettings {
             host: "10.0.0.2".to_owned(),
-            username: None, // no inline username -- RoyalTS-imported style
+            username: None, // no inline username - RoyalTS-imported style
             domain: Some("CORP".to_owned()),
             ..RdpSettings::default()
         };
@@ -5428,7 +5424,7 @@ mod tests {
         // Build `conn` with these same settings directly, rather than via
         // `make_rdp_conn` (which hardcodes its own, different username).
         // `resolve_connection_auth`'s username fallback reads `conn.settings`
-        // directly, not the `settings` param passed to `resolve_rdp_auth` --
+        // directly, not the `settings` param passed to `resolve_rdp_auth` -
         // in production the two are always the same object, so a mismatched
         // pair here would only be a test artifact, not a real scenario.
         let conn = Connection::new(
@@ -5457,11 +5453,11 @@ mod tests {
 
     /// SSH counterpart of [`resolve_ssh_auth`]'s SSH equivalent
     /// (BUG-cred-username-auth). [`SshAuthInput`] carries no username field
-    /// -- the effective username is applied to [`SshSettings`] via
-    /// [`effective_ssh_settings`], which every SSH launch/reconnect path uses
-    /// before connecting. **Must FAIL on master**: `effective_ssh_settings`
-    /// doesn't exist there and every call site used the connection's inline
-    /// (empty) `settings.username` verbatim.
+    /// - the effective username is applied to [`SshSettings`] via
+    ///   [`effective_ssh_settings`], which every SSH launch/reconnect path uses
+    ///   before connecting. **Must FAIL on master**: `effective_ssh_settings`
+    ///   doesn't exist there and every call site used the connection's inline
+    ///   (empty) `settings.username` verbatim.
     #[test]
     fn effective_ssh_settings_credential_username_wins_over_empty_inline_username() {
         let conn = make_ssh_conn(None, Some(1), SshAuthMethod::Password);
@@ -5498,7 +5494,7 @@ mod tests {
     }
 
     /// Non-regression (item d): key-material auth resolution itself is
-    /// untouched by the username fix -- `resolve_ssh_auth` never looked at
+    /// untouched by the username fix - `resolve_ssh_auth` never looked at
     /// username before and still doesn't; `effective_ssh_settings` only
     /// changes the login name that goes alongside whatever auth material was
     /// resolved (agent, password, or key).
@@ -5521,14 +5517,14 @@ mod tests {
             other => panic!("expected KeyMaterial, got {other:?}"),
         }
         // The login name for a key-auth connection still follows the same
-        // credential-wins precedence -- the credential's username applies to
+        // credential-wins precedence - the credential's username applies to
         // *which account* the key logs into, independent of the key material.
         let credentials = vec![make_credential(4, Some("keyuser"))];
         let effective = effective_ssh_settings(&conn, &[], &settings, &credentials);
         assert_eq!(effective.username, "keyuser");
     }
 
-    // ── P6.12 gap 20: quick-connect kind selector → settings mapping ────────
+    // ──: quick-connect kind selector → settings mapping ────────
 
     #[test]
     fn qc_kind_from_int_maps_all_four_kinds() {
@@ -5645,7 +5641,7 @@ mod tests {
         assert_eq!(ls.working_dir, None);
     }
 
-    // ── P6.12 gap 19: RDP reconnect reuses stored RdpConnectInfo + creds ────
+    // ──: RDP reconnect reuses stored RdpConnectInfo + creds ────
 
     #[test]
     fn resolve_ssh_reconnect_direct_clones_the_cached_auth() {
@@ -5689,7 +5685,7 @@ mod tests {
     }
 
     /// BUG-cred-username-auth: a reconnect must not regress to an empty
-    /// username -- the returned settings re-derive the effective username
+    /// username - the returned settings re-derive the effective username
     /// from the *live* connection + credentials list, not whatever the
     /// tab's stale cached `SshConnectInfo.settings.username` happened to be.
     #[test]
@@ -5770,7 +5766,7 @@ mod tests {
     }
 
     /// BUG-cred-username-auth: RDP reconnect must not regress to an empty
-    /// username either -- `resolve_rdp_auth` re-applies the credential-wins
+    /// username either - `resolve_rdp_auth` re-applies the credential-wins
     /// precedence fresh on every reconnect since `credentials` is threaded
     /// all the way through.
     #[test]
@@ -5779,7 +5775,7 @@ mod tests {
         let ci = RdpConnectInfo {
             settings: RdpSettings {
                 host: "srv-win01".to_owned(),
-                username: None, // no inline username -- RoyalTS-imported style
+                username: None, // no inline username - RoyalTS-imported style
                 ..RdpSettings::default()
             },
             auth_source: RdpAuthSource::Credential(conn.id),
@@ -5809,7 +5805,7 @@ mod tests {
         );
     }
 
-    // ── P8.6-B item 4: agent_mode_execute_blocked (the execute-gate) ──────────
+    // ── agent_mode_execute_blocked (the execute-gate) ──────────
 
     fn agent_mode_fixture(
         interaction_count: usize,
@@ -5835,7 +5831,7 @@ mod tests {
 
     #[test]
     fn execute_gate_never_blocks_when_no_write_interaction_is_in_flight() {
-        // Agent mode is on, execute is even NOT granted -- but nothing is
+        // Agent mode is on, execute is even NOT granted - but nothing is
         // actually mid-flight, so this must be indistinguishable from a
         // plain human click: never blocked.
         let cfg = agent_mode_fixture(0, true, true, false);
@@ -5850,7 +5846,7 @@ mod tests {
 
     #[test]
     fn execute_gate_blocks_a_write_tool_in_flight_without_execute_granted() {
-        // The adversarial case Fable will test: write granted, execute not,
+        // The adversarial case review will test: write granted, execute not,
         // and an agent write-tool call (e.g. click_element on Connect) is
         // actually in flight right now.
         let cfg = agent_mode_fixture(1, true, true, false);

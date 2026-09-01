@@ -1,16 +1,16 @@
-// ConMan — Settings panel (P5.2: full settings + theming).
+// ConMan — Settings panel (full settings + theming).
 //
 // Sections:
-//   • Appearance — Theme (dark/light/system), Accent, Density (Compact/Cosy)
-//   • Terminal   — Font family/size, default local shell + args + cwd
-//   • Startup    — Open last session on launch vs clean start
-//   • Shortcuts  — Reserved Ctrl⇧ map (display-only; remap is a later task)
+// • Appearance — Theme (dark/light/system), Accent, Density (Compact/Cosy)
+// • Terminal — Font family/size, default local shell + args + cwd
+// • Startup — Open last session on launch vs clean start
+// • Shortcuts — Reserved Ctrl⇧ map (display-only; remap is a later task)
 //
 // All controls are token-driven (zero hardcoded colors). Changes are forwarded
 // via callbacks; the Rust controller persists them to the settings(key,value)
 // table and applies them live.
 //
-//   import { SettingsPanel } from "screens/settings_panel.slint";
+// import { SettingsPanel } from "screens/settings_panel.slint";
 
 import { Theme } from "../theme.slint";
 import { SegmentedControl, EditableFocus } from "../components.slint";
@@ -164,7 +164,7 @@ export component SettingsPanel inherits Rectangle {
     // 0 = clean start, 1 = restore last session
     in-out property <int>  startup-behavior: 0;
 
-    // ── Rendering (P7.1 cont.) ──────────────────────────────────────────────
+    // ── Rendering ──────────────────────────────────────────────
     // 0 = Auto (probe each launch) · 1 = Software · 2 = Hardware (accelerated).
     // Takes effect on next launch (see the row hint below).
     in-out property <int>  render-backend: 0;
@@ -175,22 +175,22 @@ export component SettingsPanel inherits Rectangle {
     in property <string> build-version: "";
     in property <string> build-details: "";
 
-    // ── Automation / Agent mode (P8.6-B) ─────────────────────────────────────
+    // ── Automation / Agent mode ─────────────────────────────────────
     // `agent-mode-available`: true only when this binary was actually built
-    // with the `agent-mode` Cargo feature -- Rust never sets this in a normal
+    // with the `agent-mode` Cargo feature - Rust never sets this in a normal
     // release build, so the whole section below stays hidden there (the
-    // markup itself still compiles in, per the P8.6-impl.md trade-off note;
+    // markup itself still compiles in;
     // nothing user-visible or functional ships without the feature).
     in property <bool> agent-mode-available: false;
     // The `automation.enabled` master toggle.
     in-out property <bool> agent-mode-enabled: false;
-    // The three granted scopes -- read/write/execute, see the consent copy
+    // The three granted scopes - read/write/execute, see the consent copy
     // below for exactly what each allows.
     in-out property <bool> agent-mode-scope-read: false;
     in-out property <bool> agent-mode-scope-write: false;
     in-out property <bool> agent-mode-scope-execute: false;
     // "" when not currently listening (enabled but the proxy failed to bind,
-    // or disabled); otherwise "127.0.0.1:<port>" -- the loopback address an
+    // or disabled); otherwise "127.0.0.1:<port>" - the loopback address an
     // agent connects to.
     in property <string> agent-mode-connection-details: "";
 
@@ -221,7 +221,7 @@ export component SettingsPanel inherits Rectangle {
     callback agent-mode-scope-write-changed(bool);
     callback agent-mode-scope-execute-changed(bool);
 
-    // P8.1: landmark region — non-interactive, but a genuine navigation aid
+    // landmark region — non-interactive, but a genuine navigation aid
     // for screen readers jumping between panels (not required for the audit's
     // interactive-role check, added for real a11y value).
     accessible-role: region;
@@ -273,11 +273,10 @@ export component SettingsPanel inherits Rectangle {
                         options: ["Dark", "Light", "System"];
                         selected <=> root.theme-mode;
                         changed(i) => {
-                            // P6.8 (gap 9): `Theme.dark-mode` must already hold the
-                            // NEW value before `root.theme-changed(i)` fires --
+                            // NEW value before `root.theme-changed(i)` fires -
                             // the Rust handler re-pushes the terminal palette from
-                            // `ui.get_dark_mode()` synchronously inside that call,
-                            // so the write order here matters (was reversed pre-P6.8).
+                            // `ui.get_dark_mode` synchronously inside that call,
+                            // so the write order here matters (was reversed pre-).
                             if (i == 0) { Theme.dark-mode = true; }
                             else if (i == 1) { Theme.dark-mode = false; }
                             else {
@@ -320,7 +319,7 @@ export component SettingsPanel inherits Rectangle {
                             background: c;
                             border-width: idx == root.accent-index ? 2px : 0px;
                             border-color: Theme.color-base;
-                            // P8.1: a single-select swatch picker is a radio group;
+                            // a single-select swatch picker is a radio group;
                             // no color-name text exists to quote, so the label is
                             // an honest ordinal (no fabricated color name).
                             accessible-role: radio-button;
@@ -347,7 +346,7 @@ export component SettingsPanel inherits Rectangle {
                                 root.accent-changed(idx);
                             } }
                         }
-                        // Reserved "OS accent" swatch (P6.8, gap 10): a live, non-
+                        // Reserved "OS accent" swatch: a live, non-
                         // preset color read from the OS by `cm_platform::accent` and
                         // pushed into `Theme.os-accent-color` from Rust at startup
                         // (and live, where the platform has a change signal). Kept
@@ -511,7 +510,7 @@ export component SettingsPanel inherits Rectangle {
                             width: 38px; height: Theme.control-height;
                             border-radius: Theme.radius-sm; background: Theme.color-card;
                             border-width: 1px; border-color: Theme.color-stroke;
-                            // P8.1: the −/value/+ trio is a custom stepper — the
+                            // the −/value/+ trio is a custom stepper — the
                             // closest role fit is `spinbox`, with the numeric value
                             // exposed for assistive tech (bounds mirror the clamps
                             // the dec/inc buttons already enforce).
@@ -797,7 +796,7 @@ export component SettingsPanel inherits Rectangle {
                 }
             }
 
-            // ════ AUTOMATION / AGENT MODE (P8.6-B) ═══════════════════════
+            // ════ AUTOMATION / AGENT MODE ═══════════════════════
             // Whole section hidden unless this binary was built with the
             // `agent-mode` feature (see `agent-mode-available`'s doc comment).
             if root.agent-mode-available : VerticalLayout {
@@ -812,7 +811,7 @@ export component SettingsPanel inherits Rectangle {
 
                     // Master enable toggle. Own checkbox text (not a
                     // separate title Text) so its accessible-label is
-                    // unambiguous -- a plain Text with the same words would
+                    // unambiguous - a plain Text with the same words would
                     // otherwise tie for "first match" on a label lookup.
                     VerticalLayout {
                         spacing: Theme.space-2;

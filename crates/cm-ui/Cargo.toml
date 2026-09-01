@@ -8,7 +8,7 @@ publish.workspace = true
 [dependencies]
 cm-core = { path = "../cm-core" }
 cm-storage = { path = "../cm-storage" }
-# cm-platform: OS accent-color read at startup + live watch (P6.8, gap 10).
+# cm-platform: OS accent-color read at startup + live watch.
 cm-platform = { path = "../cm-platform" }
 # The local terminal session (PTY + libghostty engine, on its own threads). Brings in the
 # zig-built engine via its default `engine-libghostty` feature.
@@ -19,7 +19,7 @@ cm-session = { path = "../cm-session" }
 # requirement. `std` + `compat-1-2` are enough to compile the generated component code and
 # the renderer's `SharedPixelBuffer`/`Image` value types.
 slint = { version = "1.17", default-features = false, features = ["std", "compat-1-2"] }
-# Terminal shaping, installed-font fallback, and mask/color glyph rasterization (P10.2).
+# Terminal shaping, installed-font fallback, and mask/color glyph rasterization.
 cosmic-text = { version = "=0.19.0", default-features = false, features = [
     "std",
     "swash",
@@ -28,19 +28,17 @@ cosmic-text = { version = "=0.19.0", default-features = false, features = [
 # Required by cosmic-text's public Fallback trait method signature. This is already
 # transitive through cosmic-text; no second version or additional implementation is added.
 unicode-script = "0.5"
-# arboard: cross-platform clipboard access for RDP CLIPRDR bidirectional sync (P4.2).
-# See docs/devel/memos/p4.2-clipboard-dep.md for the rationale.
+# arboard: cross-platform clipboard access for RDP CLIPRDR bidirectional sync.
 arboard = { version = "3", features = ["wayland-data-control"] }
-# Structured logging facade (P6.3). The composition root (`conman`) installs
+# Structured logging facade. The composition root (`conman`) installs
 # the actual subscriber; libraries only ever call the `tracing::*` macros.
 tracing = "0.1"
 # serde_json: already a workspace dependency (cm-core, cm-storage, cm-session).
-# Made a direct, non-optional dep of cm-ui in P6.6: the import/export dialog
+# A direct, non-optional dependency: the import/export dialog
 # wiring (`controller/import_export.rs`) parses the export envelope directly
 # to report a skipped-secrets count in the summary toast.
 serde_json = "1"
-# rfd: native file-open/save dialogs for the Import/Export palette actions (P6.6, new
-# dep — MIT, memo: docs/devel/memos/P6.6-rfd-dep.md). Default features (`xdg-portal` +
+# rfd: native file-open/save dialogs for the Import/Export palette actions. Default features (`xdg-portal` +
 # `wayland` on Linux) talk to the desktop portal via a bundled blocking mini-executor;
 # no GTK3 linkage and no dependency on the workspace's `tokio` runtime.
 rfd = "0.17"
@@ -58,30 +56,26 @@ windows = { version = "0.62", features = [
 ] }
 
 [features]
-# P8.1: off by default, no dependency changes of its own. When enabled, build.rs compiles
+# Off by default, with no dependency changes of its own. When enabled, build.rs compiles
 # ui/app.slint with Slint compiler debug info (element ids/roles/labels), which
 # i-slint-backend-testing's ElementHandle queries need to resolve anything at all. This is
 # what tests/a11y_audit.rs runs under. A default (feature-off) build — including
 # `--release` — stays debug-info-free: no element-name strings in the shipped binary.
-# See docs/devel/tasks/P8.1-a11y-element-contract.md.
 ui-introspection = []
-# P8.6-B leaf feature (empty for now): the Settings "Automation / Agent mode"
+# Leaf feature (empty for now): the Settings "Automation / Agent mode"
 # section, the persistent active indicator, and the execute-scope
-# session-launch gate compile behind this. Reserved by P8.6-A (storage-dev)
-# so `conman`'s `agent-mode` feature has a valid forward target; the actual
-# gated code is P8.6-B (ui-dev, after Phase C). Off by default, like
-# `ui-introspection`. See docs/devel/tasks/P8.6-impl.md.
+# session-launch gate compile behind this. Off by default, like
+# `ui-introspection`.
 agent-mode = []
 
 [dev-dependencies]
-# Already a workspace dep (dev-only, in cm-storage) — used here for the P6.6
+# Already a workspace dep (dev-only, in cm-storage) — used here for
 # import/export seam tests (fresh scratch dirs for exported/imported files).
 tempfile = "3"
-# P8.1: Slint's own testing backend — instantiate AppWindow headlessly (no display, no
+# Slint's own testing backend — instantiate AppWindow headlessly (no display, no
 # event loop) and walk its element tree via ElementHandle for the a11y audit test
 # (tests/a11y_audit.rs). Dev-only, never shipped. Internal/non-semver crate per its own
-# docs — pinned exact, bump only in lockstep with the `slint` version above. New-dep memo:
-# docs/devel/memos/P8.1-slint-testing-backend-dep.md.
+# docs — pinned exact, bump only in lockstep with the `slint` version above.
 i-slint-backend-testing = "=1.17.0"
 
 [build-dependencies]

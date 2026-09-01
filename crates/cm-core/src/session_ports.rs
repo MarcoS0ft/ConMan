@@ -1,4 +1,4 @@
-//! `SessionProvider` port (P6.15, gap 27).
+//! `SessionProvider` port.
 //!
 //! Establishes live sessions for ConMan's supported connection kinds, hiding
 //! the concrete adapter types (`LocalTerminalSession`, `SshTerminalSession`,
@@ -13,10 +13,6 @@
 //! I/O, so they stay in `cm-session`, never in `cm-core`) is now the
 //! provider's concern: callers no longer need to know either file exists.
 //!
-//! Reserved-decision writeup (the trait shape, and why the supporting types
-//! in [`crate::session`]/[`crate::ssh`]/[`crate::rdp`] had to move here too):
-//! `docs/devel/memos/P6.15-sessionprovider-port.md`.
-
 use std::sync::Arc;
 
 use crate::rdp::{CertVerifier, RdpAuthInput};
@@ -51,9 +47,9 @@ impl Default for TerminalOptions {
 /// establish a session synchronously (thread/spawn/connect setup failure —
 /// e.g. the PTY couldn't be opened, or an OS thread couldn't be started).
 ///
-/// Protocol/auth/cert failures still surface later via `Session::status()`
+/// Protocol/auth/cert failures still surface later via `Session::status`
 /// (`SessionStatus::Failed`), unchanged. Every existing call site only ever
-/// called `.to_string()` on the three transport-specific error enums this
+/// called `.to_string` on the three transport-specific error enums this
 /// replaces at the port boundary (`cm_session::{SshError, RdpError,
 /// local::SessionError}`), so collapsing them to one `Display`-only type
 /// here loses no information any caller used.
@@ -62,7 +58,7 @@ impl Default for TerminalOptions {
 pub struct SessionSetupError(String);
 
 impl SessionSetupError {
-    /// Wrap any error's `Display` output (typically `err.to_string()` on the
+    /// Wrap any error's `Display` output (typically `err.to_string` on the
     /// adapter's own typed error).
     pub fn new(reason: impl Into<String>) -> Self {
         Self(reason.into())
@@ -73,11 +69,9 @@ impl SessionSetupError {
 /// (ARCHITECTURE §3). Object-safe so it can be held as `Arc<dyn
 /// SessionProvider>`.
 ///
-/// Keeps the thread-per-session model unchanged: each method returns
-/// immediately with a handle in `SessionStatus::Connecting` (SSH/RDP) or
-/// `Connected` (local, spawned synchronously) exactly as the concrete
-/// constructors did before P6.15 — only the *construction* boundary moved,
-/// not the runtime shape.
+/// Each method returns immediately with a handle in
+/// `SessionStatus::Connecting` (SSH/RDP) or `Connected` (local, spawned
+/// synchronously), while the thread-per-session model remains unchanged.
 pub trait SessionProvider: Send + Sync {
     /// Spawn a local shell session.
     fn spawn_local(

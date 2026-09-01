@@ -10,32 +10,29 @@ name = "conman"
 path = "src/main.rs"
 
 [features]
-# P8.3: the Slint-native MCP automation surface, off by default. Enables the
+# The Slint-native MCP automation surface, off by default. Enables the
 # `mcp` feature on the shared `slint` build (feature unification pulls in
 # `i-slint-backend-testing`'s embedded MCP server behind the runtime
 # `SLINT_MCP_PORT` double-gate — no port set, no listener, zero overhead) and
 # `cm-ui/ui-introspection` (Slint compiler debug info, so element
 # ids/roles/labels the MCP tools query actually resolve). Deliberately a named
 # Cargo feature rather than Slint's own README-recommended
-# `--features slint/mcp` CLI-only convention — see
-# docs/devel/memos/P8.3-slint-mcp-feature.md for the rationale. Never present
+# `--features slint/mcp` CLI-only convention. Never present
 # in a shipped/release artifact.
 automation = ["slint/mcp", "cm-ui/ui-introspection"]
-# P8.6: the agent-mode product feature (scoped MCP surface) — extends
+# The agent-mode product feature (scoped MCP surface) — extends
 # `automation` (same underlying Slint MCP server + introspection debug info)
-# with `cm-ui/agent-mode`, the leaf feature P8.6-B's Settings UI / active
+# with `cm-ui/agent-mode`, the Settings UI / active
 # indicator / execute-scope launch-gate compile behind, and `dep:httparse`,
-# the scope-enforcement proxy's HTTP request parser (memos/
-# P8.6-proxy-httparse-dep.md — already resolved at this exact version
+# the scope-enforcement proxy's HTTP request parser (already resolved at this exact version
 # transitively via slint/mcp, zero new lockfile entries). Off by default; opt
-# in with `cargo build -p conman --features agent-mode`. `automation` keeps
+# in with `cargo build -p conman - features agent-mode`. `automation` keeps
 # working standalone (e.g. for QA/introspection use without the full
-# agent-mode product surface); `agent-mode` is what a real deployment
-# enables. See docs/devel/tasks/P8.6-impl.md.
+# agent-mode product surface); `agent-mode` is what a real deployment enables.
 agent-mode = ["automation", "cm-ui/agent-mode", "dep:httparse", "dep:serde_json"]
 # Dev-only convenience: seeds a small example DB on first launch. Off by
 # default; NEVER present in a shipped/release artifact. Opt in with
-# `cargo build -p conman --features demo-seed`.
+# `cargo build -p conman - features demo-seed`.
 demo-seed = []
 
 [dependencies]
@@ -49,12 +46,12 @@ cm-platform = { path = "../cm-platform" }
 # Blocking native error dialogs owned by the composition root. This is kept
 # independent of cm-ui so fatal storage/renderer/UI startup failures remain visible.
 rfd = "0.17"
-# P6.15 (gap 27): the composition root is the only place that names the
+# The composition root is the only place that names the
 # concrete `SessionProviderImpl` adapter, injected into `cm-ui` as
 # `Arc<dyn cm_core::SessionProvider>` (mirrors `cm-storage`/`cm-secrets` above).
 cm-session = { path = "../cm-session" }
 # The composition root selects the real Slint backend + renderers. femtovg is the GPU path
-# chosen in P0.3; the software renderer is the `SLINT_BACKEND=software` fallback for
+# The software renderer is the `SLINT_BACKEND=software` fallback for
 # headless/CI. Feature unification enables these on the single shared `slint` build for the
 # whole dependency graph (cm-ui declares slint with default features off).
 slint = { version = "1.17", default-features = false, features = [
@@ -64,21 +61,20 @@ slint = { version = "1.17", default-features = false, features = [
     "renderer-femtovg",
     "renderer-software",
 ] }
-# Structured logging (P6.3, new dep — pre-approved by the P6.3 spec, all
+# Structured logging (all
 # MIT-licensed): the composition root is the only place that installs a
-# subscriber. A rotating file layer under `cm_platform::app_log_dir()` in both
-# builds (P9.8 §2a), plus a console layer in debug only, since
+# subscriber. A rotating file layer under `cm_platform::app_log_dir` in both
+# builds), plus a console layer in debug only, since
 # `windows_subsystem = "windows"` swallows stderr in release. `env-filter`
 # backs the `CONMAN_LOG` override (RUST_LOG-compatible syntax).
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-# P8.6: the `agent-mode` scope-enforcement proxy's HTTP request parser — see
-# memos/P8.6-proxy-httparse-dep.md. Optional, only compiled when `agent-mode`
+# The `agent-mode` scope-enforcement proxy's HTTP request parser. Optional, only compiled when `agent-mode`
 # is enabled (`dep:httparse` in that feature's requirement list). Pinned to
 # the exact version already resolved transitively via `slint/mcp`.
 httparse = { version = "=1.10.1", optional = true }
-# P8.6: the proxy's JSON-RPC body inspection (tools/call gating, tools/list
+# The proxy's JSON-RPC body inspection (tools/call gating, tools/list
 # filtering). Optional, only compiled when `agent-mode` is enabled. Already a
 # direct dependency of cm-core/cm-storage/cm-ui at this exact version —
 # adding it here too is lockfile-neutral (no new package/version entries).

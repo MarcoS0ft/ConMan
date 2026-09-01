@@ -1,24 +1,21 @@
-//! Structured logging installation (P6.3, config fixed P9.8 §2a).
+//! Structured logging installation.
 //!
 //! The composition root is the only place a `tracing` subscriber is installed;
 //! every other crate only calls the `tracing::*` macros against whatever
 //! subscriber (if any) is globally registered.
 //!
 //! - **Debug builds:** a daily-rotating file layer under
-//!   `cm_platform::app_log_dir()` (`<data>/conman/logs/conman.log.<date>`)
+//!   `cm_platform::app_log_dir` (`<data>/conman/logs/conman.log.<date>`)
 //!   PLUS a human-readable layer on stderr (the console stays attached in
 //!   debug, see `main.rs`'s `windows_subsystem` cfg) — a debug repro must
 //!   always leave something on disk, not just scroll past on the console.
 //! - **Release builds:** the same file layer, alone. `windows_subsystem =
-//!   "windows"` detaches the console, so stderr is not observable there.
+//! "windows"` detaches the console, so stderr is not observable there.
 //!
 //! Both layers share one `EnvFilter`, read from `CONMAN_LOG` (RUST_LOG-compatible
 //! syntax, e.g. `CONMAN_LOG=debug` or `CONMAN_LOG=cm_session=trace,info`),
 //! defaulting to `info` when unset or invalid.
 //!
-//! Controllable log levels (a persisted `log.level` setting + a `reload::Handle`
-//! so a Settings dropdown can change the filter at runtime) is a P2 follow-up —
-//! see docs/devel/tasks/P9.8-logging-audit.md §2b. Not implemented here.
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Registry, fmt};
 
@@ -102,10 +99,9 @@ pub(crate) fn init() -> LoggingGuard {
 mod tests {
     use super::*;
 
-    /// P9.8 §2a regression: the debug build must no longer be stderr-only —
-    /// the file layer has to receive events unconditionally. Uses a scoped
+    /// The file layer receives events unconditionally. Uses a scoped
     /// (`tracing::subscriber::with_default`) subscriber rather than calling
-    /// `init()` so it doesn't install a real process-wide subscriber that
+    /// `init` so it doesn't install a real process-wide subscriber that
     /// would leak into every other test in this binary.
     #[test]
     fn file_layer_receives_events_without_a_global_subscriber() {

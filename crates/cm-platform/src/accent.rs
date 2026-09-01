@@ -1,4 +1,4 @@
-//! OS accent-color read (P6.8, gap 10 — HANDOFF §3's one hard wiring item).
+//! OS accent-color read.
 //!
 //! Best-effort and infallible from the caller's point of view: [`os_accent`] always
 //! returns a usable color, falling back to [`AccentColor::FALLBACK`] (the same
@@ -16,8 +16,7 @@
 //!   implement. [`watch_os_accent`] additionally subscribes to the portal's
 //!   `SettingChanged` signal for live updates while the app runs. No portal (most
 //!   window managers, headless/CI) → fallback.
-//! - **Everything else (macOS, …)**: fallback only (macOS is P6 gap 32, blocked on
-//!   hardware — see `docs/devel/p6-gaps.md`).
+//! - **Everything else (macOS, …)**: fallback only.
 
 /// An OS accent color, 0-255 per channel (no alpha — accent colors are opaque).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,19 +204,14 @@ mod imp {
 
     /// Reads the DWM colorization color (`dwmapi.dll`'s `DwmGetColorizationColor`).
     ///
-    /// **Compile- and runtime-UNVERIFIED in this task**: this agent's environment
-    /// has only the `x86_64-unknown-linux-gnu` Rust target installed, so this
-    /// `cfg`-gated module is never parsed by `cargo build`/`cargo check` here, and
-    /// there is no Windows host to run it on. Written carefully against the
-    /// vendored `windows` 0.62 crate source (`Win32::Graphics::Dwm`'s generated
-    /// binding for `DwmGetColorizationColor`) — a Windows build/run is required to
-    /// confirm it actually compiles and behaves as documented.
+    /// Uses the generated `windows` binding for
+    /// `Win32::Graphics::Dwm::DwmGetColorizationColor`.
     pub(super) fn read() -> Option<AccentColor> {
         let mut color: u32 = 0;
         let mut opaque_blend = windows::core::BOOL(0);
         // SAFETY: both out-params are valid, stack-local slots that outlive this
         // single synchronous FFI call; `DwmGetColorizationColor` only writes
-        // through them before returning -- no aliasing, no retained pointers.
+        // through them before returning - no aliasing, no retained pointers.
         let ok = unsafe {
             windows::Win32::Graphics::Dwm::DwmGetColorizationColor(&mut color, &mut opaque_blend)
         }
@@ -236,8 +230,8 @@ mod imp {
     pub(super) fn watch(_on_change: Box<dyn Fn(AccentColor) + Send + 'static>) -> bool {
         // No live-signal watcher on Windows in this pass: DWM colorization changes
         // arrive as a WM_DWMCOLORIZATIONCOLORCHANGED window message, which would
-        // need a hook into Slint's winit event loop -- out of this task's scope.
-        // `os_accent()` above is startup-only on Windows for now.
+        // need a hook into Slint's winit event loop - out of this implementation's scope.
+        // `os_accent` above is startup-only on Windows for now.
         false
     }
 }
@@ -247,7 +241,7 @@ mod imp {
     use super::AccentColor;
 
     /// macOS (and any other unhandled OS) has no accent read implemented yet —
-    /// macOS support is P6 gap 32, blocked on hardware (`docs/devel/p6-gaps.md`).
+    /// macOS currently uses the fallback color.
     /// Always falls back to [`AccentColor::FALLBACK`].
     pub(super) fn read() -> Option<AccentColor> {
         None

@@ -1,10 +1,10 @@
 //! Split-pane management: split/close/broadcast/detach/focus/resize, and
 //! reattaching a previously-detached session.
 //!
-//! P6.11: generalized from the P5.1/P6.10 2-pane single-axis model to an
+//! generalized from the / 2-pane single-axis model to an
 //! N-way recursive split tree (`cm_session::PaneGroup`, up to `MAX_PANES`).
 //! Pane id `0` is always the tab's primary pane (kept in `Tab`'s own fields,
-//! as before P6.11); ids `1..count()` live in `Tab::extra_panes`, indexed by
+//! as before); ids `1..count` live in `Tab::extra_panes`, indexed by
 //! `id - 1`. `PaneGroup` keeps ids dense on every split/close (see
 //! `cm_session::pane`'s module docs), so `Vec::push`/`Vec::remove` on
 //! `extra_panes` always lines up with the tree's id bookkeeping without a
@@ -39,18 +39,16 @@ pub(super) fn wire_panes(ctx: &Ctx) {
     wire_broadcast_target(ctx);
 }
 
-// ---------------------------------------------------------------------------
-// P6.11 (gap 14): broadcast targeting
-// ---------------------------------------------------------------------------
+// broadcast targeting
 
 /// Which of a tab's panes receive input while broadcast (`Ctrl⇧B`) is active.
 ///
 /// Scoped to the active tab, same as broadcast always has been — extending
 /// broadcast across tabs is a separate, larger behavior change not asked for
-/// here (see the P6.11 task report).
+/// here (see the API contract).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) enum BroadcastTarget {
-    /// Every pane currently in the tab's `PaneGroup` — the pre-P6.11 "always
+    /// Every pane currently in the tab's `PaneGroup` — the earlier "always
     /// all panes" behavior, and the default.
     #[default]
     Visible,
@@ -80,7 +78,7 @@ impl BroadcastTarget {
     }
 
     /// Human-readable label for the "never silent" status/broadcast-bar
-    /// indicator (GUI_DESIGN principle — see the P6.11 task spec).
+    /// indicator (GUI_DESIGN principle — see the API contract).
     pub(super) fn label(&self, pane_count: usize) -> String {
         match self {
             BroadcastTarget::Visible => "all panes".to_string(),
@@ -96,7 +94,7 @@ impl BroadcastTarget {
 }
 
 /// Fan `evs` out to exactly the panes selected by `tab.broadcast_target`
-/// (P6.11, gap 14 — targeted, not always "all panes"). Extracted from
+/// (— targeted, not always "all panes"). Extracted from
 /// `wire_key_input`'s broadcast branch (`sessions.rs`) so the targeting
 /// behavior is unit-testable without a live `AppWindow`/Slint event loop —
 /// see the `broadcast_targets_only_selected_panes` test below.
@@ -324,9 +322,7 @@ impl BroadcastCtx {
     }
 }
 
-// ---------------------------------------------------------------------------
-// P6.11: N-way pane repeater model (`app.slint`'s `pane-cells`)
-// ---------------------------------------------------------------------------
+// N-way pane repeater model (`app.slint`'s `pane-cells`)
 
 /// Rebuild the `pane-cells` model for the active tab from scratch: geometry
 /// (via `PaneGroup::rects`) plus each pane's current frame image and surface
@@ -465,7 +461,7 @@ fn wire_split_pane_v(ctx: &Ctx) {
     });
 }
 
-/// The active tab's currently-focused pane id -- every "close/detach
+/// The active tab's currently-focused pane id - every "close/detach
 /// whatever I'm looking at" caller of the now-generalized [`do_close_pane`]
 /// (the keyboard shortcuts here, the command palette, `wire_key_input`'s own
 /// shortcut handling in `sessions.rs`) passes this explicitly, preserving
@@ -506,11 +502,11 @@ fn wire_detach_session(ctx: &Ctx) {
     });
 }
 
-/// P9.10 #2: per-pane disconnect inside a split -- the corner affordance on
+/// #2: per-pane disconnect inside a split - the corner affordance on
 /// each `PaneSlot` (or a future context menu) targets a SPECIFIC pane id,
 /// never "whichever pane is focused" (unlike the two callbacks above).
 /// Always a plain disconnect (`detach: false`), matching the "close ==
-/// disconnect == collapse split" naming this whole P9.10 lane's other items
+/// disconnect == collapse split" naming this whole lane's other items
 /// use for a session teardown that isn't kept running in the background.
 fn wire_pane_disconnect(ctx: &Ctx) {
     ctx.ui.on_pane_disconnect({
@@ -631,8 +627,8 @@ struct SplitPaneMetadata {
     kind: String,
 }
 
-/// Reserve a pane slot in the active tab's `PaneGroup` (P6.11: any focused
-/// pane, N-way). Shared by [`do_split`] and [`connect_in_split`] (P6.10 fix
+/// Reserve a pane slot in the active tab's `PaneGroup` (any focused
+/// pane, N-way). Shared by [`do_split`] and [`connect_in_split`] ( fix
 /// round 2) — the pane-slot bookkeeping is identical regardless of what kind
 /// of session ends up filling the slot.
 fn reserve_split_slot(state: &Rc<RefCell<State>>, layout: PaneLayout) -> Option<SplitSlot> {
@@ -790,7 +786,7 @@ fn settle_split_incumbent(
 /// push `ExtraPaneState`, refresh the tab-strip pane-count badge, rebuild the
 /// N-way pane-cells geometry, and update the UI's pane-layout/focus. Shared
 /// by [`do_split`] and [`connect_in_split`] — both terminal (`TerminalGrid`)
-/// and RDP (`Framebuffer`, P6.11) sessions go through this same path; the
+/// and RDP (`Framebuffer`) sessions go through this same path; the
 /// `size`/`renderer` args are meaningless dead weight for an RDP session
 /// (mirrors how `Tab` already carries an always-present but RDP-tabs-ignore
 /// `renderer`/`cols`/`rows` — see `tabs::push_tab`).
@@ -847,8 +843,8 @@ fn commit_split_pane(
                 connect_started: std::time::Instant::now(),
             };
             // New pane ids are always appended (`PaneGroup::split` returns
-            // `count() - 1` after the split, i.e. the previous `count()`),
-            // so `extra_panes.len()` and `new_pane_idx - 1` always agree.
+            // `count - 1` after the split, i.e. the previous `count`),
+            // so `extra_panes.len` and `new_pane_idx - 1` always agree.
             if tab.extra_panes.len() <= new_pane_idx {
                 tab.extra_panes.push(ep);
             }
@@ -906,7 +902,7 @@ fn do_local_split(
     };
 
     // Spawn a new local terminal for the extra pane (half the width for H-split).
-    // P6.8 (gap 9): follow the live app theme rather than hardcoding dark.
+    // follow the live app theme rather than hardcoding dark.
     let renderer = TerminalRenderer::with_font_system(
         slot.fonts,
         &slot.font_family,
@@ -970,17 +966,17 @@ fn do_local_split(
     );
 }
 
-/// P6.10/P6.11: "Connect in split" — open a stored connection's session
+/// /: "Connect in split" — open a stored connection's session
 /// directly into the active tab's next pane slot, reusing the same
 /// N-way-pane machinery `do_split` already has (see
 /// `reserve_split_slot`/`commit_split_pane` above).
 ///
 /// - **Local** profiles are identical to a plain split (always a local
 ///   shell), so they delegate straight to [`do_split`].
-/// - **SSH** profiles resolve credentials via the same P6.4 path
+/// - **SSH** profiles resolve credentials via the same path
 ///   `launch_saved_connection` uses (`sessions::resolve_ssh_auth`) and spawn
 ///   a real `SshTerminalSession` into the pane slot.
-/// - **RDP** profiles (P6.11: lifts the P6.10 deferral) resolve credentials
+/// - **RDP** profiles (lifts the deferral) resolve credentials
 ///   via `sessions::resolve_rdp_auth` and spawn a real `RdpSession` into the
 ///   pane slot — `ExtraPaneState` now carries the `last_frame`/`rdp_w`/
 ///   `rdp_h` fields a `Surface::Framebuffer` session needs (mirroring
@@ -1112,7 +1108,7 @@ pub(super) fn connect_in_split(
             // BUG-cred-username-auth: the settings actually used to
             // connect/log carry the *effective* username (credential's own
             // username wins over the inline field when a credential is
-            // assigned) -- see `sessions::effective_ssh_settings`.
+            // assigned) - see `sessions::effective_ssh_settings`.
             let effective_settings = {
                 let st = state.borrow();
                 sessions::effective_ssh_settings(
@@ -1136,7 +1132,7 @@ pub(super) fn connect_in_split(
                 return;
             };
 
-            // P6.8 (gap 9): follow the live app theme rather than hardcoding dark.
+            // follow the live app theme rather than hardcoding dark.
             let renderer = TerminalRenderer::with_font_system(
                 slot.fonts,
                 &slot.font_family,
@@ -1158,9 +1154,9 @@ pub(super) fn connect_in_split(
 
             let verifier = sessions::ssh_host_key_verifier(state, weak, hk_pending);
 
-            // P8.6-B (Fable review fixup): "Connect in split" establishes a
+            // "Connect in split" establishes a
             // live session with stored credentials exactly like a fresh
-            // launch, so it's an execute-scope action too -- see
+            // launch, so it's an execute-scope action too - see
             // `sessions::open_ssh_tab`'s identical comment for the gate's
             // rationale/timing proof. The split slot is already reserved at
             // this point, so a block must roll it back like any other
@@ -1279,14 +1275,14 @@ pub(super) fn connect_in_split(
                 slot.incumbent_has_chrome,
             );
 
-            // P9.5 #10 (Fable review fixup): connect-into-a-split-pane
+            // Connect-into-a-split-pane
             // bypassed `open_rdp_tab`/`apply_pane_resolution` entirely, so it
             // still negotiated whatever resolution the saved profile
-            // carried -- stretched to fill under the old `image-fit: fill`,
+            // carried - stretched to fill under the old `image-fit: fill`,
             // but *letterboxed at the wrong resolution* now that RdpSurface
             // uses `contain`. Apply the same pane-size-wins override here,
             // using the split slot's own pixel size (mirrors the
-            // `(w * scale).round().max(1.0)` formula `apply_settled_resize`
+            // `(w * scale).round.max(1.0)` formula `apply_settled_resize`
             // already uses at tabs.rs for the primary-pane/resize path).
             let mut s = s.clone();
             let (width, height) = sessions::pane_resolution_override(
@@ -1301,7 +1297,7 @@ pub(super) fn connect_in_split(
 
             let verifier = sessions::rdp_certificate_verifier(state, weak, cert_pending);
 
-            // P8.6-B (Fable review fixup): see the SSH arm's identical
+            // See the SSH arm's identical
             // comment, above.
             if sessions::agent_mode_execute_blocked(&state.borrow().agent_mode) {
                 tracing::warn!(
@@ -1428,17 +1424,17 @@ fn promote_extra_to_primary(tab: &mut Tab, ep_idx: usize, primary_title: &mut St
     tab.is_empty = false;
 }
 
-/// Close a specific pane (by id) in the active tab (P6.11: any pane,
+/// Close a specific pane (by id) in the active tab (any pane,
 /// including the primary — see [`promote_extra_to_primary`]).
 ///
 /// If `detach` is `true`, the closed pane's session is moved to the detached
-/// list (kept running).  If `false`, the session is shut down immediately.
+/// list (kept running). If `false`, the session is shut down immediately.
 ///
-/// P9.10 #2: generalized from "always the focused pane" to an explicit
-/// `pane_id` -- a per-pane disconnect affordance (or a future context menu)
+/// #2: generalized from "always the focused pane" to an explicit
+/// `pane_id` - a per-pane disconnect affordance (or a future context menu)
 /// can target ANY pane, not necessarily the one the user happens to be
 /// typing into. Retargets `PaneGroup`'s own focus to `pane_id` first (its
-/// only removal primitive is `close_focused()` — see `cm_session::pane`),
+/// only removal primitive is `close_focused` — see `cm_session::pane`),
 /// then everything below is the original, unchanged "close the focused
 /// pane" logic. The two pre-existing keyboard-shortcut callers
 /// (`wire_close_pane`/`wire_detach_session`) now pass the CURRENTLY-focused
@@ -1479,18 +1475,18 @@ pub(super) fn do_close_pane(
             .map(|t| t.title.to_string())
             .unwrap_or_else(|| format!("tab {}", tab.num));
 
-        // P6.11 fix: closing the *primary* pane (id 0) while other panes
-        // exist used to leak — the pre-P6.11 2-pane code only ever removed
+        // fix: closing the *primary* pane (id 0) while other panes
+        // exist used to leak — the earlier 2-pane code only ever removed
         // `extra_panes[closed_idx - 1]`, silently doing nothing when
         // `closed_idx == 0`, orphaning the real second pane's session
         // forever (still ticked/drained, never shown, never closable). Since
-        // `close_focused()` below unconditionally removes whichever leaf id
+        // `close_focused` below unconditionally removes whichever leaf id
         // is focused, we must first promote another pane into the primary
         // slot when that id is 0, so there is always something coherent left
         // in `Tab`'s primary fields afterward.
         let closed_session = if focused_id == 0 {
             promote_extra_to_primary(tab, 0, &mut label);
-            // The (former) primary session now sits in extra_panes[0] --
+            // The (former) primary session now sits in extra_panes[0] -
             // that's the one being closed.
             Some(tab.extra_panes.remove(0))
         } else {
@@ -1576,7 +1572,7 @@ pub(super) fn do_close_pane(
 /// Reattach a previously detached session to a new tab.
 ///
 /// The detached entry is consumed — the session is moved from `State::detached`
-/// back into the tab list.  A new `TerminalRenderer` is created for the session
+/// back into the tab list. A new `TerminalRenderer` is created for the session
 /// since the old one was discarded when the tab was closed.
 pub(super) fn reattach_session(
     state: &Rc<RefCell<State>>,
@@ -1602,7 +1598,7 @@ pub(super) fn reattach_session(
             st.font_size_px,
         )
     };
-    // P6.8 (gap 9): follow the live app theme rather than hardcoding dark.
+    // follow the live app theme rather than hardcoding dark.
     let renderer = TerminalRenderer::with_font_system(
         fonts,
         &font_family,
@@ -1646,17 +1642,17 @@ pub(super) fn reattach_session(
             broadcast_target: BroadcastTarget::default(),
             broadcast_saved_groups: Vec::new(),
             search: super::search::SearchState::default(),
-            // P9.5 #3: reattach has no live "connecting" moment of its own
+            // #3: reattach has no live "connecting" moment of its own
             // (a detached session is only ever Connected/Disconnected, never
-            // Connecting -- see `disposition`), so `kind` never actually
+            // Connecting - see `disposition`), so `kind` never actually
             // renders; `identity` mirrors what's pushed to
             // `set_session_identity` just below.
             identity: label.clone(),
             kind: kind.clone(),
             insecure_transport,
-            // P9.8 I2: same reasoning as `kind` above -- reattach never sees
+            // I2: same reasoning as `kind` above - reattach never sees
             // a `connecting -> connected` transition, so this is never
-            // actually read; `Instant::now()` is just a harmless default.
+            // actually read; `Instant::now` is just a harmless default.
             connect_started: std::time::Instant::now(),
         });
         st.active = st.tabs.len() - 1;
@@ -1669,12 +1665,12 @@ pub(super) fn reattach_session(
             id: num as i32,
             status: SharedString::from(initial_status),
             pane_count: 1,
-            // A reattached detached session is always a real connection --
+            // A reattached detached session is always a real connection -
             // never the Home tab.
             is_home: false,
-            // P9.10 #1: `origin_connection_id` is always `None` for a
+            // #1: `origin_connection_id` is always `None` for a
             // reattached tab (see the comment just above, in the `Tab {
-            // ... }` construction) -- can only "duplicate" as a new local
+            //... }` construction) - can only "duplicate" as a new local
             // shell, and only if this reattached session actually was one.
             can_duplicate: !is_remote,
         });
@@ -1706,7 +1702,7 @@ mod tests {
     use std::sync::mpsc;
 
     /// A `Session` that records every `send_input` call — the "mock sink"
-    /// the P6.11 task spec asks broadcast-targeting tests to assert against.
+    /// the API contract asks broadcast-targeting tests to assert against.
     struct RecordingSession {
         surface: Surface,
         sent: Arc<Mutex<Vec<SessionInput>>>,
@@ -1741,9 +1737,9 @@ mod tests {
         }
 
         /// A `Surface::Framebuffer`-backed session — the RDP pane shape
-        /// (P6.11) used to prove `build_pane_cells` produces a correct
+        /// used to prove `build_pane_cells` produces a correct
         /// `is_rdp` cell without needing a reachable RDP host (see the
-        /// P6.11 task report's RDP-in-pane verification note).
+        /// task report's RDP-in-pane verification note).
         fn new_rdp() -> Self {
             let (_tx, rx) = mpsc::channel::<cm_session::FrameUpdate>();
             Self {
@@ -1872,7 +1868,7 @@ mod tests {
     #[test]
     fn broadcast_custom_targets_only_selected_panes() {
         let (mut tab, sinks) = test_tab(3);
-        // Target panes 0 and 2 only -- pane 1 must NOT receive the input.
+        // Target panes 0 and 2 only - pane 1 must NOT receive the input.
         tab.broadcast_target = BroadcastTarget::Custom {
             name: None,
             panes: BTreeSet::from([0, 2]),
@@ -1891,7 +1887,7 @@ mod tests {
         let (mut tab, sinks) = test_tab(2);
         tab.broadcast_target = BroadcastTarget::Custom {
             name: None,
-            panes: BTreeSet::from([0, 5]), // 5 doesn't exist (count() == 2)
+            panes: BTreeSet::from([0, 5]), // 5 doesn't exist (count == 2)
         };
         broadcast_fan_out(&tab, &[SessionInput::Paste(b"x".to_vec())]);
         assert_eq!(sinks[0].lock().unwrap().len(), 1);
@@ -1900,7 +1896,7 @@ mod tests {
 
     #[test]
     fn rdp_in_pane_shape_produces_an_is_rdp_cell() {
-        // P6.11: an extra pane whose session surface is `Framebuffer` (RDP)
+        // an extra pane whose session surface is `Framebuffer` (RDP)
         // must render as an `is_rdp` pane-cell carrying its own decoded
         // frame — the shape lift that makes RDP-in-a-split possible at all.
         // Verifiable without a reachable RDP host (see task report).
@@ -2034,11 +2030,11 @@ mod tests {
         );
     }
 
-    // ── P9.5 #10 (Fable review fixup): connect-in-split RDP resolution ──
+    // Connect-in-split RDP resolution.
     // `connect_in_split`'s Rdp arm bypasses `open_rdp_tab`, so it has to
     // apply `sessions::pane_resolution_override` itself using the split
-    // slot's own `(pane_w, pane_h, scale)` -- this proves the exact
-    // `(logical * scale).round().max(1.0)` conversion used there produces
+    // slot's own `(pane_w, pane_h, scale)` - this proves the exact
+    // `(logical * scale).round.max(1.0)` conversion used there produces
     // the same physical-pixel override as the primary-pane path
     // (`apply_settled_resize`, tabs.rs) would for the same inputs.
     #[test]
@@ -2060,7 +2056,7 @@ mod tests {
     fn connect_in_split_pane_size_wins_over_a_tiny_slot_via_the_clamp() {
         // A degenerate (not-yet-laid-out) split slot must still clamp to
         // the same [200, 8192] floor `pane_resolution_override` enforces
-        // for the primary-pane path -- never a literally-zero desktop.
+        // for the primary-pane path - never a literally-zero desktop.
         let (pane_w, pane_h, scale): (f32, f32, f32) = (0.0, 0.0, 1.0);
         let (width, height) = sessions::pane_resolution_override(
             Some((

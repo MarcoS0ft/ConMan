@@ -33,9 +33,7 @@ pub(crate) fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-// ---------------------------------------------------------------------------
 // ConnectionTree
-// ---------------------------------------------------------------------------
 
 /// Maintains connection + group state for the Connections panel.
 ///
@@ -213,7 +211,7 @@ impl ConnectionTree {
             .map(|c| c.id.get())
             .collect();
         // Collect groups whose name matches OR that contain a matching connection
-        // (including nested).  We traverse from root → leaf so we can mark
+        // (including nested). We traverse from root → leaf so we can mark
         // ancestors.
         let mut out = Vec::new();
         let mut root_groups: Vec<&Group> = self
@@ -316,9 +314,7 @@ impl ConnectionTree {
         }
     }
 
-    // -----------------------------------------------------------------------
     // Row-lookup helpers used by the controller
-    // -----------------------------------------------------------------------
 
     /// The group_id encoded in a flat row (group rows carry the group id;
     /// connection rows carry the group_id of the connection).
@@ -444,9 +440,7 @@ pub fn new_local_connection(name: &str, group_id: Option<GroupId>, sort: i64) ->
     .expect("default local connection is always valid")
 }
 
-// ---------------------------------------------------------------------------
 // Credential name list helper
-// ---------------------------------------------------------------------------
 
 /// Build the flat credential name list for all dropdowns.
 ///
@@ -515,9 +509,7 @@ pub fn cred_name_idx(
         .unwrap_or(0)
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

@@ -1,4 +1,4 @@
-//! RoyalTS `.rjson` importer (P9.2).
+//! RoyalTS `.rjson` importer.
 //!
 //! Parses the plaintext RoyalTS JSON export format — a document shaped like
 //! `{"Objects": [...]}`, a nested tree of folder / connection / credential
@@ -10,7 +10,7 @@
 //!
 //! Scope note: this handles the plaintext `.rjson` export only. RoyalTS's
 //! encrypted vault format (`.rtsz`, password-protected) is out of scope for
-//! this task (see the P9.2 task spec's "Out" list).
+//! this implementation (see the API contract's "Out" list).
 //!
 //! ## Node-kind detection
 //! RoyalTS has shipped (at least) two type-name families across versions:
@@ -39,7 +39,7 @@
 //! 1 built, so N connections sharing one RoyalTS credential all resolve to
 //! that single ConMan `Credential`.
 //!
-//! ## Field mapping (see the P9.2 task report for the full table)
+//! ## Field mapping (see the API contract for the full table)
 //! - `Folder` → [`Group`] (nested `"Objects"` → child groups, recursively;
 //!   `parent_id` set from the enclosing folder, `None` at the document root).
 //! - `RemoteDesktopConnection` (+ legacy) → an RDP [`Connection`]. Host from
@@ -48,7 +48,7 @@
 //!   [`RdpSettings::DEFAULT_PORT`] (RoyalTS only emits `Port` when
 //!   non-default). The many RoyalTS RDP tuning attributes (color profile,
 //!   gateway, redirection flags, etc.) have no home in [`RdpSettings`] and
-//!   are dropped — expected, per the task spec.
+//!   are dropped — expected, per the API contract.
 //! - `TerminalConnection` with `TerminalConnectionType = SSH` → an SSH
 //!   [`Connection`]; same host/port handling, port defaults to
 //!   [`SshSettings::DEFAULT_PORT`]. `auth_method` is
@@ -113,9 +113,7 @@ pub fn parse(contents: &str) -> Result<(ExportEnvelope, Vec<ImportWarning>), Imp
     Ok((envelope, ctx.warnings))
 }
 
-// ---------------------------------------------------------------------------
 // Parse state
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct ParseCtx {
@@ -129,7 +127,7 @@ struct ParseCtx {
     /// this map *is* the dedupe: one entry per unique RoyalTS credential ID.
     cred_guid_to_id: HashMap<String, CredentialId>,
     /// Running count of credential nodes skipped because their GUID was
-    /// already registered (P9.8 G8) — logged as a count only, never the GUID
+    /// already registered ( G8) — logged as a count only, never the GUID
     /// itself.
     credential_dedup_count: usize,
     next_group_id: i64,
@@ -154,9 +152,7 @@ impl ParseCtx {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Node classification
-// ---------------------------------------------------------------------------
 
 enum NodeKind {
     Folder,
@@ -187,9 +183,7 @@ fn classify(type_str: &str) -> NodeKind {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Field access helpers
-// ---------------------------------------------------------------------------
 
 fn get_str(v: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
@@ -210,9 +204,7 @@ fn children(v: &Value) -> &[Value] {
         .unwrap_or(&[])
 }
 
-// ---------------------------------------------------------------------------
 // Pass 1: credential discovery (dedupe by construction)
-// ---------------------------------------------------------------------------
 
 fn collect_credentials(nodes: &[Value], ctx: &mut ParseCtx) {
     for node in nodes {
@@ -265,9 +257,7 @@ fn register_credential(node: &Value, ctx: &mut ParseCtx) {
     ctx.cred_guid_to_id.insert(guid, cred_id);
 }
 
-// ---------------------------------------------------------------------------
 // Pass 2: group tree + connections
-// ---------------------------------------------------------------------------
 
 fn walk_nodes(nodes: &[Value], parent_group: Option<GroupId>, ctx: &mut ParseCtx) {
     for node in nodes {

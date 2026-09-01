@@ -1,4 +1,4 @@
-//! P8.6-A — the scope-enforcement proxy engine.
+//! Scope-enforcement proxy engine.
 //!
 //! Sits between an MCP client (an "agent") and the vendored Slint MCP server
 //! (`i-slint-backend-testing`'s `mcp_server.rs`, enabled via the `automation`/
@@ -14,13 +14,13 @@
 //! the real server listens (never reachable directly by the agent).
 //!
 //! ## What this proxy does NOT gate (read the module doc before changing this)
-//! **`execute` is not a distinct MCP tool** — it rides the *write* tools
+//! `execute` is not a distinct MCP tool** — it rides the *write* tools
 //! (`click_element` / `invoke_accessibility_action` / `dispatch_key_event`)
 //! when they happen to target a connection-launch UI element. A tool-name
 //! keyed proxy structurally cannot tell "click a button" from "click the
 //! button that opens an SSH session" — both are just `click_element`. So this
 //! proxy enforces **read vs. write only**; the execute boundary is enforced
-//! later, at `cm-ui`'s actual session-launch call sites (P8.6-B), which do
+//! later, at `cm-ui`'s actual session-launch call sites, which do
 //! know what they're about to do. Do not "finish the job" here by trying to
 //! infer execute from tool name or arguments — it can't be done reliably at
 //! this layer, and a future refactor that "cleans this up" by assuming
@@ -28,8 +28,8 @@
 //! note exists to prevent.
 //!
 //! ## Fail-closed on unrecognized tools
-//! [`ToolScope::classify`] classifies exactly the 14 tools from the P8.6-A
-//! spec's surface map. A tool name not in that table — a future Slint
+//! [`ToolScope::classify`] classifies the supported tools. A tool name not in
+//! that table — a future Slint
 //! upgrade adding a 15th tool this build doesn't know about, or a bug in the
 //! table — is **never forwarded regardless of granted scopes**, and never
 //! advertised in a filtered `tools/list`. The safe default for "we don't know
@@ -37,12 +37,10 @@
 //! most permissive scope."
 //!
 //! ## Gate invariants enforced independently of the upstream server
-//! Added after Fable's adversarial review, which could not smuggle an
-//! out-of-scope call through but flagged that two of the proxy's invariants
-//! were only airtight because they *delegated* to the vendored Slint
-//! server's own strictness (rejecting batch JSON-RPC arrays, 404-ing any
-//! path other than `/mcp`/`/`) rather than enforcing it independently — a
-//! future Slint version that loosened either could silently turn a
+//! The proxy independently enforces invariants that the vendored Slint server
+//! also currently enforces, including rejecting batch JSON-RPC arrays and
+//! paths other than `/mcp` or `/`. A future Slint version that loosened either
+//! could otherwise silently turn a
 //! passthrough into a bypass. [`process`] now re-checks both itself, before
 //! ever dialing the internal server:
 //! - **Batch rejection**: a top-level JSON array is always denied here
@@ -86,11 +84,9 @@ use std::time::Duration;
 use cm_core::ScopeSet;
 use serde_json::Value;
 
-// ---------------------------------------------------------------------------
-// Tool -> scope classification (P8.6-A spec's surface map, verbatim)
-// ---------------------------------------------------------------------------
+// Tool-to-scope classification.
 
-/// read (introspection, no state change) — see the P8.6-impl.md surface map.
+/// Read-only tools perform introspection without changing state.
 const READ_TOOLS: &[&str] = &[
     "list_windows",
     "get_window_properties",
@@ -103,7 +99,7 @@ const READ_TOOLS: &[&str] = &[
     "stop_event_recording",
 ];
 
-/// write (mutate UI/data) — see the P8.6-impl.md surface map.
+/// Write tools can mutate UI or data.
 const WRITE_TOOLS: &[&str] = &[
     "click_element",
     "drag_element",
@@ -151,9 +147,7 @@ impl ToolScope {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Pure gate decision (unit-tested without any I/O)
-// ---------------------------------------------------------------------------
 
 /// What [`decide_tool_call`] says to do with one `tools/call` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,9 +186,7 @@ fn json_rpc_error_body(id: &Value, code: i32, message: String) -> Vec<u8> {
     serde_json::to_vec(&json_rpc_error(id, code, message)).unwrap_or_default()
 }
 
-// ---------------------------------------------------------------------------
 // Minimal HTTP/1.1 framing (request read, response read, response write)
-// ---------------------------------------------------------------------------
 
 /// Upper bound on the request-line + headers block, mirroring the vendored
 /// server's own `64 * 1024` header-size guard.
@@ -395,9 +387,7 @@ fn write_response(
     stream.flush()
 }
 
-// ---------------------------------------------------------------------------
 // Forwarding to the internal server
-// ---------------------------------------------------------------------------
 
 /// Opens a fresh, short-lived connection to the internal server, sends
 /// `req` verbatim (method/path/body; `Connection: close` so the internal
@@ -469,16 +459,16 @@ fn forward_and_filter_tools_list(
     }
 }
 
-/// P8.6-B item 4 (the execute-scope launch gate): RAII guard incrementing
+/// RAII guard incrementing
 /// `count` on construction and decrementing on drop, so the gate's window
 /// closes even on an early return or (however unlikely) a panic between the
-/// increment and decrement -- more robust than a manual paired
+/// increment and decrement - more robust than a manual paired
 /// increment/decrement. See `cm_ui::AgentModeConfig::mcp_interaction_count`'s
 /// doc comment for why this is a count, not a bool, and for the proof that
 /// this window actually covers any launch callback a write tool could
 /// trigger (the vendored Slint MCP server dispatches the click/key event
-/// synchronously, inline, before its async handler returns -- strictly
-/// before this guard's `forward()` call, which brackets it, returns).
+/// synchronously, inline, before its async handler returns - strictly
+/// before this guard's `forward` call, which brackets it, returns).
 struct McpInteractionGuard<'a>(&'a AtomicUsize);
 
 impl<'a> McpInteractionGuard<'a> {
@@ -501,8 +491,7 @@ impl Drop for McpInteractionGuard<'_> {
 /// deliberately re-checked **here**, independent of whatever the internal
 /// Slint server itself does with the same input — see the module doc's
 /// "Gate invariants enforced independently of the upstream server" section.
-/// This is belt-and-suspenders, added after Fable's adversarial review: the
-/// gate must stay airtight even if a future Slint version loosened its own
+/// The gate must stay airtight even if a future Slint version loosened its own
 /// path matching or re-added batch support.
 fn process(
     req: &ParsedRequest,
@@ -510,8 +499,8 @@ fn process(
     scopes: &Arc<RwLock<ScopeSet>>,
     mcp_interaction_count: &Arc<AtomicUsize>,
 ) -> (u16, String, Vec<u8>) {
-    // P8.6-B item 4: whether this specific request, if it falls through to
-    // the plain forward below, is a Write-scoped `tools/call` -- the only
+    // Whether this specific request, if it falls through to
+    // the plain forward below, is a Write-scoped `tools/call` - the only
     // case the execute-gate cares about (Read tools can't launch anything;
     // everything else here is either denied above or isn't a tool call at
     // all).
@@ -587,9 +576,7 @@ fn process(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Connection handling / accept loop
-// ---------------------------------------------------------------------------
 
 /// Serves one agent client connection: reads requests one at a time (no
 /// pipelining — see the module doc), replies to each, and stops on EOF or
@@ -663,7 +650,7 @@ mod tests {
         }
     }
 
-    /// A fresh, zero execute-gate counter -- these `process()` tests exercise
+    /// A fresh, zero execute-gate counter - these `process` tests exercise
     /// the read/write scope gate, not the execute-gate counter itself (see
     /// `mcp_interaction_count_*` tests below for that).
     fn no_interactions() -> Arc<AtomicUsize> {
@@ -740,8 +727,7 @@ mod tests {
 
     #[test]
     fn write_tool_is_not_forwarded_under_read_only_scope() {
-        // The literal scenario the P8.6 spec names as the adversarial case:
-        // a write-tool call under a read-only ScopeSet must be denied.
+        // A write-tool call under a read-only ScopeSet must be denied.
         let read_only = scopes(true, false, false);
         for name in WRITE_TOOLS {
             assert_eq!(
@@ -809,10 +795,9 @@ mod tests {
     }
 
     /// Like [`spawn_mock_internal_server`], but delays the response by
-    /// `delay` -- lets a test observe the execute-gate counter's value
-    /// *while* a `forward()` call is still in flight, not just its net-zero
-    /// value afterward (the P8.6-B item 4 mechanism this whole module exists
-    /// to prove: the window has to actually be open during the call).
+    /// `delay` - lets a test observe the execute-gate counter's value
+    /// *while* a `forward` call is still in flight, not just its net-zero
+    /// value afterward: the window has to actually be open during the call.
     fn spawn_slow_mock_internal_server(status: u16, body: Vec<u8>, delay: Duration) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let port = listener.local_addr().expect("local_addr").port();
@@ -912,8 +897,8 @@ mod tests {
 
     #[test]
     fn batch_json_rpc_array_is_rejected_without_forwarding() {
-        // A top-level array is a batch request -- the proxy must deny it
-        // itself (Fable hardening note), not rely on the internal server's
+        // A top-level array is a batch request - the proxy must deny it
+        // itself, not rely on the internal server's
         // own "-32600 Batch requests are not supported". Every scope
         // granted, to prove this isn't a scope-related denial.
         let everything = Arc::new(RwLock::new(scopes(true, true, true)));
@@ -940,7 +925,7 @@ mod tests {
     #[test]
     fn tool_call_on_a_non_mcp_path_is_rejected_without_forwarding() {
         // A tools/call-shaped body arriving on a path other than /mcp or /
-        // must be denied at the proxy itself (Fable hardening note) rather
+        // must be denied at the proxy itself rather
         // than forwarded on the assumption the internal server will 404 it.
         // Every scope granted, to prove this isn't a scope-related denial.
         let everything = Arc::new(RwLock::new(scopes(true, true, true)));
@@ -1023,7 +1008,7 @@ mod tests {
 
     #[test]
     fn non_json_rpc_request_is_forwarded_untouched() {
-        // OPTIONS (CORS preflight) is not a JSON-RPC call at all -- the proxy
+        // OPTIONS (CORS preflight) is not a JSON-RPC call at all - the proxy
         // must not try to interpret it, just relay whatever the internal
         // server says.
         let canned = b"".to_vec();
@@ -1037,8 +1022,6 @@ mod tests {
         );
         assert_eq!(body, canned);
     }
-
-    // ── P8.6-B item 4: the execute-gate counter ────────────────────────────
 
     #[test]
     fn mcp_interaction_count_is_elevated_only_while_a_write_tool_call_is_in_flight() {
@@ -1060,7 +1043,7 @@ mod tests {
             std::thread::spawn(move || process(&req, port, &scopes_lock, &count))
         };
 
-        // Give forward()'s connect+send time to happen but land well inside
+        // Give forward's connect+send time to happen but land well inside
         // the mock server's artificial 200ms delay.
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(
@@ -1109,7 +1092,7 @@ mod tests {
     #[test]
     fn mcp_interaction_count_decrements_even_when_the_write_tool_call_is_denied() {
         // A write tool DENIED by scope never reaches the fallthrough forward
-        // at all -- the counter must never increment for it in the first
+        // at all - the counter must never increment for it in the first
         // place (there's nothing to decrement).
         let scopes_lock = Arc::new(RwLock::new(scopes(true, false, false))); // read-only
         let count = Arc::new(AtomicUsize::new(0));

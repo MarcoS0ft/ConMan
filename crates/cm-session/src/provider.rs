@@ -1,12 +1,8 @@
-//! [`SessionProvider`] adapter (P6.15, gap 27).
+//! [`SessionProvider`] adapter.
 //!
-//! Builds the same concrete sessions `cm-ui` constructed directly before
-//! P6.15 — no behavior change, only the construction boundary moves. Also
-//! absorbs the per-transport trust-store construction (`KnownHosts`,
-//! `CertStore`) that `cm-ui` previously did itself before calling
-//! `connect()`: same defaults, same per-call construction timing, just
-//! relocated so callers no longer need to know either file exists. See
-//! `docs/devel/memos/P6.15-sessionprovider-port.md`.
+//! Builds concrete sessions for `cm-ui` and owns per-transport trust-store
+//! construction (`KnownHosts`, `CertStore`). Callers therefore do not need to
+//! know where either store lives or how it is initialized.
 
 use std::sync::Arc;
 
@@ -24,8 +20,8 @@ use crate::ssh::{KnownHosts, SshTerminalSession};
 use crate::telnet::TelnetTerminalSession;
 
 /// Default `cm-session` [`SessionProvider`]. Stateless — every call resolves
-/// its own trust-store defaults, exactly as the pre-P6.15 `cm-ui` call sites
-/// did inline (`KnownHosts::with_defaults()`,
+/// its own trust-store defaults, matching the `cm-ui` call sites
+/// did inline (`KnownHosts::with_defaults`,
 /// `CertStore::new_persistent(<app-data dir>/conman/cert_trust.json)`).
 #[derive(Debug)]
 pub struct SessionProviderImpl {
@@ -34,7 +30,7 @@ pub struct SessionProviderImpl {
 
 impl SessionProviderImpl {
     /// Construct the provider. No setup performed here — trust stores are
-    /// resolved per-connect, matching the pre-P6.15 behavior.
+    /// resolved per-connect.
     #[must_use]
     pub fn new(clipboard_root: Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>) -> Self {
         Self { clipboard_root }
@@ -42,7 +38,7 @@ impl SessionProviderImpl {
 }
 
 /// Persistent RDP cert-trust store in the OS app-data dir, so accepted certs
-/// survive restarts. Moved here from `cm-ui`'s `default_cert_store()`
+/// survive restarts. Moved here from `cm-ui`'s `default_cert_store`
 /// (`controller/sessions.rs`) — same path, same defaults.
 fn default_cert_store() -> Arc<CertStore> {
     let path = dirs::data_local_dir()

@@ -4,23 +4,23 @@
 //!
 //! ```json
 //! {
-//!   "conman_export_version": 1,
-//!   "exported_at": <epoch-seconds>,
-//!   "credential_folders": [...],
-//!   "credentials":         [...],
-//!   "groups":              [...],
-//!   "connections":         [...],
-//!   "credential_secrets":  [...]   // omitted when empty
+//! "conman_export_version": 1,
+//! "exported_at": <epoch-seconds>,
+//! "credential_folders": [...],
+//! "credentials": [...],
+//! "groups": [...],
+//! "connections": [...],
+//! "credential_secrets": [...] // omitted when empty
 //! }
 //! ```
 //!
 //! ## Import semantics (additive, pinned)
 //!
 //! Every imported record receives a **fresh** database ID; the IDs embedded in
-//! the envelope are used only as intra-envelope link keys.  Parent and
-//! credential links are rewritten to the newly assigned IDs.  Links to IDs not
+//! the envelope are used only as intra-envelope link keys. Parent and
+//! credential links are rewritten to the newly assigned IDs. Links to IDs not
 //! present in the envelope are silently set to `None` (never a panic or hard
-//! failure).  Cyclic parent references in untrusted input are broken by
+//! failure). Cyclic parent references in untrusted input are broken by
 //! treating the offending node as a root — no abort, no loop. All database
 //! writes are one transaction; keychain writes begin only after it commits.
 //!
@@ -42,9 +42,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::repository::{AtomicImportRepository, ImportTransaction};
 
-// ---------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
 
 /// Envelope schema version produced by this build.
 ///
@@ -57,9 +55,7 @@ pub const ENVELOPE_VERSION: u32 = 1;
 /// malformed input from untrusted JSON.
 const MAX_TOPO_PASSES: usize = 1_024;
 
-// ---------------------------------------------------------------------------
 // Public types
-// ---------------------------------------------------------------------------
 
 /// Options controlling what is included in an [`export`] / [`export_to_json`] call.
 #[derive(Debug, Clone, Default)]
@@ -70,7 +66,7 @@ pub struct ExportOptions {
     /// # WARNING
     /// This option embeds **plain-text secret material** into the JSON output.
     /// Only set it when the operator has explicitly requested a
-    /// secrets-inclusive export.  Treat the resulting file with the same care
+    /// secrets-inclusive export. Treat the resulting file with the same care
     /// as a private-key or password database.
     pub include_secrets: bool,
 }
@@ -130,7 +126,7 @@ impl AsRef<[u8]> for ExportJsonOutcome {
 /// Versioned JSON export envelope.
 ///
 /// Serialised with `serde_json`; the schema is pinned at version
-/// [`ENVELOPE_VERSION`].  Deserialising an envelope with a different version
+/// [`ENVELOPE_VERSION`]. Deserialising an envelope with a different version
 /// succeeds at the JSON level but [`import`] will reject it with
 /// [`ImportExportError::UnsupportedVersion`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,7 +140,7 @@ pub struct ExportEnvelope {
     pub groups: Vec<Group>,
     pub connections: Vec<Connection>,
     /// Present only when [`ExportOptions::include_secrets`] is `true` and
-    /// secrets were available.  Omitted from serialisation when empty so a
+    /// secrets were available. Omitted from serialisation when empty so a
     /// default export carries no hint of the field.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub credential_secrets: Vec<ExportedSecret>,
@@ -157,7 +153,7 @@ pub struct ExportEnvelope {
 
 /// One secret entry in a gated export, tied to a credential **object**.
 ///
-/// `secret_hex` is the raw secret bytes encoded as lower-case hex.  For
+/// `secret_hex` is the raw secret bytes encoded as lower-case hex. For
 /// password credentials this is the UTF-8 bytes of the password; for SSH
 /// credentials it is the bytes of the PEM-encoded private key.
 ///
@@ -165,7 +161,7 @@ pub struct ExportEnvelope {
 /// `"password"`, `"ssh-key"`, or `"ssh-passphrase"`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportedSecret {
-    /// The **exported** (pre-remap) credential ID.  During import this is
+    /// The **exported** (pre-remap) credential ID. During import this is
     /// looked up in the remap table to find the freshly assigned ID.
     pub credential_id: CredentialId,
     /// Stable purpose tag from [`CredentialPurpose::as_str`].
@@ -175,12 +171,12 @@ pub struct ExportedSecret {
 }
 
 /// One inline (`CredentialSource::Inline`) secret entry, tied to a
-/// **connection** rather than a credential object — the P9.6-A counterpart to
+/// **connection** rather than a credential object — the counterpart to
 /// [`ExportedSecret`]. Always `purpose == "password"` in practice today
 /// because inline authentication is password-only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportedConnectionSecret {
-    /// The **exported** (pre-remap) connection ID.  During import this is
+    /// The **exported** (pre-remap) connection ID. During import this is
     /// looked up in the connection-id remap table built while importing
     /// connections, mirroring how `ExportedSecret::credential_id` is remapped.
     pub connection_id: ConnectionId,
@@ -215,7 +211,7 @@ pub enum ImportExportError {
         included: usize,
         failures: usize,
     },
-    /// P9.4: the attempted password did not decrypt an mRemoteNG file's
+    /// the attempted password did not decrypt an mRemoteNG file's
     /// encrypted fields (wrong password, or a custom one was never
     /// supplied). The caller should prompt for the correct password and
     /// retry via `import::import_from_path_with_password`. Never raised for
@@ -235,9 +231,7 @@ pub struct ImportStats {
     pub secrets_imported: usize,
 }
 
-// ---------------------------------------------------------------------------
 // Export
-// ---------------------------------------------------------------------------
 
 /// Export the full tree from `repo` into a versioned [`ExportEnvelope`].
 ///
@@ -313,9 +307,7 @@ pub fn export_to_json(
     })
 }
 
-// ---------------------------------------------------------------------------
 // Import
-// ---------------------------------------------------------------------------
 
 /// Import an [`ExportEnvelope`] into `repo` (additive; every record gets a
 /// fresh ID).
@@ -378,7 +370,7 @@ pub fn import(
     )?;
 
     // 3. Groups (topologically sorted; may reference credentials via
-    //    default_credential).
+    // default_credential).
     let group_id_map = import_groups(
         &envelope.groups,
         &cred_id_map,
@@ -444,9 +436,7 @@ pub fn import_from_json(
     import(&envelope, repo, store)
 }
 
-// ---------------------------------------------------------------------------
 // Import helpers
-// ---------------------------------------------------------------------------
 
 fn import_credential_folders(
     folders: &[CredentialFolder],
@@ -647,7 +637,7 @@ fn import_secrets(
     }
 }
 
-/// P9.6-A: write imported *inline* (connection-scoped) secrets to the
+/// write imported *inline* (connection-scoped) secrets to the
 /// keychain under the *new* connection IDs — the `CredentialRef::for_connection`
 /// counterpart to [`import_secrets`]. Same defensive, non-fatal-per-entry
 /// posture.
@@ -706,9 +696,7 @@ fn import_connection_secrets(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Secret collection for export
-// ---------------------------------------------------------------------------
 
 fn collect_secrets(
     credentials: &[Credential],
@@ -759,7 +747,7 @@ fn collect_secrets(
     (out, report)
 }
 
-/// P9.6-A: the `CredentialSource::Inline` counterpart to [`collect_secrets`] —
+/// the `CredentialSource::Inline` counterpart to [`collect_secrets`] —
 /// reads `conn:<id>:password` for every connection whose source is `Inline`
 /// with `has_secret: true`. Password-only (inline never stores any other
 /// purpose, per the non-goals), same absent/error-is-never-fatal posture.
@@ -813,9 +801,7 @@ fn collect_connection_secrets(
     (out, report)
 }
 
-// ---------------------------------------------------------------------------
 // Topological sort
-// ---------------------------------------------------------------------------
 
 fn topo_sort_folders(folders: &[CredentialFolder]) -> Vec<&CredentialFolder> {
     topo_sort(folders, |f| f.id, |f| f.parent_id)
@@ -830,7 +816,7 @@ fn topo_sort_groups(groups: &[Group]) -> Vec<&Group> {
 /// - Nodes whose `parent_id` is absent from the list are treated as roots.
 /// - Cycles are detected by observing "no progress" over a full pass; the
 ///   remaining (cyclic) nodes are then flushed as roots rather than looping
-///   forever.  Total passes are bounded by [`MAX_TOPO_PASSES`].
+///   forever. Total passes are bounded by [`MAX_TOPO_PASSES`].
 fn topo_sort<T, Id, FId, FPid>(items: &[T], id_fn: FId, parent_id_fn: FPid) -> Vec<&T>
 where
     Id: std::hash::Hash + Eq + Copy,
@@ -873,9 +859,7 @@ where
     result
 }
 
-// ---------------------------------------------------------------------------
 // Misc helpers
-// ---------------------------------------------------------------------------
 
 /// Current UTC time as epoch seconds; returns 0 on a pre-epoch system clock.
 fn current_epoch_secs() -> i64 {
@@ -897,7 +881,7 @@ fn parse_purpose(s: &str) -> Option<CredentialPurpose> {
 /// Encode raw bytes as a lower-case hex string.
 ///
 /// `pub(crate)`: also reused by [`crate::import`]'s foreign-format importers
-/// (e.g. RoyalTS, P9.2) to encode a plaintext secret into an
+/// (e.g. RoyalTS) to encode a plaintext secret into an
 /// [`ExportedSecret`] without duplicating the encoder.
 pub(crate) fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -910,7 +894,7 @@ pub(crate) fn to_hex(bytes: &[u8]) -> String {
 }
 
 /// Decode a hex string (upper- or lower-case) into bytes.
-/// Returns `Err(())` on odd length or a non-hex character.
+/// Returns `Err` on odd length or a non-hex character.
 fn from_hex(s: &str) -> Result<Vec<u8>, ()> {
     if !s.len().is_multiple_of(2) {
         return Err(());

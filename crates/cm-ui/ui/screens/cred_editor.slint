@@ -1,7 +1,7 @@
-// P1.4 — Credential editor modal.
+// — Credential editor modal.
 //
 // Allows creating and editing a Credential (name, kind, username) and storing
-// the secret via the OS keychain (P1.3).  The `secret` / `passphrase` fields
+// the secret via the OS keychain. The `secret` / `passphrase` fields
 // are TRANSIENT — Rust MUST clear them immediately after reading them in the
 // `cred-save` callback (see CONVENTIONS secrets hygiene).
 //
@@ -16,9 +16,9 @@ import { ComboBox } from "std-widgets.slint";
 // ── CredFormData ───────────────────────────────────────────────────────────
 // Data bag for the credential editor.
 //
-// `kind`  0 = Password · 1 = SSH Key · 2 = SSH Key + Passphrase
-// `folder-id`  0 = root (no folder)
-// `secret`     TRANSIENT — cleared by Rust after cred-save fires
+// `kind` 0 = Password · 1 = SSH Key · 2 = SSH Key + Passphrase
+// `folder-id` 0 = root (no folder)
+// `secret` TRANSIENT — cleared by Rust after cred-save fires
 // `passphrase` TRANSIENT — cleared by Rust after cred-save fires
 export struct CredFormData {
     id: int,
@@ -34,10 +34,10 @@ export struct CredFormData {
 }
 
 // ── CredEditor ─────────────────────────────────────────────────────────────
-// Opaque card: mirrors ProfileEditor / GroupEditor / QuickConnectForm (P9.5
-// #4 -- the SAME "no opaque card" bleed-through defect P7.2 fixed for
-// ProfileEditor and P7.6 fixed for GroupEditor, but this dialog was missed)
-// -- a solid `color-overlay` panel with a border/radius so nothing behind
+// Opaque card: mirrors ProfileEditor / GroupEditor / QuickConnectForm (
+// #4 - the SAME "no opaque card" bleed-through defect fixed for
+// ProfileEditor and fixed for GroupEditor, but this dialog was missed)
+// - a solid `color-overlay` panel with a border/radius so nothing behind
 // the Modal scrim bleeds through, in both themes.
 export component CredEditor inherits Rectangle {
     in-out property <CredFormData> form;
@@ -47,7 +47,7 @@ export component CredEditor inherits Rectangle {
     callback save();
     callback cancel();
 
-    // P8.1: no dialog role in Slint 1.17 — groupbox + "<Title> dialog".
+    // no dialog role in Slint 1.17 — groupbox + "<Title> dialog".
     accessible-role: groupbox;
     accessible-label: (root.form.id == 0 ? "New credential" : "Edit credential") + " dialog";
 

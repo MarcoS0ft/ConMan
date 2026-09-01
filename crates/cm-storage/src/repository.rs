@@ -45,17 +45,15 @@ pub trait AtomicImportRepository: Send + Sync {
     fn begin_import(&self) -> Result<Box<dyn ImportTransaction + '_>, RepositoryError>;
 }
 
-// ---------------------------------------------------------------------------
 // SqliteRepository
-// ---------------------------------------------------------------------------
 
 /// SQLite-backed adapter implementing [`ConnectionRepository`].
 ///
 /// The underlying [`rusqlite::Connection`] is `!Sync`; access is serialised via
-/// a [`Mutex`].  All structural mutations run inside an explicit transaction.
+/// a [`Mutex`]. All structural mutations run inside an explicit transaction.
 pub struct SqliteRepository {
     conn: Mutex<rusqlite::Connection>,
-    /// Optional keychain handle (P9.6-A Decision 2) — when set, deleting a
+    /// Optional keychain handle. When set, deleting a
     /// connection directly or through recursive group deletion also deletes
     /// its connection-scoped inline-secret keychain entry.
     credential_store: Option<Arc<dyn CredentialStore>>,
@@ -88,7 +86,7 @@ impl SqliteRepository {
     }
 
     /// Opens an in-memory database (data is lost when the repository is
-    /// dropped).  Primarily for tests.
+    /// dropped). Primarily for tests.
     pub fn open_in_memory() -> Result<Self, StorageError> {
         let conn = rusqlite::Connection::open_in_memory()
             .map_err(|e| StorageError::Open(e.to_string()))?;
@@ -111,14 +109,14 @@ impl SqliteRepository {
         })
     }
 
-    /// Attaches a [`CredentialStore`] (P9.6-A Decision 2) so
+    /// Attaches a [`CredentialStore`] so
     /// [`delete_connection`][ConnectionRepository::delete_connection] can
     /// also clean up the connection-scoped inline-secret keychain entry —
     /// the DB's `ON DELETE SET NULL` only handles the credential-**object**
     /// foreign key; an inline secret lives entirely outside SQLite
     /// (`CredentialRef::for_connection`) and must be deleted explicitly.
     /// Optional and purely additive: a repository with no store attached
-    /// just skips this cleanup, matching pre-P9.6-A behavior exactly.
+    /// just skips this cleanup, matching earlier behavior exactly.
     #[must_use]
     pub fn with_credential_store(mut self, store: Arc<dyn CredentialStore>) -> Self {
         self.credential_store = Some(store);
@@ -148,14 +146,10 @@ impl SqliteRepository {
     }
 }
 
-// ---------------------------------------------------------------------------
 // ConnectionRepository implementation
-// ---------------------------------------------------------------------------
 
 impl ConnectionRepository for SqliteRepository {
-    // -----------------------------------------------------------------------
     // Connections
-    // -----------------------------------------------------------------------
 
     fn list_connections(&self) -> Result<Vec<Connection>, RepositoryError> {
         let conn = self.lock()?;
@@ -268,7 +262,7 @@ impl ConnectionRepository for SqliteRepository {
             }
         } // release the SQLite lock before touching the (unrelated) keychain
 
-        // P9.6-A Decision 2: inline secrets live outside SQLite. Cleanup is
+        // inline secrets live outside SQLite. Cleanup is
         // best-effort because the database deletion has already committed.
         self.cleanup_connection_secrets([id]);
         Ok(())
@@ -293,9 +287,7 @@ impl ConnectionRepository for SqliteRepository {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
     // Groups
-    // -----------------------------------------------------------------------
 
     fn list_groups(&self) -> Result<Vec<Group>, RepositoryError> {
         let conn = self.lock()?;
@@ -460,9 +452,7 @@ impl ConnectionRepository for SqliteRepository {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
     // Credentials
-    // -----------------------------------------------------------------------
 
     fn list_credentials(&self) -> Result<Vec<Credential>, RepositoryError> {
         let conn = self.lock()?;
@@ -539,9 +529,7 @@ impl ConnectionRepository for SqliteRepository {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
     // Credential folders
-    // -----------------------------------------------------------------------
 
     fn list_credential_folders(&self) -> Result<Vec<CredentialFolder>, RepositoryError> {
         let conn = self.lock()?;
@@ -678,9 +666,7 @@ impl ConnectionRepository for SqliteRepository {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
     // Inheritance resolution
-    // -----------------------------------------------------------------------
 
     fn resolve_effective_credential(
         &self,
@@ -742,9 +728,7 @@ impl ConnectionRepository for SqliteRepository {
         Ok(None)
     }
 
-    // -----------------------------------------------------------------------
-    // Recents (P6.14 — Launchpad)
-    // -----------------------------------------------------------------------
+    // Recent connections
 
     fn record_recent(&self, id: ConnectionId, opened_at: i64) -> Result<(), RepositoryError> {
         let conn = self.lock()?;
@@ -929,11 +913,9 @@ impl AtomicImportRepository for SqliteRepository {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Row mappers
-// ---------------------------------------------------------------------------
 
-/// Intermediate representation of a `connections` row.  Deferred conversion
+/// Intermediate representation of a `connections` row. Deferred conversion
 /// to [`Connection`] lets us return [`rusqlite::Error`] from the closure and
 /// propagate richer [`RepositoryError`]s later.
 struct ConnectionRow {
@@ -1093,9 +1075,7 @@ fn map_folder_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CredentialFolder>
     })
 }
 
-// ---------------------------------------------------------------------------
 // Kind serialisation helpers
-// ---------------------------------------------------------------------------
 
 fn connection_kind_str(kind: ConnectionKind) -> &'static str {
     match kind {
@@ -1141,9 +1121,7 @@ fn parse_credential_kind_rusqlite(s: &str) -> rusqlite::Result<CredentialKind> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Misc helpers
-// ---------------------------------------------------------------------------
 
 fn extract_host_port(settings: &ConnectionSettings) -> (Option<String>, Option<i64>) {
     match settings {
@@ -1158,15 +1136,13 @@ fn map_err(e: rusqlite::Error) -> RepositoryError {
     RepositoryError::Backend(e.to_string())
 }
 
-// ---------------------------------------------------------------------------
 // Cycle detection
-// ---------------------------------------------------------------------------
 
 /// Returns `true` if making `id` a child of `proposed_parent` would create a
 /// cycle in the group tree.
 ///
 /// Algorithm: walk *upward* from `proposed_parent` through `parent_id` links.
-/// If we encounter `id`, there is a cycle.  The walk is bounded by
+/// If we encounter `id`, there is a cycle. The walk is bounded by
 /// [`MAX_TREE_DEPTH`] to guard against already-corrupt trees.
 fn would_create_group_cycle(
     conn: &rusqlite::Connection,
@@ -1247,9 +1223,7 @@ fn would_create_folder_cycle(
     Ok(true)
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1341,7 +1315,7 @@ mod tests {
         }
     }
 
-    // ── P6.14: recents ───────────────────────────────────────────────────
+    // ──: recents ───────────────────────────────────────────────────
 
     fn mk_local_conn(repo: &SqliteRepository, name: &str) -> ConnectionId {
         use cm_core::{Connection, ConnectionKind, ConnectionSettings, LocalSettings};

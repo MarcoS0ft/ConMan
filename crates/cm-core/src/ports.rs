@@ -23,9 +23,7 @@ use crate::ids::{ConnectionId, CredentialFolderId, CredentialId, GroupId};
 /// [`move_credential_folder`][Self::move_credential_folder] that would make a
 /// node its own ancestor is rejected with [`RepositoryError::Conflict`].
 pub trait ConnectionRepository: Send + Sync {
-    // -----------------------------------------------------------------------
     // Connections
-    // -----------------------------------------------------------------------
 
     fn list_connections(&self) -> Result<Vec<Connection>, RepositoryError>;
     fn get_connection(&self, id: ConnectionId) -> Result<Option<Connection>, RepositoryError>;
@@ -41,9 +39,7 @@ pub trait ConnectionRepository: Send + Sync {
         new_sort: i64,
     ) -> Result<(), RepositoryError>;
 
-    // -----------------------------------------------------------------------
     // Groups
-    // -----------------------------------------------------------------------
 
     fn list_groups(&self) -> Result<Vec<Group>, RepositoryError>;
     fn get_group(&self, id: GroupId) -> Result<Option<Group>, RepositoryError>;
@@ -65,9 +61,7 @@ pub trait ConnectionRepository: Send + Sync {
         new_sort: i64,
     ) -> Result<(), RepositoryError>;
 
-    // -----------------------------------------------------------------------
     // Credentials
-    // -----------------------------------------------------------------------
 
     fn list_credentials(&self) -> Result<Vec<Credential>, RepositoryError>;
     fn get_credential(&self, id: CredentialId) -> Result<Option<Credential>, RepositoryError>;
@@ -80,9 +74,7 @@ pub trait ConnectionRepository: Send + Sync {
     /// their credential id nullified.
     fn delete_credential(&self, id: CredentialId) -> Result<(), RepositoryError>;
 
-    // -----------------------------------------------------------------------
     // Credential folders
-    // -----------------------------------------------------------------------
 
     fn list_credential_folders(&self) -> Result<Vec<CredentialFolder>, RepositoryError>;
     fn get_credential_folder(
@@ -109,9 +101,7 @@ pub trait ConnectionRepository: Send + Sync {
         new_sort: i64,
     ) -> Result<(), RepositoryError>;
 
-    // -----------------------------------------------------------------------
     // Inheritance resolution
-    // -----------------------------------------------------------------------
 
     /// Returns the effective [`CredentialId`] for a connection by walking the
     /// group inheritance chain:
@@ -125,16 +115,14 @@ pub trait ConnectionRepository: Send + Sync {
         conn_id: ConnectionId,
     ) -> Result<Option<CredentialId>, RepositoryError>;
 
-    // -----------------------------------------------------------------------
-    // Recents (P6.14 — Launchpad)
-    // -----------------------------------------------------------------------
+    // Recent connections
 
     /// Records that `id` was just opened at `opened_at` (epoch seconds),
     /// superseding any earlier record for the same connection. Recency only —
-    /// not frecency (a nice-to-have noted, not implemented, by the P6.14 task
+    /// not frecency (a nice-to-have noted, not implemented, by the task
     /// spec). Best-effort: callers should treat a failure here as non-fatal to
     /// the connect attempt itself (see the schema memo,
-    /// `docs/devel/memos/P6.14-recents-schema.md`).
+    ///).
     fn record_recent(&self, id: ConnectionId, opened_at: i64) -> Result<(), RepositoryError>;
 
     /// Returns up to `limit` `(connection id, opened_at)` pairs among

@@ -50,7 +50,7 @@ fn wire_toggle_sidebar(ctx: &Ctx) {
     });
 }
 
-/// Persist the side-panel width once per drag gesture (P6.9 gap 11). Defensively
+/// Persist the side-panel width once per drag gesture. Defensively
 /// re-clamps server-side (see `util::clamp_sidebar_width`) so a value from any
 /// non-drag caller (e.g. a future QA-harness command) can't persist a width
 /// outside the chrome's own bounds.
@@ -72,7 +72,7 @@ fn wire_sidebar_width_changed(ctx: &Ctx) {
     });
 }
 
-/// ErrorOverlay "Edit…" (P6.9 gap 16): reopen the failed profile's own editor
+/// ErrorOverlay "Edit…": reopen the failed profile's own editor
 /// via the exact existing CRUD callback (`edit_conn`), or fall back to
 /// quick-connect when the failing tab has no originating stored profile
 /// (quick-connect / local-shell tabs never show this overlay's Edit path
@@ -95,7 +95,7 @@ fn wire_edit_failed_profile(ctx: &Ctx) {
     });
 }
 
-/// Pure decision behind [`wire_edit_failed_profile`] -- kept separate from the
+/// Pure decision behind [`wire_edit_failed_profile`] - kept separate from the
 /// `AppWindow` dispatch so it is unit-testable without a live UI (mirrors the
 /// "menu-action dispatch" test style used for other CRUD-callback reuse in
 /// this codebase, e.g. `palette::dispatch_palette_action`).
@@ -127,10 +127,10 @@ fn wire_toast_dismissed(ctx: &Ctx) {
 }
 
 pub(super) fn update_overlays_from_status(ui: &AppWindow, tab: &Tab, status: &SessionStatus) {
-    // P6.14 (gap 3): an "empty" tab (the Launchpad-fronted local shell used
+    // an "empty" tab (the Launchpad-fronted local shell used
     // for the home/new-tab-without-a-live-session state) shows the Launchpad
     // instead of the terminal for as long as its underlying shell reports
-    // Connected -- the only status a fresh local shell should ever be in.
+    // Connected - the only status a fresh local shell should ever be in.
     // If it somehow isn't (spawn raced into a weird state), fall through to
     // the normal handling below so the tab is never stuck invisible.
     if tab.is_empty && matches!(status, SessionStatus::Connected) {
@@ -165,7 +165,7 @@ pub(super) fn update_overlays_from_status(ui: &AppWindow, tab: &Tab, status: &Se
             ui.set_session_status(SharedString::from("error"));
         }
         SessionStatus::Disconnected => {
-            // P9.12 #3: a clean disconnect is not a failure -- neutral
+            // #3: a clean disconnect is not a failure - neutral
             // "Session ended" framing (see `error_is_failure`'s doc comment,
             // ErrorOverlay). Reconnect stays available either way.
             if tab.is_remote {
@@ -179,8 +179,8 @@ pub(super) fn update_overlays_from_status(ui: &AppWindow, tab: &Tab, status: &Se
             ui.set_session_status(SharedString::from("disconnected"));
         }
         SessionStatus::Exited(exit) => {
-            // P9.12 #3: a shell `exit` -- clean (`success: true`) or a
-            // non-zero exit code -- is still not a *connection* failure
+            // #3: a shell `exit` - clean (`success: true`) or a
+            // non-zero exit code - is still not a *connection* failure
             // (the connection itself worked; the remote command just
             // ended). Neutral framing either way, matching `Disconnected`
             // above; the exit code itself is still surfaced in `detail`.
@@ -232,7 +232,7 @@ mod tests {
         }
     }
 
-    // ── gap 16: ErrorOverlay "Edit…" dispatch ───────────────────────────
+    // ──: ErrorOverlay "Edit…" dispatch ───────────────────────────
 
     #[test]
     fn resolve_edit_action_with_origin_edits_that_profile() {

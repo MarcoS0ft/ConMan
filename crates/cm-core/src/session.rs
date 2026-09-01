@@ -1,10 +1,9 @@
-//! Session lifecycle port types (P6.15).
+//! Session lifecycle port types.
 //!
 //! Moved here from `cm-session/src/session.rs` so the [`SessionProvider`]
 //! port (`cm_core::session_ports`) can return a value `cm-ui` uses
 //! polymorphically without depending on the concrete `cm-session` adapter
-//! crate. See `docs/devel/memos/P6.15-sessionprovider-port.md` for the
-//! reserved-decision writeup (recommendation C).
+//! crate.
 //!
 //! `cm-session`'s `RdpSession`/`LocalTerminalSession`/`SshTerminalSession`
 //! all implement [`Session`]; `cm-session::session` re-exports everything in
@@ -21,9 +20,7 @@ use std::path::PathBuf;
 
 use crate::terminal::{GridSnapshot, KeyEvent, MouseEvent};
 
-// ---------------------------------------------------------------------------
 // Shared types
-// ---------------------------------------------------------------------------
 
 /// The exit status of a session's process (local shell child / remote shell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,12 +48,10 @@ pub enum SessionStatus {
     Failed(String),
 }
 
-// ---------------------------------------------------------------------------
-// Neutral RDP input types (P4.2 — moved here from rdp.rs so SessionInput can
-// reference them without a circular dep rdp→session→rdp; P6.15 — moved again,
+// Neutral RDP input types live here so SessionInput can
+// reference them without a circular dep rdp→session→rdp; — moved again,
 // cm-session → cm-core, so the SessionProvider port can return a Session
 // trait object without cm-core depending on cm-session).
-// ---------------------------------------------------------------------------
 
 /// Mouse button identifier for [`RdpInputEvent`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +68,7 @@ pub enum RdpMouseButton {
 /// Transport-neutral RDP input event.
 ///
 /// Used by [`SessionInput::Rdp`] to send keyboard, mouse, and scroll events to
-/// an RDP session via [`Session::send_input`].  The driver converts these to
+/// an RDP session via [`Session::send_input`]. The driver converts these to
 /// `FastPathInputEvent`s inside `cm-session::rdp` using `ironrdp-input`.
 #[derive(Debug, Clone)]
 pub enum RdpInputEvent {
@@ -111,9 +106,7 @@ pub enum RdpInputEvent {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Transport-neutral session input (P4.2)
-// ---------------------------------------------------------------------------
+// Transport-neutral session input
 
 /// Transport-neutral input event sent to any session via [`Session::send_input`].
 ///
@@ -128,7 +121,7 @@ pub enum SessionInput {
     Mouse(MouseEvent),
     /// Paste raw bytes into the terminal (e.g. clipboard paste via bracketed-paste).
     Paste(Vec<u8>),
-    /// P6.7: set the terminal viewport's scroll offset (lines above the live
+    /// set the terminal viewport's scroll offset (lines above the live
     /// tail; `0` = tail/follow). Terminal sessions only — RDP ignores it.
     Scroll(u32),
     /// RDP input events (keyboard / mouse / scroll).
@@ -197,9 +190,7 @@ pub enum RdpClipboardEvent {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Unified Session trait (P4.1+P4.2)
-// ---------------------------------------------------------------------------
+// Unified Session trait (+)
 
 /// A decoded RGBA framebuffer frame published by `cm_session::RdpSession`.
 ///
@@ -220,7 +211,7 @@ pub struct FrameUpdate {
 /// The rendering surface exposed by a [`Session`].
 ///
 /// - `TerminalGrid` — a channel of terminal cell snapshots (terminal sessions).
-/// - `Framebuffer`  — a channel of decoded RGBA frames (RDP sessions).
+/// - `Framebuffer` — a channel of decoded RGBA frames (RDP sessions).
 ///
 /// The UI inspects this once on session construction and holds the appropriate
 /// receiver for the tab's lifetime (ARCHITECTURE §4).
@@ -259,7 +250,7 @@ impl std::fmt::Debug for Surface {
     }
 }
 
-/// Unified live-session handle (P4.1+P4.2; port-ified in P6.15).
+/// Unified live-session handle (+; port-ified in).
 ///
 /// `cm_session::{RdpSession, LocalTerminalSession, SshTerminalSession}` all
 /// implement this trait. The `cm-ui` controller holds `Box<dyn Session>` per
@@ -279,7 +270,7 @@ pub trait Session: Send {
     /// `resize_cells` for cell-level precision.
     fn resize_px(&self, width: u32, height: u32);
 
-    // ── P4.2 additions ────────────────────────────────────────────────────────
+    // ── additions ────────────────────────────────────────────────────────
 
     /// Resize by cell grid dimensions (terminal sessions; no-op for RDP).
     ///
@@ -293,7 +284,7 @@ pub trait Session: Send {
     /// the rest. Default: no-op.
     fn send_input(&self, _input: SessionInput) {}
 
-    // ── P6.7 addition ────────────────────────────────────────────────────────
+    // ── addition ────────────────────────────────────────────────────────
 
     /// Request the full retained buffer as plain-text lines (search) be sent
     /// to `reply`, asynchronously — the caller polls `reply` rather than
@@ -310,15 +301,13 @@ pub trait Session: Send {
     }
 }
 
-// ---------------------------------------------------------------------------
-// FailedSession (P5.3 carry-over fix b)
-// ---------------------------------------------------------------------------
+// FailedSession
 
 /// A sentinel [`Session`] that immediately reports `Failed`.
 ///
 /// Used when a synchronous connection error prevents spawning a real session
 /// thread — the UI receives a proper tab with an error overlay rather than
-/// a silent `eprintln!` (carry-over fix b).
+/// a silent `eprintln!` .
 ///
 /// The surface channel is a permanently-closed `Receiver<GridSnapshot>`:
 /// the tick loop will drain nothing and the tab is auto-closed after the

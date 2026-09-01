@@ -1,4 +1,4 @@
-//! SSH auth-input and host-key-verification contract types (P6.15).
+//! SSH auth-input and host-key-verification contract types.
 //!
 //! Moved here from `cm-session/src/ssh.rs` — these are pure data/trait
 //! definitions with no I/O, needed by the [`crate::session_ports::
@@ -9,13 +9,13 @@
 //! (`russh::keys::known_hosts::*`), which has no place in `cm-core`'s
 //! charter (ARCHITECTURE §1: "no I/O"). It stays in `cm-session::ssh`; the
 //! `SessionProvider` adapter constructs it internally so callers never need
-//! to know it exists. See `docs/devel/memos/P6.15-sessionprovider-port.md`.
+//! to know it exists.
 
 use std::sync::Arc;
 
 use crate::credential::Secret;
 
-/// MVP inline authentication input (until `cm-secrets`/profile storage lands in P1).
+/// MVP inline authentication input (until `cm-secrets`/profile storage lands in).
 /// Secrets are [`Secret`] (zeroizing) and never logged.
 ///
 /// `Clone` is derived so the controller can store a copy for reconnect.
@@ -35,7 +35,7 @@ pub enum SshAuthInput {
         path: std::path::PathBuf,
         passphrase: Option<Secret>,
     },
-    /// Public-key authentication from key material held in memory (P6.4: a
+    /// Public-key authentication from key material held in memory (a
     /// stored `Credential`'s private-key text fetched from the keychain —
     /// there is no file on disk to point `Key` at). `key_pem` is the
     /// OpenSSH/PEM-encoded private key text, decoded via
@@ -45,10 +45,10 @@ pub enum SshAuthInput {
         key_pem: Secret,
         passphrase: Option<Secret>,
     },
-    /// ssh-agent authentication. Unix: `SSH_AUTH_SOCK`. Windows (P6.13): the
+    /// ssh-agent authentication. Unix: `SSH_AUTH_SOCK`. Windows: the
     /// OpenSSH agent named pipe `\\.\pipe\openssh-ssh-agent`.
     Agent,
-    /// Keyboard-interactive authentication (P6.13): the server drives one or
+    /// Keyboard-interactive authentication: the server drives one or
     /// more challenge/response rounds (e.g. a password prompt, then a TOTP
     /// code); `handler` collects the user's answers for each round. Modeled
     /// on [`HostKeyVerifier`] — a UI prompt flow round-tripped synchronously
@@ -73,9 +73,7 @@ impl std::fmt::Debug for SshAuthInput {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Keyboard-interactive auth (P6.13)
-// ---------------------------------------------------------------------------
+// Keyboard-interactive auth
 
 /// A single keyboard-interactive prompt from the server: the text to show and
 /// whether the terminal should echo the typed characters.
@@ -102,16 +100,14 @@ pub struct KbdInteractiveChallenge {
 /// block the calling (session driver) thread while they round-trip through
 /// the host UI event loop. Return `None` to abort authentication (e.g. the
 /// user dismissed the prompt) or `Some(answers)` with exactly
-/// `challenge.prompts.len()` entries, in order. Answers are [`Secret`] and
+/// `challenge.prompts.len` entries, in order. Answers are [`Secret`] and
 /// must never be logged, `Debug`-formatted, or otherwise stringified outside
 /// the auth exchange itself (CONVENTIONS §2).
 pub trait KbdInteractiveHandler: Send + Sync {
     fn respond(&self, challenge: &KbdInteractiveChallenge) -> Option<Vec<Secret>>;
 }
 
-// ---------------------------------------------------------------------------
 // Host-key verification
-// ---------------------------------------------------------------------------
 
 /// Which store a previously-recorded host key came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +130,7 @@ pub enum HostKeySituation {
     },
 }
 
-/// Details of a host key awaiting a user decision (the prompt UI is P3.2).
+/// Details of a host key awaiting a user decision (the prompt UI is).
 #[derive(Debug, Clone)]
 pub struct HostKeyInfo {
     pub host: String,
@@ -155,7 +151,7 @@ pub enum HostKeyDecision {
     Reject,
 }
 
-/// Decides whether to trust an unknown/mismatched host key. In P3.2 this is the
+/// Decides whether to trust an unknown/mismatched host key. In this is the
 /// prompt UI; in tests it is programmatic (auto-accept / auto-reject).
 pub trait HostKeyVerifier: Send + Sync {
     fn decide(&self, info: &HostKeyInfo) -> HostKeyDecision;

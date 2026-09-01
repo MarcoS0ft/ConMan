@@ -1,4 +1,4 @@
-//! RDP session via IronRDP (P4.1).
+//! RDP session via IronRDP.
 //!
 //! Architecture (ARCHITECTURE §4/§5):
 //! - A **tokio current-thread runtime** on a dedicated OS thread drives the
@@ -13,106 +13,69 @@
 //!   both remote→local and local→remote text transfers are implemented.
 //!
 //! IronRDP crate versions (verified 2026-06-28 against crates.io):
-//!   ironrdp-connector  0.9.0  (vendored, CredSSP feature ON — P9.1)
-//!   ironrdp-async      0.9.0  (vendored, CredSSP feature ON — P9.1)
-//!   ironrdp-session    0.10.0
-//!   ironrdp-tokio      0.9.0
-//!   ironrdp-graphics   0.8.1
-//!   ironrdp-pdu        0.8.0
-//!   ironrdp-input      0.6.0  (neutral→FastPath input encoding)
-//!   ironrdp-cliprdr    0.6.0
-//!   ironrdp-tls        0.2.1  (rustls + ring backend)
+//! ironrdp-connector 0.9.0 (vendored, CredSSP feature ON —)
+//! ironrdp-async 0.9.0 (vendored, CredSSP feature ON —)
+//! ironrdp-session 0.10.0
+//! ironrdp-tokio 0.9.0
+//! ironrdp-graphics 0.8.1
+//! ironrdp-pdu 0.8.0
+//! ironrdp-input 0.6.0 (neutral→FastPath input encoding)
+//! ironrdp-cliprdr 0.6.0
+//! ironrdp-tls 0.2.1 (rustls + ring backend)
 //!
-//! TLS backend: `rustls` with the `ring` crypto provider — avoids the
-//! `aws-lc-rs` NASM/MSVC build failures encountered in P3.1.
+//! TLS backend: `rustls` with the `ring` crypto provider, avoiding the
+//! `aws-lc-rs` NASM/MSVC build requirement.
 //!
-//! **CredSSP / NLA (P9.1)**: `enable_credssp: true` — the connector advertises
-//! TLS|CredSSP. The server picks; `ClientConnector::should_perform_credssp()`
+//! CredSSP / NLA: `enable_credssp: true` — the connector advertises
+//! TLS|CredSSP. The server picks; `ClientConnector::should_perform_credssp`
 //! gates the CredSSP step, so servers that select plain TLS (NLA disabled,
-//! e.g. win11-target, xrdp `security_layer=tls`) are completely unaffected —
-//! this is the load-bearing backward-compat guarantee for the pre-existing
-//! TLS-only path. Auth mechanism is **NTLM only** (username/password,
-//! optional domain — see [`RdpAuthInput`]); Kerberos scaffolding
-//! (`KerberosConfig`, a KDC-capable `NetworkClient`) exists upstream but is
-//! wired off (`kerberos_config: None`) — see [`NtlmOnlyNetworkClient`].
-//! Smartcard CredSSP is not supported (the vendored `sspi` build disables the
-//! `scard` feature to avoid a crypto-bigint conflict with russh — see
-//! `docs/devel/memos/P9.1-credssp-dep-audit.md`).
+//! e.g. win11-target, xrdp `security_layer=tls`) remain supported. Auth
+//! mechanism is **NTLM only** (username/password, optional domain — see
+//! [`RdpAuthInput`]); Kerberos scaffolding exists upstream but remains
+//! disabled (`kerberos_config: None`). Smartcard CredSSP is not supported;
+//! the vendored `sspi` build disables `scard` to avoid a crypto-bigint conflict
+//! with russh.
 //!
-//! **Dependency snapshot is a pinned, fragile RustCrypto RC alignment** (not a
-//! durable position) — see `docs/devel/memos/P9.1-credssp-dep-audit.md` and
-//! `docs/devel/tasks/CLEANUP-credssp-vendoring.md` for the exact pins and the
-//! removal trigger (RustCrypto 1.0 stabilization).
+//! The RustCrypto pre-release versions remain pinned together to avoid
+//! duplicate or incompatible transitive versions.
 //!
-//! **Server-side TLS requirement**: ConMan's IronRDP connector only advertises
-//! and accepts enhanced-security protocols (TLS / CredSSP); it has no
-//! implementation of legacy Standard RDP Security (RC4) and never will (see
-//! `RdpError::LegacySecurityOnly` below). The RDP server must therefore be
-//! configured to offer TLS or CredSSP — for xrdp, `security_layer=negotiate`
-//! (or `tls`) in `/etc/xrdp/xrdp.ini`, restart the service. A server left at
-//! the xrdp default `security_layer=rdp` selects Standard RDP Security and
-//! the connection fails with a dedicated, actionable error rather than a raw
-//! connector string (diagnosed in `memos/rdp-xrdp-diagnosis-2026-07.md`;
-//! supporting the legacy layer via a second engine is a P8 candidate, not
-//! this crate).
+//! Server-side TLS requirement: ConMan's IronRDP connector only advertises
+//! and accepts enhanced-security protocols (TLS / CredSSP); legacy Standard
+//! RDP Security (RC4) is unsupported. Configure the RDP server to offer TLS
+//! or CredSSP — for xrdp, use `security_layer=negotiate` or `tls` in
+//! `/etc/xrdp/xrdp.ini`. A server left at `security_layer=rdp` receives the
+//! dedicated `RdpError::LegacySecurityOnly` error.
 //!
-//! **Unified input (P4.2)**: `Session::send_input(SessionInput)` dispatches
+//! Unified input: `Session::send_input(SessionInput)` dispatches
 //! `SessionInput::Rdp(events)` to the wire; CLIPRDR commands use the separate
-//! `SessionInput::RdpClipboard` path. `RdpInputEvent` and `RdpMouseButton` are now
-//! defined in `session.rs` (shared neutral types).
+//! `SessionInput::RdpClipboard` path. `RdpInputEvent` and `RdpMouseButton` are
+//! defined in `session.rs` as shared neutral types.
 //!
-//! **Cert store persistence (P4.2)**: `CertStore::new_persistent(path)` loads
-//! existing entries from a JSON file and saves on every accepted fingerprint.
-//! Call with a path in the app-data directory so TOFU survives restarts.
+//! Cert store persistence: `CertStore::new_persistent(path)` loads existing
+//! entries from a JSON file and saves on every accepted fingerprint. Call it
+//! with a path in the app-data directory so TOFU survives restarts.
 //!
-//! **Deactivation-Reactivation Sequence (P9.9)**: when the server sends
-//! `DeactivateAll` (which xrdp does during normal connection setup before
-//! first bitmap data, and which any server does in response to a display-
-//! control resize -- MS-RDPBCGR §1.3.1.3), `active_loop` disambiguates the
-//! target by peeking the `Action` of the very next PDU (`reactivate_session`):
-//! - `Action::X224` (a compliant host's `ServerDemandActive`): drives the
-//!   bound `ConnectionActivationSequence` to `Finalized` (the same state
-//!   machine used for the ordinary connect sequence), then applies the new
-//!   `share_id` and negotiated `desktop_size` via `ActiveStage::set_share_id`,
-//!   a freshly-built `fast_path::Processor` (`ActiveStage::set_fastpath_processor`),
-//!   and a `DecodedImage` realloc. `static_channels` (the DisplayControl DVC,
-//!   clipboard SVC) are never touched -- they live inside `ActiveStage`'s
-//!   private `x224::Processor` the whole time, so nothing is dropped.
-//! - `Action::FastPath` (xrdp's non-compliant shortcut: it resumes bitmap
-//!   updates immediately, no `DemandActive`): the CAS is dropped and the
-//!   already-read frame is processed normally -- the session stays stable at
-//!   its current size (a legitimate no-op resize on this target, never a
-//!   hang or a crash).
+//! Deactivation-Reactivation Sequence: when the server sends `DeactivateAll`,
+//! `active_loop` disambiguates the target by peeking at the next PDU:
+//! - `Action::X224` drives the bound `ConnectionActivationSequence` to
+//!   `Finalized`, then applies the new share ID, desktop size, fast-path
+//!   processor, and framebuffer while retaining static channels.
+//! - `Action::FastPath` processes the already-read frame normally and keeps
+//!   the session at its current size.
 //!
-//! A prior version of this comment said the loop discarded `DeactivateAll`
-//! outright and "just `continue`s" -- that was true before P9.9 landed the
-//! state machine above.
-//!
-//! **Resize**: `resize_px` sends a Display Control resize PDU
+//! Resize: `resize_px` sends a Display Control resize PDU
 //! (`ActiveStage::encode_resize`); the `RdpCmd::Resize` handler coalesces a
 //! burst of pending resizes (`coalesce_latest_resize`) down to one PDU for
 //! the settled size, avoiding a reactivation storm on a live window drag.
 //!
-//! **P9.9-FIX**: `encode_resize` returns `None` (a silent no-op) unless the
-//! `DisplayControl` DVC is registered AND the server has opened it --
-//! `drive_inner` registers a `DrdynvcClient` carrying a `DisplayControlClient`
-//! alongside `cliprdr` for exactly this reason (unless
-//! `CONMAN_RDP_DISABLE_DISPLAYCONTROL=1` opts out -- see
-//! `rdp_displaycontrol_disabled`, a manual escape hatch for hosts that hang
-//! on the DVC channel-join, not an automatic fallback). Before this fix, no
-//! DVC was registered at all, so `encode_resize` always returned `None`: the
-//! resize PDU was never written to the wire, no server ever saw a resize
-//! request, `DeactivateAll` never fired, and the whole state machine above
-//! -- correct on its own terms -- was unreachable. (An earlier version of
-//! this doc block claimed `static_channels` already included the
-//! DisplayControl DVC; that was aspirational and untrue until this fix
-//! landed.) Timing caveat,
-//! not a defect: `encode_resize` still returns `None` until the DVC's
-//! capability exchange completes after connect (the server must open the
-//! channel first) -- a resize fired in the sub-second window right after
-//! connect can still no-op. Resizes are user-driven window/pane drags, well
-//! after connect, so this is not expected to matter in practice; not worth
-//! buffering unless a live test shows a real first-resize miss.
+//! `encode_resize` returns `None` unless the `DisplayControl` DVC is
+//! registered and the server has opened it. `drive_inner` registers a
+//! `DrdynvcClient` carrying a `DisplayControlClient` alongside `cliprdr`.
+//! Setting `CONMAN_RDP_DISABLE_DISPLAYCONTROL=1` opts out for hosts that hang
+//! on the DVC channel join; this is a manual escape hatch, not an automatic
+//! fallback. The DVC capability exchange must complete before resize requests
+//! can be encoded, so a resize during that short window is intentionally a
+//! no-op.
 
 use std::io::Write as _;
 use std::sync::mpsc::{self, SyncSender};
@@ -153,7 +116,7 @@ use cm_core::RdpClipboardCommand;
 
 mod clipboard;
 use clipboard::{ClipboardBackend, ClipboardEventMailbox, ClipboardWork};
-// P6.15: the auth-input and cert-verifier *contract* types moved to
+// the auth-input and cert-verifier *contract* types moved to
 // `cm_core::rdp` (needed by the `SessionProvider` port, which must be
 // nameable from `cm-core` without a cm-core -> cm-session dependency). Only
 // `CertStore` (real file I/O) stays here. Re-exported so external callers
@@ -162,16 +125,12 @@ pub use cm_core::rdp::{
     CertDecision, CertInfo, CertSituation, CertVerifier, KnownCertSource, RdpAuthInput,
 };
 
-// ---------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
 
 /// Number of pending FrameUpdates before the oldest is dropped (backpressure).
 const FRAME_CHANNEL_CAPACITY: usize = 4;
 
-// ---------------------------------------------------------------------------
 // Ring crypto-provider bootstrap
-// ---------------------------------------------------------------------------
 
 /// Ensure the `ring` crypto provider is registered as the process-level
 /// rustls provider before any TLS call.
@@ -184,9 +143,7 @@ fn install_ring_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-// ---------------------------------------------------------------------------
 // Certificate verification
-// ---------------------------------------------------------------------------
 
 /// Programmatic verifier for tests: always returns a fixed decision.
 #[derive(Debug)]
@@ -210,9 +167,9 @@ impl CertVerifier for FixedCertVerifier {
 ///
 /// Maps `host:port` → SHA-256 fingerprint for TOFU certificate verification.
 ///
-/// **Persistent (P4.2):** construct with [`CertStore::new_persistent`] to back
-/// the store with a JSON file.  The file is created on the first accepted
-/// fingerprint and updated atomically on each subsequent one.  Use
+/// **Persistent:** construct with [`CertStore::new_persistent`] to back
+/// the store with a JSON file. The file is created on the first accepted
+/// fingerprint and updated atomically on each subsequent one. Use
 /// [`CertStore::new`] for an ephemeral in-memory-only instance (tests, etc.).
 #[derive(Debug)]
 pub struct CertStore {
@@ -239,7 +196,7 @@ impl CertStore {
     /// Create a persistent cert store backed by `path`.
     ///
     /// Existing entries are loaded from the file if it exists; missing or
-    /// unparseable files start empty.  The file is created / updated on each
+    /// unparseable files start empty. The file is created / updated on each
     /// accepted fingerprint.
     pub fn new_persistent(path: std::path::PathBuf) -> Arc<Self> {
         let entries: std::collections::HashMap<String, String> = std::fs::read_to_string(&path)
@@ -308,12 +265,10 @@ impl CertStore {
     }
 }
 
-// ---------------------------------------------------------------------------
-// RdpMouseButton → ironrdp-input MouseButton conversion (P4.1; types moved to
-// cm-core in P6.15 — `RdpMouseButton` is no longer local to this crate, so a
+// RdpMouseButton → ironrdp-input MouseButton conversion (types moved to
+// cm-core in — `RdpMouseButton` is no longer local to this crate, so a
 // trait impl of the foreign `From` for the foreign `MouseButton` would
 // violate the orphan rule (E0117); a local free function sidesteps that.)
-// ---------------------------------------------------------------------------
 
 fn to_ironrdp_mouse_button(b: RdpMouseButton) -> MouseButton {
     match b {
@@ -325,9 +280,7 @@ fn to_ironrdp_mouse_button(b: RdpMouseButton) -> MouseButton {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Internal driver command
-// ---------------------------------------------------------------------------
 
 enum RdpCmd {
     /// Neutral input events to encode and send to the server.
@@ -342,12 +295,12 @@ enum RdpCmd {
     Clipboard(RdpClipboardCommand),
 }
 
-/// P9.9 §5: collapses a burst of pending resize sizes down to the latest one.
+/// §5: collapses a burst of pending resize sizes down to the latest one.
 ///
 /// A live window/pane drag fires `resize_px` (and so `RdpCmd::Resize`) many
 /// times in quick succession; without coalescing, each would trigger its own
 /// Display Control PDU -> `ActiveStageOutput::DeactivateAll` -> a full
-/// reactivation -- a "reactivation storm". `active_loop`'s `RdpCmd::Resize`
+/// reactivation - a "reactivation storm". `active_loop`'s `RdpCmd::Resize`
 /// handler drains every immediately-pending `Resize` from the command
 /// channel and calls this pure function so exactly one resize PDU is sent
 /// for the settled size. Factored out (rather than inlined) so it's
@@ -364,9 +317,7 @@ fn is_new_resize_target(last: (u32, u32), requested: (u32, u32)) -> bool {
     last != requested
 }
 
-// ---------------------------------------------------------------------------
 // RdpError
-// ---------------------------------------------------------------------------
 
 /// Typed RDP session errors.
 #[derive(Debug, thiserror::Error)]
@@ -380,7 +331,7 @@ pub enum RdpError {
     /// The server rejected every enhanced-security protocol ConMan advertised
     /// and negotiated legacy Standard RDP Security (RC4) instead. IronRDP has
     /// no implementation of that legacy layer (by design) and never will;
-    /// see [`map_negotiation_error`] and the P7.5 diagnosis memo.
+    /// see [`map_negotiation_error`] and the diagnosis memo.
     #[error(
         "This RDP server only offers legacy Standard RDP Security, which ConMan does not \
          support. Enable TLS on the server (xrdp: set `security_layer=negotiate` and restart)."
@@ -391,8 +342,8 @@ pub enum RdpError {
     /// so — unlike the TLS-only path, where a blank password just fails
     /// later at the Windows logon screen — ConMan can and must detect this
     /// up front and give an actionable message instead of letting the raw
-    /// CredSSP/NTLM exchange fail cryptically. See Milestone C
-    /// (`docs/devel/tasks/P9.1-credssp-nla-support.md`).
+    /// CredSSP/NTLM exchange fail cryptically. See the reviewer check
+    ///.
     #[error("This server requires credentials (NLA); add a credential or enter a password.")]
     CredentialsRequired,
     #[error("Certificate rejected: {0}")]
@@ -403,7 +354,7 @@ pub enum RdpError {
     /// (which embeds an internal `[CredSSP @ <file>:<line>]` protocol/source
     /// trace — see `ironrdp_error::Error`'s `Display` impl) is logged via
     /// `tracing` at the [`map_finalize_error`] call site instead, never
-    /// surfaced here (P9.5 item 5).
+    /// surfaced here.
     #[error("{0}")]
     Auth(String),
     #[error("Session error: {0}")]
@@ -416,9 +367,9 @@ pub enum RdpError {
 ///
 /// Detects the specific IronRDP outcome where the server confirmed the
 /// connection but selected no enhanced-security protocol at all — an empty
-/// `selected_protocol` bitset (`ironrdp_pdu::nego::SecurityProtocol::empty()`),
+/// `selected_protocol` bitset (`ironrdp_pdu::nego::SecurityProtocol::empty`),
 /// which is exactly what `security_layer=rdp` (legacy Standard RDP Security)
-/// causes an xrdp server to do (`memos/rdp-xrdp-diagnosis-2026-07.md`).
+/// causes an xrdp server to do.
 /// IronRDP's connector reports this as a [`ConnectorErrorKind::Reason`] whose
 /// text embeds the negotiated protocol's `Display` — `"STANDARD_RDP_SECURITY"`
 /// precisely when it is empty (`SecurityProtocol::is_standard_rdp_security`).
@@ -429,7 +380,7 @@ pub enum RdpError {
 /// renders that token. All other `connect_begin` failures pass through
 /// unchanged as `RdpError::Protocol`.
 ///
-/// **P9.1 note:** before CredSSP was enabled, a HYBRID-requiring server (NLA
+/// Before CredSSP was enabled, a HYBRID-requiring server (NLA
 /// on) made `connect_begin` fail outright (the opposite mismatch from the one
 /// this function handles) and there was pressure to add a matching
 /// `HYBRID_REQUIRED → dead end` mapping here. That is now obsolete: with
@@ -470,7 +421,7 @@ fn credssp_requires_credentials(should_perform_credssp: bool, password: &[u8]) -
 /// unchanged as `RdpError::Protocol`, matching [`map_negotiation_error`]'s
 /// fallback behavior.
 ///
-/// **P9.5 item 5:** `e.to_string()` for a `Credssp` failure renders as
+/// ** ** `e.to_string` for a `Credssp` failure renders as
 /// `[CredSSP @ <vendored-source-file>:<line>] <sspi message>` (the
 /// `ironrdp_error::Error<Kind>` `Display` impl always prefixes the error's
 /// context + call-site source location). That internal plumbing is
@@ -488,9 +439,7 @@ fn map_finalize_error(e: ConnectorError) -> RdpError {
     RdpError::Protocol(e.to_string())
 }
 
-// ---------------------------------------------------------------------------
 // RdpSession
-// ---------------------------------------------------------------------------
 
 /// A live RDP session driven by IronRDP over a dedicated tokio runtime thread.
 ///
@@ -510,7 +459,7 @@ impl RdpSession {
     ///
     /// # Errors
     /// Returns [`RdpError`] only for synchronous setup failures (thread spawn).
-    /// Protocol/auth/cert failures surface via [`Self::status()`].
+    /// Protocol/auth/cert failures surface via [`Self::status`].
     pub fn connect(
         cfg: &RdpSettings,
         auth: RdpAuthInput,
@@ -622,7 +571,7 @@ impl Session for RdpSession {
             }
             // Terminal inputs are not applicable to RDP.
             SessionInput::Key(_) | SessionInput::Mouse(_) | SessionInput::Paste(_) => {}
-            // P6.7: scrollback is a terminal-surface concept; RDP has none.
+            // scrollback is a terminal-surface concept; RDP has none.
             SessionInput::Scroll(_) => {}
         }
     }
@@ -647,9 +596,7 @@ fn set_status(status: &Arc<Mutex<SessionStatus>>, new: SessionStatus) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Async driver
-// ---------------------------------------------------------------------------
 
 /// Groups the runtime handles passed to the async driver so `drive_inner` stays
 /// below the clippy `too_many_arguments` threshold.
@@ -665,7 +612,7 @@ struct DriveCtx {
 }
 
 /// The [`ironrdp_async::NetworkClient`] ConMan gives CredSSP for its
-/// NTLM-only auth mode (P9.1).
+/// NTLM-only auth mode.
 ///
 /// This is a complete, correct implementation for that mode — not a
 /// placeholder: NTLM's challenge/response handshake never suspends the
@@ -690,18 +637,18 @@ impl ironrdp_async::NetworkClient for NtlmOnlyNetworkClient {
     }
 }
 
-/// P9.9-FIX (found live, not spec'd): bounded safety timeout around the
+/// (found live, not spec'd): bounded safety timeout around the
 /// `connect_begin`/`connect_finalize` negotiation calls. Both drive an
-/// internal `loop { single_sequence_step(...).await?; ... }` (vendored
-/// ironrdp-connector/-async) with no timeout of their own -- if the server
+/// internal `loop { single_sequence_step(...).await?;... }` (vendored
+/// ironrdp-connector/-async) with no timeout of their own - if the server
 /// stops responding mid-exchange (observed live: xrdp 192.0.2.10 hangs
 /// waiting for an MCS Channel Join Confirm once a DRDYNVC channel is
 /// requested, seemingly not granting it), the `.await` blocks forever. That
-/// alone would just mean a slow connect, except `RdpSession::shutdown()`
-/// blocks on `JoinHandle::join()`, which ALSO never returns while this task
-/// is stuck -- so a caller that gives up waiting for `Connected` and calls
-/// `shutdown()` hangs too, with no way to recover short of killing the
-/// process. This is not new to P9.9-FIX (the vendored loops always lacked a
+/// alone would just mean a slow connect, except `RdpSession::shutdown`
+/// blocks on `JoinHandle::join`, which ALSO never returns while this implementation
+/// is stuck - so a caller that gives up waiting for `Connected` and calls
+/// `shutdown` hangs too, with no way to recover short of killing the
+/// process. This is not new to (the vendored loops always lacked a
 /// timeout); the DVC registration is simply the first thing that reliably
 /// triggers it against a real host. Env-tunable like the other RDP timeouts.
 fn rdp_connect_phase_timeout() -> std::time::Duration {
@@ -712,24 +659,24 @@ fn rdp_connect_phase_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
-/// P9.9-FIX follow-up (N1, Fable non-blocking recommendation): an escape
+/// An escape
 /// hatch for hosts that hang during connect once the DRDYNVC/DisplayControl
-/// channel is requested (see `rdp_connect_phase_timeout`'s doc comment --
+/// channel is requested (see `rdp_connect_phase_timeout`'s doc comment -
 /// observed live against xrdp 192.0.2.10). Setting this skips registering
 /// the DVC entirely, trading away dynamic resize for a connect that can't be
 /// affected by a server declining to grant that channel. This is a manual
 /// opt-out, not an automatic fallback: an automatic retry-without-DVC was
-/// considered and rejected (Fable review) -- NOT because the one observed
+/// is intentionally not retried automatically - NOT because the one observed
 /// hang (xrdp 192.0.2.10) was deterministic; it wasn't (it reproduced
 /// once out of several attempts, correlated with that host's reconnect
-/// throttle -- see `test-hosts` memory and e8438e7's commit message).
+/// throttle - see `test-hosts` memory and e8438e7's commit message).
 /// Rejected instead because firing a second connect attempt immediately
 /// after a timeout is exactly the rapid-reconnect pattern that trips this
 /// same host's throttle: auto-retry would risk hammering an already-
 /// stressed host into a worse state, while a server that grants the DVC
 /// cleanly never needs the retry in the first place. The manual escape
 /// hatch covers the case without that risk. Automatic retry-without-DVC
-/// remains a documented FUTURE option, not dropped for good -- revisit it
+/// remains a documented FUTURE option, not dropped for good - revisit it
 /// if a host is found where a fresh retry reliably recovers *without*
 /// triggering a reconnect-throttle risk.
 fn rdp_displaycontrol_disabled() -> bool {
@@ -743,7 +690,7 @@ async fn drive(cfg: RdpSettings, auth: RdpAuthInput, ctx: DriveCtx) {
     match drive_inner(&cfg, auth, ctx).await {
         Ok(()) => {}
         Err(e) => {
-            // P9.8 B12: catch-all so no `RdpError` variant is ever silent --
+            // B12: catch-all so no `RdpError` variant is ever silent -
             // every failure that reaches here (Connect/Tls/Protocol/Session/
             // CertRejected/etc.) gets one WARN line before the status flips
             // to Failed, even though the ErrorOverlay also shows `e`.
@@ -759,11 +706,11 @@ async fn drive_inner(
     mut ctx: DriveCtx,
 ) -> Result<(), RdpError> {
     // 0. Ensure the ring crypto provider is installed before any TLS call.
-    //    ironrdp-tls enables both aws-lc-rs (default) and ring features in
-    //    tokio-rustls; without an explicit `install_default()`, rustls panics.
+    // ironrdp-tls enables both aws-lc-rs (default) and ring features in
+    // tokio-rustls; without an explicit `install_default`, rustls panics.
     install_ring_provider();
 
-    // P9.8 §5.1: connect-start Instant, used for `connect_ms` (B8) and
+    // §5.1: connect-start Instant, used for `connect_ms` (B8) and
     // `ttff_ms` (B9). Threaded into `active_loop` for the latter.
     let t0 = std::time::Instant::now();
 
@@ -783,8 +730,8 @@ async fn drive_inner(
             RdpError::Connect(e.to_string())
         })?;
 
-    // 2. Build connector config (TLS security, CredSSP/NLA enabled — P9.1).
-    //    Password exposed only here, at the IronRDP boundary, then moved.
+    // 2. Build connector config (TLS security, CredSSP/NLA enabled —).
+    // Password exposed only here, at the IronRDP boundary, then moved.
     let password = String::from_utf8_lossy(auth.password.expose()).into_owned();
     let connector_config = Config {
         desktop_size: DesktopSize {
@@ -793,7 +740,7 @@ async fn drive_inner(
         },
         desktop_scale_factor: 0,
         enable_tls: true,
-        // P9.1: advertise TLS|CredSSP. `should_perform_credssp()` (checked
+        // advertise TLS|CredSSP. `should_perform_credssp` (checked
         // below, after negotiation) is true only when the server actually
         // selects HYBRID, so TLS-only servers are unaffected — this is the
         // backward-compat guarantee for the pre-existing plain-TLS path.
@@ -830,9 +777,9 @@ async fn drive_inner(
     };
 
     // 3. Build connector with the CLIPRDR and DRDYNVC static channels
-    //    attached. `ClientConnector::new` takes a local socket address used
-    //    only for RDPDR client identification; "0.0.0.0:0" is the right
-    //    value for clients that do not bind a fixed local port.
+    // attached. `ClientConnector::new` takes a local socket address used
+    // only for RDPDR client identification; "0.0.0.0:0" is the right
+    // value for clients that do not bind a fixed local port.
     tracing::debug!(
         endpoint_id = ctx.endpoint_id.0,
         "rdp: initializing clipboard channel"
@@ -842,17 +789,17 @@ async fn drive_inner(
         ctx.clipboard_root,
         ctx.endpoint_id,
     )));
-    // P9.9-FIX: DRDYNVC carrying the DisplayControl DVC -- without this,
+    // DRDYNVC carrying the DisplayControl DVC - without this,
     // `ActiveStage::encode_resize` always returns `None` (the DVC is simply
     // not there to ask), so `RdpCmd::Resize` never actually writes a resize
-    // PDU to the wire and the reactivation state machine (P9.9) is
+    // PDU to the wire and the reactivation state machine is
     // unreachable. `DisplayControlClient::new`'s callback is the
     // `OnCapabilitiesReceived` hook (fires once the server opens the DVC and
     // sends its capabilities); a client that only ever *sends* resize
     // requests (never needs to react to the server's capabilities) replies
     // with no immediate message.
     // N1: escape hatch for hosts that hang once DRDYNVC is requested (see
-    // `rdp_displaycontrol_disabled`'s doc comment) -- skip the DVC
+    // `rdp_displaycontrol_disabled`'s doc comment) - skip the DVC
     // registration entirely rather than retry, trading away resize for a
     // connect that's unaffected by the server's channel-grant behavior.
     let displaycontrol_disabled = rdp_displaycontrol_disabled();
@@ -876,8 +823,8 @@ async fn drive_inner(
 
     // 4. Initial connection phase (before TLS upgrade).
     let mut framed: TokioFramed<TcpStream> = TokioFramed::new(tcp);
-    // P9.9-FIX: `connect_begin` drives an unbounded internal loop with no
-    // timeout of its own -- bound it here so a server that stops responding
+    // `connect_begin` drives an unbounded internal loop with no
+    // timeout of its own - bound it here so a server that stops responding
     // mid-negotiation fails the session cleanly instead of hanging forever
     // (see `rdp_connect_phase_timeout`'s doc comment for why this matters).
     let should_upgrade = match tokio::time::timeout(
@@ -887,7 +834,7 @@ async fn drive_inner(
     .await
     {
         Ok(result) => result.map_err(|e| {
-            // P9.8 B4: `map_negotiation_error` stays a pure, unit-testable
+            // B4: `map_negotiation_error` stays a pure, unit-testable
             // function (no host/port); log the actionable case here at the
             // IO boundary where those fields are in scope.
             let mapped = map_negotiation_error(e);
@@ -914,7 +861,7 @@ async fn drive_inner(
     };
 
     // 5. TLS upgrade — ironrdp-tls performs the handshake; CA validation and
-    //    TOFU follow in verify_cert.
+    // TOFU follow in verify_cert.
     let (tcp, leftover) = framed.into_inner();
     let (tls_stream, tls_cert) =
         ironrdp_tls::upgrade(tcp, cfg.host.as_str())
@@ -937,24 +884,24 @@ async fn drive_inner(
     let upgraded = mark_as_upgraded(should_upgrade, &mut connector);
     let mut framed: TokioFramed<_> = TokioFramed::new_with_leftover(tls_stream, leftover);
 
-    // 7b. P9.1: `should_perform_credssp()` only reflects the server's real
-    //     protocol selection *after* `mark_as_upgraded` above has driven the
-    //     connector's state machine past `EnhancedSecurityUpgrade`: that call
-    //     transitions to `ClientConnectorState::Credssp` when the server
-    //     selected HYBRID, or to `BasicSettingsExchange...` when it selected
-    //     plain TLS (see vendored `ironrdp-connector`'s
-    //     `mark_security_upgrade_as_done`). Immediately after `connect_begin`
-    //     (i.e. before this point) the connector is still in
-    //     `EnhancedSecurityUpgrade`, where `should_perform_credssp()` is
-    //     unconditionally false — checking there would never fire. So: if the
-    //     server requires NLA and we have no password, fail fast here with an
-    //     actionable error instead of running the CredSSP exchange only to
-    //     have NTLM reject an empty credential deep inside the connector. The
-    //     extra TLS handshake already performed above is an acceptable cost —
-    //     it's the CredSSP round-trip (and its opaque failure mode) that this
-    //     check avoids. For a TLS-only server, the state here is
-    //     `BasicSettingsExchange...`, so `should_perform_credssp()` is false
-    //     and this check is a no-op — the plain-TLS path is unaffected.
+    // 7b.: `should_perform_credssp` only reflects the server's real
+    // protocol selection *after* `mark_as_upgraded` above has driven the
+    // connector's state machine past `EnhancedSecurityUpgrade`: that call
+    // transitions to `ClientConnectorState::Credssp` when the server
+    // selected HYBRID, or to `BasicSettingsExchange...` when it selected
+    // plain TLS (see vendored `ironrdp-connector`'s
+    // `mark_security_upgrade_as_done`). Immediately after `connect_begin`
+    // (i.e. before this point) the connector is still in
+    // `EnhancedSecurityUpgrade`, where `should_perform_credssp` is
+    // unconditionally false — checking there would never fire. So: if the
+    // server requires NLA and we have no password, fail fast here with an
+    // actionable error instead of running the CredSSP exchange only to
+    // have NTLM reject an empty credential deep inside the connector. The
+    // extra TLS handshake already performed above is an acceptable cost —
+    // it's the CredSSP round-trip (and its opaque failure mode) that this
+    // check avoids. For a TLS-only server, the state here is
+    // `BasicSettingsExchange...`, so `should_perform_credssp` is false
+    // and this check is a no-op — the plain-TLS path is unaffected.
     let should_perform_credssp = connector.should_perform_credssp();
     tracing::info!(
         host = %cfg.host,
@@ -971,7 +918,7 @@ async fn drive_inner(
     }
 
     // fix-connect-credential-logging: debug-build-only diagnostic for the
-    // effective username/domain actually handed to CredSSP/NLA finalize --
+    // effective username/domain actually handed to CredSSP/NLA finalize -
     // NEVER the password (not included below; `connector_config`/`auth` are
     // deliberately not Debug-dumped even though `Secret`'s own Debug impl
     // redacts, to keep this an explicit, auditable allowlist of fields).
@@ -985,23 +932,23 @@ async fn drive_inner(
     );
 
     // `connect_finalize` (credssp build) takes:
-    //   upgraded, connector, &mut framed, network_client, server_name,
-    //   server_public_key, kerberos_config
+    // upgraded, connector, &mut framed, network_client, server_name,
+    // server_public_key, kerberos_config
     // NTLM completes locally (no KDC round-trip), so the NetworkClient's
-    // send() is never invoked — see NtlmOnlyNetworkClient. Kerberos is off
+    // send is never invoked — see NtlmOnlyNetworkClient. Kerberos is off
     // (kerberos_config: None). CredSSP itself only runs when the server
-    // selected HYBRID (should_perform_credssp(), checked in step 7b above);
+    // selected HYBRID (should_perform_credssp, checked in step 7b above);
     // TLS-only servers never reach the CredSSP branch inside this call.
     let mut network_client = NtlmOnlyNetworkClient;
-    // P9.9-FIX: found live against xrdp 192.0.2.10 once the DisplayControl
-    // DVC was registered -- `connect_finalize` drives an unbounded internal
+    // found live against xrdp 192.0.2.10 once the DisplayControl
+    // DVC was registered - `connect_finalize` drives an unbounded internal
     // loop (CredSSP, then BasicSettingsExchange -> ChannelConnection ->
     // SecureSettingsExchange -> ConnectionFinalization) with no timeout of
     // its own. This server appears to not grant the requested DRDYNVC
     // channel, so the vendored `ChannelConnectionSequence` hangs forever
-    // awaiting an MCS Channel Join Confirm that never arrives -- and because
-    // `RdpSession::shutdown()` blocks on joining this very task, a caller
-    // that gives up waiting for `Connected` and calls `shutdown()` hangs
+    // awaiting an MCS Channel Join Confirm that never arrives - and because
+    // `RdpSession::shutdown` blocks on joining this very task, a caller
+    // that gives up waiting for `Connected` and calls `shutdown` hangs
     // too. Bound the whole call so a non-responsive server always fails the
     // session cleanly instead of wedging it (see `rdp_connect_phase_timeout`).
     let connection_result: ConnectionResult = match tokio::time::timeout(
@@ -1019,10 +966,10 @@ async fn drive_inner(
     .await
     {
         Ok(result) => result.map_err(|e| {
-            // P9.8 B7: `map_finalize_error` stays pure/testable (no host/username
+            // B7: `map_finalize_error` stays pure/testable (no host/username
             // in scope); log the actionable, operator-facing event here where
             // they're available. `map_finalize_error` still separately logs the
-            // raw ironrdp error at `debug` for deep diagnosis (P9.5 item 5) --
+            // raw ironrdp error at `debug` for deep diagnosis -
             // this ERROR line is the "what happened, to whom" summary.
             if matches!(e.kind(), ConnectorErrorKind::Credssp(_)) {
                 tracing::error!(
@@ -1039,8 +986,8 @@ async fn drive_inner(
                 "rdp: connect finalization timed out (server stopped responding \
                  -- e.g. not granting a requested channel during MCS channel-join)"
             );
-            // N2 (Fable follow-up): a short cause hint appended to the raw
-            // timeout message -- self-diagnosing for a support ticket. Only
+            // A short cause hint is appended to the raw
+            // timeout message - self-diagnosing for a support ticket. Only
             // relevant when the DVC was actually requested; a host that
             // already has it disabled hung for some other reason, so the
             // hint would be misleading there.
@@ -1093,8 +1040,8 @@ async fn drive_inner(
 /// Strategy (per spec):
 /// 1. If the cert is valid against the OS/CA trust store, accept silently.
 /// 2. Otherwise fall back to TOFU: look up the fingerprint in the store.
-///    - Match → accept silently (previously pinned).
-///    - Unknown / mismatch → ask the verifier (user dialog in P4.2).
+/// - Match → accept silently (previously pinned).
+/// - Unknown / mismatch → ask the verifier (user dialog in).
 ///
 /// Returns the server's DER public key bytes (needed by `connect_finalize`).
 fn verify_cert(
@@ -1121,7 +1068,7 @@ fn verify_cert(
         .to_vec();
 
     // 1. Try CA validation against the platform root store.
-    //    CA-valid certs connect silently — no TOFU or user prompt required.
+    // CA-valid certs connect silently — no TOFU or user prompt required.
     if is_ca_trusted(&der, host) {
         return Ok(public_key);
     }
@@ -1181,7 +1128,7 @@ fn verify_cert(
 /// Check whether the DER-encoded certificate is signed by a trusted OS/CA root.
 ///
 /// Uses `rustls-native-certs` to load the platform trust store and
-/// `WebPkiServerVerifier` to validate.  Returns `false` on any error (missing
+/// `WebPkiServerVerifier` to validate. Returns `false` on any error (missing
 /// certs, parse failures, hostname mismatch) so that the caller falls through
 /// to TOFU.
 fn is_ca_trusted(cert_der: &[u8], host: &str) -> bool {
@@ -1229,13 +1176,11 @@ fn sha256_fingerprint(data: &[u8]) -> String {
     s
 }
 
-// ---------------------------------------------------------------------------
 // Active-stage loop
-// ---------------------------------------------------------------------------
 
-/// P9.9 §3: bounded safety timeout for driving the reactivation
+/// §3: bounded safety timeout for driving the reactivation
 /// (`ConnectionActivationSequence`) to `Finalized` after a compliant host's
-/// `DemandActive`. Belt-and-suspenders against a half-speaking server -- the
+/// `DemandActive`. Belt-and-suspenders against a half-speaking server - the
 /// reactivation must never be able to wedge `active_loop` forever; on
 /// timeout the session fails with a clear status instead of hanging (the
 /// §3 degradation contract: a wedged session is never acceptable, a stable
@@ -1256,8 +1201,8 @@ enum PduOutcome {
     /// Nothing special; the caller proceeds as usual.
     Continue,
     /// The server sent [`ActiveStageOutput::Terminate`]; `status` has
-    /// already been set to [`SessionStatus::Disconnected`] -- the caller
-    /// must return `Ok(())` from `active_loop`.
+    /// already been set to [`SessionStatus::Disconnected`] - the caller
+    /// must return `Ok` from `active_loop`.
     Terminated,
     /// The server sent [`ActiveStageOutput::DeactivateAll`]; the caller
     /// drives the Deactivation-Reactivation Sequence (`reactivate_session`).
@@ -1265,7 +1210,7 @@ enum PduOutcome {
 }
 
 /// Outcome of handling one non-`Resize` [`RdpCmd`] ([`handle_rdp_cmd`]).
-/// `Resize` has its own coalescing wrapper directly in `active_loop` (P9.9
+/// `Resize` has its own coalescing wrapper directly in `active_loop` (
 /// §5) so it never reaches `handle_rdp_cmd`.
 #[derive(PartialEq, Eq)]
 enum CmdOutcome {
@@ -1282,7 +1227,7 @@ async fn active_loop<S>(
     cmd_rx: &mut UnboundedReceiver<RdpCmd>,
     frame_tx: &SyncSender<FrameUpdate>,
     status: &Arc<Mutex<SessionStatus>>,
-    // P9.8 §5.1 B9: connect-start Instant (from `drive_inner`), used to log
+    // §5.1 B9: connect-start Instant (from `drive_inner`), used to log
     // `ttff_ms` (time-to-first-frame) exactly once below.
     t0: std::time::Instant,
 ) -> Result<(), String>
@@ -1300,7 +1245,7 @@ where
     // FrameMarker-only PDUs (which produce a GraphicsUpdate with an empty
     // rectangle but do not update image pixels).
     let mut image_has_content = false;
-    // P9.8 B9: fire-once guard so `ttff_ms` is logged exactly once.
+    // B9: fire-once guard so `ttff_ms` is logged exactly once.
     let mut first_frame_logged = false;
     // Start with the server-confirmed desktop size, so the UI's first settled
     // geometry callback does not send a no-op DisplayControl request.
@@ -1355,7 +1300,7 @@ where
                     PduOutcome::Continue => {}
                     PduOutcome::Terminated => return Ok(()),
                     PduOutcome::Reactivate(cas) => {
-                        // P9.9: Deactivation-Reactivation Sequence (MS-RDPBCGR
+                        // Deactivation-Reactivation Sequence (MS-RDPBCGR
                         // §1.3.1.3). See the module doc comment +
                         // `reactivate_session`'s own doc for the full design
                         // (dual-target disambiguation, the §4 rebuild
@@ -1383,8 +1328,8 @@ where
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
                     RdpCmd::Resize { width, height } => {
-                        // P9.9 §5: drain every immediately-pending Resize and
-                        // coalesce down to the latest settled size -- one
+                        // §5: drain every immediately-pending Resize and
+                        // coalesce down to the latest settled size - one
                         // Display Control PDU per burst, not one per event
                         // (avoids a reactivation storm on a live window/pane
                         // drag). Non-Resize commands drained along the way
@@ -1401,9 +1346,9 @@ where
                         if let Some((width, height)) = coalesce_latest_resize(sizes.into_iter()) {
                             let requested = (width, height);
                             if is_new_resize_target(last_resize_target, requested) {
-                                // P9.9-FIX: the three outcomes were previously
+                                // the three outcomes were previously
                                 // collapsed into one silent no-op via `if let
-                                // Some(Ok(data)) = ...` -- that pattern is
+                                // Some(Ok(data)) =...` - that pattern is
                                 // exactly what hid the missing-DVC bug (a `None`
                                 // here looked identical to "sent, server
                                 // ignored it"). Log all three distinctly.
@@ -1423,7 +1368,7 @@ where
                                     }
                                     None => {
                                         // The DisplayControl DVC isn't registered
-                                        // (shouldn't happen -- it's always
+                                        // (shouldn't happen - it's always
                                         // registered at connect, see `drive_inner`)
                                         // or the server hasn't opened it yet (the
                                         // documented timing caveat: a resize fired
@@ -1463,17 +1408,17 @@ where
     }
 }
 
-/// Processes one server PDU (`action`/`frame`, as read by `framed.read_pdu()`)
+/// Processes one server PDU (`action`/`frame`, as read by `framed.read_pdu`)
 /// through `active_stage`: applies the standard side effects (write
 /// `ResponseFrame`s, track dirty/`image_has_content`, publish frames, drive
 /// the CLIPRDR remote<->local state machine) exactly as `active_loop` did
-/// inline before P9.9. Factored out so the same logic can process the
+/// inline before. Factored out so the same logic can process the
 /// disambiguating post-`DeactivateAll` frame in `reactivate_session`'s xrdp
 /// fallback without duplicating it.
 ///
 /// Returns [`PduOutcome::Reactivate`] on `DeactivateAll` (mirrors the
 /// original `should_reactivate` flag) and [`PduOutcome::Terminated`] on
-/// `Terminate` (mirrors the original inline early `return Ok(())` --
+/// `Terminate` (mirrors the original inline early `return Ok` -
 /// `status` is already set to `Disconnected` when this returns).
 #[allow(clippy::too_many_arguments)]
 async fn process_active_stage_pdu<S>(
@@ -1508,7 +1453,7 @@ where
                 dirty = true;
             }
             ActiveStageOutput::Terminate(reason) => {
-                // P9.8 B11: `reason` was previously discarded -- bind and
+                // B11: `reason` was previously discarded - bind and
                 // log it (a `GracefulDisconnectReason`, just a description
                 // string, never secret).
                 tracing::info!(reason = %reason, "rdp: session terminated by server");
@@ -1533,7 +1478,7 @@ where
 
     if let Some(cas) = reactivate {
         // Matches the original `if should_reactivate { continue; }`: skip
-        // the dirty/publish/clipboard handling below for this PDU -- the
+        // the dirty/publish/clipboard handling below for this PDU - the
         // reactivation is driven by the caller, and the next real content
         // frame is handled on its own next iteration.
         return Ok(PduOutcome::Reactivate(cas));
@@ -1541,7 +1486,7 @@ where
 
     if dirty {
         // Suppress phantom frames that arrive before the first real
-        // bitmap is decoded.  IronRDP sets alpha = 0xFF for every
+        // bitmap is decoded. IronRDP sets alpha = 0xFF for every
         // pixel it writes (see `apply_bgr24_bitmap`); before that the
         // DecodedImage is zero-filled, so any(|b| b != 0) is a cheap
         // proxy for "has at least one decoded pixel".
@@ -1885,7 +1830,7 @@ where
 }
 
 /// Handles one non-`Resize` [`RdpCmd`] (see [`CmdOutcome`]). `Resize` is
-/// handled directly in `active_loop` (its own coalescing wrapper, P9.9 §5)
+/// handled directly in `active_loop` (its own coalescing wrapper, §5)
 /// and never reaches this function.
 async fn handle_rdp_cmd<S>(
     cmd: RdpCmd,
@@ -1956,34 +1901,34 @@ enum ReactivationOutcome {
     Continue,
     /// The server terminated the session partway through (rare, but
     /// `process_active_stage_pdu` can still surface it for the xrdp
-    /// fallback's disambiguating frame) -- `status` is already
-    /// `Disconnected`; the caller must return `Ok(())`.
+    /// fallback's disambiguating frame) - `status` is already
+    /// `Disconnected`; the caller must return `Ok`.
     Terminated,
 }
 
 /// Drives the Deactivation-Reactivation Sequence (MS-RDPBCGR §1.3.1.3) after
-/// `active_stage.process()` surfaces `ActiveStageOutput::DeactivateAll(cas)`.
+/// `active_stage.process` surfaces `ActiveStageOutput::DeactivateAll(cas)`.
 ///
-/// **Dual-target disambiguation (P9.9 §3, no heuristic, no timed wait):**
+/// **Dual-target disambiguation ( §3, no heuristic, no timed wait):**
 /// does NOT blindly drive `cas` via `single_sequence_step` (that would
-/// `read_by_hint(X224_HINT)` and stall on xrdp's FastPath bitmaps -- see
+/// `read_by_hint(X224_HINT)` and stall on xrdp's FastPath bitmaps - see
 /// [`ironrdp_tokio::single_sequence_step_read`]). Instead it reads the very
-/// next PDU with the loop's own `framed.read_pdu()` and branches on its
+/// next PDU with the loop's own `framed.read_pdu` and branches on its
 /// [`Action`], which is decided straight from the wire header
-/// (`ironrdp_pdu::find_size`) -- the exact same function `X224_HINT`'s own
+/// (`ironrdp_pdu::find_size`) - the exact same function `X224_HINT`'s own
 /// `find_size` delegates to, so a PDU classified `Action::X224` here is
 /// byte-for-byte the same frame `read_by_hint(X224_HINT)` would have
 /// produced:
-/// - `Action::X224` -- a compliant host's `ServerDemandActive`. Feeds the
+/// - `Action::X224` - a compliant host's `ServerDemandActive`. Feeds the
 ///   already-read frame into `cas`'s first `step` directly (equivalent to,
 ///   not a re-read of, what `single_sequence_step` would have done), then
 ///   drives the rest via `single_sequence_step` until `Finalized`, bounded
-///   by [`reactivation_timeout`] -- a half-speaking server fails the session
+///   by [`reactivation_timeout`] - a half-speaking server fails the session
 ///   with a clear status rather than wedging `active_loop` forever.
-/// - `Action::FastPath` -- xrdp's non-compliant shortcut: it resumes bitmap
+/// - `Action::FastPath` - xrdp's non-compliant shortcut: it resumes bitmap
 ///   updates immediately, never sending `DemandActive`. The CAS is dropped
 ///   and the already-read frame is processed exactly like any other PDU
-///   (via [`process_active_stage_pdu`]) -- the session stays stable at its
+///   (via [`process_active_stage_pdu`]) - the session stays stable at its
 ///   current size. A no-op resize on this target is a legitimate outcome;
 ///   a wedged session is not (the §3 degradation contract).
 ///
@@ -1991,26 +1936,26 @@ enum ReactivationOutcome {
 /// reaching `Finalized { desktop_size, share_id, io_channel_id,
 /// user_channel_id, enable_server_pointer, pointer_software_rendering }`,
 /// the ONLY things that differ from the initial connect are `share_id` and
-/// `desktop_size` -- `io_channel_id`/`user_channel_id` are carried forward
-/// unchanged by `ConnectionActivationSequence::reset()`, and
+/// `desktop_size` - `io_channel_id`/`user_channel_id` are carried forward
+/// unchanged by `ConnectionActivationSequence::reset`, and
 /// `enable_server_pointer`/`pointer_software_rendering` are copied straight
 /// from the CAS's own immutable `Config` on every `Finalized` transition
 /// (never real deltas). `static_channels` (the DisplayControl DVC, clipboard
 /// SVC) live inside `ActiveStage`'s private `x224::Processor` and are never
-/// touched here -- there is no `ActiveStage` rebuild, so nothing is dropped:
-/// - `ActiveStage::set_share_id` -- documented upstream for exactly this
+/// touched here - there is no `ActiveStage` rebuild, so nothing is dropped:
+/// - `ActiveStage::set_share_id` - documented upstream for exactly this
 ///   ("Must be called during Deactivation-Reactivation if the server
 ///   assigns a new share_id").
 /// - `ActiveStage::set_fastpath_processor` with a freshly built
-///   `fast_path::ProcessorBuilder` -- needed because `fast_path::Processor`'s
+///   `fast_path::ProcessorBuilder` - needed because `fast_path::Processor`'s
 ///   internal `FrameMarkerProcessor` captures its own `share_id` copy at
 ///   construction (used to encode outbound `FrameAcknowledge` PDUs);
 ///   `set_share_id` alone only updates the x224 processor's copy, leaving
 ///   fast-path's stale. `bulk_decompressor: None` is correct here because
 ///   ConMan's `Config.compression_type` is always `None` (see `drive_inner`)
-///   -- if ConMan ever negotiates bulk compression, this rebuild would need
+/// - if ConMan ever negotiates bulk compression, this rebuild would need
 ///   to carry the decompressor state forward instead.
-/// - The `DecodedImage` realloc (§6) is `cm-session`'s own concern --
+/// - The `DecodedImage` realloc (§6) is `cm-session`'s own concern -
 ///   neither processor stores pixel dimensions.
 #[allow(clippy::too_many_arguments)]
 async fn reactivate_session<S>(
@@ -2052,7 +1997,7 @@ where
             PduOutcome::Terminated => Ok(ReactivationOutcome::Terminated),
             // A nested DeactivateAll/Reactivate surfacing from this single
             // fallback read is not driven further here (astronomically
-            // unlikely immediately after an already-ignored resize) -- fall
+            // unlikely immediately after an already-ignored resize) - fall
             // through to Continue rather than recurse unboundedly.
             PduOutcome::Continue | PduOutcome::Reactivate(_) => Ok(ReactivationOutcome::Continue),
         };
@@ -2065,7 +2010,7 @@ where
         .step(&first_frame, &mut buf)
         .map_err(|e| e.to_string())?;
     // Mirrors `ironrdp_async::framed::single_sequence_step_write` (private to
-    // that crate) -- `cas.step`'s first call already produced the response
+    // that crate) - `cas.step`'s first call already produced the response
     // in `buf`; the rest of the sequence is driven generically below via the
     // public `single_sequence_step`, which does its own read+step+write.
     if written.size().is_some() {
@@ -2086,7 +2031,7 @@ where
             pointer_software_rendering,
         } = cas.connection_activation_state()
         {
-            // §4: in-place mutation via the existing public setters -- no
+            // §4: in-place mutation via the existing public setters - no
             // `ActiveStage` rebuild, `static_channels` untouched.
             active_stage.set_share_id(share_id);
             active_stage.set_fastpath_processor(
@@ -2102,7 +2047,7 @@ where
             );
 
             // §6: framebuffer realloc. A reactivation legitimately starts
-            // blank again -- reuse the existing `image_has_content` guard so
+            // blank again - reuse the existing `image_has_content` guard so
             // the first new-size frame publishes once real content arrives.
             *image =
                 DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
@@ -2116,15 +2061,15 @@ where
             return Ok(ReactivationOutcome::Continue);
         }
 
-        // Fable review fix: the deadline must bound the *step itself*, not
+        // review: the deadline must bound the *step itself*, not
         // just the gap between iterations. `single_sequence_step` reads via
-        // `read_by_hint` with no timeout of its own -- a server that sends
+        // `read_by_hint` with no timeout of its own - a server that sends
         // `DemandActive` (taking us into this loop) and then goes silent
         // mid-finalization would otherwise block here forever. Because this
         // whole function runs inline inside `active_loop`'s
         // `tokio::select!` arm, an unbounded block here freezes the ENTIRE
         // session (no input, no frames, `RdpCmd::Shutdown` not polled)
-        // until the OS TCP stack notices -- exactly the wedge the §3
+        // until the OS TCP stack notices - exactly the wedge the §3
         // degradation contract forbids. Wrapping the step in
         // `tokio::time::timeout` bounds it directly; a zero/negative
         // `remaining` (deadline already passed) times out immediately,
@@ -2135,7 +2080,7 @@ where
         {
             Ok(step_result) => step_result.map_err(|e| e.to_string())?,
             Err(_elapsed) => {
-                // §3 degradation contract: never wedge -- fail the session
+                // §3 degradation contract: never wedge - fail the session
                 // with a clear status instead of hanging.
                 tracing::warn!("rdp: reactivation timed out, failing session");
                 set_status(
@@ -2148,7 +2093,7 @@ where
     }
 }
 
-/// P9.9 §3's dual-target branch decision, factored as a pure function over
+/// §3's dual-target branch decision, factored as a pure function over
 /// the PDU [`Action`] so it's unit-testable without a live host: does this
 /// `Action` indicate a compliant host actually running the reactivation
 /// (`Action::X224`, i.e. `ServerDemandActive`), or xrdp's non-compliant
@@ -2201,14 +2146,12 @@ fn publish_frame(image: &DecodedImage, tx: &SyncSender<FrameUpdate>) {
     let _ = tx.try_send(update);
 }
 
-// ---------------------------------------------------------------------------
 // Unit tests
-// ---------------------------------------------------------------------------
 
 /// Counts distinct `(r, g, b)` triples in a [`FrameUpdate`]'s RGBA buffer
-/// (ignoring alpha). Test-only helper (P9.7 Slice 1 hardening) used both to
+/// (ignoring alpha). Test-only helper ( visual QA hardening) used both to
 /// pick the "richest" frame in a content window and, on that chosen frame,
-/// to assert real variety -- one source of truth for what "distinct color"
+/// to assert real variety - one source of truth for what "distinct color"
 /// means in `rdp_connect_live_host`, which also documents the
 /// `PixelFormat::RgbA32` byte-order justification.
 #[cfg(test)]
@@ -2223,7 +2166,7 @@ fn distinct_rgb_count(rgba: &[u8]) -> usize {
 mod tests {
     use super::*;
     // Only used to build `RdpAuthInput` values in these tests — the
-    // production path never converts a `Secret` outside `connect()` itself.
+    // production path never converts a `Secret` outside `connect` itself.
     use cm_core::Secret;
     use ironrdp_pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 
@@ -2316,9 +2259,7 @@ mod tests {
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // P9.9 §5: coalesce_latest_resize (pure)
-    // ---------------------------------------------------------------------------
+    // §5: coalesce_latest_resize (pure)
 
     #[test]
     fn coalesce_latest_resize_empty_is_none() {
@@ -2371,9 +2312,7 @@ mod tests {
         drop(task); // Drop aborts the isolated file task.
     }
 
-    // ---------------------------------------------------------------------------
-    // P9.9 §3: rdp_action_wants_reactivation (pure, dual-target branch decision)
-    // ---------------------------------------------------------------------------
+    // §3: rdp_action_wants_reactivation (pure, dual-target branch decision)
 
     #[test]
     fn action_x224_wants_reactivation() {
@@ -2385,13 +2324,11 @@ mod tests {
     #[test]
     fn action_fastpath_does_not_want_reactivation() {
         // xrdp's shortcut: resumes FastPath bitmaps immediately, never
-        // sending a DemandActive -- passthrough, no reactivation.
+        // sending a DemandActive - passthrough, no reactivation.
         assert!(!rdp_action_wants_reactivation(Action::FastPath));
     }
 
-    // ---------------------------------------------------------------------------
     // CertStore tests
-    // ---------------------------------------------------------------------------
 
     #[test]
     fn cert_store_unknown_then_accept_stores_entry() {
@@ -2422,9 +2359,7 @@ mod tests {
         assert!(store.lookup("other", 3389).is_none());
     }
 
-    // ---------------------------------------------------------------------------
     // CertVerifier decision tests
-    // ---------------------------------------------------------------------------
 
     #[test]
     fn fixed_verifier_accept_always_accepts() {
@@ -2452,9 +2387,7 @@ mod tests {
         assert_eq!(v.decide(&info), CertDecision::Reject);
     }
 
-    // ---------------------------------------------------------------------------
     // RdpMouseButton → ironrdp-input MouseButton
-    // ---------------------------------------------------------------------------
 
     #[test]
     fn mouse_button_conversion() {
@@ -2468,9 +2401,7 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------------
     // Session object-safety
-    // ---------------------------------------------------------------------------
 
     #[test]
     fn session_is_object_safe() {
@@ -2480,9 +2411,7 @@ mod tests {
         _assert_send::<RdpSession>();
     }
 
-    // ---------------------------------------------------------------------------
     // RdpSettings default / mapping tests
-    // ---------------------------------------------------------------------------
 
     #[test]
     fn rdp_settings_defaults() {
@@ -2511,9 +2440,7 @@ mod tests {
         assert_eq!(s, back);
     }
 
-    // ---------------------------------------------------------------------------
     // SHA-256 fingerprint format
-    // ---------------------------------------------------------------------------
 
     #[test]
     fn sha256_fingerprint_has_correct_prefix() {
@@ -2522,19 +2449,17 @@ mod tests {
         assert_eq!(fp.len(), "SHA256:".len() + 64); // 32 bytes × 2 hex chars
     }
 
-    // ---------------------------------------------------------------------------
-    // verify_cert TOFU decision paths (P6.2, gap 23)
+    // verify_cert TOFU decision paths
     //
     // A full in-process RDP server that completes the X.224/MCS negotiation and
     // a real TLS accept is out of scope without a new dependency (rcgen for
     // self-signed cert generation, or ironrdp-server for full protocol
-    // fidelity) — see the P6.2 new-dep memo
-    // (docs/devel/memos/p6.2-rdp-loopback-new-dep.md). `verify_cert` is exactly
+    // fidelity) — see the new-dep memo
+    //. `verify_cert` is exactly
     // the decision function that new dep would let us exercise inside a live
-    // `connect()`; calling it directly against two real (throwaway,
+    // `connect`; calling it directly against two real (throwaway,
     // pre-generated) self-signed certs exercises the identical TOFU logic —
     // Unknown/Match/Mismatch × Accept/Reject — without needing a live socket.
-    // ---------------------------------------------------------------------------
 
     /// Real, throwaway self-signed ed25519 certificates (DER), generated once
     /// via `openssl req -x509` for these tests (not CA-trusted, so
@@ -2702,14 +2627,11 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------------
-    // map_negotiation_error (P7.5)
-    // ---------------------------------------------------------------------------
+    // map_negotiation_error
 
     /// Builds the exact `ConnectorError` IronRDP's `connection.rs` produces
     /// (`ConnectionInitiationWaitConfirm`, `reason_err!`) when the server's
-    /// selected protocol doesn't intersect what the client requested — the
-    /// literal call site diagnosed in `memos/rdp-xrdp-diagnosis-2026-07.md`.
+    /// selected protocol doesn't intersect what the client requested.
     fn negotiation_mismatch_err(
         requested: ironrdp_pdu::nego::SecurityProtocol,
         selected: ironrdp_pdu::nego::SecurityProtocol,
@@ -2779,11 +2701,9 @@ mod tests {
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // P9.1 CredSSP/NLA: credential-check + connect_finalize error mapping
-    // ---------------------------------------------------------------------------
+    // CredSSP/NLA: credential-check + connect_finalize error mapping
 
-    /// HYBRID-selected (should_perform_credssp() == true) + no password ==>
+    /// HYBRID-selected (should_perform_credssp == true) + no password ==>
     /// the actionable missing-credential error, *before* any CredSSP exchange
     /// is attempted.
     #[test]
@@ -2798,7 +2718,7 @@ mod tests {
         assert!(!credssp_requires_credentials(true, b"hunter2"));
     }
 
-    /// TLS-only server (should_perform_credssp() == false) + no password ==>
+    /// TLS-only server (should_perform_credssp == false) + no password ==>
     /// unaffected by this check at all, even though the password is empty.
     /// This is the plain-TLS regression guard: a blank password against a
     /// TLS-only server must not be misdiagnosed as an NLA credential problem
@@ -2859,40 +2779,40 @@ mod tests {
         "0.0.0.0:0".parse().expect("hardcoded SocketAddr is valid")
     }
 
-    /// Drift guard (Milestone-C reviewer blocker): proves, against the real
+    /// Drift guard (reviewer check): proves, against the real
     /// vendored `ClientConnector` state machine — not a reimplementation —
-    /// that `should_perform_credssp()` only becomes meaningful *after*
+    /// that `should_perform_credssp` only becomes meaningful *after*
     /// `mark_as_upgraded`, and is unconditionally `false` right after
     /// `connect_begin` (where the missing-credential check used to live,
     /// making it dead code).
     ///
     /// This uses the exact production functions `rdp::connect` calls:
     /// `ironrdp_tokio::skip_connect_begin` performs the identical
-    /// precondition assertion and state handoff as `connect_begin` without
+    /// precondition assertion and state transition as `connect_begin` without
     /// requiring a live socket (both hand back the connector already in
     /// `EnhancedSecurityUpgrade`), and `ironrdp_tokio::mark_as_upgraded` is
-    /// the literal function `connect()` calls at rdp.rs step 7.
+    /// the literal function `connect` calls at rdp.rs step 7.
     ///
     /// A future regression that moves the `credssp_requires_credentials`
     /// call back to right after `connect_begin`/`skip_connect_begin` (i.e.
     /// before `mark_as_upgraded`) will not be caught by compilation, but
-    /// *is* caught here: this test fails loudly if `should_perform_credssp()`
+    /// *is* caught here: this test fails loudly if `should_perform_credssp`
     /// ever reads `true` before `mark_as_upgraded`, or `false` after it for
     /// a HYBRID selection.
     ///
-    /// What this test does *not* cover: driving `connect()` itself end to
+    /// What this test does *not* cover: driving `connect` itself end to
     /// end (that needs a real or fully-scripted RDP negotiation over a
     /// socket — `connect_begin` parses actual X.224 Connection Confirm
     /// bytes). That remaining gap is covered by the win11-dev live NLA
     /// verify: an empty-password HYBRID connection to a real NLA-enabled
     /// server must surface `RdpError::CredentialsRequired`, not the
-    /// cryptic pre-fix `RdpError::Auth`.
+    /// cryptic earlier `RdpError::Auth`.
     #[test]
     fn credssp_state_machine_only_settles_after_mark_as_upgraded() {
         use ironrdp_connector::ClientConnectorState;
         use ironrdp_pdu::nego::SecurityProtocol;
 
-        // --- HYBRID (NLA) case: the bug this fix corrects ---
+        // HYBRID (NLA) case
         let mut connector =
             ClientConnector::new(test_connector_config(), test_connector_local_addr());
         // This is what connect_begin leaves behind once the server has
@@ -2903,8 +2823,8 @@ mod tests {
         };
         let should_upgrade = ironrdp_tokio::skip_connect_begin(&mut connector);
 
-        // This is exactly the point where the pre-fix check lived (rdp.rs
-        // step "4b", immediately after connect_begin): should_perform_credssp()
+        // This is exactly the point where the earlier check lived (rdp.rs
+        // step "4b", immediately after connect_begin): should_perform_credssp
         // is false here even though the server selected HYBRID. Checking here
         // is dead code.
         assert!(
@@ -2926,7 +2846,7 @@ mod tests {
              (the check must run after mark_as_upgraded, not before)"
         );
 
-        // --- TLS-only case: plain-TLS regression guard ---
+        // TLS-only case
         let mut connector =
             ClientConnector::new(test_connector_config(), test_connector_local_addr());
         connector.state = ClientConnectorState::EnhancedSecurityUpgrade {
@@ -2964,9 +2884,9 @@ mod tests {
         assert!(matches!(mapped, RdpError::Auth(_)), "got: {mapped:?}");
     }
 
-    /// P9.5 item 5: the mapped `RdpError::Auth` message is clean and
+    /// the mapped `RdpError::Auth` message is clean and
     /// user-facing — no `[CredSSP @ …]` internal protocol/source-location
-    /// trace (which `e.to_string()` on the raw `ConnectorError` embeds, per
+    /// trace (which `e.to_string` on the raw `ConnectorError` embeds, per
     /// `ironrdp_error::Error<Kind>`'s `Display` impl). The raw detail must
     /// only reach the `tracing` log, never the reason string the
     /// `ErrorOverlay` renders.
@@ -2994,7 +2914,7 @@ mod tests {
 
     /// A non-CredSSP `connect_finalize` failure (e.g. a plain TLS-only-path
     /// finalize error) passes through unchanged as `RdpError::Protocol`,
-    /// exactly like the pre-P9.1 behavior — the plain-TLS regression guard
+    /// exactly like the earlier behavior — the plain-TLS regression guard
     /// for the finalize step.
     #[test]
     fn map_finalize_error_non_credssp_passes_through_unchanged() {
@@ -3011,8 +2931,7 @@ mod tests {
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // Connection-failure surfacing over a real socket (P6.2, gap 23)
+    // Connection-failure surfacing over a real socket
     //
     // No in-process RDP protocol responder exists (see the new-dep memo above),
     // so these exercise the client-side failure path — refused connection,
@@ -3020,7 +2939,6 @@ mod tests {
     // expected — proving `RdpSession::connect` always fails soft (typed
     // `Failed` status, never a panic) exactly as CONVENTIONS §2 requires for
     // untrusted transport input.
-    // ---------------------------------------------------------------------------
 
     fn test_rdp_settings(port: u16) -> cm_core::RdpSettings {
         cm_core::RdpSettings {
@@ -3154,19 +3072,17 @@ mod tests {
         session.shutdown();
     }
 
-    // ---------------------------------------------------------------------------
-    // Integration test (real host, gated) -- P9.5 item 8: env-gated, no
+    // Integration test (real host, gated) - env-gated, no
     // hardcoded lab host/credential in tracked source.
-    // ---------------------------------------------------------------------------
 
-    /// In-memory `tracing` sink for `rdp_connect_live_host` (P9.9-FIX): the
+    /// In-memory `tracing` sink for `rdp_connect_live_host`: the
     /// RDP driver runs on its own dedicated OS thread (spawned inside
     /// `RdpSession::connect`), so a thread-local `tracing::subscriber::
-    /// set_default` in the test's own task would never see its events --
+    /// set_default` in the test's own task would never see its events -
     /// this installs a real global subscriber (`try_init`, safe here because
     /// this test is `#[ignore]`d and is expected to be run alone via
     /// `--ignored rdp_connect_live_host`) writing formatted log lines into a
-    /// shared buffer the test can `.contains()` on afterward, instead of
+    /// shared buffer the test can `.contains` on afterward, instead of
     /// requiring a human to eyeball `--nocapture` output.
     #[derive(Clone, Default)]
     struct SharedLogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -3199,29 +3115,29 @@ mod tests {
 
     /// Opt-in live proof driven entirely by env vars, so no lab-specific
     /// host/user/password is ever hardcoded in tracked source (this repo
-    /// keeps infra/host details out of tracked files -- P9.5 item 8; mirrors
+    /// keeps infra/host details out of tracked files -; mirrors
     /// the `ssh_publickey_rsa_live_host_requiring_sha2` live test in
     /// `cm-session/tests/ssh_loopback.rs`). No-ops (does not fail) when the
-    /// env vars are unset, so `cargo test --ignored` elsewhere never fails on
+    /// env vars are unset, so `cargo test - ignored` elsewhere never fails on
     /// missing lab access; only meaningful when explicitly pointed at a host:
     ///
     /// ```text
     /// CONMAN_LIVE_RDP_HOST=<ip-or-hostname> CONMAN_LIVE_RDP_USER=<user> \
-    ///   CONMAN_LIVE_RDP_PASSWORD=<password> \
-    ///   cargo test -p cm-session -- --ignored rdp_connect_live_host --nocapture
+    /// CONMAN_LIVE_RDP_PASSWORD=<password> \
+    /// cargo test -p cm-session - - ignored rdp_connect_live_host - nocapture
     /// ```
     ///
     /// Prerequisites (xrdp target):
-    ///   - Network access to the target host on port 3389.
-    ///   - `/etc/xrdp/xrdp.ini` on the server must have `security_layer=negotiate`
-    ///     (or `tls`); the default `security_layer=rdp` uses STANDARD_RDP_SECURITY
-    ///     which IronRDP does not support.
+    /// - Network access to the target host on port 3389.
+    /// - `/etc/xrdp/xrdp.ini` on the server must have `security_layer=negotiate`
+    /// (or `tls`); the default `security_layer=rdp` uses STANDARD_RDP_SECURITY
+    /// which IronRDP does not support.
     ///
-    /// **P9.7 Slice 1** (wire-level visual QA, since every other runner is
+    /// ** visual QA** (wire-level visual QA, since every other runner is
     /// headless/software and structurally blind to GPU-compositing bugs):
     /// beyond "connects and gets one frame", this asserts (1) the confirmed
     /// desktop size matches the *requested* `RdpSettings` (proves resolution
-    /// negotiation, not post-hoc scaling -- #10 at the wire level), (2) the
+    /// negotiation, not post-hoc scaling - #10 at the wire level), (2) the
     /// framebuffer has real RGB variety, not just a non-zero byte (catches a
     /// uniform solid-color decode failure the old check missed), and (3) the
     /// #9/#11 black-screen root cause (alpha = wire-padding 0x00 while RGB is
@@ -3233,18 +3149,18 @@ mod tests {
     /// unrelated to the RDP decode/resolution code itself (both confirmed
     /// correct by a clean run):
     /// - The old code asserted variety against whichever frame happened to
-    ///   be the *first* non-empty one, which can be a solid xrdp
-    ///   greeter/background frame that arrives before real desktop content --
-    ///   a spurious "1 distinct RGB value" failure. Now it keeps collecting
-    ///   frames for a bounded window after first content and asserts against
-    ///   the richest (most colorful) one seen, only failing if real content
-    ///   never arrives in that window.
+    /// be the *first* non-empty one, which can be a solid xrdp
+    /// greeter/background frame that arrives before real desktop content -
+    /// a spurious "1 distinct RGB value" failure. Now it keeps collecting
+    /// frames for a bounded window after first content and asserts against
+    /// the richest (most colorful) one seen, only failing if real content
+    /// never arrives in that window.
     /// - The fixed 15 s connect-wait can trip on this host's own
-    ///   reconnect-throttling (a same-user RDP reconnect attempted right
-    ///   after a prior disconnect gets held/rejected server-side for ~20 s --
-    ///   see the `test-hosts` memo). The timeout is now tunable via
-    ///   `CONMAN_LIVE_RDP_TIMEOUT_SECS` (default unchanged, 15) and a single
-    ///   connect attempt that times out gets one retry after a cooldown.
+    /// reconnect-throttling (a same-user RDP reconnect attempted right
+    /// after a prior disconnect gets held/rejected server-side for ~20 s -
+    /// see the `test-hosts` memo). The timeout is now tunable via
+    /// `CONMAN_LIVE_RDP_TIMEOUT_SECS` (default unchanged, 15) and a single
+    /// connect attempt that times out gets one retry after a cooldown.
     #[tokio::test]
     #[ignore = "opt-in: set CONMAN_LIVE_RDP_HOST/_USER/_PASSWORD to run against a real host"]
     async fn rdp_connect_live_host() {
@@ -3263,10 +3179,10 @@ mod tests {
             }
         };
 
-        // P9.9-FIX: capture the driver's own log output so the resize
+        // capture the driver's own log output so the resize
         // round-trip below can assert the PDU was actually emitted, not
         // just that the session stayed stable (which passed trivially even
-        // when nothing was sent -- the exact gap that hid the missing-DVC
+        // when nothing was sent - the exact gap that hid the missing-DVC
         // bug). `try_init` is a global, process-wide install; safe here
         // because this test is `#[ignore]`d and meant to be run alone.
         let log_buf = SharedLogBuf::default();
@@ -3303,7 +3219,7 @@ mod tests {
 
         /// One connect attempt: spawn the session and wait up to `timeout`
         /// for `Connected`. Returns the connected session, or an error
-        /// string describing what went wrong (never panics -- the caller
+        /// string describing what went wrong (never panics - the caller
         /// decides whether to retry).
         async fn try_connect(
             cfg: &cm_core::RdpSettings,
@@ -3346,7 +3262,7 @@ mod tests {
         // Hardening: one retry after a cooldown if the first attempt times
         // out. This host's reconnect-throttle (empirically ~20 s) is the
         // known cause; other failure kinds (auth rejected, disconnected) are
-        // not retried -- they're real signal, not host flakiness.
+        // not retried - they're real signal, not host flakiness.
         let session = match try_connect(&cfg, auth.clone(), connect_timeout).await {
             Ok(session) => session,
             Err(e) if e.contains("timed out waiting for Connected") => {
@@ -3401,14 +3317,14 @@ mod tests {
             usize::from(frame.width) * usize::from(frame.height) * 4
         );
 
-        // P9.7 Slice 1, item 1: requested-size validation (#10 at the wire
-        // level). `frame.width`/`frame.height` are not an echo of `cfg` --
+        // visual QA, requested-size validation (#10 at the wire
+        // level). `frame.width`/`frame.height` are not an echo of `cfg` -
         // they come from `DecodedImage::new(.., desktop_size.width,
         // desktop_size.height)` in `drive_inner`, where `desktop_size` is
         // `connection_result.desktop_size`, IronRDP's server-CONFIRMED
         // active size from `connect_finalize`. Asserting it equals the
         // requested size proves the resolution was actually negotiated
-        // end-to-end (not bitmap-scaled after the fact -- the #10 bug).
+        // end-to-end (not bitmap-scaled after the fact - the #10 bug).
         // Logged unconditionally so a clamp is visible in the test output
         // even if this assertion is later relaxed for a target host that
         // genuinely can't honor arbitrary resolutions.
@@ -3430,7 +3346,7 @@ mod tests {
             frame.height
         );
 
-        // P9.7 Slice 1, items 2 + 3: content variety, and the alpha=0/
+        // visual QA, content variety, and the alpha=0/
         // RGB-valid invariant behind the #9/#11 black-screen root cause.
         //
         // `PixelFormat::RgbA32`'s byte order is [R, G, B, A] per pixel
@@ -3443,11 +3359,11 @@ mod tests {
             .collect();
         assert!(!pixels.is_empty(), "frame has no pixels");
 
-        // Item 2: a uniform solid-color fill (a plausible decode failure
+        // a uniform solid-color fill (a plausible decode failure
         // distinct from all-zero) passed the old "any non-zero byte" check
-        // -- it must not pass here. 8 distinct RGB values is a conservative
-        // floor (a real xrdp desktop -- wallpaper, taskbar, anti-aliased
-        // text -- has hundreds to thousands), chosen to avoid flaking
+        // it must not pass here. 8 distinct RGB values is a conservative
+        // floor (a real xrdp desktop - wallpaper, taskbar, anti-aliased
+        // text - has hundreds to thousands), chosen to avoid flaking
         // against an unknown target's visual complexity while still
         // catching a truly uniform fill (which has exactly 1). This now
         // runs against the richest frame in the content window, not
@@ -3463,9 +3379,9 @@ mod tests {
             distinct_rgb.len()
         );
 
-        // Item 3 (the highest-value part): pin the #9/#11 black-screen root
+        // (the highest-value part): pin the #9/#11 black-screen root
         // cause as a test-documented invariant. That black screen was NOT a
-        // wire bug -- IronRDP's fast-path/tile decoders leave the alpha
+        // wire bug - IronRDP's fast-path/tile decoders leave the alpha
         // channel at the wire-padding value 0x00 while the RGB channels are
         // fully valid. Slint's software backend ignores alpha (so it
         // rendered fine); femtovg alpha-blends alpha=0x00 to fully
@@ -3473,9 +3389,9 @@ mod tests {
         // (`frame_to_image`) forces alpha=0xff before handing the buffer to
         // Slint's `Image`. This assertion documents the exact contract that
         // fix depends on: the RGB data is real and varied EVEN WHERE alpha
-        // is 0 -- so a downstream renderer MUST treat alpha=0 pixels as
+        // is 0 - so a downstream renderer MUST treat alpha=0 pixels as
         // opaque, never as "no content" / blank. Do NOT change decode/alpha
-        // behavior here -- this only asserts + documents the invariant; the
+        // behavior here - this only asserts + documents the invariant; the
         // fix itself lives in cm-ui.
         let alpha_zero_rgb: std::collections::HashSet<(u8, u8, u8)> = pixels
             .iter()
@@ -3503,10 +3419,10 @@ mod tests {
             );
         }
 
-        // P9.9 §8: mid-session resize round-trip. Request a different size
+        // §8: mid-session resize round-trip. Request a different size
         // and give the target a window to respond, then assert only what's
         // true for BOTH targets the dual-target design supports: the
-        // session must stay `Connected` -- never `Failed`/hung -- whether
+        // session must stay `Connected` - never `Failed`/hung - whether
         // the target actually reactivates to the new size (a compliant
         // host) or silently ignores the request (xrdp's documented no-op).
         // Does NOT hard-assert the new dimensions equal the request: that
@@ -3539,8 +3455,8 @@ mod tests {
             session.status()
         );
 
-        // P9.9-FIX: the actual bug this whole test extension exists to catch
-        // -- "session stayed Connected" passed trivially even when the
+        // the actual bug this whole test extension exists to catch
+        // "session stayed Connected" passed trivially even when the
         // resize PDU was never sent at all (no DisplayControl DVC
         // registered), because a `None` from `encode_resize` looked
         // identical to "sent, but the server ignored it" from the outside.

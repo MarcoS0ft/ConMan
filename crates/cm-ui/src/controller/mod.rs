@@ -1,21 +1,16 @@
 //! UI-thread controller: owns per-tab sessions (local or SSH) + renderers + the
 //! redraw timer, wires Slint callbacks, and drives the snapshot->render->Image pipeline.
 //!
-//! P1.4 upgrade: the controller now accepts [`AppConfig`] carrying the repository
-//! (P1.1) and credential store (P1.3).  It wires the Connections panel and Keys
+//! The controller accepts [`AppConfig`] carrying the repository and credential
+//! store. It wires the Connections panel and Keys
 //! panel to real persisted data and handles all CRUD operations.
 //!
-//! Threading (ARCHITECTURE §4 / P0.3):
+//! Threading (ARCHITECTURE §4):
 //! - Sessions run their byte-pump on dedicated threads.
 //! - The controller lives entirely on the UI thread.
 //! - A `slint::Timer` coalesces snapshots, renders the active tab.
 //! - Repository calls are synchronous (SQLite; fast enough for UI responses).
 //!
-//! P6.1: split from a single 4,525-line `controller.rs` god-module into this
-//! `controller/` tree — one file per feature area, each registering its Slint
-//! callbacks via a `wire_*(ctx: &Ctx)` function called from [`run`]. Pure code
-//! move: no behavior change. See `docs/devel/tasks/P6.1-controller-decomposition.md`.
-
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
@@ -54,7 +49,7 @@ mod startup;
 mod tabs;
 mod tree_ctl;
 
-/// Default logical font size used in unit tests (matches `AppSettings::default().font_size`).
+/// Default logical font size used in unit tests (matches `AppSettings::default.font_size`).
 #[cfg(test)]
 const FONT_SIZE_PX: f32 = 15.0;
 /// Redraw cadence (~60 Hz) for coalescing snapshots.
@@ -64,10 +59,10 @@ const RESIZE_DEBOUNCE: Duration = Duration::from_millis(90);
 /// Initial grid size before the surface reports its real dimensions.
 const INITIAL_SIZE: TerminalSize = TerminalSize { rows: 24, cols: 80 };
 
-/// Where an SSH tab's auth material comes from, for reconnect (P6.4).
+/// Where an SSH tab's auth material comes from, for reconnect.
 ///
 /// `Direct` (quick-connect / debug autoinit hooks) caches the typed
-/// [`SshAuthInput`] verbatim, exactly as before P6.4 — there is no credential
+/// [`SshAuthInput`] verbatim, unchanged — there is no credential
 /// record to re-resolve against. `Credential` (tree-launched, stored-credential
 /// connections) caches only the [`cm_core::ConnectionId`]: a reconnect re-runs
 /// [`sessions::resolve_ssh_auth`] against the live credential store, so the
@@ -93,12 +88,12 @@ struct SshConnectInfo {
     auth_source: SshAuthSource,
 }
 
-/// Mirrors [`SshAuthSource`] for RDP tabs (P6.12, gap 19): `Direct`
+/// Mirrors [`SshAuthSource`] for RDP tabs: `Direct`
 /// (quick-connect / debug autoinit) caches the typed [`RdpAuthInput`]
 /// verbatim; `Credential` (tree-launched) caches only the
 /// [`cm_core::ConnectionId`], so a reconnect re-resolves the password fresh
 /// via [`sessions::resolve_rdp_auth`] rather than caching plaintext in `Tab`
-/// state -- the same rule P6.4 established for SSH.
+/// state - the same rule established for SSH.
 enum RdpAuthSource {
     Direct(RdpAuthInput),
     Credential(cm_core::ConnectionId),
@@ -111,9 +106,9 @@ struct RdpConnectInfo {
 
 /// What a remote tab was launched with, for the error/disconnect overlay's
 /// Reconnect button. A tab is SSH, RDP, or Telnet (or neither, for local shells)
-/// -- never both -- so this is a plain sum type rather than two `Option`
-/// fields on [`Tab`]. [`sessions::wire_reconnect`] matches on this to pick
-/// the SSH or RDP reconnect path.
+/// - never both - so this is a plain sum type rather than two `Option`
+///   fields on [`Tab`]. [`sessions::wire_reconnect`] matches on this to pick
+///   the SSH or RDP reconnect path.
 enum ConnectInfo {
     Ssh(SshConnectInfo),
     Rdp(RdpConnectInfo),
@@ -133,11 +128,11 @@ struct ExtraPaneState {
     surface_w: f32,
     /// Logical height reported by the last `pane-resized` event for this pane.
     surface_h: f32,
-    /// P6.5: mouse-drag text selection + multi-click state for this pane.
+    /// mouse-drag text selection + multi-click state for this pane.
     sel: PaneSelectionState,
-    /// P6.11: RDP-capable pane shape (lifts P6.10's deferral — see
+    /// RDP-capable pane shape (lifts 's deferral — see
     /// `panes::connect_in_split`'s RDP arm). Populated when this pane's
-    /// `session.surface()` is `Surface::Framebuffer` instead of
+    /// `session.surface` is `Surface::Framebuffer` instead of
     /// `Surface::TerminalGrid`; mirrors the primary pane's
     /// `Tab::last_frame`/`rdp_w`/`rdp_h` fields. `None`/`0` for terminal panes.
     last_frame: Option<Image>,
@@ -265,57 +260,56 @@ struct Tab {
     scale: f32,
     num: u32,
     /// Present for remote sessions (SSH + RDP + Telnet) — enables the error overlay's
-    /// Reconnect button. The `Ssh`/`Rdp` variant (P6.12, gap 19) determines
+    /// Reconnect button. The `Ssh`/`Rdp` variant determines
     /// which reconnect path [`sessions::wire_reconnect`] takes.
     connect_info: Option<ConnectInfo>,
     /// True for any remote session (SSH, RDP, or Telnet) — drives the error overlay.
     is_remote: bool,
     /// The stored connection profile this tab was launched from (tree-launched
     /// SSH/RDP/Telnet), if any. `None` for quick-connect and local-shell tabs, which
-    /// have no profile to edit. Drives the ErrorOverlay "Edit…" button (P6.9
-    /// gap 16): with an id, it opens that profile's editor; without one, it
+    /// have no profile to edit. Drives the ErrorOverlay "Edit…" button:
+    /// with an id, it opens that profile's editor; without one, it
     /// falls back to quick-connect (the only thing there ever was to edit).
     origin_connection_id: Option<i32>,
-    // P5.1: Split-pane support.
+    // Split-pane support.
     /// Pane layout and focus tracking.
     pane_group: PaneGroup,
     /// Extra panes (beyond the primary pane 0 held in `session`).
     extra_panes: Vec<ExtraPaneState>,
-    /// P6.5: mouse-drag text selection + multi-click state for the primary pane
+    /// mouse-drag text selection + multi-click state for the primary pane
     /// (pane 0). Extra panes carry their own in [`ExtraPaneState::sel`].
     sel: PaneSelectionState,
-    /// P6.5 lifecycle: the pane index (`PaneGroup::focused()`) observed on the
+    /// lifecycle: the pane index (`PaneGroup::focused`) observed on the
     /// last tick, so a focus change (Ctrl+Shift+arrow, clicking another pane)
     /// can be detected reactively and clear every pane's stale selection —
-    /// see `selection lifecycle` in `docs/devel/tasks/
-    /// P6.5-terminal-selection-copy-paste.md`.
+    /// see the selection lifecycle handled by [`invalidate_if_stale`].
     last_focused_pane: usize,
-    /// P6.14 (gap 3): `true` for the Launchpad-fronted "home" tab -- a plain
+    /// `true` for the Launchpad-fronted "home" tab - a plain
     /// local shell underneath, shown instead of a bare terminal until the
     /// user picks something from the Launchpad. Set on the tab opened for a
     /// non-first-launch empty workspace and for a tab created by closing the
     /// last real tab ("explicitly emptied"); `false` for every real session
-    /// tab (never persisted into the restore-last-session snapshot -- see
+    /// tab (never persisted into the restore-last-session snapshot - see
     /// `startup::persist_session_tabs`).
     is_empty: bool,
-    /// P6.11 (gap 14): which of this tab's panes receive input while
+    /// which of this tab's panes receive input while
     /// broadcast is active. Defaults to `Visible` (every pane) — identical
-    /// to the pre-P6.11 "always all panes" behavior.
+    /// to the earlier "always all panes" behavior.
     broadcast_target: panes::BroadcastTarget,
-    /// P6.11: custom pane selections the user has named for quick re-use via
-    /// the targeting menu. Session-only (not persisted -- cleared with the
+    /// custom pane selections the user has named for quick re-use via
+    /// the targeting menu. Session-only (not persisted - cleared with the
     /// tab): a "named group" here is a saved custom selection, not a new
-    /// persisted entity (see the P6.11 task report for the reasoning).
+    /// persisted entity (see the API contract for the reasoning).
     broadcast_saved_groups: Vec<(String, BTreeSet<usize>)>,
     /// Whole-buffer search overlay state, targeting the pane that was focused
     /// when Find opened.
     search: search::SearchState,
-    /// P9.5 #3: this tab's own `"user@host:port"` identity (or a local
+    /// #3: this tab's own `"user@host:port"` identity (or a local
     /// shell's title, e.g. `"shell 3"`), cached at connect/reconnect time.
     /// `AppWindow::session-identity` is a single shared property (feeds
     /// `ConnectingOverlay`/`ErrorOverlay`/the status bar for whichever tab is
     /// active) that used to be set ONLY when a tab connects/reconnects, never
-    /// refreshed on a plain tab switch -- so switching to a tab that was
+    /// refreshed on a plain tab switch - so switching to a tab that was
     /// merely `Connecting`/`Failed` (not just-connected) kept showing
     /// whichever OTHER tab's identity had most recently been set, bleeding
     /// that tab's content into the one just switched to. `select_tab` now
@@ -323,19 +317,19 @@ struct Tab {
     /// never connected/been named (never shown, since `overlay_connecting`/
     /// `overlay_error` gate whether it's rendered at all).
     identity: String,
-    /// P9.5 #3: this tab's protocol label ("SSH"/"RDP"), cached alongside
-    /// `identity` for the same reason -- feeds `ConnectingOverlay`'s `kind`
+    /// #3: this tab's protocol label ("SSH"/"RDP"), cached alongside
+    /// `identity` for the same reason - feeds `ConnectingOverlay`'s `kind`
     /// text. Empty for local-shell tabs (which never show it: `kind == ""`
     /// falls back to "the connection" with no protocol name).
     kind: String,
     /// Explicit security presentation state. True only for plain Telnet;
     /// never inferred from a title/status/error string.
     insecure_transport: bool,
-    /// P9.8 I2: when this tab's current connect attempt started -- set at
+    /// I2: when this tab's current connect attempt started - set at
     /// push time (`tabs::push_tab`) and reset on every reconnect
     /// (`reconnect_ssh_tab`/`reconnect_rdp_tab`), mirroring `identity`/`kind`'s
     /// existing "keep in step with a reconnect" pattern. `tick_tab` diffs
-    /// this against `Instant::now()` on the `connecting -> connected`
+    /// this against `Instant::now` on the `connecting -> connected`
     /// transition to log the user-perceived connect duration.
     connect_started: std::time::Instant,
 }
@@ -351,20 +345,20 @@ struct State {
     surface_h: f32,
     conn_tree: ConnectionTree,
     keys_panel: KeysPanel,
-    /// Shared OS clipboard handle (P6.5: factored out of the RDP-only P4.2
+    /// Shared OS clipboard handle (factored out of the RDP-only
     /// field — used for both RDP CLIPRDR sync and terminal copy/paste). Fails
     /// soft internally if no clipboard is available (e.g. no display).
     sys_clipboard: PlatformClipboardHandle,
-    // P5.1: Detached sessions (still running; drained in tick).
+    // Detached sessions (still running; drained in tick).
     detached: Vec<DetachedEntry>,
-    /// P6.5 lifecycle: the active tab index observed on the last tick, so a
+    /// lifecycle: the active tab index observed on the last tick, so a
     /// tab switch can be detected reactively and clear the outgoing/incoming
     /// tab's stale terminal selection (see `Tab::last_focused_pane` for the
     /// pane-level counterpart).
     last_active_tab: usize,
-    // P5.2: Persisted terminal font size (logical px), updated live from Settings.
+    // Persisted terminal font size (logical px), updated live from Settings.
     font_size_px: f32,
-    // P5.2: Persisted default local-shell settings, updated live from Settings.
+    // Persisted default local-shell settings, updated live from Settings.
     local_settings: LocalSettings,
     /// Preferences consumed by terminal input/session creation paths.
     plain_copy_paste_shortcuts: bool,
@@ -379,9 +373,9 @@ struct State {
     pending_close: Option<close::CloseIntent>,
     /// Physical keys pressed while the modal owns the global Slint keyboard
     /// boundary. Key-up remains swallowed even when Escape or a mouse action
-    /// closes the modal between the two phases.
+    /// closes the modal between the two.
     close_modal_global_keys: BTreeSet<String>,
-    /// Same paired-phase guard for direct RDP callback entry points (including
+    /// Same paired- for direct RDP callback entry points (including
     /// introspection/automation calls that bypass Slint's global capture).
     close_modal_rdp_keys: BTreeSet<(String, i32)>,
     /// Set immediately before a confirmed quit hides the native window. A
@@ -394,10 +388,10 @@ struct State {
     /// Machine-local state remains reachable from state-only tab lifecycle
     /// helpers without mixing it into the connection repository.
     app_state: Arc<dyn cm_core::AppStateRepository>,
-    // P5.3b: Current filter text for the connection tree and keys tree.
+    // Current filter text for the connection tree and keys tree.
     conn_filter: String,
     cred_filter: String,
-    // P6.6: repo/secrets + the Slint list-model handles the Import/Export
+    // repo/secrets + the Slint list-model handles the Import/Export
     // palette actions need. Carried on `State` (not threaded through
     // `dispatch_palette_action`'s parameters) so the QA harness's narrower
     // handle set and the keyboard-dispatch path in `sessions.rs` — both
@@ -435,29 +429,29 @@ struct State {
     clipboard_observed_source: Option<std::path::PathBuf>,
     pending_terminal_buffer_copies: Vec<PendingTerminalBufferCopy>,
     secure_clipboard_root: Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>,
-    /// P6.14: the Slint list-model backing `launchpad-recents`. Lives on
+    /// the Slint list-model backing `launchpad-recents`. Lives on
     /// `State` (like `io` above) so both the tab-lifecycle code that shows
     /// the Launchpad (`tabs::open_local_tab_inner`) and the Launchpad's own
     /// callbacks (`launchpad.rs`) can refresh it without widening every
     /// intermediate function signature.
     launchpad_recents_model: Rc<VecModel<crate::RecentItem>>,
-    /// P6.11: the Slint list-model backing `pane-cells` (the N-way pane
+    /// the Slint list-model backing `pane-cells` (the N-way pane
     /// repeater in `app.slint`). Lives on `State` (like `io`/
     /// `launchpad_recents_model` above) rather than being threaded through
     /// `render_active`/`tick_tab`'s many call sites. Only rebuilt when the
     /// active tab's pane count is `> 1` — single-pane tabs (the common case)
     /// never touch this model, keeping the feature zero-cost when unsplit.
     pane_model: Rc<VecModel<crate::PaneCell>>,
-    /// P8.6-B: `Some(_)` only when the composition root actually started the
-    /// agent-mode proxy this session -- see [`crate::AgentModeConfig`]'s doc
+    /// `Some(_)` only when the composition root actually started the
+    /// agent-mode proxy this session - see [`crate::AgentModeConfig`]'s doc
     /// comment. Lives on `State` (like `session_provider` above) so every
     /// launch function (`sessions::open_ssh_tab`/`open_rdp_tab`, quick-connect,
-    /// broadcast) -- all of which already take `state: &Rc<RefCell<State>>`,
-    /// not the wider `Ctx` -- can reach it for the execute-scope gate without
+    /// broadcast) - all of which already take `state: &Rc<RefCell<State>>`,
+    /// not the wider `Ctx` - can reach it for the execute-scope gate without
     /// widening their signatures. Unconditional field for the same reason
     /// `AppConfig`'s is; only the code that *reads* it for a real decision
     /// (`settings_ctl`'s agent-mode wiring, `sessions::agent_mode_execute_blocked`)
-    /// is `#[cfg(feature = "agent-mode")]`-gated -- a non-agent-mode build
+    /// is `#[cfg(feature = "agent-mode")]`-gated - a non-agent-mode build
     /// never meaningfully reads it (it's always `None` there).
     #[allow(dead_code)]
     agent_mode: Option<crate::AgentModeConfig>,
@@ -528,12 +522,12 @@ impl State {
 
 /// Per-connection reply queue for the host-key dialog.
 ///
-/// Changed from `Option<Sender>` to `VecDeque<Sender>` (carry-over fix a):
+/// Uses a `VecDeque<Sender>` so
 /// concurrent SSH connects each push their own sender; accept/reject pops the
 /// front, so no sender is ever clobbered by a subsequent connection.
 type HkQueue = Arc<Mutex<std::collections::VecDeque<Sender<HostKeyDecision>>>>;
 
-/// Per-connection reply queue for the keyboard-interactive dialog (P6.13),
+/// Per-connection reply queue for the keyboard-interactive dialog,
 /// modeled on [`HkQueue`]: each pending challenge round pushes its own
 /// sender; submit/cancel pops the front so no sender is ever clobbered by a
 /// subsequent round or connection. `None` means the user cancelled the
@@ -547,11 +541,11 @@ type KbdQueue = Arc<Mutex<std::collections::VecDeque<Sender<Option<Vec<cm_core::
 ///
 /// Built once in [`run`] after all models + initial state are constructed,
 /// then passed by reference to each feature module's `wire_*` function. Pure
-/// parameter bundling — introduced by the P6.1 controller split, no behavior
+/// parameter bundling — introduced by the controller split, no behavior
 /// change (CONVENTIONS §3: internal/private, no memo required).
-// `pub(crate)`, not private: `lib.rs`'s `build_for_test` (P8.2) needs to name
+// `pub(crate)`, not private: `lib.rs`'s `build_for_test` needs to name
 // this type to box it up as the test harness's keepalive handle. Its fields
-// stay private -- only this crate's `controller` module (and submodules) can
+// stay private - only this crate's `controller` module (and submodules) can
 // reach into it; `lib.rs` only ever holds an opaque `Ctx` value, never reads
 // it.
 pub(crate) struct Ctx {
@@ -572,7 +566,7 @@ pub(crate) struct Ctx {
     cert_pending: Arc<Mutex<Option<Sender<CertDecision>>>>,
     kbd_pending: KbdQueue,
     resize_debounce: Rc<Timer>,
-    /// P6.11: broadcast-targeting-menu UI state (see `panes::wire_broadcast_target`).
+    /// broadcast-targeting-menu UI state (see `panes::wire_broadcast_target`).
     /// `bc_check_model`/`bc_group_model` back the popup's per-pane checkbox
     /// list and saved-group list; `bc_draft` is the in-progress custom
     /// selection while the popup is open (applied into the active tab's
@@ -636,17 +630,17 @@ pub(crate) fn terminal_paste_request_probe(ctx: &Ctx) -> Box<dyn Fn() -> usize> 
     })
 }
 
-/// Shared assembly behind [`run`] (production) and [`build_for_test`] (P8.2's
-/// hermetic element-test harness): model setup + every `wire_*()`
+/// Shared assembly behind [`run`] (production) and [`build_for_test`] ('s
+/// hermetic element-test harness): model setup + every `wire_*`
 /// registration, through wiring the redraw timer and (if applicable)
 /// restoring the last session's tabs. Stops **short** of: entering the event
 /// loop, the env-var debug hooks (`util::wire_env_hooks`), the OS-accent
 /// live-watch thread, and the single-instance
-/// activation listener -- [`run`] adds all of those; [`build_for_test`] adds
+/// activation listener - [`run`] adds all of those; [`build_for_test`] adds
 /// none of them (irrelevant, or actively non-deterministic, for hermetic
 /// tests).
 ///
-/// Returns the live `AppWindow` handle (a cheap strong-reference clone --
+/// Returns the live `AppWindow` handle (a cheap strong-reference clone -
 /// `ctx.ui` also refers to the same live window), the [`Ctx`] bundle, and the
 /// redraw [`Timer`]. The caller MUST keep the latter two alive for as long as
 /// the window should keep ticking: `Ctx` owns the resize-debounce timer and
@@ -671,7 +665,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
     util::apply_platform_shell_placeholders(&ui);
     let scale = ui.window().scale_factor();
 
-    // P6.8 (gap 10): push the real OS accent into `Theme.os-accent-color` before any
+    // push the real OS accent into `Theme.os-accent-color` before any
     // persisted settings are applied, so a persisted "OS accent" selection resolves to
     // a live color immediately rather than the compiled-in Slint default.
     util::push_os_accent(&ui, cm_platform::accent::os_accent());
@@ -689,18 +683,18 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         Rc::new(VecModel::from(palette::initial_palette_actions()));
     ui.set_palette_actions(ModelRc::from(palette_model.clone()));
 
-    // P6.14: the Launchpad's recents list.
+    // the Launchpad's recents list.
     let launchpad_recents_model: Rc<VecModel<crate::RecentItem>> = Rc::new(VecModel::default());
     ui.set_launchpad_recents(ModelRc::from(launchpad_recents_model.clone()));
     ui.set_launchpad_greeting(SharedString::from(launchpad::current_greeting()));
 
-    // P5.3b: toast model.
+    // toast model.
     let toast_model: Rc<VecModel<ToastEntry>> = Rc::new(VecModel::default());
     ui.set_toasts(ModelRc::from(toast_model.clone()));
-    // Toast counter -- gives each toast a unique id so we can remove it by id.
+    // Toast counter - gives each toast a unique id so we can remove it by id.
     let toast_next_id: Rc<RefCell<i32>> = Rc::new(RefCell::new(0));
 
-    // P6.11: N-way pane repeater model + broadcast-targeting-menu models.
+    // N-way pane repeater model + broadcast-targeting-menu models.
     let pane_model: Rc<VecModel<crate::PaneCell>> = Rc::new(VecModel::default());
     ui.set_pane_cells(ModelRc::from(pane_model.clone()));
     let bc_check_model: Rc<VecModel<bool>> = Rc::new(VecModel::default());
@@ -709,7 +703,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
     ui.set_broadcast_saved_groups(ModelRc::from(bc_group_model.clone()));
     let bc_draft: Rc<RefCell<BTreeSet<usize>>> = Rc::new(RefCell::new(BTreeSet::new()));
 
-    // -- Load persisted settings (P5.2) --------------------------------------
+    // Load persisted settings - ------------------------------------
     let stored_settings = {
         let svc = SettingsService::new(config_store.as_ref());
         match svc.load_with_warnings() {
@@ -774,7 +768,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         sys_clipboard: PlatformClipboardHandle::spawn(secure_clipboard_root.clone()),
         detached: Vec::new(),
         last_active_tab: 0,
-        // P5.2: persist terminal rendering font size and local shell defaults.
+        // persist terminal rendering font size and local shell defaults.
         font_size_px: stored_settings.font_size as f32,
         local_settings: settings_ctl::local_settings_from_app(&stored_settings),
         plain_copy_paste_shortcuts: stored_settings.plain_copy_paste_shortcuts,
@@ -790,10 +784,10 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         terminal_theme: stored_settings.terminal_theme,
         scrollback_limit: stored_settings.scrollback_limit,
         app_state: app_state.clone(),
-        // P5.3b: search/filter boxes start empty.
+        // search/filter boxes start empty.
         conn_filter: String::new(),
         cred_filter: String::new(),
-        // P6.6: see the `io` field doc comment.
+        // see the `io` field doc comment.
         io: import_export::ImportExportHandles {
             repo: repo.clone(),
             import_repo: import_repo.clone(),
@@ -802,11 +796,11 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
             cred_model: cred_model.clone(),
             toast_model: toast_model.clone(),
             toast_next_id: toast_next_id.clone(),
-            // P9.4: no import is ever mid-password-prompt at startup.
+            // no import is ever mid-password-prompt at startup.
             pending_import_path: Rc::new(RefCell::new(None)),
             pending_import_password: Rc::new(RefCell::new(String::new())),
         },
-        // P6.15: see the field doc comment.
+        // see the field doc comment.
         session_provider,
         next_endpoint_id: 1,
         clipboard_owner: None,
@@ -822,11 +816,11 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         pending_terminal_buffer_copies: Vec::new(),
         pointer_gesture: None,
         secure_clipboard_root,
-        // P6.14: see the field doc comment.
+        // see the field doc comment.
         launchpad_recents_model: launchpad_recents_model.clone(),
-        // P6.11: see the field doc comment.
+        // see the field doc comment.
         pane_model: pane_model.clone(),
-        // P8.6-B: see the field doc comment.
+        // see the field doc comment.
         agent_mode,
     }));
 
@@ -845,9 +839,9 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
     let kbd_pending: KbdQueue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let resize_debounce = Rc::new(Timer::default());
 
-    // -- Initial tab(s) (P6.14: gap 3 empty/launchpad home + gap 4 restore) --
+    // Initial tab(s) (empty/launchpad home + restore) -
     // The very first-ever launch always opens a plain local shell (nothing to
-    // restore, no recents yet) -- established design, unchanged. Otherwise,
+    // restore, no recents yet) - established design, unchanged. Otherwise,
     // "restore last session" (when enabled and there is something to
     // restore) takes priority; that needs `ctx` (the credentialed connect
     // path), so it runs just below, after `ctx` exists. A clean start, or a
@@ -910,7 +904,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
     launchpad::wire_launchpad(&ctx);
     import_export::wire_import_export(&ctx);
 
-    // -- Redraw timer ---------------------------------------------------------
+    // Redraw timer - -------------------------------------------------------
     let redraw = sessions::wire_tick(&ctx);
 
     if let Some(snap) = restore_snapshot {
@@ -926,13 +920,13 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
 /// # Errors
 /// Returns a [`slint::PlatformError`] if the window/backend cannot be created.
 pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
-    // P9.8 A6: this crate's own share of "how long did startup take" --
+    // A6: this crate's own share of "how long did startup take" -
     // main.rs already logs A1 (process start) before calling here; this
     // Instant doesn't reach back into that (no shared clock needed), it just
     // times this function's own work (assemble + wiring) through to handing
     // control to the event loop.
     let t0 = std::time::Instant::now();
-    // Taken before `assemble` consumes the rest of `config` -- only the
+    // Taken before `assemble` consumes the rest of `config` - only the
     // single-instance listener below needs it, and `assemble` (shared with
     // the test seam, which never has one) has no use for this field.
     let mut config = config;
@@ -940,13 +934,13 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
 
     let (_ui, ctx, _redraw) = assemble(config)?;
 
-    // -- Optional headless test hooks -----------------------------------------
+    // Optional headless test hooks - ---------------------------------------
     let mut hooks: Vec<Timer> = Vec::new();
     util::wire_env_hooks(&ctx, &mut hooks);
 
-    // P6.8 (gap 10): best-effort live OS accent-change watch. `watch_os_accent`
+    // best-effort live OS accent-change watch. `watch_os_accent`
     // is a no-op (returns `false`, spawns nothing) on platforms/desktops with no
-    // such signal (Windows in this pass, Linux without a portal) -- `os_accent()`
+    // such signal (Windows in this pass, Linux without a portal) - `os_accent`
     // above already covered the startup value for those.
     {
         let weak = ctx.ui.as_weak();
@@ -960,14 +954,14 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         });
     }
 
-    // P6.16: single-instance activation — a second `conman` launch asked us to
+    // single-instance activation — a second `conman` launch asked us to
     // come to the foreground. The composition root already validated the
     // handshake (see `cm_platform::single_instance`); here we just react to
-    // each `()` on a background thread and hop onto the UI thread to un-
+    // each `` on a background thread and hop onto the UI thread to un-
     // minimize and (re)show the window. Actually raising the window above
     // others is best-effort and OS/window-manager dependent — Slint's public
     // `Window` API has no direct "bring to front"/focus primitive, so
-    // `set_minimized(false)` + `show()` is the most we can portably do.
+    // `set_minimized(false)` + `show` is the most we can portably do.
     if let Some(rx) = activation_rx {
         let weak = ctx.ui.as_weak();
         std::thread::spawn(move || {
@@ -983,7 +977,7 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
         });
     }
 
-    // P9.8 A6.
+    // A6.
     tracing::info!(
         elapsed_ms = t0.elapsed().as_millis(),
         "startup complete, entering event loop"
@@ -991,8 +985,8 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
     ctx.ui.run()
 }
 
-/// P8.2 — test-only construction seam. Performs [`run`]'s model setup and all
-/// `wire_*()` registration (via the shared [`assemble`] helper) but does
+/// — test-only construction seam. Performs [`run`]'s model setup and all
+/// `wire_*` registration (via the shared [`assemble`] helper) but does
 /// **not** enter the event loop, and skips the production-only bits that are
 /// irrelevant or actively non-deterministic for hermetic in-process tests
 /// (env-var debug hooks, the OS-accent live-watch thread, the single-instance
@@ -1004,14 +998,14 @@ pub fn run(config: AppConfig) -> Result<(), slint::PlatformError> {
 ///
 /// `pub(crate)`: reached from outside this crate only through the tiny public
 /// forwarding wrapper `cm_ui::build_for_test` (`lib.rs`), gated the same way
-/// -- this keeps the seam out of the public `run()` surface per the task spec
-/// ("no change to the public `cm_ui::run` signature; internal seam, no memo
-/// needed"). See `docs/devel/tasks/P8.2-element-test-harness.md`.
+/// - this keeps the seam out of the public `run` surface per the API contract
+///   ("no change to the public `cm_ui::run` signature; internal seam, no memo
+///   needed"). See.
 ///
 /// # Panics
-/// Panics if `AppWindow::new()` fails (e.g. no testing backend installed --
-/// callers must call `i_slint_backend_testing::init_no_event_loop()` or
-/// `init_integration_test_with_mock_time()` first). A panic (not a
+/// Panics if `AppWindow::new` fails (e.g. no testing backend installed -
+/// callers must call `i_slint_backend_testing::init_no_event_loop` or
+/// `init_integration_test_with_mock_time` first). A panic (not a
 /// `Result`) is deliberate: every caller is test code where an unwind is the
 /// right failure mode, and it keeps this internal seam's signature simple.
 #[cfg(any(test, feature = "ui-introspection"))]

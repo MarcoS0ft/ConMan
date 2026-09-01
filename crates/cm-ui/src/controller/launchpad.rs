@@ -1,5 +1,5 @@
-//! Launchpad activation (P6.14, gap 3): real recents from the `recents`
-//! table, a time-of-day greeting, search filtering, and recent activation.
+//! Launchpad activation: real recents from the `recents` table, a time-of-day
+//! greeting, search filtering, and recent activation.
 //!
 //! The "empty tab" concept (`Tab::is_empty`) that decides *when* the
 //! Launchpad is shown lives in `tabs.rs` (tab lifecycle) and `overlays.rs`
@@ -57,7 +57,7 @@ fn wire_open_recent(ctx: &Ctx) {
         move |idx| {
             let Some(ui) = weak.upgrade() else { return };
             // `idx` is the position in whatever list is currently displayed
-            // (recents, or the live search-filtered list) -- resolve the row
+            // (recents, or the live search-filtered list) - resolve the row
             // to its *displayed* id (`RecentItem.id`, the real connection
             // id), never `idx` itself.
             let conn_id = {
@@ -90,7 +90,7 @@ fn wire_open_recent(ctx: &Ctx) {
 /// Resolves `idx` (a `RecentItem` list position, from `on_open_recent`) to
 /// the connection id displayed at that position, or `None` if out of range.
 /// Pulled out of the wired closure so it's testable without a live
-/// `AppWindow`/model (mirrors `overlays::resolve_edit_action`) -- the actual
+/// `AppWindow`/model (mirrors `overlays::resolve_edit_action`) - the actual
 /// list at click time may be the true recents or a live search-filtered
 /// list, so this always resolves against *whatever* is currently displayed,
 /// never a stale/cached recents snapshot.
@@ -101,9 +101,7 @@ fn recent_id_at(items: &[RecentItem], idx: i32) -> Option<i32> {
         .map(|item| item.id)
 }
 
-// ---------------------------------------------------------------------------
 // Recents / search content
-// ---------------------------------------------------------------------------
 
 fn search_or_recent(st: &State, query: &str) -> Vec<RecentItem> {
     let q = query.trim();
@@ -186,7 +184,7 @@ fn status_for(st: &State, conn_id: i64) -> &'static str {
     }
 }
 
-/// "just now" / "Nm ago" / "Nh ago" / "Nd ago" -- pure function of two epoch
+/// "just now" / "Nm ago" / "Nh ago" / "Nd ago" - pure function of two epoch
 /// timestamps so it's unit-testable without wall-clock flakiness.
 fn relative_time_secs(now: i64, then: i64) -> String {
     let delta = (now - then).max(0);
@@ -199,7 +197,7 @@ fn relative_time_secs(now: i64, then: i64) -> String {
 }
 
 /// A real (if coarse) greeting: UTC-hour buckets rather than a literal
-/// hardcoded string. Deliberately not locale/timezone-aware -- pulling in a
+/// hardcoded string. Deliberately not locale/timezone-aware - pulling in a
 /// local-time crate for a cosmetic greeting isn't worth a new-dependency
 /// memo (CONVENTIONS §4); this is a known, low-stakes simplification.
 pub(super) fn current_greeting() -> String {

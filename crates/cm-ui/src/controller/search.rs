@@ -1,8 +1,8 @@
-//! Whole-buffer terminal search (P6.7, `Ctrl⇧F`): pure match-finding logic,
+//! Whole-buffer terminal search (`Ctrl⇧F`): pure match-finding logic,
 //! the per-tab [`SearchState`] lifecycle, and the wiring for the search
 //! overlay's callbacks + the `Ctrl⇧F` / in-overlay keyboard shortcuts.
 //!
-//! Scoping decisions (see the task report):
+//! Search behavior:
 //! - Search targets the pane that was focused when the overlay opened. The
 //!   stable pane index keeps split-pane Find aligned with the same contextual
 //!   action target as Copy/Paste and RDP send-key commands.
@@ -188,7 +188,7 @@ pub(super) fn refresh_search_ui_from(ui: &AppWindow, st: &State) {
 
 /// Route to the search overlay's editing keys while the terminal FocusScope
 /// remains focused (`sessions.rs`'s `wire_key_input` checks
-/// `ui.get_terminal_search_open()` before ordinary session input).
+/// `ui.get_terminal_search_open` before ordinary session input).
 /// `Ctrl⇧F` here closes the overlay (opening it is handled by the ordinary
 /// Ctrl⇧ dispatch table when *not* already open).
 pub(super) fn handle_search_key(
@@ -280,7 +280,7 @@ pub(crate) fn offset_to_show_row(scrollback_len: u32, target_row: u16) -> u32 {
     scrollback_len.saturating_sub(u32::from(target_row))
 }
 
-/// Per-tab search-overlay state (P6.7): open/query/matches/current index,
+/// Per-tab search-overlay state: open/query/matches/current index,
 /// plus the pending [`Receiver`] awaiting a `Session::request_search_text`
 /// reply. Lives on [`Tab`] (mirrors [`crate::selection::PaneSelectionState`]'s
 /// per-tab home).
@@ -348,7 +348,7 @@ impl SearchState {
     }
 
     /// Drain a pending buffer-text reply, if one has arrived, and recompute
-    /// matches. Call once per tick while `is_open()` (mirrors how
+    /// matches. Call once per tick while `is_open` (mirrors how
     /// `sessions::tick_tab` polls snapshot channels). Returns `true` if the
     /// match list was (re)computed, so the caller knows to force a render and
     /// refresh the overlay's match-count UI.
