@@ -200,10 +200,11 @@ pub struct TerminalTheme {
     /// Background tint for the *current* search match — brighter than
     /// `search_bg` so next/prev navigation is visually obvious.
     pub search_current_bg: Rgb,
-    /// Scrollbar track color ( position indicator), drawn only when
-    /// `GridSnapshot::scrollback_len > 0`.
+    /// Scrollbar track color for the Slint `TerminalScrollbar` overlay
+    /// (`ui/app.slint` styles its own rail today; kept here so the palette
+    /// stays complete if the overlay ever binds to theme colors).
     pub scrollbar_track: Rgb,
-    /// Scrollbar thumb color ( position indicator).
+    /// Scrollbar thumb color (see `scrollbar_track`).
     pub scrollbar_thumb: Rgb,
     /// The 16 ANSI colors (0-7 normal, 8-15 bright).
     pub ansi: [Rgb; 16],
@@ -580,10 +581,14 @@ impl TerminalRenderer {
 
     /// [`render_to_selected`](Self::render_to_selected) with search
     /// highlighting: `matches` are tinted with [`TerminalTheme::search_bg`]
-    /// (or `search_current_bg` for `matches[current_match]`), and a
-    /// scrollbar position indicator is drawn on the right edge whenever
-    /// `snap.scrollback_len > 0`. `selection` takes priority over a match
+    /// (or `search_current_bg` for `matches[current_match]`).
+    /// `selection` takes priority over a match
     /// tint on any cell covered by both.
+    ///
+    /// Scroll position is NOT painted here: the Slint `TerminalScrollbar`
+    /// overlay (`ui/app.slint`) renders the interactive 10px rail/thumb from
+    /// the same `scrollback_len`/`scroll_offset` fields, so the buffer stays
+    /// pure terminal content.
     ///
     /// Callers should pre-filter `matches` to ones visible in the current
     /// viewport window (the row range `snap.scrollback_len -
@@ -698,7 +703,6 @@ impl TerminalRenderer {
             }
         }
 
-        self.draw_scrollbar(bytes, stride, w, h, snap);
         self.draw_cursor(bytes, stride, w, h, snap, cw, ch_h);
         buf
     }
@@ -731,50 +735,6 @@ impl TerminalRenderer {
             };
         }
         (fg, bg)
-    }
-
-    /// scroll-position indicator: a thin vertical scrollbar on the right
-    /// edge, drawn only when there is scrollback to show a position within
-    /// (`snap.scrollback_len == 0` draws nothing — nothing to indicate).
-    /// Thumb position/height are proportional to `(scrollback_len -
-    /// scroll_offset) / total_rows` and `size.rows / total_rows`.
-    fn draw_scrollbar(&self, bytes: &mut [u8], stride: usize, w: u32, h: u32, snap: &GridSnapshot) {
-        if snap.scrollback_len == 0 {
-            return;
-        }
-        let total_rows = snap.scrollback_len + u32::from(snap.size.rows);
-        if total_rows == 0 {
-            return;
-        }
-        const BAR_W: usize = 4;
-        let w_px = w as usize;
-        let h_px = h as usize;
-        let track_x = w_px.saturating_sub(BAR_W);
-        fill_rect(
-            bytes,
-            stride,
-            track_x,
-            0,
-            BAR_W,
-            h_px,
-            self.theme.scrollbar_track,
-        );
-
-        let abs_top = snap.scrollback_len.saturating_sub(snap.scroll_offset);
-        let thumb_y = ((f64::from(abs_top) / f64::from(total_rows)) * h_px as f64).round() as usize;
-        let thumb_h = (((f64::from(snap.size.rows) / f64::from(total_rows)) * h_px as f64).round()
-            as usize)
-            .max(6)
-            .min(h_px);
-        fill_rect(
-            bytes,
-            stride,
-            track_x,
-            thumb_y.min(h_px.saturating_sub(thumb_h)),
-            BAR_W,
-            thumb_h,
-            self.theme.scrollbar_thumb,
-        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1674,7 +1634,10 @@ mod tests {
     }
 
     #[test]
-    fn scrollbar_present_when_scrolled_back() {
+    fn no_painted_scrollbar_when_scrolled_back() {
+        // The interactive overlay scrollbar lives in Slint (`TerminalScrollbar`
+        // in `ui/app.slint`); the buffer itself must stay pure terminal
+        // content so the overlay is the single scroll indicator.
         let mut r = TerminalRenderer::new(14.0, 1.0, TerminalTheme::dark());
         let cell = mk("", Color::Default, Color::Default, CellAttrs::empty(), 1);
         let mut s = snap(4, 20, vec![cell; 80], blank_cursor());
@@ -1682,8 +1645,8 @@ mod tests {
         s.scroll_offset = 50;
         let buf = r.render(&s);
         let w = buf.width();
-        // The scrollbar track occupies the rightmost few pixels.
-        assert_ne!(px_at(&buf, w - 1, 0), TerminalTheme::dark().bg);
+        // The rightmost column is plain background — no painted track.
+        assert_eq!(px_at(&buf, w - 1, 0), TerminalTheme::dark().bg);
     }
 
     #[test]

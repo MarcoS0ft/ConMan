@@ -385,6 +385,12 @@ struct State {
     terminal_theme: cm_core::TerminalTheme,
     scrollback_limit: usize,
     pointer_gesture: Option<PointerGestureCapture>,
+    /// Revision counter for the overlay scrollbar's `rev`/`scroll-rev`
+    /// properties. Bumped on tab/pane switches (see `tabs::select_tab`,
+    /// `panes::wire_pane_focused`) so a switch into a scrolled-back viewport
+    /// flashes the bar even when no scroll value changed. Never bumped per
+    /// tick — live offset changes already reveal the bar via `changed`.
+    scroll_rev: u64,
     /// Machine-local state remains reachable from state-only tab lifecycle
     /// helpers without mixing it into the connection repository.
     app_state: Arc<dyn cm_core::AppStateRepository>,
@@ -814,6 +820,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         clipboard_observed_source: None,
         pending_terminal_buffer_copies: Vec::new(),
         pointer_gesture: None,
+        scroll_rev: 0,
         secure_clipboard_root,
         // see the field doc comment.
         launchpad_recents_model: launchpad_recents_model.clone(),

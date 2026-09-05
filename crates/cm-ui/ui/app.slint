@@ -58,6 +58,16 @@ export struct PaneCell {
     h: float,
     frame: image,
     is-rdp: bool,
+    // Scrollback viewport state for this pane's overlay scrollbar
+    // (`TerminalScrollbar` in `PaneSlot`): lines retained above the live
+    // tail, the current offset above the tail, and the viewport height in
+    // rows — all mirrored from the pane's latest `GridSnapshot`. `scroll-rev`
+    // is bumped by the controller on tab/pane switches so a switch into a
+    // scrolled-back pane flashes the bar even when no value changed.
+    scrollback-len: int,
+    scroll-offset: int,
+    view-rows: int,
+    scroll-rev: int,
 }
 
 // Flattened connection-tree row. `depth` drives left-indent (16 px per level).
@@ -89,6 +99,175 @@ export struct CredRow {
     // by N connections") - precomputed in Rust (keys_ctl::refresh_cred_model)
     // rather than formatted in.slint, matching `kind`'s existing pattern.
     used-by-label: string,
+}
+
+component TerminalScrollbar inherits Rectangle {
+    in property <int> scrollback-len: 0;
+    in property <int> scroll-offset: 0;
+    in property <int> view-rows: 0;
+    // Bumped by the controller on tab/pane switches so a switch into a
+    // scrolled-back viewport flashes the bar even when no value changed
+    // (Rust sets with the same value otherwise, which fires no `changed`).
+    in property <int> rev: 0;
+    // Fraction of the buffer to show (0 = oldest/top, 1 = live tail/bottom).
+    callback scrub(float);
+
+    // Total buffer lines backing the viewport; zero until the first snapshot.
+    property <int> total: scrollback-len + view-rows;
+    property <bool> has-content: scrollback-len > 0 && view-rows > 0 && total > 0;
+    // Width collapses to zero once fully faded so the strip never steals
+    // terminal pointer input (text selection) while hidden.
+    property <bool> sb-shown: false;
+    property <float> sb-opacity: 0;
+    animate sb-opacity { duration: 300ms; easing: ease-in-out; }
+
+    // Thumb geometry. thumb-h is the SIZE of the viewport within the whole
+    // buffer: rows / total of the track. thumb-y is the POSITION, and it must
+    // travel the full `height - thumb-h` range: normalize by `scrollback-len`
+    // (the number of lines the viewport top can move over), NOT `total` --
+    // dividing by `total` made the thumb stop at scrollback-len/total (~83%)
+    // instead of the rail bottom at the live tail. At tail (offset 0) the
+    // numerator == scrollback-len so the thumb bottom reaches `height`; at the
+    // oldest line (offset == scrollback-len) it sits at the top.
+    property <length> thumb-h: has-content ? max(20px, (self.height - 4px) * view-rows / total) : 0px;
+    property <length> thumb-y: has-content && self.height > thumb-h && scrollback-len > 0
+        ? (self.height - thumb-h) * (scrollback-len - scroll-offset) / scrollback-len : 0px;
+    // Grab offset (press point inside the thumb) so a drag doesn't snap.
+    property <length> grab-delta: 0px;
+    property <bool> scrubbing: false;
+
+    public function poke() {
+        if (!has-content) {
+            // Scrollback drained (session ended, tab reset): never leave a
+            // faded-out but still hit-testable strip behind.
+            sb-opacity = 0;
+            sb-shown = false;
+            hide-timer.stop();
+            collapse-timer.stop();
+            return;
+        }
+        sb-shown = true;
+        sb-opacity = 1;
+        collapse-timer.stop();
+        // Re-arm the hide delay from NOW. Two Slint Timer facts (builtins.slint,
+        // 1.17): `restart()` "restarts the timer if it was previously started"
+        // -- it does NOTHING to a stopped timer -- and `stop()` + `start()`
+        // inside one callback toggles `running` false -> true, which nets to
+        // "unchanged" so the old countdown survives (the original bug: the bar
+        // faded ~1.25s after the FIRST scroll regardless of later ones). So:
+        // start a stopped timer, restart a running one.
+        if (hide-timer.running) {
+            hide-timer.restart();
+        } else {
+            hide-timer.start();
+        }
+    }
+
+    function scrub-at(pos-y: length) -> bool {
+        if (!has-content || self.height <= thumb-h) {
+            return false;
+        }
+        scrub(clamp((pos-y - grab-delta) / (self.height - thumb-h), 0.0, 1.0));
+        return true;
+    }
+
+    width: (sb-shown || sb-touch.has-hover || sb-touch.pressed) && has-content ? 10px : 0px;
+    opacity: sb-opacity;
+    background: transparent;
+
+    // One-shot: a Slint Timer REPEATS every `interval` while running, so it
+    // must stop itself when it fires or it keeps re-forcing the fade.
+    hide-timer := Timer {
+        interval: 1250ms;
+        running: false;
+        triggered => {
+            hide-timer.stop();
+            if (sb-touch.has-hover || sb-touch.pressed || root.scrubbing) {
+                // The pointer reached the bar (or a scrub is in progress):
+                // hold it instead of fading out under the user's cursor;
+                // `poke()` re-arms the delay.
+                root.poke();
+            } else {
+                root.sb-opacity = 0;
+                // Stopped by construction (poke() and its own trigger stop
+                // it), so `start()`; `restart()` would be a no-op here.
+                collapse-timer.start();
+            }
+        }
+    }
+
+    // Collapses the strip once the 300ms fade-out completes. A dedicated
+    // timer rather than `changed sb-opacity`: change handlers are not
+    // guaranteed to observe animation-interpolated values, which left a
+    // fully transparent but still hit-testable 10px strip over the terminal
+    // after the first fade (clickable ghost thumb, stolen edge selection).
+    collapse-timer := Timer {
+        interval: 400ms;
+        running: false;
+        triggered => {
+            collapse-timer.stop();
+            if (sb-touch.pressed || sb-touch.has-hover || root.scrubbing) {
+                root.poke();
+            } else {
+                root.sb-shown = false;
+            }
+        }
+    }
+
+    // Deliberately offset-only: at the live tail `scrollback-len` grows with
+    // every output line, which must NOT keep the bar visible — only an actual
+    // viewport move (wheel, PageUp/PageDown, scrub) or a tab/pane switch
+    // into a scrolled-back viewport reveals it.
+    changed scroll-offset => { root.poke(); }
+    changed rev => {
+        if (root.scroll-offset > 0) {
+            root.poke();
+        }
+    }
+
+    // Faint full-height rail, visible only with the bar itself.
+    Rectangle {
+        width: 10px;
+        background: Theme.color-hover.with-alpha(0.35);
+    }
+
+    // Thumb position indicator.
+    Rectangle {
+        x: 1px;
+        y: root.thumb-y + 2px;
+        width: 8px;
+        height: max(0px, root.thumb-h - 4px);
+        border-radius: 4px;
+        background: sb-touch.pressed ? Theme.color-accent : Theme.color-text-disabled;
+    }
+
+    sb-touch := TouchArea {
+        enabled: root.has-content && root.width > 0px;
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root.scrubbing = true;
+                if (self.mouse-y >= root.thumb-y && self.mouse-y <= root.thumb-y + root.thumb-h) {
+                    root.grab-delta = self.mouse-y - root.thumb-y;
+                } else {
+                    // Track click: jump the thumb center to the press point,
+                    // then drag from there.
+                    root.grab-delta = root.thumb-h / 2;
+                    root.scrub-at(self.mouse-y);
+                }
+                root.poke();
+            } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                root.scrubbing = false;
+                root.poke();
+            }
+        }
+        moved => {
+            if (root.scrubbing) {
+                root.scrub-at(self.mouse-y);
+                root.poke();
+            }
+        }
+    }
 }
 
 component TerminalSurface inherits Rectangle {
@@ -1198,6 +1377,14 @@ component PaneSlot inherits Rectangle {
     callback scroll(length, length);                        // terminal panes
     callback rdp-scroll(length, length, length, length);    // RDP panes
     callback resized(length, length);
+    // Scrollback viewport state for this pane's overlay scrollbar, mirrored
+    // from the pane's latest `GridSnapshot` via `PaneCell` (see its doc
+    // comment). `scrub` carries a 0..1 buffer fraction (0 = oldest/top).
+    in property <int> scrollback-len: 0;
+    in property <int> scroll-offset: 0;
+    in property <int> view-rows: 0;
+    in property <int> scroll-rev: 0;
+    callback scrub(float);
     // per-pane disconnect - arg is `root.pane-index` (this pane's
     // real id), not the repeater's own iteration index.
     callback pane-disconnect(int);
@@ -1248,6 +1435,19 @@ component PaneSlot inherits Rectangle {
             }
             rdp-scroll(x, y, dx, dy) => { root.rdp-scroll(x, y, dx, dy); }
             resized(w, h) => { root.resized(w, h); }
+        }
+
+        // Overlay scrollbar for terminal panes. Declared after the surfaces
+        // so it captures pointer input first; zero-width while faded so it
+        // never blocks text selection.
+        if !root.is-rdp : TerminalScrollbar {
+            x: parent.width - self.width;
+            height: 100%;
+            scrollback-len: root.scrollback-len;
+            scroll-offset: root.scroll-offset;
+            view-rows: root.view-rows;
+            rev: root.scroll-rev;
+            scrub(f) => { root.scrub(f); }
         }
     }
 
@@ -1413,6 +1613,19 @@ export component AppWindow inherits Window {
     // rdp-active: true while an RDP tab is the active tab.
     in property <image>     rdp-frame;
     in-out property <bool>  rdp-active: false;
+    // ── Terminal overlay scrollbar (single-pane) ───────────────────
+    // Scrollback viewport state of the active tab's primary terminal pane,
+    // mirrored from its latest `GridSnapshot` (see `TerminalScrollbar`).
+    // Split tabs drive per-pane state through `PaneCell` instead.
+    in property <int> term-scrollback-len: 0;
+    in property <int> term-scroll-offset: 0;
+    in property <int> term-view-rows: 0;
+    in property <int> term-scroll-rev: 0;
+    // Buffer fraction scrub (0 = oldest/top, 1 = live tail/bottom) from the
+    // single-pane overlay, or per-pane (`pane` = `PaneCell.pane`) from a
+    // split overlay.
+    callback scroll-scrub(float);
+    callback pane-scroll-scrub(int, float);
 
     // ── Side panel ────────────────────────────────────────────────────
     in property <[ConnRow]> connections;
@@ -2537,14 +2750,29 @@ export component AppWindow inherits Window {
                 spacing: 0px;
 
                 // ── Single-pane terminal ──────
-                if !rdp-active && pane-cells.length <= 1 : TerminalSurface {
+                // Wrapped so the overlay scrollbar can float over the
+                // surface's right edge (declared after it, capturing first).
+                if !rdp-active && pane-cells.length <= 1 : Rectangle {
                     vertical-stretch: 1;
-                    frame: root.frame;
-                    focus-request: root.session-focus-request;
-                    key-input(t, s, m) => { root.key-input(t, s, m); }
-                    pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
-                    scroll(dx, dy) => { root.scroll(dx, dy); }
-                    resized(w, h) => { root.surface-resized(w, h); }
+                    clip: true;
+                    TerminalSurface {
+                        width: 100%; height: 100%;
+                        frame: root.frame;
+                        focus-request: root.session-focus-request;
+                        key-input(t, s, m) => { root.key-input(t, s, m); }
+                        pointer(b, k, x, y, m) => { root.pointer(b, k, x, y, m); }
+                        scroll(dx, dy) => { root.scroll(dx, dy); }
+                        resized(w, h) => { root.surface-resized(w, h); }
+                    }
+                    TerminalScrollbar {
+                        x: parent.width - self.width;
+                        height: 100%;
+                        scrollback-len: root.term-scrollback-len;
+                        scroll-offset: root.term-scroll-offset;
+                        view-rows: root.term-view-rows;
+                        rev: root.term-scroll-rev;
+                        scrub(f) => { root.scroll-scrub(f); }
+                    }
                 }
 
                 // ── RDP surface (only shown when an unsplit RDP tab is
@@ -2581,6 +2809,11 @@ export component AppWindow inherits Window {
                         is-focused: root.active-pane == cell.pane;
                         focus-request: root.session-focus-request;
                         pane-index: cell.pane;
+                        scrollback-len: cell.scrollback-len;
+                        scroll-offset: cell.scroll-offset;
+                        view-rows: cell.view-rows;
+                        scroll-rev: cell.scroll-rev;
+                        scrub(f) => { root.pane-scroll-scrub(cell.pane, f); }
                         // a split (more than one cell) is the only
                         // time there's another pane to fall back to.
                         show-disconnect: root.pane-cells.length > 1;

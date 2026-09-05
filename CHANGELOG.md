@@ -67,6 +67,7 @@ All notable user-facing changes to Connection Manager are documented here.
   emitting control characters or triggering clipboard shortcuts.
 - Keep contextual session-action menus compact and anchored to their tab-strip
   trigger instead of stretching them to the full window height.
+- Fixed scrollbar not clickable, and widened it to 10px
 
 ### Security
 

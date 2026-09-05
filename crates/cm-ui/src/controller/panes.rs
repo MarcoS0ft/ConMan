@@ -353,10 +353,14 @@ pub(super) fn rebuild_pane_cells_for_state(st: &mut State) {
         pane_model.set_vec(Vec::new());
         return;
     }
-    pane_model.set_vec(build_pane_cells(tab, primary_target));
+    pane_model.set_vec(build_pane_cells(tab, primary_target, st.scroll_rev));
 }
 
-fn build_pane_cells(tab: &mut Tab, primary_target: Option<(u32, u32)>) -> Vec<crate::PaneCell> {
+fn build_pane_cells(
+    tab: &mut Tab,
+    primary_target: Option<(u32, u32)>,
+    scroll_rev: u64,
+) -> Vec<crate::PaneCell> {
     let rects = tab.pane_group.rects();
     let mut out = Vec::with_capacity(rects.len());
     for rect in rects {
@@ -422,6 +426,28 @@ fn build_pane_cells(tab: &mut Tab, primary_target: Option<(u32, u32)>) -> Vec<cr
                 None => (Image::default(), false),
             }
         };
+        // Latest scrollback viewport for this pane's overlay scrollbar
+        // (`None` before the first snapshot / for RDP panes → zeros hide it).
+        let (scrollback_len, scroll_offset, view_rows) = if rect.pane == 0 {
+            tab.last.as_ref().map_or((0, 0, 0), |snap| {
+                (
+                    snap.scrollback_len as i32,
+                    snap.scroll_offset as i32,
+                    snap.size.rows as i32,
+                )
+            })
+        } else {
+            tab.extra_panes
+                .get(rect.pane - 1)
+                .and_then(|ep| ep.last.as_ref())
+                .map_or((0, 0, 0), |snap| {
+                    (
+                        snap.scrollback_len as i32,
+                        snap.scroll_offset as i32,
+                        snap.size.rows as i32,
+                    )
+                })
+        };
         out.push(crate::PaneCell {
             pane: rect.pane as i32,
             x: rect.x,
@@ -430,6 +456,10 @@ fn build_pane_cells(tab: &mut Tab, primary_target: Option<(u32, u32)>) -> Vec<cr
             h: rect.h,
             frame,
             is_rdp,
+            scrollback_len,
+            scroll_offset,
+            view_rows,
+            scroll_rev: scroll_rev as i32,
         });
     }
     out
@@ -545,6 +575,39 @@ fn wire_pane_focused(ctx: &Ctx) {
             }
             if let Some(ui) = weak.upgrade() {
                 ui.set_active_pane(pane_idx);
+                // Flash the newly focused pane's overlay scrollbar when it
+                // sits scrolled back by bumping ONLY that pane's `scroll-rev`
+                // cell field in place. Never rebuild the pane model here:
+                // `render_active` -> `rebuild_pane_cells_for_state` ->
+                // `set_vec` destroys and recreates every `PaneSlot`, including
+                // the surface that just took keyboard focus from this very
+                // click, so the fresh instance has no focus and the next key
+                // press (e.g. Return to the close-confirm dialog) goes nowhere
+                // (caught by suite_session_actions). `set_row_data` is a
+                // data-only update that preserves element instances. Single-
+                // pane tabs have an empty model and use the AppWindow
+                // `term-scroll-rev` prop, bumped by `select_tab`.
+                let active = st.active;
+                if st
+                    .tabs
+                    .get(active)
+                    .is_some_and(|tab| tab.pane_group.count() > 1)
+                {
+                    st.scroll_rev = st.scroll_rev.wrapping_add(1);
+                    let rev = st.scroll_rev as i32;
+                    let pane_model = st.pane_model.clone();
+                    let row = (0..pane_model.row_count()).find(|&i| {
+                        pane_model
+                            .row_data(i)
+                            .is_some_and(|cell| cell.pane == pane_idx)
+                    });
+                    if let Some(i) = row
+                        && let Some(mut cell) = pane_model.row_data(i)
+                    {
+                        cell.scroll_rev = rev;
+                        pane_model.set_row_data(i, cell);
+                    }
+                }
             }
         }
     });
@@ -1908,7 +1971,7 @@ mod tests {
         tab.extra_panes[0].rdp_w = 4;
         tab.extra_panes[0].rdp_h = 4;
 
-        let cells = build_pane_cells(&mut tab, None);
+        let cells = build_pane_cells(&mut tab, None, 0);
         assert_eq!(cells.len(), 2);
         let primary = cells.iter().find(|c| c.pane == 0).unwrap();
         assert!(!primary.is_rdp, "primary pane is still a plain terminal");

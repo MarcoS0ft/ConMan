@@ -516,7 +516,13 @@ pub(super) fn select_tab(state: &Rc<RefCell<State>>, ui: &AppWindow, idx: i32) {
     ui.set_session_insecure(
         tab.insecure_transport || tab.extra_panes.iter().any(|ep| ep.insecure_transport),
     );
+    // Flash the overlay scrollbar when switching into a scrolled-back
+    // viewport. Bump first so the split cells stamped inside `render_active`
+    // carry the new `rev`; the single-pane `rev` prop is set after (values
+    // first, then `rev`) so `TerminalScrollbar` evaluates against fresh values.
+    st.scroll_rev = st.scroll_rev.wrapping_add(1);
     sessions::render_active(&mut st, ui);
+    ui.set_term_scroll_rev(st.scroll_rev as i32);
     drop(st);
     panes::refresh_broadcast_label(state, ui);
     startup::persist_session_tabs(state);

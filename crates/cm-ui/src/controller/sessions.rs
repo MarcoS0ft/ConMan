@@ -30,6 +30,7 @@ pub(super) fn wire_sessions(ctx: &Ctx) {
     wire_session_actions(ctx);
     wire_pointer(ctx);
     wire_scroll(ctx);
+    wire_scroll_scrub(ctx);
     wire_rdp_scroll(ctx);
     wire_quick_connect(ctx);
     wire_qc_connect(ctx);
@@ -767,6 +768,133 @@ const PAGE_DOWN: i32 = 12;
 /// mouse tracking; see `wire_scroll`.
 const WHEEL_SCROLL_LINES: u32 = 3;
 
+/// Map an overlay-scrollbar scrub fraction (0 = oldest/top, 1 = live
+/// tail/bottom — matching `TerminalScrollbar`'s thumb geometry in
+/// `ui/app.slint`) to an absolute `SessionInput::Scroll` offset for `snap`,
+/// clamped to the available scrollback. Pure — unit-tested below.
+fn fraction_to_offset(snap: &GridSnapshot, frac: f32) -> u32 {
+    // Invert the thumb-y travel mapping in `TerminalScrollbar` (ui/app.slint):
+    // the thumb travels over `scrollback_len` lines, so a travel fraction
+    // `frac` (0 = top/oldest, 1 = live tail) maps to an offset of
+    // `scrollback_len * (1 - frac)`. Normalizing by `scrollback_len` (not the
+    // old `scrollback_len + rows` total) keeps the scrub 1:1 with the thumb --
+    // frac 0 -> the oldest line, frac 1 -> the tail, midpoint -> the middle.
+    if snap.scrollback_len == 0 {
+        return 0;
+    }
+    let travel = f64::from(frac.clamp(0.0, 1.0));
+    (f64::from(snap.scrollback_len) * (1.0 - travel)).round() as u32
+}
+
+/// Publish the primary pane's scrollback viewport state to the Slint overlay
+/// scrollbar (`TerminalScrollbar` in `ui/app.slint`). Slint reveals the bar
+/// on `scroll-offset` changes; `rev` is only bumped on tab/pane switches
+/// (see `tabs::select_tab`, `panes::wire_pane_focused`), so steady output at
+/// the live tail never flashes it.
+pub(super) fn publish_scroll_state(tab: &Tab, ui: &AppWindow) {
+    match tab.last.as_ref() {
+        Some(snap) => {
+            ui.set_term_scrollback_len(snap.scrollback_len as i32);
+            ui.set_term_scroll_offset(snap.scroll_offset as i32);
+            ui.set_term_view_rows(snap.size.rows as i32);
+        }
+        None => {
+            ui.set_term_scrollback_len(0);
+            ui.set_term_scroll_offset(0);
+            ui.set_term_view_rows(0);
+        }
+    }
+}
+
+/// Scrub the **focused** pane's scrollback viewport to `frac` (unlike the
+/// wheel path's historical always-primary scope, the overlay lives per-pane).
+/// No-op for RDP surfaces and before the first snapshot arrives.
+fn scrub_focused_by_fraction(tab: &Tab, frac: f32) {
+    let focused = tab.pane_group.focused();
+    let (surface, snap) = if focused == 0 {
+        (tab.session.surface(), tab.last.as_ref())
+    } else if let Some(ep) = tab.extra_panes.get(focused - 1) {
+        (ep.session.surface(), ep.last.as_ref())
+    } else {
+        return;
+    };
+    if !matches!(surface, Surface::TerminalGrid(_)) {
+        return;
+    }
+    let Some(snap) = snap else { return };
+    let offset = fraction_to_offset(snap, frac);
+    if offset == snap.scroll_offset {
+        return;
+    }
+    send_to_focused_pane(tab, SessionInput::Scroll(offset));
+}
+
+/// Scrub one split pane by id (`PaneCell.pane`: 0 = primary, 1+ =
+/// `extra_panes[id - 1]`). Same no-op rules as [`scrub_focused_by_fraction`].
+fn scrub_pane_by_fraction(tab: &Tab, pane: i32, frac: f32) {
+    let (surface, snap, target): (&Surface, Option<&GridSnapshot>, SessionTarget) = if pane == 0 {
+        (
+            tab.session.surface(),
+            tab.last.as_ref(),
+            SessionTarget::Primary,
+        )
+    } else if let Some(ep) = tab.extra_panes.get(pane as usize - 1) {
+        (
+            ep.session.surface(),
+            ep.last.as_ref(),
+            SessionTarget::Extra(pane as usize - 1),
+        )
+    } else {
+        return;
+    };
+    if !matches!(surface, Surface::TerminalGrid(_)) {
+        return;
+    }
+    let Some(snap) = snap else { return };
+    let offset = fraction_to_offset(snap, frac);
+    if offset == snap.scroll_offset {
+        return;
+    }
+    match target {
+        SessionTarget::Primary => tab.session.send_input(SessionInput::Scroll(offset)),
+        SessionTarget::Extra(idx) => {
+            if let Some(ep) = tab.extra_panes.get(idx) {
+                ep.session.send_input(SessionInput::Scroll(offset));
+            }
+        }
+    }
+}
+
+/// Which session `scrub_pane_by_fraction` resolved `pane` to, without holding
+/// a borrow across the `send_input` call.
+#[derive(Debug, Clone, Copy)]
+enum SessionTarget {
+    Primary,
+    Extra(usize),
+}
+
+fn wire_scroll_scrub(ctx: &Ctx) {
+    ctx.ui.on_scroll_scrub({
+        let state = ctx.state.clone();
+        move |frac| {
+            let st = state.borrow();
+            let Some(tab) = st.tabs.get(st.active) else {
+                return;
+            };
+            scrub_focused_by_fraction(tab, frac);
+        }
+    });
+    ctx.ui.on_pane_scroll_scrub({
+        let state = ctx.state.clone();
+        move |pane, frac| {
+            let st = state.borrow();
+            let Some(tab) = st.tabs.get(st.active) else {
+                return;
+            };
+            scrub_pane_by_fraction(tab, pane, frac);
+        }
+    });
+}
 /// The scroll offset to request given the current one plus a signed `delta`
 /// (positive = further into scrollback, negative = toward the tail), clamped
 /// to what's actually available. Pure — shared by the wheel and
@@ -3652,6 +3780,7 @@ fn tick_tab(
                 if i == active {
                     let img = render_frame(&mut st.tabs[i], &snap, target);
                     ui.set_frame(img);
+                    publish_scroll_state(&st.tabs[i], ui);
                     panes_updated = true;
                 }
                 st.tabs[i].last = Some(snap);
@@ -4633,10 +4762,15 @@ pub(super) fn render_active(st: &mut State, ui: &AppWindow) {
                 };
                 ui.set_frame(img);
                 ui.set_rdp_active(false);
+                publish_scroll_state(tab, ui);
             }
             Surface::Framebuffer(_) => {
                 ui.set_rdp_frame(tab.last_frame.clone().unwrap_or_default());
                 ui.set_rdp_active(true);
+                // RDP has no scrollback viewport — hide the terminal overlay.
+                ui.set_term_scrollback_len(0);
+                ui.set_term_scroll_offset(0);
+                ui.set_term_view_rows(0);
             }
         }
     }
@@ -4737,6 +4871,55 @@ mod tests {
         tx.send(3).unwrap();
         assert_eq!(drain_latest(&rx), Some(3));
         assert_eq!(drain_latest(&rx), None);
+    }
+
+    fn scrub_snap(scrollback_len: u32, scroll_offset: u32, rows: u16) -> GridSnapshot {
+        GridSnapshot {
+            size: cm_core::TerminalSize { rows, cols: 80 },
+            cells: Vec::new(),
+            cursor: CursorState {
+                row: 0,
+                col: 0,
+                visible: false,
+                shape: CursorShape::Block,
+            },
+            scrollback_len,
+            scroll_offset,
+            mouse_tracking: false,
+        }
+    }
+
+    #[test]
+    fn scrub_fraction_maps_ends_to_top_and_tail() {
+        // 100 lines of scrollback, 20-row viewport: fraction 0 shows the
+        // oldest line (offset == len), fraction 1 the live tail (offset 0).
+        let snap = scrub_snap(100, 0, 20);
+        assert_eq!(fraction_to_offset(&snap, 0.0), 100);
+        assert_eq!(fraction_to_offset(&snap, 1.0), 0);
+    }
+
+    #[test]
+    fn scrub_fraction_midpoint_rounds_to_middle() {
+        let snap = scrub_snap(100, 0, 20);
+        // Travel is over scrollback_len (100), not total: 0.5 -> 100*(1-0.5)
+        // = offset 50 (the middle of the scrollback), matching the thumb.
+        assert_eq!(fraction_to_offset(&snap, 0.5), 50);
+    }
+
+    #[test]
+    fn scrub_fraction_clamps_out_of_range() {
+        let snap = scrub_snap(100, 0, 20);
+        assert_eq!(fraction_to_offset(&snap, -0.5), 100);
+        assert_eq!(fraction_to_offset(&snap, 1.5), 0);
+    }
+
+    #[test]
+    fn scrub_fraction_empty_buffer_is_tail() {
+        let snap = scrub_snap(0, 0, 0);
+        assert_eq!(fraction_to_offset(&snap, 0.5), 0);
+        let no_scrollback = scrub_snap(0, 0, 24);
+        assert_eq!(fraction_to_offset(&no_scrollback, 0.0), 0);
+        assert_eq!(fraction_to_offset(&no_scrollback, 1.0), 0);
     }
 
     #[test]
