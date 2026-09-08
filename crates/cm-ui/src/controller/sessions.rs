@@ -791,8 +791,8 @@ fn fraction_to_offset(snap: &GridSnapshot, frac: f32) -> u32 {
 /// on `scroll-offset` changes; `rev` is only bumped on tab/pane switches
 /// (see `tabs::select_tab`, `panes::wire_pane_focused`), so steady output at
 /// the live tail never flashes it.
-pub(super) fn publish_scroll_state(tab: &Tab, ui: &AppWindow) {
-    match tab.last.as_ref() {
+fn publish_scroll_state(snap: Option<&GridSnapshot>, ui: &AppWindow) {
+    match snap {
         Some(snap) => {
             ui.set_term_scrollback_len(snap.scrollback_len as i32);
             ui.set_term_scroll_offset(snap.scroll_offset as i32);
@@ -3776,7 +3776,9 @@ fn tick_tab(
                 if i == active {
                     let img = render_frame(&mut st.tabs[i], &snap, target);
                     ui.set_frame(img);
-                    publish_scroll_state(&st.tabs[i], ui);
+                    // Publish the same snapshot we just rendered. `last` is
+                    // still the previous frame until the assignment below.
+                    publish_scroll_state(Some(&snap), ui);
                     panes_updated = true;
                 }
                 st.tabs[i].last = Some(snap);
@@ -4758,7 +4760,7 @@ pub(super) fn render_active(st: &mut State, ui: &AppWindow) {
                 };
                 ui.set_frame(img);
                 ui.set_rdp_active(false);
-                publish_scroll_state(tab, ui);
+                publish_scroll_state(tab.last.as_ref(), ui);
             }
             Surface::Framebuffer(_) => {
                 ui.set_rdp_frame(tab.last_frame.clone().unwrap_or_default());

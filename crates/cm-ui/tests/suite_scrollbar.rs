@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use i_slint_backend_testing::{ElementHandle, mock_elapsed_time};
 use slint::platform::{PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition};
+use slint::{ComponentHandle, LogicalPosition, Model};
 use support::find_by_id;
 
 #[test]
@@ -106,6 +106,58 @@ fn scrollbar_suite() {
     assert_eq!(rail.size().width, 0.0, "no history leaves no hit target");
 
     queued_scrubs_keep_the_final_request_and_target_the_correct_pane();
+    incoming_snapshots_update_the_thumb_on_the_same_tick();
+}
+
+fn incoming_snapshots_update_the_thumb_on_the_same_tick() {
+    let (h, _, provider) = support::harness();
+    // Start at a stable live tail, then exercise the real pointer -> request
+    // -> session snapshot -> redraw path. No direct UI property updates.
+    provider.publish_terminal_grid(0, snapshot());
+    support::pump_ticks(1);
+    assert_eq!(h.ui.get_term_scrollback_len(), 1000);
+    let rail = find_by_id(&h.ui, "TerminalScrollbar::sb-touch");
+    let initial_y = find_by_id(&h.ui, "TerminalScrollbar::thumb")
+        .absolute_position()
+        .y;
+    click(&h.ui, point(&rail, 5.0, rail.size().height / 2.0));
+    assert_eq!(provider.terminal_scroll_offsets_for(0), [24]);
+    let mut paged = snapshot();
+    paged.scroll_offset = 24;
+    provider.publish_terminal_grid(0, paged);
+    support::pump_ticks(1);
+    assert_eq!(
+        h.ui.get_term_scroll_offset(),
+        24,
+        "one click and one snapshot must move the thumb"
+    );
+    let paged_y = find_by_id(&h.ui, "TerminalScrollbar::thumb")
+        .absolute_position()
+        .y;
+    assert!(paged_y < initial_y);
+    for offset in [500, 1000, 0] {
+        let mut snap = snapshot();
+        snap.scroll_offset = offset;
+        provider.publish_terminal_grid(0, snap);
+        support::pump_ticks(1);
+        assert_eq!(h.ui.get_term_scroll_offset(), offset as i32);
+    }
+    h.ui.invoke_split_pane_h();
+    for (pane, offset) in [(0, 250), (1, 750)] {
+        let mut snap = snapshot();
+        snap.scroll_offset = offset;
+        provider.publish_terminal_grid(pane, snap);
+        support::pump_ticks(1);
+        let cell =
+            h.ui.get_pane_cells()
+                .iter()
+                .find(|cell| cell.pane == pane as i32)
+                .unwrap();
+        assert_eq!(
+            cell.scroll_offset, offset as i32,
+            "split pane snapshot must publish in the same tick"
+        );
+    }
 }
 
 fn queued_scrubs_keep_the_final_request_and_target_the_correct_pane() {
