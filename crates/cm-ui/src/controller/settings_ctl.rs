@@ -20,6 +20,7 @@ pub(super) fn wire_settings_ctl(ctx: &Ctx) {
     wire_settings_font_family_changed(ctx);
     wire_settings_font_size_changed(ctx);
     wire_scrollback_limit_changed(ctx);
+    wire_always_show_scrollbar_changed(ctx);
     wire_settings_shell_path_changed(ctx);
     wire_settings_shell_args_changed(ctx);
     wire_settings_shell_cwd_changed(ctx);
@@ -404,6 +405,23 @@ fn wire_settings_shell_path_changed(ctx: &Ctx) {
     });
 }
 
+fn wire_always_show_scrollbar_changed(ctx: &Ctx) {
+    ctx.ui.on_settings_always_show_scrollbar_changed({
+        let store = ctx.config_store.clone();
+        let weak = ctx.ui.as_weak();
+        move |value| {
+            persist(
+                store.as_ref(),
+                SettingKey::AlwaysShowScrollbar,
+                if value { "true" } else { "false" },
+            );
+            if let Some(ui) = weak.upgrade() {
+                ui.set_settings_always_show_scrollbar(value);
+            }
+        }
+    });
+}
+
 fn wire_settings_shell_args_changed(ctx: &Ctx) {
     ctx.ui.on_settings_shell_args_changed({
         let store = ctx.config_store.clone();
@@ -595,6 +613,7 @@ pub(super) fn apply_settings_to_ui(settings: &AppSettings, state: &AppState, ui:
     ui.set_settings_terminal_theme(terminal_theme_index(settings.terminal_theme));
     ui.set_settings_font_size(settings.font_size);
     ui.set_settings_scrollback_limit(settings.scrollback_limit.to_string().into());
+    ui.set_settings_always_show_scrollbar(settings.always_show_scrollbar);
     ui.set_settings_shell_path(settings.command.as_str().into());
     ui.set_settings_shell_args(settings.command_args.as_str().into());
     ui.set_settings_shell_cwd(settings.working_directory.as_str().into());

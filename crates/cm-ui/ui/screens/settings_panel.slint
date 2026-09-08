@@ -145,6 +145,7 @@ export component SettingsPanel inherits Rectangle {
     // New-session scrollback line limit, represented as text so the Rust
     // validation boundary handles the full 0..=1,000,000 range.
     in-out property <string> scrollback-limit: "10000";
+    in-out property <bool> always-show-scrollbar: true;
     in-out property <bool> plain-copy-paste: true;
     in-out property <bool> copy-on-select: false;
     // Default local shell executable path (empty = OS default: $SHELL / cmd.exe).
@@ -202,6 +203,7 @@ export component SettingsPanel inherits Rectangle {
     callback font-size-changed(int);
     callback terminal-theme-changed(int);
     callback scrollback-limit-changed(string);
+    callback always-show-scrollbar-changed(bool);
     callback plain-copy-paste-changed(bool);
     callback copy-on-select-changed(bool);
     callback shell-path-changed(string);
@@ -630,6 +632,15 @@ export component SettingsPanel inherits Rectangle {
 
                 VerticalLayout {
                     spacing: Theme.space-2;
+                    settings-always-show-scrollbar-check := CheckBox {
+                        min-width: 0px;
+                        text: "Always show terminal scrollbar";
+                        checked <=> root.always-show-scrollbar;
+                        toggled => { root.always-show-scrollbar-changed(self.checked); }
+                    }
+                    Text { text: "Keeps a subtle scrollbar visible when history is available. Turn off to fade it after scrolling.";
+                        color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                        font-family: Theme.font-family; wrap: word-wrap; }
                     settings-plain-copy-paste-check := CheckBox {
                         min-width: 0px;
                         text: "Enable Ctrl+C / Ctrl+V aliases";

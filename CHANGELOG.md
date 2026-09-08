@@ -67,7 +67,10 @@ All notable user-facing changes to Connection Manager are documented here.
   emitting control characters or triggering clipboard shortcuts.
 - Keep contextual session-action menus compact and anchored to their tab-strip
   trigger instead of stretching them to the full window height.
-- Fixed scrollbar not clickable, and widened it to 10px
+- Make terminal scrollbar tracks reliably clickable across their full width,
+  page by one viewport without losing position, and keep thumb dragging stable.
+  Add an always-visible default with subtle resting contrast and an option to
+  restore activity-triggered fading.
 
 ### Security
 

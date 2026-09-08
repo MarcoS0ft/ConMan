@@ -44,6 +44,7 @@ theme = system
 terminal-theme = dark
 font-family = "JetBrainsMono Nerd Font Mono"
 scrollback-limit = 10000
+always-show-scrollbar = true
 ```
 
 - Keys are lowercase ASCII letters, digits, and hyphens, and must begin with a
@@ -77,6 +78,7 @@ Boolean values are exactly `true` or `false`; values are case-sensitive.
 | `font-family` | Font family name; default `JetBrainsMono Nerd Font Mono` | Terminal font family. |
 | `font-size` | Integer `6` through `72`; default `14` | Terminal font size in points. |
 | `scrollback-limit` | Integer `0` through `32768`; default `10000` | Maximum exposed history lines for new terminal sessions; `0` disables history. A separate 64 MiB backing limit per session can retain fewer content-dense rows. |
+| `always-show-scrollbar` | `true` (default), `false` | Keeps the terminal scrollbar visible when history is available, subtle at rest and emphasized on hover or press. `false` restores activity-triggered fading. Applies immediately to existing terminal panes; also editable under Settings → Terminal. Clicking the track pages one viewport; dragging the thumb scrubs history. |
 | `command` | Executable path; empty by default | Local terminal command. Empty uses the platform default shell. Applies to new local sessions. |
 | `command-args` | Command-line text; empty by default | Arguments for new local terminal sessions. |
 | `working-directory` | Directory path; empty by default | Working directory for new local terminal sessions. Empty uses the user's home directory. |

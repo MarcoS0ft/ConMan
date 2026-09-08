@@ -124,6 +124,7 @@ pub enum SettingKey {
     FontFamily,
     FontSize,
     ScrollbackLimit,
+    AlwaysShowScrollbar,
     Command,
     CommandArgs,
     WorkingDirectory,
@@ -147,6 +148,7 @@ pub const ALL_SETTING_KEYS: &[SettingKey] = &[
     SettingKey::FontFamily,
     SettingKey::FontSize,
     SettingKey::ScrollbackLimit,
+    SettingKey::AlwaysShowScrollbar,
     SettingKey::Command,
     SettingKey::CommandArgs,
     SettingKey::WorkingDirectory,
@@ -172,6 +174,7 @@ impl SettingKey {
             Self::FontFamily => "font-family",
             Self::FontSize => "font-size",
             Self::ScrollbackLimit => "scrollback-limit",
+            Self::AlwaysShowScrollbar => "always-show-scrollbar",
             Self::Command => "command",
             Self::CommandArgs => "command-args",
             Self::WorkingDirectory => "working-directory",
@@ -202,7 +205,8 @@ impl SettingKey {
             Self::RendererBackend => parse_enum::<RendererBackend>(value),
             Self::FontSize => parse_range(value, MIN_FONT_SIZE as usize, MAX_FONT_SIZE as usize),
             Self::ScrollbackLimit => parse_range(value, 0, MAX_SCROLLBACK_LIMIT),
-            Self::PlainCopyPasteShortcuts
+            Self::AlwaysShowScrollbar
+            | Self::PlainCopyPasteShortcuts
             | Self::CopyOnSelect
             | Self::ConfirmCloseActiveTab
             | Self::ConfirmQuitActiveConnections
@@ -268,6 +272,7 @@ pub struct AppSettings {
     pub font_family: String,
     pub font_size: i32,
     pub scrollback_limit: usize,
+    pub always_show_scrollbar: bool,
     pub command: String,
     pub command_args: String,
     pub working_directory: String,
@@ -292,6 +297,7 @@ impl Default for AppSettings {
             font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             font_size: 14,
             scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
+            always_show_scrollbar: true,
             command: String::new(),
             command_args: String::new(),
             working_directory: String::new(),
@@ -364,6 +370,11 @@ impl<'a> SettingsService<'a> {
             SettingKey::ScrollbackLimit,
             s.scrollback_limit,
             MAX_SCROLLBACK_LIMIT,
+            &mut warnings,
+        )?;
+        s.always_show_scrollbar = self.read_bool(
+            SettingKey::AlwaysShowScrollbar,
+            s.always_show_scrollbar,
             &mut warnings,
         )?;
         s.command = self.read_string(SettingKey::Command, &s.command)?;
@@ -552,6 +563,10 @@ fn serialize_settings(settings: &AppSettings) -> Vec<(SettingKey, String)> {
         (
             SettingKey::ScrollbackLimit,
             settings.scrollback_limit.to_string(),
+        ),
+        (
+            SettingKey::AlwaysShowScrollbar,
+            bool_wire(settings.always_show_scrollbar).to_owned(),
         ),
         (SettingKey::Command, settings.command.clone()),
         (SettingKey::CommandArgs, settings.command_args.clone()),
@@ -797,6 +812,7 @@ mod tests {
         assert_eq!(settings.terminal_theme, TerminalTheme::Dark);
         assert_eq!(settings.font_size, 14);
         assert_eq!(settings.scrollback_limit, 10_000);
+        assert!(settings.always_show_scrollbar);
         assert!(settings.plain_copy_paste_shortcuts);
         assert!(!settings.copy_on_select);
         assert!(settings.confirm_close_active_tab);
@@ -819,6 +835,7 @@ mod tests {
             font_family: "Cascadia Mono".into(),
             font_size: 21,
             scrollback_limit: 32_000,
+            always_show_scrollbar: false,
             command: "pwsh.exe".into(),
             command_args: "-NoLogo".into(),
             working_directory: "C:\\work".into(),
@@ -948,7 +965,7 @@ mod tests {
 
     #[test]
     fn strict_validation_is_case_sensitive_and_checks_ranges() {
-        assert_eq!(ALL_SETTING_KEYS.len(), 20);
+        assert_eq!(ALL_SETTING_KEYS.len(), 21);
         for key in ALL_SETTING_KEYS {
             key.validate_value("").unwrap();
         }

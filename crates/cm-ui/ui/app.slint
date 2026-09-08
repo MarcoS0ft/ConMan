@@ -102,6 +102,7 @@ export struct CredRow {
 }
 
 component TerminalScrollbar inherits Rectangle {
+    in property <bool> always-visible: true;
     in property <int> scrollback-len: 0;
     in property <int> scroll-offset: 0;
     in property <int> view-rows: 0;
@@ -129,9 +130,9 @@ component TerminalScrollbar inherits Rectangle {
     // instead of the rail bottom at the live tail. At tail (offset 0) the
     // numerator == scrollback-len so the thumb bottom reaches `height`; at the
     // oldest line (offset == scrollback-len) it sits at the top.
-    property <length> thumb-h: has-content ? max(20px, (self.height - 4px) * view-rows / total) : 0px;
+    property <length> thumb-h: has-content ? min(self.height, max(20px, self.height * view-rows / total)) : 0px;
     property <length> thumb-y: has-content && self.height > thumb-h && scrollback-len > 0
-        ? (self.height - thumb-h) * (scrollback-len - scroll-offset) / scrollback-len : 0px;
+        ? (self.height - thumb-h) * (scrollback-len - clamp(scroll-offset, 0, scrollback-len)) / scrollback-len : 0px;
     // Grab offset (press point inside the thumb) so a drag doesn't snap.
     property <length> grab-delta: 0px;
     property <bool> scrubbing: false;
@@ -144,11 +145,16 @@ component TerminalScrollbar inherits Rectangle {
             sb-shown = false;
             hide-timer.stop();
             collapse-timer.stop();
+            scrubbing = false;
             return;
         }
         sb-shown = true;
         sb-opacity = 1;
         collapse-timer.stop();
+        if (always-visible) {
+            hide-timer.stop();
+            return;
+        }
         // Re-arm the hide delay from NOW. Two Slint Timer facts (builtins.slint,
         // 1.17): `restart()` "restarts the timer if it was previously started"
         // -- it does NOTHING to a stopped timer -- and `stop()` + `start()`
@@ -171,8 +177,8 @@ component TerminalScrollbar inherits Rectangle {
         return true;
     }
 
-    width: (sb-shown || sb-touch.has-hover || sb-touch.pressed) && has-content ? 10px : 0px;
-    opacity: sb-opacity;
+    width: (always-visible || sb-shown || sb-touch.has-hover || sb-touch.pressed) && has-content ? 10px : 0px;
+    opacity: always-visible ? 1 : sb-opacity;
     background: transparent;
 
     // One-shot: a Slint Timer REPEATS every `interval` while running, so it
@@ -182,7 +188,7 @@ component TerminalScrollbar inherits Rectangle {
         running: false;
         triggered => {
             hide-timer.stop();
-            if (sb-touch.has-hover || sb-touch.pressed || root.scrubbing) {
+            if (root.always-visible || sb-touch.has-hover || sb-touch.pressed || root.scrubbing) {
                 // The pointer reached the bar (or a scrub is in progress):
                 // hold it instead of fading out under the user's cursor;
                 // `poke()` re-arms the delay.
@@ -206,7 +212,7 @@ component TerminalScrollbar inherits Rectangle {
         running: false;
         triggered => {
             collapse-timer.stop();
-            if (sb-touch.pressed || sb-touch.has-hover || root.scrubbing) {
+            if (root.always-visible || sb-touch.pressed || sb-touch.has-hover || root.scrubbing) {
                 root.poke();
             } else {
                 root.sb-shown = false;
@@ -219,6 +225,10 @@ component TerminalScrollbar inherits Rectangle {
     // viewport move (wheel, PageUp/PageDown, scrub) or a tab/pane switch
     // into a scrolled-back viewport reveals it.
     changed scroll-offset => { root.poke(); }
+    changed always-visible => { root.poke(); }
+    changed has-content => {
+        if (!root.has-content) { root.poke(); }
+    }
     changed rev => {
         if (root.scroll-offset > 0) {
             root.poke();
@@ -227,36 +237,44 @@ component TerminalScrollbar inherits Rectangle {
 
     // Faint full-height rail, visible only with the bar itself.
     Rectangle {
-        width: 10px;
-        background: Theme.color-hover.with-alpha(0.35);
+        width: 100%; height: 100%;
+        background: Theme.color-hover.with-alpha(sb-touch.has-hover || sb-touch.pressed ? 0.5 : 0.15);
     }
 
     // Thumb position indicator.
-    Rectangle {
-        x: 1px;
+    thumb := Rectangle {
+        x: (parent.width - self.width) / 2;
         y: root.thumb-y + 2px;
-        width: 8px;
+        width: sb-touch.has-hover || sb-touch.pressed ? 8px : 4px;
         height: max(0px, root.thumb-h - 4px);
         border-radius: 4px;
-        background: sb-touch.pressed ? Theme.color-accent : Theme.color-text-disabled;
+        background: sb-touch.pressed ? Theme.color-accent
+            : sb-touch.has-hover ? Theme.color-text-secondary : Theme.color-text-disabled;
     }
 
     sb-touch := TouchArea {
+        x: 0px; y: 0px;
+        width: 100%; height: 100%;
         enabled: root.has-content && root.width > 0px;
         mouse-cursor: pointer;
+        changed has-hover => { root.poke(); }
         pointer-event(e) => {
             if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
-                root.scrubbing = true;
                 if (self.mouse-y >= root.thumb-y && self.mouse-y <= root.thumb-y + root.thumb-h) {
+                    root.scrubbing = true;
                     root.grab-delta = self.mouse-y - root.thumb-y;
                 } else {
-                    // Track click: jump the thumb center to the press point,
-                    // then drag from there.
-                    root.grab-delta = root.thumb-h / 2;
-                    root.scrub-at(self.mouse-y);
+                    // Track presses move one viewport towards the pointer.
+                    // They never begin a thumb drag; snapshot updates remain
+                    // the sole source of thumb position.
+                    root.scrubbing = false;
+                    root.scrub(clamp(1.0 - (root.scroll-offset
+                        + (self.mouse-y < root.thumb-y ? root.view-rows : -root.view-rows))
+                        / (root.scrollback-len * 1.0), 0.0, 1.0));
                 }
                 root.poke();
-            } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+            } else if ((e.kind == PointerEventKind.up && e.button == PointerEventButton.left)
+                || e.kind == PointerEventKind.cancel) {
                 root.scrubbing = false;
                 root.poke();
             }
@@ -1384,6 +1402,7 @@ component PaneSlot inherits Rectangle {
     in property <int> scroll-offset: 0;
     in property <int> view-rows: 0;
     in property <int> scroll-rev: 0;
+    in property <bool> always-show-scrollbar: true;
     callback scrub(float);
     // per-pane disconnect - arg is `root.pane-index` (this pane's
     // real id), not the repeater's own iteration index.
@@ -1441,6 +1460,7 @@ component PaneSlot inherits Rectangle {
         // so it captures pointer input first; zero-width while faded so it
         // never blocks text selection.
         if !root.is-rdp : TerminalScrollbar {
+            always-visible: root.always-show-scrollbar;
             x: parent.width - self.width;
             height: 100%;
             scrollback-len: root.scrollback-len;
@@ -1941,6 +1961,7 @@ export component AppWindow inherits Window {
         Theme.terminal-dark = self.settings-terminal-theme != 1;
     }
     in-out property <string> settings-scrollback-limit: "10000";
+    in-out property <bool> settings-always-show-scrollbar: true;
     in-out property <bool> settings-plain-copy-paste: true;
     in-out property <bool> settings-copy-on-select: false;
     in-out property <string> settings-shell-path: "";
@@ -2048,6 +2069,7 @@ export component AppWindow inherits Window {
     callback settings-font-family-changed(string);
     callback settings-terminal-theme-changed(int);
     callback settings-scrollback-limit-changed(string);
+    callback settings-always-show-scrollbar-changed(bool);
     callback settings-plain-copy-paste-changed(bool);
     callback settings-copy-on-select-changed(bool);
     callback settings-confirm-close-active-tab-changed(bool);
@@ -2527,6 +2549,7 @@ export component AppWindow inherits Window {
                     font-size           <=> root.settings-font-size;
                     terminal-theme      <=> root.settings-terminal-theme;
                     scrollback-limit    <=> root.settings-scrollback-limit;
+                    always-show-scrollbar <=> root.settings-always-show-scrollbar;
                     plain-copy-paste    <=> root.settings-plain-copy-paste;
                     copy-on-select      <=> root.settings-copy-on-select;
                     shell-path          <=> root.settings-shell-path;
@@ -2559,6 +2582,7 @@ export component AppWindow inherits Window {
                     font-size-changed(v)         => { root.settings-font-size-changed(v); }
                     terminal-theme-changed(v)    => { root.settings-terminal-theme-changed(v); }
                     scrollback-limit-changed(v)  => { root.settings-scrollback-limit-changed(v); }
+                    always-show-scrollbar-changed(v) => { root.settings-always-show-scrollbar-changed(v); }
                     plain-copy-paste-changed(v)  => { root.settings-plain-copy-paste-changed(v); }
                     copy-on-select-changed(v)    => { root.settings-copy-on-select-changed(v); }
                     shell-path-changed(v)        => { root.settings-shell-path-changed(v); }
@@ -2765,6 +2789,7 @@ export component AppWindow inherits Window {
                         resized(w, h) => { root.surface-resized(w, h); }
                     }
                     TerminalScrollbar {
+                        always-visible: root.settings-always-show-scrollbar;
                         x: parent.width - self.width;
                         height: 100%;
                         scrollback-len: root.term-scrollback-len;
@@ -2813,6 +2838,7 @@ export component AppWindow inherits Window {
                         scroll-offset: cell.scroll-offset;
                         view-rows: cell.view-rows;
                         scroll-rev: cell.scroll-rev;
+                        always-show-scrollbar: root.settings-always-show-scrollbar;
                         scrub(f) => { root.pane-scroll-scrub(cell.pane, f); }
                         // a split (more than one cell) is the only
                         // time there's another pane to fall back to.

@@ -505,6 +505,9 @@ fn terminal_and_confirmation_preferences_persist_and_reload() {
     let (h, _repo, _provider) = harness();
     h.ui.invoke_settings_terminal_theme_changed(1);
     h.ui.invoke_settings_scrollback_limit_changed("25000".into());
+    assert!(h.ui.get_settings_always_show_scrollbar());
+    h.ui.invoke_settings_always_show_scrollbar_changed(false);
+    assert!(!h.ui.get_settings_always_show_scrollbar());
     h.ui.invoke_settings_plain_copy_paste_changed(false);
     h.ui.invoke_settings_copy_on_select_changed(true);
     h.ui.invoke_settings_confirm_close_active_tab_changed(false);
@@ -515,6 +518,7 @@ fn terminal_and_confirmation_preferences_persist_and_reload() {
         .expect("load persisted settings");
     assert_eq!(saved.terminal_theme, TerminalTheme::Light);
     assert_eq!(saved.scrollback_limit, 25_000);
+    assert!(!saved.always_show_scrollbar);
     assert!(!saved.plain_copy_paste_shortcuts);
     assert!(saved.copy_on_select);
     assert!(!saved.confirm_close_active_tab);
@@ -524,12 +528,14 @@ fn terminal_and_confirmation_preferences_persist_and_reload() {
         .set_values(&[
             (SettingKey::TerminalTheme.as_str(), "dark"),
             (SettingKey::ScrollbackLimit.as_str(), "7000"),
+            (SettingKey::AlwaysShowScrollbar.as_str(), "true"),
             (SettingKey::PlainCopyPasteShortcuts.as_str(), "true"),
         ])
         .expect("edit config externally");
     h.ui.invoke_settings_reload_config();
     assert_eq!(h.ui.get_settings_terminal_theme(), 0);
     assert_eq!(h.ui.get_settings_scrollback_limit().as_str(), "7000");
+    assert!(h.ui.get_settings_always_show_scrollbar());
     assert!(h.ui.get_settings_plain_copy_paste());
 
     h.ui.invoke_settings_scrollback_limit_changed(

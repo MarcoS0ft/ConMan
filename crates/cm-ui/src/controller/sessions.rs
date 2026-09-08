@@ -823,9 +823,8 @@ fn scrub_focused_by_fraction(tab: &Tab, frac: f32) {
     }
     let Some(snap) = snap else { return };
     let offset = fraction_to_offset(snap, frac);
-    if offset == snap.scroll_offset {
-        return;
-    }
+    // The snapshot can predate queued scrubs. Returning to its offset must
+    // still enqueue a request, otherwise an earlier scrub wins instead.
     send_to_focused_pane(tab, SessionInput::Scroll(offset));
 }
 
@@ -852,9 +851,6 @@ fn scrub_pane_by_fraction(tab: &Tab, pane: i32, frac: f32) {
     }
     let Some(snap) = snap else { return };
     let offset = fraction_to_offset(snap, frac);
-    if offset == snap.scroll_offset {
-        return;
-    }
     match target {
         SessionTarget::Primary => tab.session.send_input(SessionInput::Scroll(offset)),
         SessionTarget::Extra(idx) => {

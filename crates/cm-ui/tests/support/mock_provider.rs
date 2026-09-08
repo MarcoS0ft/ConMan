@@ -268,6 +268,18 @@ impl MockSessionProvider {
             .count()
     }
 
+    pub(crate) fn terminal_scroll_offsets_for(&self, session_id: usize) -> Vec<u32> {
+        self.tagged_inputs
+            .lock()
+            .expect("MockSessionProvider tagged inputs mutex poisoned")
+            .iter()
+            .filter_map(|(id, input)| match input {
+                SessionInput::Scroll(offset) if *id == session_id => Some(*offset),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn terminal_key_events_for(&self, session_id: usize) -> Vec<cm_core::KeyEvent> {
         self.tagged_inputs
             .lock()
