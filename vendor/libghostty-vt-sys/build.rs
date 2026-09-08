@@ -250,9 +250,12 @@ fn zig_cache_dirs(out_dir: &Path, cache_root: Option<&Path>) -> (PathBuf, PathBu
                         out_dir.display()
                     )
                 });
+            // Zig's global cache also contains compiled build graphs. Sharing
+            // it between Cargo's distinct libghostty builds can reuse a graph
+            // tied to the other OUT_DIR and lose dependency named paths.
             (
                 root.join("local").join(build_identity),
-                root.join("global"),
+                root.join("global").join(build_identity),
             )
         }
         None => (
@@ -460,7 +463,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shared_cache_root_keeps_local_caches_isolated_by_cargo_build() {
+    fn shared_cache_root_isolates_zig_build_graphs_by_cargo_build() {
         let root = Path::new("/tmp/conman-zig-cache");
         let first = Path::new(
             "/workspace/target/debug/build/libghostty-vt-sys-aaaaaaaaaaaaaaaa/out",
@@ -473,8 +476,12 @@ mod tests {
         let (second_local, second_global) = zig_cache_dirs(second, Some(root));
 
         assert_ne!(first_local, second_local);
-        assert_eq!(first_global, second_global);
-        assert_eq!(first_global, root.join("global"));
+        assert_ne!(first_global, second_global);
+        assert_eq!(
+            first_global,
+            root.join("global")
+                .join("libghostty-vt-sys-aaaaaaaaaaaaaaaa")
+        );
         assert_eq!(
             first_local,
             root.join("local")
