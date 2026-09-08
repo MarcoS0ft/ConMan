@@ -125,12 +125,8 @@ fn build_vendored(link_mode: LinkMode) {
     // Build libghostty-vt via zig.
     let install_prefix = out_dir.join("ghostty-install");
     let cache_root = env::var_os("LIBGHOSTTY_VT_SYS_CACHE_ROOT").map(PathBuf::from);
-    let zig_cache_dir = cache_root
-        .as_ref()
-        .map_or_else(|| out_dir.join("zig-cache"), |root| root.join("local"));
-    let zig_global_cache_dir = cache_root
-        .as_ref()
-        .map_or_else(|| out_dir.join("zig-global-cache"), |root| root.join("global"));
+    let (zig_cache_dir, zig_global_cache_dir) =
+        zig_cache_dirs(&out_dir, cache_root.as_deref());
 
     let optimize = zig_optimize_mode();
 
@@ -238,6 +234,31 @@ fn warn_unused_xcframework(lib_dir: &Path) {
             "cargo:warning=unused libghostty-vt XCFramework emitted at {}; Cargo links the dylib or archive directly",
             xcframework.display()
         );
+    }
+}
+
+fn zig_cache_dirs(out_dir: &Path, cache_root: Option<&Path>) -> (PathBuf, PathBuf) {
+    match cache_root {
+        Some(root) => {
+            let build_identity = out_dir
+                .parent()
+                .and_then(Path::file_name)
+                .filter(|identity| !identity.is_empty())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "OUT_DIR has no Cargo build identity component: {}",
+                        out_dir.display()
+                    )
+                });
+            (
+                root.join("local").join(build_identity),
+                root.join("global"),
+            )
+        }
+        None => (
+            out_dir.join("zig-cache"),
+            out_dir.join("zig-global-cache"),
+        ),
     }
 }
 
@@ -432,4 +453,48 @@ fn zig_target(target: &str) -> String {
         other => panic!("unsupported Rust target for vendored build: {other}"),
     };
     value.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_cache_root_keeps_local_caches_isolated_by_cargo_build() {
+        let root = Path::new("/tmp/conman-zig-cache");
+        let first = Path::new(
+            "/workspace/target/debug/build/libghostty-vt-sys-aaaaaaaaaaaaaaaa/out",
+        );
+        let second = Path::new(
+            "/workspace/target/debug/build/libghostty-vt-sys-bbbbbbbbbbbbbbbb/out",
+        );
+
+        let (first_local, first_global) = zig_cache_dirs(first, Some(root));
+        let (second_local, second_global) = zig_cache_dirs(second, Some(root));
+
+        assert_ne!(first_local, second_local);
+        assert_eq!(first_global, second_global);
+        assert_eq!(first_global, root.join("global"));
+        assert_eq!(
+            first_local,
+            root.join("local")
+                .join("libghostty-vt-sys-aaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn local_cache_identity_does_not_include_the_workspace_path() {
+        let root = Path::new("/tmp/conman-zig-cache");
+        let first = Path::new(
+            "/Users/build/actions/target/debug/build/libghostty-vt-sys-aaaaaaaaaaaaaaaa/out",
+        );
+        let second = Path::new(
+            "/home/build/actions/target/debug/build/libghostty-vt-sys-aaaaaaaaaaaaaaaa/out",
+        );
+
+        assert_eq!(
+            zig_cache_dirs(first, Some(root)),
+            zig_cache_dirs(second, Some(root))
+        );
+    }
 }
