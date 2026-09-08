@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -eq 3 ] \
+    && [ "$1" = "--sdk" ] \
+    && [ "$2" = "macosx" ] \
+    && [ "$3" = "--show-sdk-path" ] \
+    && [ -n "${CONMAN_ZIG_MACOS_SDK:-}" ]; then
+    printf '%s\n' "$CONMAN_ZIG_MACOS_SDK"
+    exit 0
+fi
+
+exec /usr/bin/xcrun "$@"

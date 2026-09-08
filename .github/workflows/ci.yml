@@ -116,6 +116,16 @@ jobs:
           dirname "$(command -v zig)" >> "$GITHUB_PATH"
           zig version
 
+      - name: Use Zig-compatible macOS SDK
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          sdk=/Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk
+          test -f "$sdk/usr/lib/libSystem.tbd"
+          grep -q 'arm64-macos' "$sdk/usr/lib/libSystem.tbd"
+          echo "CONMAN_ZIG_MACOS_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/scripts/ci" >> "$GITHUB_PATH"
+
       - name: Bootstrap Zig 0.15.2 (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
