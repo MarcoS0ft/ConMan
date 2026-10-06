@@ -272,6 +272,7 @@ fn transfer_kind_exposes_only_typed_size_policy() {
 
     assert_eq!(K::Import.max_total_bytes(), 16 * 1024 * 1024);
     assert_eq!(K::Export.max_total_bytes(), 16 * 1024 * 1024);
+    assert_eq!(K::WorkspaceSnapshot.max_total_bytes(), 16 * 1024 * 1024);
     assert_eq!(K::ClipboardText.max_total_bytes(), 1024 * 1024);
     assert_eq!(K::SecretPassword.max_total_bytes(), 64 * 1024);
     assert_eq!(K::SecretSshKey.max_total_bytes(), 64 * 1024);
