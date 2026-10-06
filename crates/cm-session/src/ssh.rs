@@ -14,13 +14,14 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use cm_core::Secret;
 use cm_core::TerminalOptions;
+use cm_core::latest::latest_channel;
 use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalSize};
 #[cfg(test)]
 use russh::keys::known_hosts::learn_known_hosts_path;
@@ -397,7 +398,7 @@ impl SshTerminalSession {
         options: TerminalOptions,
     ) -> Result<Self, SshError> {
         let (control_tx, control_rx) = mpsc::channel::<Msg>();
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<GridSnapshot>();
+        let (snapshot_tx, snapshot_rx) = latest_channel::<GridSnapshot>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), EngineError>>();
         let (out_tx, out_rx) = unbounded_channel::<Outbound>();
         let status = Arc::new(Mutex::new(SessionStatus::Connecting));
@@ -482,7 +483,7 @@ impl SshTerminalSession {
 }
 
 impl TerminalSession for SshTerminalSession {
-    fn snapshots(&self) -> &Receiver<GridSnapshot> {
+    fn snapshots(&self) -> &cm_core::latest::LatestReceiver<GridSnapshot> {
         match &self.surface {
             Surface::TerminalGrid(rx) => rx,
             _ => unreachable!("SshTerminalSession always has TerminalGrid surface"),

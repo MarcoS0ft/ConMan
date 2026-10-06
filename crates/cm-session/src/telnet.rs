@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use cm_core::TelnetSettings;
 use cm_core::TerminalOptions;
+use cm_core::latest::{LatestReceiver, latest_channel};
 use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalSize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -25,7 +26,7 @@ use tokio::sync::mpsc::{Receiver as TokioReceiver, Sender as TokioSender};
 use tokio::sync::watch;
 
 use self::codec::TelnetCodec;
-use crate::engine_owner::{ControlSource, Msg, SnapshotSink, Transport, run_engine_owner};
+use crate::engine_owner::{ControlSource, Msg, Transport, run_engine_owner};
 use crate::libghostty::EngineError;
 use crate::session::{Session, SessionInput, SessionStatus, Surface, TerminalSession};
 
@@ -40,9 +41,6 @@ const CONTROL_OVERLOAD_REASON: &str = "TELNET UI control queue overloaded";
 /// capacity reserved for user controls.
 const REMOTE_QUEUE_CAPACITY: usize = 16;
 const QUEUE_RETRY_INTERVAL: Duration = Duration::from_millis(1);
-/// Bounds rendered snapshots waiting for the UI. The owner backpressures with
-/// the latest complete frame retained until the UI drains or shutdown cancels.
-const SNAPSHOT_QUEUE_CAPACITY: usize = 8;
 /// Bounds encoded terminal records waiting for the socket driver. The engine
 /// owner backpressures here until the driver consumes or shutdown drops it.
 const OUTBOUND_QUEUE_CAPACITY: usize = 4;
@@ -128,31 +126,6 @@ impl ControlSource for TelnetControlSource {
     }
 }
 
-/// A bounded snapshot sink that retains the exact frame it is asked to send.
-/// Queue saturation backpressures the engine owner; direct shutdown state
-/// breaks the wait so joining never depends on the UI draining snapshots.
-struct CancellableSnapshotSink {
-    tx: SyncSender<GridSnapshot>,
-    shutdown: Arc<AtomicBool>,
-}
-
-impl SnapshotSink for CancellableSnapshotSink {
-    fn send_snapshot(&self, snapshot: GridSnapshot) -> bool {
-        let mut pending = snapshot;
-        loop {
-            if self.shutdown.load(Ordering::Acquire) {
-                return false;
-            }
-            match self.tx.try_send(pending) {
-                Ok(()) => return true,
-                Err(TrySendError::Disconnected(_)) => return false,
-                Err(TrySendError::Full(returned)) => pending = returned,
-            }
-            thread::sleep(QUEUE_RETRY_INTERVAL);
-        }
-    }
-}
-
 impl Transport for TelnetTransport {
     fn write(&mut self, bytes: &[u8]) {
         if !bytes.is_empty() {
@@ -200,8 +173,7 @@ impl TelnetTerminalSession {
     ) -> Result<Self, TelnetError> {
         let (control_tx, control_rx) = mpsc::sync_channel::<Msg>(CONTROL_QUEUE_CAPACITY);
         let (remote_tx, remote_rx) = mpsc::sync_channel::<Msg>(REMOTE_QUEUE_CAPACITY);
-        let (snapshot_tx, snapshot_rx) =
-            mpsc::sync_channel::<GridSnapshot>(SNAPSHOT_QUEUE_CAPACITY);
+        let (snapshot_tx, snapshot_rx) = latest_channel::<GridSnapshot>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), EngineError>>();
         let (out_tx, out_rx) = tokio::sync::mpsc::channel::<Outbound>(OUTBOUND_QUEUE_CAPACITY);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -218,10 +190,7 @@ impl TelnetTerminalSession {
                     remote_rx,
                     shutdown: Arc::clone(&shutdown_flag),
                 };
-                let snapshots = CancellableSnapshotSink {
-                    tx: snapshot_tx,
-                    shutdown: Arc::clone(&shutdown_flag),
-                };
+                let snapshots = snapshot_tx;
                 move || {
                     run_engine_owner(
                         size, options, transport, &control, &snapshots, &ready_tx, start,
@@ -288,7 +257,7 @@ impl TelnetTerminalSession {
 }
 
 impl TerminalSession for TelnetTerminalSession {
-    fn snapshots(&self) -> &Receiver<GridSnapshot> {
+    fn snapshots(&self) -> &LatestReceiver<GridSnapshot> {
         match &self.surface {
             Surface::TerminalGrid(receiver) => receiver,
             _ => unreachable!("TelnetTerminalSession always has TerminalGrid surface"),
@@ -332,8 +301,8 @@ impl TerminalSession for TelnetTerminalSession {
         {
             let _ = handle.join();
         }
-        // The driver receiver is now dropped, so an engine owner backpressured
-        // on the bounded outbound queue is released before this blocking send.
+        // The driver receiver is now dropped, releasing an engine owner
+        // blocked on the bounded outbound queue before this blocking send.
         let _ = self.control_tx.send(Msg::Shutdown);
         if let Some(handle) = self
             .owner_handle
@@ -668,7 +637,6 @@ async fn write_all_or_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cm_core::terminal::TerminalEngine;
 
     #[tokio::test]
     async fn shutdown_interrupts_pending_connect() {
@@ -694,7 +662,7 @@ mod tests {
         control_tx
             .send(Msg::SetScroll(1))
             .expect("fill UI control queue");
-        let (snapshot_tx, snapshot_rx) = mpsc::channel();
+        let (snapshot_tx, snapshot_rx) = latest_channel();
         drop(snapshot_tx);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let session = TelnetTerminalSession {
@@ -746,44 +714,12 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_backpressure_retains_final_frame_until_ui_drains() {
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let (snapshot_tx, snapshot_rx) = mpsc::sync_channel(1);
-        let sink = CancellableSnapshotSink {
-            tx: snapshot_tx,
-            shutdown,
-        };
-        let mut engine = crate::libghostty::LibghosttyEngine::new(
-            TerminalSize { cols: 80, rows: 24 },
-            TerminalOptions::default(),
-        )
-        .expect("engine");
-        engine.feed(b"first");
-        assert!(sink.send_snapshot(engine.snapshot(0)));
-        engine.feed(b"\rFINAL_SNAPSHOT_MARKER");
-        let final_snapshot = engine.snapshot(0);
-        let (progress_tx, progress_rx) = mpsc::channel();
-        let worker = thread::spawn(move || {
-            assert!(sink.send_snapshot(final_snapshot));
-            progress_tx.send(()).expect("final snapshot delivered");
-        });
-
-        assert!(
-            progress_rx.recv_timeout(Duration::from_millis(50)).is_err(),
-            "final snapshot should backpressure while the queue is full"
-        );
-        let _first = snapshot_rx.recv().expect("drain first snapshot");
-        progress_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("final snapshot unblocked");
-        let final_snapshot = snapshot_rx.recv().expect("receive final snapshot");
-        let rendered = final_snapshot
-            .cells
-            .iter()
-            .map(|cell| cell.grapheme.as_str())
-            .collect::<String>();
-        assert!(rendered.contains("FINAL_SNAPSHOT_MARKER"));
-        worker.join().expect("snapshot producer thread");
+    fn snapshots_replace_pending_value_without_blocking() {
+        let (sender, receiver) = latest_channel();
+        assert_eq!(sender.publish(1), Ok(false));
+        assert_eq!(sender.publish(2), Ok(true));
+        assert_eq!(receiver.try_recv_latest().unwrap(), Some(2));
+        assert_eq!(receiver.try_recv_latest().unwrap(), None);
     }
 
     #[test]

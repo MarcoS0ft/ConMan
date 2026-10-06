@@ -87,15 +87,30 @@ fn snapshot_contains(snapshot: &GridSnapshot, needle: &str) -> bool {
         })
 }
 
+fn recv_latest_timeout<T>(
+    receiver: &cm_core::latest::LatestReceiver<T>,
+    timeout: Duration,
+) -> Option<T> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match receiver.try_recv_latest() {
+            Ok(Some(value)) => return Some(value),
+            Err(_) => return None,
+            Ok(None) if Instant::now() >= deadline => return None,
+            Ok(None) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+
 fn wait_for_text(session: &dyn TerminalSession, needle: &str) {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(!remaining.is_zero(), "terminal did not render {needle:?}");
-        match session.snapshots().recv_timeout(remaining) {
-            Ok(snapshot) if snapshot_contains(&snapshot, needle) => return,
-            Ok(_) => {}
-            Err(error) => panic!("snapshot stream closed before rendering {needle:?}: {error}"),
+        match recv_latest_timeout(session.snapshots(), remaining) {
+            Some(snapshot) if snapshot_contains(&snapshot, needle) => return,
+            Some(_) => {}
+            None => panic!("snapshot stream closed or timed out before rendering {needle:?}"),
         }
     }
 }
@@ -471,10 +486,10 @@ fn telnet_live_authorized_smoke() {
                 !remaining.is_zero(),
                 "live TELNET output marker was not rendered"
             );
-            match session.snapshots().recv_timeout(remaining) {
-                Ok(snapshot) if snapshot_contains(&snapshot, needle) => return,
-                Ok(_) => {}
-                Err(error) => panic!("live TELNET snapshot stream closed: {error}"),
+            match recv_latest_timeout(session.snapshots(), remaining) {
+                Some(snapshot) if snapshot_contains(&snapshot, needle) => return,
+                Some(_) => {}
+                None => panic!("live TELNET snapshot stream closed or timed out"),
             }
         }
     }
@@ -557,10 +572,10 @@ fn telnet_live_reconnects_after_explicit_shutdown() {
                 !remaining.is_zero(),
                 "live TELNET login prompt was not rendered"
             );
-            match session.snapshots().recv_timeout(remaining) {
-                Ok(snapshot) if snapshot_contains(&snapshot, "login:") => break,
-                Ok(_) => {}
-                Err(error) => panic!("live TELNET snapshot stream closed: {error}"),
+            match recv_latest_timeout(session.snapshots(), remaining) {
+                Some(snapshot) if snapshot_contains(&snapshot, "login:") => break,
+                Some(_) => {}
+                None => panic!("live TELNET snapshot stream closed or timed out"),
             }
         }
         session.shutdown();

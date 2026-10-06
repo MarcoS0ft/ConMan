@@ -14,10 +14,11 @@
 //!
 //! [`SessionProvider`]: crate::session_ports::SessionProvider
 
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Sender;
 
 use std::path::PathBuf;
 
+use crate::latest::LatestReceiver;
 use crate::terminal::{GridSnapshot, KeyEvent, MouseEvent};
 
 // Shared types
@@ -210,22 +211,22 @@ pub struct FrameUpdate {
 
 /// The rendering surface exposed by a [`Session`].
 ///
-/// - `TerminalGrid` — a channel of terminal cell snapshots (terminal sessions).
-/// - `Framebuffer` — a channel of decoded RGBA frames (RDP sessions).
+/// - `TerminalGrid` — latest terminal cell snapshot (terminal sessions).
+/// - `Framebuffer` — latest decoded RGBA frame (RDP sessions).
 ///
 /// The UI inspects this once on session construction and holds the appropriate
 /// receiver for the tab's lifetime.
 #[allow(clippy::large_enum_variant)]
 pub enum Surface {
     /// Terminal sessions: receive [`GridSnapshot`]s for glyph-atlas rendering.
-    TerminalGrid(Receiver<GridSnapshot>),
+    TerminalGrid(LatestReceiver<GridSnapshot>),
     /// RDP sessions: receive [`FrameUpdate`]s for `slint::Image` blit.
-    Framebuffer(Receiver<FrameUpdate>),
+    Framebuffer(LatestReceiver<FrameUpdate>),
 }
 
 impl Surface {
     /// Return the terminal grid receiver if this is `TerminalGrid`.
-    pub fn as_terminal_grid(&self) -> Option<&Receiver<GridSnapshot>> {
+    pub fn as_terminal_grid(&self) -> Option<&LatestReceiver<GridSnapshot>> {
         match self {
             Self::TerminalGrid(rx) => Some(rx),
             Self::Framebuffer(_) => None,
@@ -233,7 +234,7 @@ impl Surface {
     }
 
     /// Return the framebuffer receiver if this is `Framebuffer`.
-    pub fn as_framebuffer(&self) -> Option<&Receiver<FrameUpdate>> {
+    pub fn as_framebuffer(&self) -> Option<&LatestReceiver<FrameUpdate>> {
         match self {
             Self::Framebuffer(rx) => Some(rx),
             Self::TerminalGrid(_) => None,
@@ -309,7 +310,7 @@ pub trait Session: Send {
 /// thread — the UI receives a proper tab with an error overlay rather than
 /// a silent `eprintln!` .
 ///
-/// The surface channel is a permanently-closed `Receiver<GridSnapshot>`:
+/// The surface channel is a permanently-closed latest-value receiver:
 /// the tick loop will drain nothing and the tab is auto-closed after the
 /// user dismisses the error overlay.
 #[derive(Debug)]
@@ -321,9 +322,8 @@ pub struct FailedSession {
 impl FailedSession {
     /// Create a session that always reports `Failed(reason)`.
     pub fn new(reason: impl Into<String>) -> Self {
-        let (_tx, rx) = std::sync::mpsc::channel::<GridSnapshot>();
-        // `_tx` is dropped immediately — the receiver will return `Err` on any
-        // recv call, which is exactly what a permanently-closed channel does.
+        let (tx, rx) = crate::latest::latest_channel::<GridSnapshot>();
+        drop(tx);
         Self {
             reason: reason.into(),
             surface: Surface::TerminalGrid(rx),

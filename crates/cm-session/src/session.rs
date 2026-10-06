@@ -13,8 +13,7 @@ pub use cm_core::session::{
     SessionStatus, Surface,
 };
 
-use std::sync::mpsc::Receiver;
-
+use cm_core::latest::LatestReceiver;
 use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalSize};
 
 /// A live terminal session over some byte-stream transport.
@@ -26,8 +25,8 @@ use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalSize};
 ///
 /// Implementors also implement [`Session`] (unified lifecycle + surface).
 pub trait TerminalSession {
-    /// Stream of viewport snapshots; drain with `recv`/`try_recv`/`recv_timeout`.
-    fn snapshots(&self) -> &Receiver<GridSnapshot>;
+    /// Latest viewport snapshot; poll with `try_recv_latest`.
+    fn snapshots(&self) -> &LatestReceiver<GridSnapshot>;
     /// Encode a key event and send it to the transport.
     fn send_key(&self, ev: KeyEvent);
     /// Encode a mouse event and send it (subject to the active mouse mode).

@@ -6,6 +6,7 @@
 //! difference between transports is *where* encoded input/response bytes go and
 //! how a resize is applied to the transport; that is captured by [`Transport`].
 
+use cm_core::latest::LatestSender;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 
@@ -125,16 +126,15 @@ pub(crate) trait Transport: Send {
     fn resize(&mut self, size: TerminalSize);
 }
 
-/// Transport-neutral snapshot delivery. Local and SSH retain their existing
-/// unbounded `Sender` behavior. TELNET supplies a bounded, cancellable sink.
+/// Transport-neutral snapshot delivery through a replaceable latest slot.
 pub(crate) trait SnapshotSink {
     /// Returns `false` only when the consumer has disconnected.
     fn send_snapshot(&self, snapshot: GridSnapshot) -> bool;
 }
 
-impl SnapshotSink for Sender<GridSnapshot> {
+impl SnapshotSink for LatestSender<GridSnapshot> {
     fn send_snapshot(&self, snapshot: GridSnapshot) -> bool {
-        self.send(snapshot).is_ok()
+        self.publish(snapshot).is_ok()
     }
 }
 
@@ -317,7 +317,7 @@ mod tests {
     /// code path the real byte-pump uses, without any PTY/echo involved.
     fn drive(messages: Vec<Msg>) -> Vec<u8> {
         let (control_tx, control_rx) = std::sync::mpsc::channel();
-        let (snapshot_tx, _snapshot_rx) = std::sync::mpsc::channel();
+        let (snapshot_tx, _snapshot_rx) = cm_core::latest::latest_channel();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let transport = RecordingTransport::default();
         let written = transport.written.clone();
@@ -381,11 +381,10 @@ mod tests {
     // ──: Msg::SetScroll / Msg::QueryBuffer via a fresh engine-owner ────
 
     /// Like `drive`, but on a caller-chosen `rows x cols` grid (small, so
-    /// scrollback fills quickly) and returns every [`GridSnapshot`] pushed to
-    /// `snapshot_tx`, in order.
+    /// scrollback fills quickly) and returns the final pending snapshot.
     fn drive_snapshots(rows: u16, cols: u16, messages: Vec<Msg>) -> Vec<GridSnapshot> {
         let (control_tx, control_rx) = std::sync::mpsc::channel();
-        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+        let (snapshot_tx, snapshot_rx) = cm_core::latest::latest_channel();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let transport = RecordingTransport::default();
 
@@ -404,7 +403,7 @@ mod tests {
             Instant::now(),
         );
         ready_rx.try_recv().unwrap().expect("engine init");
-        snapshot_rx.try_iter().collect()
+        snapshot_rx.try_recv_latest().unwrap().into_iter().collect()
     }
 
     /// `Msg::Bytes` for 10 numbered lines ("L0".."L9"), each on its own row —

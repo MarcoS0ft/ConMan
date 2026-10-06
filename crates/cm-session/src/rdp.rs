@@ -78,7 +78,6 @@
 //! no-op.
 
 use std::io::Write as _;
-use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -108,6 +107,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use cm_core::RdpSettings;
+use cm_core::latest::{LatestSender, latest_channel};
 
 use crate::session::{
     FrameUpdate, RdpInputEvent, RdpMouseButton, Session, SessionInput, SessionStatus, Surface,
@@ -126,9 +126,6 @@ pub use cm_core::rdp::{
 };
 
 // Constants
-
-/// Number of pending FrameUpdates before the oldest is dropped (backpressure).
-const FRAME_CHANNEL_CAPACITY: usize = 4;
 
 // Ring crypto-provider bootstrap
 
@@ -467,7 +464,7 @@ impl RdpSession {
         endpoint_id: cm_core::SessionEndpointId,
         clipboard_root: Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>,
     ) -> Result<Self, RdpError> {
-        let (frame_tx, frame_rx) = mpsc::sync_channel::<FrameUpdate>(FRAME_CHANNEL_CAPACITY);
+        let (frame_tx, frame_rx) = latest_channel::<FrameUpdate>();
         let (cmd_tx, cmd_rx) = unbounded_channel::<RdpCmd>();
         let status = Arc::new(Mutex::new(SessionStatus::Connecting));
         let clipboard_events = Arc::new(ClipboardEventMailbox::new(clipboard_root.clone()));
@@ -602,7 +599,7 @@ fn set_status(status: &Arc<Mutex<SessionStatus>>, new: SessionStatus) {
 struct DriveCtx {
     verifier: Arc<dyn CertVerifier>,
     cert_store: Arc<CertStore>,
-    frame_tx: SyncSender<FrameUpdate>,
+    frame_tx: LatestSender<FrameUpdate>,
     cmd_rx: UnboundedReceiver<RdpCmd>,
     status: Arc<Mutex<SessionStatus>>,
     clipboard_events: Arc<ClipboardEventMailbox>,
@@ -1224,7 +1221,7 @@ async fn active_loop<S>(
     image: &mut DecodedImage,
     input_db: &mut InputDatabase,
     cmd_rx: &mut UnboundedReceiver<RdpCmd>,
-    frame_tx: &SyncSender<FrameUpdate>,
+    frame_tx: &LatestSender<FrameUpdate>,
     status: &Arc<Mutex<SessionStatus>>,
     // §5.1 B9: connect-start Instant (from `drive_inner`), used to log
     // `ttff_ms` (time-to-first-frame) exactly once below.
@@ -1429,7 +1426,7 @@ async fn process_active_stage_pdu<S>(
     image_has_content: &mut bool,
     first_frame_logged: &mut bool,
     t0: std::time::Instant,
-    frame_tx: &SyncSender<FrameUpdate>,
+    frame_tx: &LatestSender<FrameUpdate>,
     status: &Arc<Mutex<SessionStatus>>,
 ) -> Result<PduOutcome, String>
 where
@@ -1965,7 +1962,7 @@ async fn reactivate_session<S>(
     image_has_content: &mut bool,
     first_frame_logged: &mut bool,
     t0: std::time::Instant,
-    frame_tx: &SyncSender<FrameUpdate>,
+    frame_tx: &LatestSender<FrameUpdate>,
     status: &Arc<Mutex<SessionStatus>>,
 ) -> Result<ReactivationOutcome, String>
 where
@@ -2133,16 +2130,15 @@ fn rdp_event_to_operation(event: RdpInputEvent) -> InputOperation {
 }
 
 /// Copy the current [`DecodedImage`] framebuffer into a [`FrameUpdate`] and
-/// send it on the channel. Drops the update silently if the channel is full
-/// (backpressure: the UI is slower than the server).
-fn publish_frame(image: &DecodedImage, tx: &SyncSender<FrameUpdate>) {
+/// send it to the replaceable latest slot. A closed UI receiver does not stop
+/// the RDP driver or change its session status.
+fn publish_frame(image: &DecodedImage, tx: &LatestSender<FrameUpdate>) {
     let update = FrameUpdate {
         width: image.width(),
         height: image.height(),
         rgba: image.data().to_vec(),
     };
-    // `try_send` on a bounded channel — drop on overflow (coalescing).
-    let _ = tx.try_send(update);
+    let _ = tx.publish(update);
 }
 
 // Unit tests
@@ -2167,6 +2163,21 @@ mod tests {
     // Only used to build `RdpAuthInput` values in these tests — the
     // production path never converts a `Secret` outside `connect` itself.
     use cm_core::Secret;
+
+    fn recv_latest_timeout<T>(
+        receiver: &cm_core::latest::LatestReceiver<T>,
+        timeout: std::time::Duration,
+    ) -> Option<T> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match receiver.try_recv_latest() {
+                Ok(Some(value)) => return Some(value),
+                Err(_) => return None,
+                Ok(None) if std::time::Instant::now() >= deadline => return None,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(1)),
+            }
+        }
+    }
     use ironrdp_pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 
     #[test]
@@ -3279,8 +3290,7 @@ mod tests {
         // xrdp can take ~10–12 s to deliver the first desktop bitmap after
         // initial cursor-setup frames; `connect_timeout` gives a comfortable
         // margin (same knob as the connect-wait, for one dial to turn).
-        let first_frame = rx
-            .recv_timeout(connect_timeout)
+        let first_frame = recv_latest_timeout(rx, connect_timeout)
             .expect("must receive a frame within the timeout");
 
         let content_window_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -3289,15 +3299,15 @@ mod tests {
         while let Some(remaining) =
             content_window_deadline.checked_duration_since(std::time::Instant::now())
         {
-            match rx.recv_timeout(remaining) {
-                Ok(frame) => {
+            match recv_latest_timeout(rx, remaining) {
+                Some(frame) => {
                     let variety = distinct_rgb_count(&frame.rgba);
                     if variety > richest_variety {
                         richest_variety = variety;
                         richest_frame = frame;
                     }
                 }
-                Err(_) => break, // no more frames arriving in the window
+                None => break, // no more frames arriving in the window
             }
         }
         let frame = richest_frame;
@@ -3424,16 +3434,12 @@ mod tests {
         let resize_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut post_resize_frame: Option<FrameUpdate> = None;
         while std::time::Instant::now() < resize_deadline {
-            match rx.recv_timeout(std::time::Duration::from_millis(500)) {
-                Ok(f) => {
-                    let reactivated = (f.width, f.height) == (resize_w, resize_h);
-                    post_resize_frame = Some(f);
-                    if reactivated {
-                        break; // observed the new size; no need to keep waiting
-                    }
+            if let Some(f) = recv_latest_timeout(rx, std::time::Duration::from_millis(500)) {
+                let reactivated = (f.width, f.height) == (resize_w, resize_h);
+                post_resize_frame = Some(f);
+                if reactivated {
+                    break; // observed the new size; no need to keep waiting
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
 

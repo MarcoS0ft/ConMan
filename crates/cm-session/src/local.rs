@@ -13,17 +13,34 @@
 
 use std::io::{Read, Write};
 use std::sync::Mutex;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
 use cm_core::LocalSettings;
 use cm_core::TerminalOptions;
+use cm_core::latest::latest_channel;
 use cm_core::terminal::{GridSnapshot, KeyEvent, MouseEvent, TerminalSize};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::engine_owner::{Msg, Transport, run_engine_owner, timing};
 use crate::libghostty::EngineError;
 use crate::session::{ExitStatus, Session, SessionInput, SessionStatus, Surface, TerminalSession};
+
+#[cfg(test)]
+fn recv_latest_timeout<T>(
+    receiver: &cm_core::latest::LatestReceiver<T>,
+    timeout: std::time::Duration,
+) -> Option<T> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match receiver.try_recv_latest() {
+            Ok(Some(value)) => return Some(value),
+            Err(_) => return None,
+            Ok(None) if std::time::Instant::now() >= deadline => return None,
+            Ok(None) => thread::sleep(std::time::Duration::from_millis(1)),
+        }
+    }
+}
 
 /// Read buffer size for the PTY reader thread.
 const READ_BUF_LEN: usize = 8192;
@@ -140,7 +157,7 @@ impl LocalTerminalSession {
         };
 
         let (control_tx, control_rx) = mpsc::channel::<Msg>();
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<GridSnapshot>();
+        let (snapshot_tx, snapshot_rx) = latest_channel::<GridSnapshot>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), EngineError>>();
 
         // B7 startup-latency instrumentation (trace-level; see engine_owner::timing).
@@ -209,7 +226,7 @@ impl LocalTerminalSession {
 }
 
 impl TerminalSession for LocalTerminalSession {
-    fn snapshots(&self) -> &Receiver<GridSnapshot> {
+    fn snapshots(&self) -> &cm_core::latest::LatestReceiver<GridSnapshot> {
         match &self.surface {
             Surface::TerminalGrid(rx) => rx,
             _ => unreachable!("LocalTerminalSession always has TerminalGrid surface"),
@@ -452,13 +469,13 @@ mod tests {
             if remaining.is_zero() {
                 return false;
             }
-            match session.snapshots().recv_timeout(remaining) {
-                Ok(snap) => {
+            match recv_latest_timeout(session.snapshots(), remaining) {
+                Some(snap) => {
                     if snapshot_contains(&snap, needle) {
                         return true;
                     }
                 }
-                Err(_) => return false,
+                None => return false,
             }
         }
     }
@@ -521,13 +538,13 @@ mod tests {
         let mut seen = None;
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            match session.snapshots().recv_timeout(remaining) {
-                Ok(snap) if snap.size == new_size => {
+            match recv_latest_timeout(session.snapshots(), remaining) {
+                Some(snap) if snap.size == new_size => {
                     seen = Some(snap.size);
                     break;
                 }
-                Ok(_) => {}
-                Err(_) => break,
+                Some(_) => {}
+                None => break,
             }
         }
         assert_eq!(seen, Some(new_size), "snapshot should reflect the new size");
@@ -617,9 +634,9 @@ mod resize_storm_tests {
         let deadline = Instant::now() + Duration::from_secs(3);
         let mut last = None;
         while Instant::now() < deadline {
-            match s.snapshots().recv_timeout(Duration::from_millis(200)) {
-                Ok(snap) => last = Some(snap.size),
-                Err(_) => break,
+            match recv_latest_timeout(s.snapshots(), Duration::from_millis(200)) {
+                Some(snap) => last = Some(snap.size),
+                None => break,
             }
         }
         assert_eq!(
@@ -673,7 +690,7 @@ mod startup_timing {
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut first_nonempty = None;
         while Instant::now() < deadline {
-            if let Ok(snap) = s.snapshots().recv_timeout(Duration::from_millis(250))
+            if let Some(snap) = recv_latest_timeout(s.snapshots(), Duration::from_millis(250))
                 && snap.cells.iter().any(|c| !c.grapheme.is_empty())
             {
                 first_nonempty = Some(t0.elapsed());

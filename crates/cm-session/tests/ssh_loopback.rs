@@ -225,6 +225,21 @@ fn snapshot_contains(snap: &GridSnapshot, needle: &str) -> bool {
     (0..snap.size.rows).any(|r| row_text(snap, r).contains(needle))
 }
 
+fn recv_latest_timeout<T>(
+    receiver: &cm_core::latest::LatestReceiver<T>,
+    timeout: Duration,
+) -> Option<T> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match receiver.try_recv_latest() {
+            Ok(Some(value)) => return Some(value),
+            Err(_) => return None,
+            Ok(None) if Instant::now() >= deadline => return None,
+            Ok(None) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+
 fn wait_for_text(session: &dyn TerminalSession, needle: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -232,10 +247,10 @@ fn wait_for_text(session: &dyn TerminalSession, needle: &str, timeout: Duration)
         if remaining.is_zero() {
             return false;
         }
-        match session.snapshots().recv_timeout(remaining) {
-            Ok(snap) if snapshot_contains(&snap, needle) => return true,
-            Ok(_) => {}
-            Err(_) => return false,
+        match recv_latest_timeout(session.snapshots(), remaining) {
+            Some(snap) if snapshot_contains(&snap, needle) => return true,
+            Some(_) => {}
+            None => return false,
         }
     }
 }
