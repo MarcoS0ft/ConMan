@@ -25,6 +25,15 @@ cp "${BINARY_DIR}/conman" "${BINARY_DIR}/conmanctl" "${WORK}/source/"
 ROOT="${WORK}/root"
 install_desktop_payload "$ROOT" "$REPO_ROOT"
 
+# This marker is the only authoritative signal that a native DEB installed
+# ConMan. It deliberately contains no root, command, or URL so a package
+# database remains the owner of replacement mechanics.
+install -d -m0755 "${ROOT}/usr/share/conman"
+cat >"${ROOT}/usr/share/conman/install-context.json" <<'EOF'
+{"schema":1,"product":"conman","kind":"deb","package":"conman"}
+EOF
+chmod 0644 "${ROOT}/usr/share/conman/install-context.json"
+
 mkdir -p "${ROOT}/DEBIAN" "${ROOT}/usr/share/doc/conman"
 cat >"${ROOT}/usr/share/doc/conman/copyright" <<'EOF'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
@@ -81,6 +90,8 @@ dpkg-deb --root-owner-group --build "$ROOT" "$ARTIFACT"
 dpkg-deb --info "$ARTIFACT" >/dev/null
 dpkg-deb --contents "$ARTIFACT" >"${WORK}/contents.txt"
 grep -q './usr/bin/conmanctl$' "${WORK}/contents.txt" || die "DEB is missing conmanctl"
+grep -q './usr/share/conman/install-context.json$' "${WORK}/contents.txt" || \
+    die "DEB is missing the ConMan install-context marker"
 mkdir -p "${WORK}/verify"
 dpkg-deb --extract "$ARTIFACT" "${WORK}/verify"
 "${WORK}/verify/usr/bin/conman" --version | grep -Fq "$VERSION" || die "packaged conman version smoke failed"

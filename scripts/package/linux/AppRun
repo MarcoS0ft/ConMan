@@ -3,6 +3,130 @@ set -eu
 HERE=$(CDPATH='' cd -- "$(dirname -- "$(readlink -f "$0")")" && pwd)
 export LD_LIBRARY_PATH="${HERE}/usr/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
+# The existing AppImage is also the bounded update helper. The environment
+# signal is consumed by the bundled GUI before its public argument parser,
+# logging, config, database, keychain, renderer, or single-instance startup.
+# Do not turn it into a public CLI switch or pass any helper arguments through.
+if [ -n "${CONMAN_UPDATE_HELPER_PLAN:-}" ]; then
+    exec "${HERE}/usr/bin/conman"
+fi
+
+cli_data_home=${XDG_DATA_HOME:-${HOME:-}/.local/share}
+cli_marker_dir="${cli_data_home}/conman"
+cli_marker="${cli_marker_dir}/appimage-cli.json"
+
+source_appimage_identity() {
+    source=${APPIMAGE:-}
+    [ -n "$source" ] || return 1
+    case "$source" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    source=$(readlink -f -- "$source") || return 1
+    [ -f "$source" ] && [ -x "$source" ] || return 1
+    # stat emits three decimal fields; none can contain whitespace.
+    # shellcheck disable=SC2046
+    set -- $(stat -Lc '%d %i %s' -- "$source") || return 1
+    source_device=$1
+    source_inode=$2
+    source_length=$3
+    source_hash=$(sha256sum -- "$source" | awk '{print $1}') || return 1
+    source_path=$source
+}
+
+write_cli_marker() {
+    # The fields are generated from paths and the bundled binary, never from
+    # release metadata. Reject control characters so the shell-generated JSON
+    # cannot be made ambiguous; normal Unix paths remain fully supported.
+    case "$source_path$cli_path" in
+        *[![:print:]]*|*'"'*|*'\'*)
+            return 1
+            ;;
+    esac
+    umask 077
+    marker_tmp="${cli_marker}.partial.$$"
+    {
+        printf '{\n'
+        printf '  "schema": 1,\n'
+        printf '  "installed_cli": "%s",\n' "$cli_path"
+        printf '  "source_appimage": {"path":"%s","device":%s,"inode":%s,"byte_length":%s,"sha256":"%s"},\n' \
+            "$source_path" "$source_device" "$source_inode" "$source_length" "$source_hash"
+        printf '  "conman_version": "%s",\n' "$cli_version"
+        printf '  "installed_cli_sha256": "%s"\n' "$cli_hash"
+        printf '}\n'
+    } >"$marker_tmp" || return 1
+    chmod 0600 "$marker_tmp"
+    mv -f -- "$marker_tmp" "$cli_marker"
+}
+
+cli_version() {
+    "${HERE}/usr/bin/conman" --version | awk 'NF { value=$NF } END { print value }'
+}
+
+install_cli() {
+    destination=${1:-"${HOME:-}/.local/bin"}
+    [ -n "$destination" ] || return 1
+    mkdir -p -- "$destination" || return 1
+    destination=$(CDPATH='' cd -- "$destination" && pwd) || return 1
+    cli_path="${destination}/conmanctl"
+    [ ! -L "$cli_path" ] || {
+        printf 'Refusing to replace symlink %s\n' "$cli_path" >&2
+        return 1
+    }
+    source_appimage_identity || {
+        printf 'Cannot install conmanctl without a resolved APPIMAGE runtime path.\n' >&2
+        return 1
+    }
+    cli_version=$(cli_version) || return 1
+    cli_tmp="${cli_path}.partial.$$"
+    install -m 0755 -- "${HERE}/usr/bin/conmanctl" "$cli_tmp" || return 1
+    mv -f -- "$cli_tmp" "$cli_path" || return 1
+    cli_hash=$(sha256sum -- "$cli_path" | awk '{print $1}') || return 1
+    mkdir -p -- "$cli_marker_dir" || return 1
+    chmod 0700 "$cli_marker_dir"
+    write_cli_marker || {
+        rm -f -- "$cli_marker"
+        printf 'Cannot record the conmanctl installation marker.\n' >&2
+        return 1
+    }
+    printf 'Installed conmanctl to %s\n' "$cli_path"
+    case ":${PATH:-}:" in
+        *":${destination}:"*) ;;
+        *) printf 'Add %s to PATH to invoke conmanctl directly.\n' "$destination" ;;
+    esac
+}
+
+uninstall_cli() {
+    [ -f "$cli_marker" ] || {
+        printf 'No managed conmanctl installation marker found.\n'
+        return 0
+    }
+    marker_path=$(sed -n 's/^[[:space:]]*"installed_cli"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$cli_marker")
+    marker_hash=$(sed -n 's/^[[:space:]]*"installed_cli_sha256"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{64\}\)".*/\1/p' "$cli_marker")
+    [ -n "$marker_path" ] && [ -n "$marker_hash" ] || {
+        printf 'Refusing to remove conmanctl: installation marker is invalid.\n' >&2
+        return 1
+    }
+    destination=${1:-"${HOME:-}/.local/bin"}
+    destination=$(CDPATH='' cd -- "$destination" 2>/dev/null && pwd) || return 1
+    [ "$marker_path" = "${destination}/conmanctl" ] || {
+        printf 'Refusing to remove a conmanctl outside the recorded path.\n' >&2
+        return 1
+    }
+    [ ! -L "$marker_path" ] && [ -f "$marker_path" ] || {
+        printf 'Preserved %s because it is not a regular managed file.\n' "$marker_path" >&2
+        return 1
+    }
+    current_hash=$(sha256sum -- "$marker_path" | awk '{print $1}') || return 1
+    [ "$current_hash" = "$marker_hash" ] || {
+        printf 'Preserved %s because it was modified after installation.\n' "$marker_path" >&2
+        return 1
+    }
+    rm -f -- "$marker_path" || return 1
+    rm -f -- "$cli_marker"
+    printf 'Removed %s\n' "$marker_path"
+}
+
 case "${1:-}" in
     --conmanctl)
         shift
@@ -10,21 +134,12 @@ case "${1:-}" in
         ;;
     --install-cli)
         shift
-        destination=${1:-"${HOME}/.local/bin"}
-        mkdir -p "$destination"
-        install -m 0755 "${HERE}/usr/bin/conmanctl" "${destination}/conmanctl"
-        printf 'Installed conmanctl to %s\n' "${destination}/conmanctl"
-        case ":${PATH}:" in
-            *":${destination}:"*) ;;
-            *) printf 'Add %s to PATH to invoke conmanctl directly.\n' "$destination" ;;
-        esac
+        install_cli "$@"
         exit 0
         ;;
     --uninstall-cli)
         shift
-        destination=${1:-"${HOME}/.local/bin"}
-        rm -f "${destination}/conmanctl"
-        printf 'Removed %s\n' "${destination}/conmanctl"
+        uninstall_cli "$@"
         exit 0
         ;;
 esac

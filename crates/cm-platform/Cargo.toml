@@ -18,6 +18,8 @@ same-file = "1"
 # Stable, path-identity digest for identity-scoped single-instance handshakes.
 # Already present in the workspace dependency graph.
 sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 tempfile = "3"
 # Structured logging facade. The composition root (`conman`) installs

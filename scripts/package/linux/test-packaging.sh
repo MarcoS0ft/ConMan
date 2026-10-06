@@ -46,6 +46,8 @@ fi
 
 # Exercise AppRun routing without requiring AppImage/FUSE.
 mkdir -p "${WORK}/AppDir/usr/bin" "${WORK}/home"
+cp /bin/true "${WORK}/fake.AppImage"
+chmod 0755 "${WORK}/fake.AppImage"
 cp "${SCRIPT_DIR}/AppRun" "${WORK}/AppDir/AppRun"
 cat >"${WORK}/AppDir/usr/bin/conmanctl" <<'EOF'
 #!/bin/sh
@@ -56,11 +58,19 @@ cat >"${WORK}/AppDir/usr/bin/conman" <<'EOF'
 printf 'gui:%s\n' "$*"
 EOF
 chmod 0755 "${WORK}/AppDir/AppRun" "${WORK}/AppDir/usr/bin/conman" "${WORK}/AppDir/usr/bin/conmanctl"
+[ "$(CONMAN_UPDATE_HELPER_PLAN=/private/plan "${WORK}/AppDir/AppRun" --example)" = 'gui:' ]
 [ "$("${WORK}/AppDir/AppRun" --conmanctl ping)" = 'ctl:ping' ]
 [ "$("${WORK}/AppDir/AppRun" --example)" = 'gui:--example' ]
-HOME="${WORK}/home" "${WORK}/AppDir/AppRun" --install-cli >/dev/null
+HOME="${WORK}/home" APPIMAGE="${WORK}/fake.AppImage" "${WORK}/AppDir/AppRun" --install-cli >/dev/null
 [ "$("${WORK}/home/.local/bin/conmanctl" test)" = 'ctl:test' ]
-HOME="${WORK}/home" "${WORK}/AppDir/AppRun" --uninstall-cli >/dev/null
+test -f "${WORK}/home/.local/share/conman/appimage-cli.json"
+printf 'modified\n' >"${WORK}/home/.local/bin/conmanctl"
+if HOME="${WORK}/home" APPIMAGE="${WORK}/fake.AppImage" "${WORK}/AppDir/AppRun" --uninstall-cli >/dev/null 2>&1; then
+    die "AppRun removed a user-modified conmanctl"
+fi
+test -f "${WORK}/home/.local/bin/conmanctl"
+HOME="${WORK}/home" APPIMAGE="${WORK}/fake.AppImage" "${WORK}/AppDir/AppRun" --install-cli >/dev/null
+HOME="${WORK}/home" APPIMAGE="${WORK}/fake.AppImage" "${WORK}/AppDir/AppRun" --uninstall-cli >/dev/null
 [ ! -e "${WORK}/home/.local/bin/conmanctl" ]
 
 printf 'Linux packaging contract tests passed.\n'

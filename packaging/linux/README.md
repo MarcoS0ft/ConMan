@@ -39,6 +39,13 @@ AppStream metadata, and icon. Build native packages on the oldest distribution
 release supported by the release; package metadata cannot make a binary built
 against a newer glibc run on an older one.
 
+Native packages also install the root-owned marker
+`/usr/share/conman/install-context.json`. The Linux update primitives recognize
+this exact marker and provide a desktop installer handoff without invoking
+`sudo`, `dpkg`, `rpm`, `apt`, or `dnf`. AppImage staging requires a writable
+runtime-resolved image parent. These primitives are not yet connected to the
+application's update worker, so automatic updates remain unavailable.
+
 The AppImage contains both programs. It launches ConMan normally and provides
 the following CLI workflow:
 

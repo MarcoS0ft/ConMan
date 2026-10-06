@@ -21,6 +21,8 @@ pub mod accent;
 pub mod config;
 pub mod console;
 mod error;
+#[cfg(target_os = "linux")]
+pub mod linux_update;
 mod safe_lock;
 pub mod secure_temp;
 pub mod single_instance;

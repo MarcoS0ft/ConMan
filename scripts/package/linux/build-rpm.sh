@@ -61,6 +61,9 @@ Desktop connection manager for terminal, SSH, Telnet, and RDP sessions.
 %install
 install -Dm0755 %{SOURCE0} %{buildroot}%{_bindir}/conman
 install -Dm0755 %{SOURCE1} %{buildroot}%{_bindir}/conmanctl
+install -Dm0644 /dev/stdin %{buildroot}%{_datadir}/conman/install-context.json <<'MARKER'
+{"schema":1,"product":"conman","kind":"rpm","package":"conman"}
+MARKER
 install -Dm0644 %{SOURCE2} %{buildroot}%{_datadir}/applications/com.marcos0ft.conman.desktop
 install -Dm0644 %{SOURCE3} %{buildroot}%{_metainfodir}/com.marcos0ft.conman.appdata.xml
 install -Dm0644 %{SOURCE4} %{buildroot}%{_datadir}/icons/hicolor/128x128/apps/com.marcos0ft.conman.png
@@ -73,6 +76,7 @@ install -Dm0644 %{SOURCE9} %{buildroot}%{_licensedir}/conman/SymbolsNerdFont-LIC
 %files
 %{_bindir}/conman
 %{_bindir}/conmanctl
+%{_datadir}/conman/install-context.json
 %{_datadir}/applications/com.marcos0ft.conman.desktop
 %{_metainfodir}/com.marcos0ft.conman.appdata.xml
 %{_datadir}/icons/hicolor/128x128/apps/com.marcos0ft.conman.png
@@ -97,6 +101,8 @@ ARTIFACT="${OUTPUT_DIR}/conman-$(artifact_version "$VERSION")-linux-${ARCH}.rpm"
 cp "$BUILT" "$ARTIFACT"
 rpm -qpl "$ARTIFACT" >"${WORK}/contents.txt"
 grep -q '/usr/bin/conmanctl$' "${WORK}/contents.txt" || die "RPM is missing conmanctl"
+grep -q '/usr/share/conman/install-context.json$' "${WORK}/contents.txt" || \
+    die "RPM is missing the ConMan install-context marker"
 rpm -qp --requires "$ARTIFACT" >"${WORK}/requires.txt"
 grep -Fxq 'glibc >= 2.35' "${WORK}/requires.txt" || die "RPM is missing the measured glibc floor"
 grep -Fxq 'fontconfig >= 2.12.6' "${WORK}/requires.txt" || die "RPM is missing the measured fontconfig floor"
