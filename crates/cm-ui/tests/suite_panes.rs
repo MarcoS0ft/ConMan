@@ -185,7 +185,7 @@ fn connect_in_split_is_refused_when_agent_mode_lacks_execute_scope() {
     let interaction_count = agent_mode.mcp_interaction_count.clone();
     let (h, repo, provider) = support::harness_with_agent_mode(true, Some(agent_mode));
 
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     {
         let mut form = h.ui.get_profile_form();
         form.name = "Split Target".into();
@@ -213,7 +213,7 @@ fn connect_in_split_is_refused_when_agent_mode_lacks_execute_scope() {
     // the proxy would have incremented this right before forwarding the
     // click that triggers `on_connect_in_split_row`.
     interaction_count.store(1, std::sync::atomic::Ordering::SeqCst);
-    h.ui.invoke_connect_in_split_row(conn_id as i32);
+    h.ui.invoke_connect_in_split_row(conn_id.to_string().into());
     pump_ticks(1);
 
     assert_eq!(
@@ -246,7 +246,7 @@ fn connect_in_split_is_refused_when_agent_mode_lacks_execute_scope() {
 
 fn telnet_connect_in_split_dispatches_and_marks_insecure() {
     let (h, repo, provider) = harness();
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     let mut form = h.ui.get_profile_form();
     form.name = "Telnet Split".into();
     form.kind = 2;
@@ -263,7 +263,7 @@ fn telnet_connect_in_split_dispatches_and_marks_insecure() {
         .id
         .get();
 
-    h.ui.invoke_connect_in_split_row(conn_id as i32);
+    h.ui.invoke_connect_in_split_row(conn_id.to_string().into());
     pump_ticks(1);
     assert_eq!(provider.telnet_connect_count(), 1);
     assert_eq!(active_tab_pane_count(&h), 2);
@@ -290,7 +290,7 @@ fn telnet_connect_in_split_dispatches_and_marks_insecure() {
 fn promoted_telnet_split_keeps_identity_origin_and_reconnect_dispatch() {
     let (h, repo, provider) = harness();
 
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     let mut ssh_form = h.ui.get_profile_form();
     ssh_form.name = "SSH Primary".into();
     ssh_form.host = "primary-ssh".into();
@@ -309,7 +309,7 @@ fn promoted_telnet_split_keeps_identity_origin_and_reconnect_dispatch() {
     assert_eq!(provider.ssh_connect_count(), 1);
     assert_eq!(h.ui.get_connecting_kind().as_str(), "SSH");
 
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     let mut telnet_form = h.ui.get_profile_form();
     telnet_form.name = "Telnet Extra".into();
     telnet_form.kind = 2;
@@ -326,7 +326,7 @@ fn promoted_telnet_split_keeps_identity_origin_and_reconnect_dispatch() {
         .id
         .get();
 
-    h.ui.invoke_connect_in_split_row(telnet_id as i32);
+    h.ui.invoke_connect_in_split_row(telnet_id.to_string().into());
     pump_ticks(1);
     assert_eq!(provider.telnet_connect_count(), 1);
     assert_eq!(active_tab_pane_count(&h), 2);
@@ -370,7 +370,7 @@ fn promoted_telnet_split_keeps_identity_origin_and_reconnect_dispatch() {
 /// its failure reason must remain visible through a toast.
 fn asynchronous_telnet_split_failure_is_visible_before_collapse() {
     let (h, repo, provider) = harness();
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     let mut form = h.ui.get_profile_form();
     form.name = "Failing Telnet Split".into();
     form.kind = 2;
@@ -389,7 +389,7 @@ fn asynchronous_telnet_split_failure_is_visible_before_collapse() {
 
     let status = std::sync::Arc::new(std::sync::Mutex::new(cm_core::SessionStatus::Connecting));
     provider.script_next_remote(status.clone());
-    h.ui.invoke_connect_in_split_row(conn_id as i32);
+    h.ui.invoke_connect_in_split_row(conn_id.to_string().into());
     pump_ticks(1);
     assert_eq!(active_tab_pane_count(&h), 2);
 

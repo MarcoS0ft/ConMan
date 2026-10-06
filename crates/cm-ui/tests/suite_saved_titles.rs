@@ -19,7 +19,7 @@ fn saved_titles_suite() {
 }
 
 fn save_profile(ui: &AppWindow, name: &str, kind: i32, host: &str, port: &str) {
-    ui.invoke_new_connection(0);
+    ui.invoke_new_connection("".into());
     let mut form = ui.get_profile_form();
     form.name = name.into();
     form.kind = kind;

@@ -65,7 +65,7 @@ fn select_does_not_launch_but_activate_does() {
     let (h, repo, _provider) = harness();
     let tabs_before = tab_count(&h.ui);
 
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     {
         let mut form = h.ui.get_profile_form();
         form.name = "Test Row".into();
@@ -111,8 +111,8 @@ fn select_does_not_launch_but_activate_does() {
     );
 }
 
-fn save_group(ui: &cm_ui::AppWindow, parent_id: i32, name: &str) {
-    ui.invoke_new_group(parent_id);
+fn save_group(ui: &cm_ui::AppWindow, parent_id: &str, name: &str) {
+    ui.invoke_new_group(parent_id.into());
     let mut form = ui.get_group_form();
     form.name = name.into();
     ui.set_group_form(form);
@@ -126,9 +126,9 @@ fn save_group(ui: &cm_ui::AppWindow, parent_id: i32, name: &str) {
 fn delete_confirmation_preserves_on_cancel_and_recursively_deletes_on_accept() {
     let (h, repo, _provider) = harness();
 
-    save_group(&h.ui, 0, "Delete root");
+    save_group(&h.ui, "", "Delete root");
     let root_id = repo.list_groups().expect("list root")[0].id;
-    save_group(&h.ui, root_id.get() as i32, "Delete child");
+    save_group(&h.ui, &root_id.get().to_string(), "Delete child");
     let child_id = repo
         .list_groups()
         .expect("list child")
@@ -137,7 +137,7 @@ fn delete_confirmation_preserves_on_cancel_and_recursively_deletes_on_accept() {
         .expect("child group")
         .id;
 
-    h.ui.invoke_new_connection(child_id.get() as i32);
+    h.ui.invoke_new_connection(child_id.get().to_string().into());
     {
         let mut form = h.ui.get_profile_form();
         form.name = "Nested connection".into();
@@ -147,7 +147,7 @@ fn delete_confirmation_preserves_on_cancel_and_recursively_deletes_on_accept() {
     find_by_id(&h.ui, "ProfileEditor::profile-save-btn").invoke_accessible_default_action();
     assert_eq!(repo.list_connections().expect("list connections").len(), 1);
 
-    h.ui.invoke_delete_conn_row(root_id.get() as i32, true);
+    h.ui.invoke_delete_conn_row(root_id.get().to_string().into(), true);
     assert!(h.ui.get_delete_confirm_open());
     assert!(h.ui.get_delete_confirm_is_group());
     assert_eq!(h.ui.get_delete_confirm_group_count(), 2);
@@ -181,7 +181,7 @@ fn delete_confirmation_preserves_on_cancel_and_recursively_deletes_on_accept() {
         1
     );
 
-    h.ui.invoke_delete_conn_row(root_id.get() as i32, true);
+    h.ui.invoke_delete_conn_row(root_id.get().to_string().into(), true);
     find_by_id(&h.ui, "DeleteConfirmationDialog::delete-confirm-btn")
         .invoke_accessible_default_action();
     assert!(!h.ui.get_delete_confirm_open());
@@ -200,7 +200,7 @@ fn delete_confirmation_preserves_on_cancel_and_recursively_deletes_on_accept() {
 
 fn connection_delete_also_requires_confirmation() {
     let (h, repo, _provider) = harness();
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     {
         let mut form = h.ui.get_profile_form();
         form.name = "Delete leaf".into();
@@ -210,7 +210,7 @@ fn connection_delete_also_requires_confirmation() {
     find_by_id(&h.ui, "ProfileEditor::profile-save-btn").invoke_accessible_default_action();
     let id = repo.list_connections().expect("saved connection")[0].id;
 
-    h.ui.invoke_delete_conn_row(id.get() as i32, false);
+    h.ui.invoke_delete_conn_row(id.get().to_string().into(), false);
     assert!(h.ui.get_delete_confirm_open());
     assert!(!h.ui.get_delete_confirm_is_group());
     assert_eq!(h.ui.get_delete_confirm_group_count(), 0);
@@ -224,7 +224,7 @@ fn connection_delete_also_requires_confirmation() {
         1
     );
 
-    h.ui.invoke_delete_conn_row(id.get() as i32, false);
+    h.ui.invoke_delete_conn_row(id.get().to_string().into(), false);
     find_by_id(&h.ui, "DeleteConfirmationDialog::delete-confirm-btn")
         .invoke_accessible_default_action();
     assert!(
@@ -254,7 +254,7 @@ fn connection_delete_also_requires_confirmation() {
 fn tree_row_status_dot_tracks_its_connection_s_live_tab() {
     let (h, repo, provider) = harness();
 
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     {
         let mut form = h.ui.get_profile_form();
         form.name = "Live Dot Target".into();
@@ -316,7 +316,7 @@ fn connection_row_still_carries_its_context_menu_area() {
     let (h, _repo, _provider) = harness();
     let before = ElementHandle::find_by_element_type_name(&h.ui, "ContextMenuArea").count();
 
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     {
         let mut form = h.ui.get_profile_form();
         form.name = "Ctx Menu Row".into();

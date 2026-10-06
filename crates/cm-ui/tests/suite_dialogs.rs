@@ -304,7 +304,7 @@ fn quick_connect_host_and_port_never_overlap() {
 /// Username present, no Domain/Resolution.
 fn profile_editor_new_ssh_default_manifest() {
     let (h, _repo, _provider) = harness();
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     pump_ticks(1);
     assert!(
         h.ui.get_profile_editor_open(),
@@ -330,7 +330,7 @@ fn profile_editor_new_ssh_default_manifest() {
 /// regression in either branch fails loudly.
 fn profile_editor_kind_switch_updates_port_and_manifest() {
     let (h, _repo, _provider) = harness();
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     pump_ticks(1);
 
     let editor = find_singleton(&h.ui, "ProfileEditor");
@@ -353,7 +353,7 @@ fn profile_editor_kind_switch_updates_port_and_manifest() {
 
 fn profile_editor_telnet_clears_credentials_and_saves_prompt() {
     let (h, repo, _provider) = harness();
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     pump_ticks(1);
 
     // Seed stale SSH credential form state, then drive the real kind selector.
@@ -452,7 +452,7 @@ fn profile_editor_telnet_clears_credentials_and_saves_prompt() {
 /// hidden).
 fn profile_editor_new_connection_username_is_editable_with_no_credential() {
     let (h, _repo, _provider) = harness();
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     pump_ticks(1);
 
     let form = h.ui.get_profile_form();
@@ -471,7 +471,7 @@ fn profile_editor_new_connection_username_is_editable_with_no_credential() {
 /// mode's own typed username is what's actually used).
 fn profile_editor_inline_mode_shows_password_hides_credential_picker() {
     let (h, _repo, _provider) = harness();
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     pump_ticks(1);
 
     let editor = find_singleton(&h.ui, "ProfileEditor");
@@ -496,7 +496,7 @@ fn profile_editor_inline_mode_shows_password_hides_credential_picker() {
 /// guarding against it being accidentally re-exposed.
 fn profile_editor_credential_mode_selector_has_no_prompt_option() {
     let (h, _repo, _provider) = harness();
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     pump_ticks(1);
 
     let editor = find_singleton(&h.ui, "ProfileEditor");
@@ -521,7 +521,7 @@ fn profile_editor_reference_mode_with_named_credential_is_read_only() {
 
     // Create a credential with its own username via the real Keys-panel save
     // path (mirrors how a user would actually do this).
-    h.ui.invoke_new_cred(0);
+    h.ui.invoke_new_cred("".into());
     pump_ticks(1);
     {
         let mut cred_form = h.ui.get_cred_form();
@@ -534,7 +534,7 @@ fn profile_editor_reference_mode_with_named_credential_is_read_only() {
 
     // New connection, assign that credential (index 1 -- the only one, index
     // 0 is "Inherit"), save it.
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     pump_ticks(1);
     {
         let mut form = h.ui.get_profile_form();
@@ -557,7 +557,7 @@ fn profile_editor_reference_mode_with_named_credential_is_read_only() {
         .expect("connection was saved")
         .id
         .get();
-    h.ui.invoke_edit_conn(conn_id as i32);
+    h.ui.invoke_edit_conn(conn_id.to_string().into());
     pump_ticks(1);
 
     let form = h.ui.get_profile_form();
@@ -576,7 +576,7 @@ fn profile_editor_save_persists_and_cancel_discards() {
     let (h, repo, _provider) = harness();
 
     // -- Save persists --------------------------------------------------
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     {
         let mut form = h.ui.get_profile_form();
         form.name = "Test Save".into();
@@ -595,7 +595,7 @@ fn profile_editor_save_persists_and_cancel_discards() {
     assert_eq!(saved[0].name, "Test Save");
 
     // -- Cancel discards --------------------------------------------------
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     {
         let mut form = h.ui.get_profile_form();
         form.name = "Should Not Persist".into();
@@ -622,7 +622,7 @@ fn profile_editor_save_persists_and_cancel_discards() {
 /// next editor-open.
 fn profile_editor_cancel_clears_the_transient_inline_password() {
     let (h, _repo, _provider) = harness();
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     pump_ticks(1);
     {
         let mut form = h.ui.get_profile_form();
@@ -647,7 +647,7 @@ fn profile_editor_fields_stay_packed_and_scroll_clear_of_footer() {
     let (h, _repo, _provider) = harness();
     h.ui.window()
         .set_size(slint::LogicalSize::new(900.0, 600.0));
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     pump_ticks(1);
 
     let editor = find_singleton(&h.ui, "ProfileEditor");
@@ -763,7 +763,7 @@ fn contrast_ratio(a: slint::Color, b: slint::Color) -> f64 {
 /// parent window.
 fn dialog_and_button_bounds() {
     let (h, _repo, _provider) = harness();
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
 
     let window_size = h.ui.root_element().size();
     let dialog = find_singleton(&h.ui, "ProfileEditor");
@@ -833,7 +833,7 @@ fn cred_row_activate_and_a11y_survive_the_content_cell_restructure() {
     h.ui.invoke_select_panel(1); // Keys panel
     pump_ticks(1);
 
-    h.ui.invoke_new_cred(0);
+    h.ui.invoke_new_cred("".into());
     pump_ticks(1);
     {
         let mut cred_form = h.ui.get_cred_form();

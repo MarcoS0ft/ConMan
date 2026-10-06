@@ -645,7 +645,7 @@ fn credential_rows_fit_default_and_minimum_sidebar_widths() {
     find_by_id(&h.ui, "AppWindow::keys-panel-btn").invoke_accessible_default_action();
     h.ui.set_credentials(ModelRc::from(Rc::new(VecModel::from(vec![
         cm_ui::CredRow {
-            id: 1,
+            id: "".into(),
             label: "A deliberately long synthetic credential label for geometry".into(),
             kind: "SSH Key+PP".into(),
             username: "synthetic-user-with-a-deliberately-long-name".into(),
@@ -654,6 +654,8 @@ fn credential_rows_fit_default_and_minimum_sidebar_widths() {
             selected: false,
             depth: 0,
             used_by_label: "Used by 99 connections".into(),
+            can_move_up: false,
+            can_move_down: false,
         },
     ]))));
 
@@ -898,7 +900,7 @@ fn tab_duplicate_is_available_for_a_saved_connection_but_not_for_quick_connect()
     );
 
     // A tree-launched saved SSH connection -- has an origin_connection_id.
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     {
         let mut form = h.ui.get_profile_form();
         form.name = "Dup Target".into();
@@ -1100,7 +1102,7 @@ fn telnet_quick_connect_reconnect_and_insecure_tab_state() {
 
 fn telnet_saved_launch_dispatches_provider() {
     let (h, repo, provider) = harness();
-    h.ui.invoke_new_connection(0);
+    h.ui.invoke_new_connection("".into());
     let mut form = h.ui.get_profile_form();
     form.name = "Saved Telnet".into();
     form.kind = 2;

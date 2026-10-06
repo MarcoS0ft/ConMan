@@ -64,7 +64,7 @@ fn launchpad_scrolls_at_compact_height() {
         .set_size(slint::LogicalSize::new(720.0, 420.0));
     let rows = (0..10)
         .map(|idx| cm_ui::RecentItem {
-            id: idx,
+            id: idx.to_string().into(),
             name: SharedString::from(format!("Recent {idx}")),
             meta: SharedString::from("just now"),
             kind: SharedString::from("SSH"),
