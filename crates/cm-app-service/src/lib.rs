@@ -259,7 +259,7 @@ impl NativeApplicationService {
                     break;
                 };
                 budget -= 1;
-                let result_class = result_class_for(&command);
+                let result_class = command.result_class();
                 let reservation = self
                     .shared
                     .borrow_mut()
@@ -504,7 +504,7 @@ fn worker_main<B: NativeCommandBackend>(
     completion_tx: SyncSender<Completion>,
 ) {
     while let Ok(work) = dispatch_rx.recv() {
-        debug_assert_eq!(work.result_class, result_class_for(&work.command));
+        debug_assert_eq!(work.result_class, work.command.result_class());
         let result = resources
             .backend
             .as_mut()
@@ -519,28 +519,6 @@ fn worker_main<B: NativeCommandBackend>(
         }
     }
     drop(resources);
-}
-
-fn result_class_for(command: &AppCommand) -> ResultClass {
-    match command {
-        AppCommand::Bootstrap | AppCommand::ListWorkspace | AppCommand::ExportSecretFree => {
-            ResultClass::Workspace
-        }
-        AppCommand::ImportPreview { .. } => ResultClass::ImportPreview,
-        AppCommand::SearchTerminal { .. } => ResultClass::Search,
-        AppCommand::QueryOutcome { .. }
-        | AppCommand::RequestControl
-        | AppCommand::Mutate { .. }
-        | AppCommand::OpenSession { .. }
-        | AppCommand::CloseSession { .. }
-        | AppCommand::DetachSession { .. }
-        | AppCommand::AttachSession { .. }
-        | AppCommand::SessionInput { .. }
-        | AppCommand::ResizeSession { .. }
-        | AppCommand::SetViewport { .. }
-        | AppCommand::ClipboardPasteText { .. }
-        | AppCommand::RespondChallenge { .. } => ResultClass::Standard,
-    }
 }
 
 #[cfg(test)]
@@ -775,28 +753,26 @@ mod tests {
 
     #[test]
     fn result_class_mapping_matches_frozen_c1_table() {
+        assert_eq!(AppCommand::Bootstrap.result_class(), ResultClass::Workspace);
         assert_eq!(
-            result_class_for(&AppCommand::Bootstrap),
+            AppCommand::ListWorkspace.result_class(),
             ResultClass::Workspace
         );
         assert_eq!(
-            result_class_for(&AppCommand::ListWorkspace),
+            AppCommand::ExportSecretFree.result_class(),
             ResultClass::Workspace
         );
         assert_eq!(
-            result_class_for(&AppCommand::ExportSecretFree),
-            ResultClass::Workspace
-        );
-        assert_eq!(
-            result_class_for(&AppCommand::ImportPreview {
+            AppCommand::ImportPreview {
                 format: ImportFormat::ConManJson,
                 filename: String::new(),
                 bytes: Vec::new(),
-            }),
+            }
+            .result_class(),
             ResultClass::ImportPreview
         );
         assert_eq!(
-            result_class_for(&AppCommand::SearchTerminal {
+            AppCommand::SearchTerminal {
                 session_id: SessionId(1),
                 session_generation: 1,
                 query: String::new(),
@@ -806,11 +782,12 @@ mod tests {
                     column: 0,
                     surface_sequence: 0,
                 },
-            }),
+            }
+            .result_class(),
             ResultClass::Search
         );
         assert_eq!(
-            result_class_for(&AppCommand::RequestControl),
+            AppCommand::RequestControl.result_class(),
             ResultClass::Standard
         );
     }

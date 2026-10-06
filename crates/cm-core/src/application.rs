@@ -132,6 +132,35 @@ pub enum AppCommand {
         response: ChallengeResponse,
     },
 }
+impl AppCommand {
+    /// Return the shared reservation class for this command.
+    ///
+    /// Native runtimes and transport bridges must derive this from the owned
+    /// command before reserving output; callers cannot override the policy.
+    #[must_use]
+    pub const fn result_class(&self) -> ResultClass {
+        match self {
+            AppCommand::Bootstrap | AppCommand::ListWorkspace | AppCommand::ExportSecretFree => {
+                ResultClass::Workspace
+            }
+            AppCommand::ImportPreview { .. } => ResultClass::ImportPreview,
+            AppCommand::SearchTerminal { .. } => ResultClass::Search,
+            AppCommand::QueryOutcome { .. }
+            | AppCommand::RequestControl
+            | AppCommand::Mutate { .. }
+            | AppCommand::OpenSession { .. }
+            | AppCommand::CloseSession { .. }
+            | AppCommand::DetachSession { .. }
+            | AppCommand::AttachSession { .. }
+            | AppCommand::SessionInput { .. }
+            | AppCommand::ResizeSession { .. }
+            | AppCommand::SetViewport { .. }
+            | AppCommand::ClipboardPasteText { .. }
+            | AppCommand::RespondChallenge { .. } => ResultClass::Standard,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum WorkspaceMutation {
     UpsertConnection {
@@ -509,7 +538,11 @@ pub enum ResultClass {
 }
 
 impl ResultClass {
-    const fn limit(self) -> usize {
+    /// Maximum owned C1 completion capacity, including its inline baseline.
+    ///
+    /// This is not a serialized JSON or wire-message byte limit.
+    #[must_use]
+    pub const fn limit(self) -> usize {
         match self {
             Self::Standard => ERROR_RESERVATION,
             Self::Workspace => 16 * 1024 * 1024,
