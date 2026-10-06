@@ -1405,6 +1405,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "conman-web"
+version = "0.1.0"
+dependencies = [
+ "cm-ui",
+ "slint",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "conmanctl"
 version = "0.1.0"
 dependencies = [

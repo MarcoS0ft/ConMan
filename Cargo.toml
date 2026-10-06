@@ -16,6 +16,7 @@ members = [
     "crates/conman",
     "crates/conmanctl",
     "crates/conman-gateway",
+    "crates/conman-web",
 ]
 # Throwaway spike crates live here, standalone (own Cargo.lock), excluded from the
 # workspace so an alpha/experimental dependency never touches the real lockfile.
