@@ -51,11 +51,10 @@ fn wire_toggle_cred_row(ctx: &Ctx) {
             let flat = st.keys_panel.flat();
             if let Some(row) = flat.get(idx as usize)
                 && row.is_folder
+                && let Ok(id) = crate::domain_ui_id::parse_credential_folder_id(row.id.as_str())
             {
-                if let Ok(id) = crate::domain_ui_id::parse_credential_folder_id(row.id.as_str()) {
-                    st.keys_panel.toggle_expand(id.get());
-                    refresh_cred_model(&st, &cred_model);
-                }
+                st.keys_panel.toggle_expand(id.get());
+                refresh_cred_model(&st, &cred_model);
             }
         }
     });

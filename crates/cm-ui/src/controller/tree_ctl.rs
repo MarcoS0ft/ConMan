@@ -62,11 +62,10 @@ fn wire_toggle_conn_row(ctx: &Ctx) {
             let flat = st.conn_tree.flat();
             if let Some(row) = flat.get(idx as usize)
                 && row.is_group
+                && let Ok(id) = parse_group_id(row.id.as_str())
             {
-                if let Ok(id) = parse_group_id(row.id.as_str()) {
-                    st.conn_tree.toggle_expand(id.get());
-                    refresh_conn_model(&st, &conn_model);
-                }
+                st.conn_tree.toggle_expand(id.get());
+                refresh_conn_model(&st, &conn_model);
             }
         }
     });
@@ -88,11 +87,10 @@ fn wire_select_conn_row(ctx: &Ctx) {
             let flat = st.conn_tree.flat();
             if let Some(row) = flat.get(idx as usize)
                 && !row.is_group
+                && let Ok(id) = parse_connection_id(row.id.as_str())
             {
-                if let Ok(id) = parse_connection_id(row.id.as_str()) {
-                    st.conn_tree.select_conn(id.get());
-                    refresh_conn_model(&st, &conn_model);
-                }
+                st.conn_tree.select_conn(id.get());
+                refresh_conn_model(&st, &conn_model);
             }
         }
     });
