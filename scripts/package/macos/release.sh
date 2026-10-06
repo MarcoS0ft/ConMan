@@ -8,6 +8,7 @@ repo_root=$(cd "$script_dir/../../.." && pwd -P)
 target_dir="$repo_root/target/release"
 output_dir="$repo_root/dist/macos"
 version=""
+revision=""
 identity=""
 app_profile=""
 cli_profile=""
@@ -18,6 +19,7 @@ notary_issuer=""
 usage() {
     cat <<'EOF'
 Usage: release.sh [--target-dir DIR] [--output-dir DIR] [--version VERSION]
+                  [--revision REVISION]
                   [--sign-identity IDENTITY]
                   [--app-provisioning-profile FILE]
                   [--cli-provisioning-profile FILE]
@@ -35,6 +37,7 @@ while [[ $# -gt 0 ]]; do
         --target-dir) target_dir=$2; shift 2 ;;
         --output-dir) output_dir=$2; shift 2 ;;
         --version) version=$2; shift 2 ;;
+        --revision) revision=$2; shift 2 ;;
         --sign-identity) identity=$2; shift 2 ;;
         --app-provisioning-profile) app_profile=$2; shift 2 ;;
         --cli-provisioning-profile) cli_profile=$2; shift 2 ;;
@@ -61,6 +64,7 @@ fi
 
 app_args=(--target-dir "$target_dir" --output-dir "$output_dir")
 [[ -n "$version" ]] && app_args+=(--version "$version")
+[[ -n "$revision" ]] && app_args+=(--revision "$revision")
 [[ -n "$identity" ]] && app_args+=(--sign-identity "$identity")
 [[ -n "$app_profile" ]] && app_args+=(--app-provisioning-profile "$app_profile")
 [[ -n "$cli_profile" ]] && app_args+=(--cli-provisioning-profile "$cli_profile")

@@ -8,16 +8,21 @@ repo_root=$(cd "$script_dir/../../.." && pwd -P)
 target_dir="$repo_root/target/release"
 output_dir="$repo_root/dist/macos"
 version=""
+revision=""
 identity=""
 app_profile=""
 cli_profile=""
+sparkle_dir="${CONMAN_SPARKLE_DIR:-}"
+sparkle_bridge="${CONMAN_SPARKLE_BRIDGE:-}"
 
 usage() {
     cat <<'EOF'
 Usage: build-app.sh [--target-dir DIR] [--output-dir DIR] [--version VERSION]
+                    [--revision REVISION]
                     [--sign-identity IDENTITY]
                     [--app-provisioning-profile FILE]
                     [--cli-provisioning-profile FILE]
+                    [--sparkle-dir DIR] [--sparkle-bridge FILE]
 
 IDENTITY may be '-' for an ad-hoc local signature. Official releases should use
 a Developer ID Application identity available in the current keychain.
@@ -29,9 +34,12 @@ while [[ $# -gt 0 ]]; do
         --target-dir) target_dir=$2; shift 2 ;;
         --output-dir) output_dir=$2; shift 2 ;;
         --version) version=$2; shift 2 ;;
+        --revision) revision=$2; shift 2 ;;
         --sign-identity) identity=$2; shift 2 ;;
         --app-provisioning-profile) app_profile=$2; shift 2 ;;
         --cli-provisioning-profile) cli_profile=$2; shift 2 ;;
+        --sparkle-dir) sparkle_dir=$2; shift 2 ;;
+        --sparkle-bridge) sparkle_bridge=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -81,12 +89,31 @@ if [[ "$profile_count" -eq 2 ]]; then
     validate_profile "$cli_profile" "2NZRF4HQT7.com.marcos0ft.conman.conmanctl"
 fi
 
-for tool in iconutil plutil sips; do
+for tool in iconutil plutil sips ditto; do
     command -v "$tool" >/dev/null || {
         echo "Required macOS tool not found: $tool" >&2
         exit 1
     }
 done
+
+if [[ -z "$sparkle_dir" ]]; then
+    sparkle_result=$("$repo_root/scripts/package/macos/fetch-sparkle.sh" \
+        --output-dir "$output_dir/.sparkle")
+    sparkle_dir=$(printf '%s\n' "$sparkle_result" | sed -n 's/^SPARKLE_DIR=//p')
+fi
+[[ -x "$sparkle_dir/Sparkle" && -d "$sparkle_dir/XPCServices" && -d "$sparkle_dir/Updater.app" ]] || {
+    echo "Pinned Sparkle framework is incomplete: $sparkle_dir" >&2
+    exit 1
+}
+sparkle_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+    "$sparkle_dir/Resources/Info.plist" 2>/dev/null || true)
+[[ "$sparkle_version" == "2.9.4" ]] || {
+    echo "Sparkle framework must be version 2.9.4, got ${sparkle_version:-unknown}" >&2
+    exit 1
+}
+if [[ -n "$sparkle_bridge" ]]; then
+    [[ -f "$sparkle_bridge" ]] || { echo "Sparkle bridge is missing: $sparkle_bridge" >&2; exit 1; }
+fi
 
 conman="$target_dir/conman"
 conmanctl="$target_dir/conmanctl"
@@ -117,8 +144,14 @@ short_version=$(printf '%s\n' "$version" | sed -nE 's/^([0-9]+\.[0-9]+\.[0-9]+).
     echo "Version is not based on MAJOR.MINOR.PATCH: $version" >&2
     exit 1
 }
-build_version=$(printf '%s\n' "$version" | sed -nE 's/.*-dev\.([0-9]+).*/\1/p')
-[[ -n "$build_version" ]] || build_version=1
+if [[ -z "$revision" ]]; then
+    revision=$(git -C "$repo_root" rev-list --count HEAD 2>/dev/null || true)
+fi
+[[ "$revision" =~ ^[1-9][0-9]*$ ]] || {
+    echo "A positive numeric Git revision is required for CFBundleVersion: $revision" >&2
+    exit 1
+}
+build_version=$revision
 
 mkdir -p "$output_dir"
 app="$output_dir/ConMan.app"
@@ -126,9 +159,13 @@ rm -rf "$app"
 cli_app="$app/Contents/Helpers/conmanctl.app"
 cli_executable="$cli_app/Contents/MacOS/conmanctl"
 mkdir -p "$app/Contents/MacOS" "$cli_app/Contents/MacOS" \
-    "$app/Contents/Resources/Licenses"
+    "$app/Contents/Resources/Licenses" "$app/Contents/Frameworks"
 install -m 0755 "$conman" "$app/Contents/MacOS/conman"
 install -m 0755 "$conmanctl" "$cli_executable"
+ditto "$sparkle_dir" "$app/Contents/Frameworks/Sparkle.framework"
+if [[ -n "$sparkle_bridge" ]]; then
+    install -m 0755 "$sparkle_bridge" "$app/Contents/Frameworks/ConManSparkleBridge.dylib"
+fi
 install -m 0644 "$repo_root/packaging/macos/Info.plist" "$app/Contents/Info.plist"
 install -m 0644 "$repo_root/packaging/macos/conmanctl-Info.plist" "$cli_app/Contents/Info.plist"
 for license in \
@@ -144,6 +181,22 @@ plutil -replace CFBundleShortVersionString -string "$short_version" "$app/Conten
 plutil -replace CFBundleVersion -string "$build_version" "$app/Contents/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$short_version" "$cli_app/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$build_version" "$cli_app/Contents/Info.plist"
+plutil -replace SUFeedURL -string \
+    "https://github.com/MarcoS0ft/ConMan/releases/latest/download/appcast-stable.xml" \
+    "$app/Contents/Info.plist"
+plutil -replace SUEnableAutomaticChecks -bool YES "$app/Contents/Info.plist"
+plutil -replace SUAutomaticallyUpdate -bool YES "$app/Contents/Info.plist"
+plutil -replace SUAllowsAutomaticUpdates -bool YES "$app/Contents/Info.plist"
+plutil -replace SURequireSignedFeed -bool YES "$app/Contents/Info.plist"
+plutil -replace SUVerifyUpdateBeforeExtraction -bool YES "$app/Contents/Info.plist"
+if [[ -n "${CONMAN_SPARKLE_PUBLIC_KEY_B64:-}" ]]; then
+    plutil -replace SUPublicEDKey -string "$CONMAN_SPARKLE_PUBLIC_KEY_B64" "$app/Contents/Info.plist"
+fi
+sparkle_public_key=$(plutil -extract SUPublicEDKey raw "$app/Contents/Info.plist" 2>/dev/null || true)
+if [[ "$sparkle_public_key" == "REPLACE_WITH_CONMAN_SPARKLE_V1_PUBLIC_KEY" && "$identity" != "-" ]]; then
+    echo "Developer ID packaging requires CONMAN_SPARKLE_PUBLIC_KEY_B64" >&2
+    exit 1
+fi
 
 if [[ "$profile_count" -eq 2 ]]; then
     install -m 0644 "$app_profile" "$app/Contents/embedded.provisionprofile"
@@ -174,6 +227,18 @@ if [[ -n "$identity" ]]; then
     else
         sign_args+=(--options runtime --timestamp)
     fi
+    sparkle_version_dir="$app/Contents/Frameworks/Sparkle.framework/Versions/B"
+    while IFS= read -r -d '' executable; do
+        codesign "${sign_args[@]}" "$executable"
+    done < <(find "$sparkle_version_dir" -type f -perm -111 -print0)
+    while IFS= read -r -d '' bundle; do
+        codesign "${sign_args[@]}" "$bundle"
+    done < <(find "$sparkle_version_dir" -type d -name '*.xpc' -print0)
+    while IFS= read -r -d '' bundle; do
+        codesign "${sign_args[@]}" "$bundle"
+    done < <(find "$sparkle_version_dir" -type d -name '*.app' -print0)
+    codesign "${sign_args[@]}" "$app/Contents/Frameworks/Sparkle.framework"
+    [[ -z "$sparkle_bridge" ]] || codesign "${sign_args[@]}" "$app/Contents/Frameworks/ConManSparkleBridge.dylib"
     if [[ "$identity" == "-" ]]; then
         # Ad-hoc builds intentionally have no restricted Keychain entitlement.
         # Saved credentials are unavailable until the build carries profiles
@@ -191,4 +256,4 @@ if [[ -n "$identity" ]]; then
     codesign --verify --deep --strict --verbose=2 "$app"
 fi
 
-printf 'APP=%s\nVERSION=%s\n' "$app" "$version"
+printf 'APP=%s\nVERSION=%s\nREVISION=%s\n' "$app" "$version" "$revision"

@@ -9,6 +9,7 @@ members = [
     "crates/cm-session",
     "crates/cm-platform",
     "crates/cm-update",
+    "crates/cm-update-macos",
     "crates/cm-ui",
     "crates/conman",
     "crates/conmanctl",

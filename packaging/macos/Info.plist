@@ -22,6 +22,22 @@
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
+    <!-- Sparkle 2.9.4; the bridge dynamically selects the stable/dev feed. -->
+    <key>SUFeedURL</key>
+    <string>https://github.com/MarcoS0ft/ConMan/releases/latest/download/appcast-stable.xml</string>
+    <!-- Sparkle key id: conman-sparkle-v1; release CI injects the public key. -->
+    <key>SUPublicEDKey</key>
+    <string>REPLACE_WITH_CONMAN_SPARKLE_V1_PUBLIC_KEY</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <true/>
+    <key>SUAllowsAutomaticUpdates</key>
+    <true/>
+    <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
