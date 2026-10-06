@@ -14,8 +14,10 @@
 //! - [`map_rdp_mouse`]: produce `RdpInputEvent` pointer sequences with coordinate mapping
 //! - [`map_rdp_scroll`]: produce `RdpInputEvent` scroll sequence
 
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 use cm_core::terminal::{Key, KeyEvent, KeyModifiers, MouseAction, MouseButton, MouseEvent};
-use cm_session::{RdpInputEvent, RdpMouseButton};
+use cm_core::{RdpInputEvent, RdpMouseButton};
 
 pub(crate) const MOD_CTRL: i32 = 1;
 pub(crate) const MOD_ALT: i32 = 2;

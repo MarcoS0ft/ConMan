@@ -13,17 +13,23 @@
 //! - [`keys`] module: `KeysPanel` flattens credential folders + credentials
 //!   for the Keys panel.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
 use cm_core::{
     AppConfigStore, AppStateRepository, ConnectionRepository, CredentialStore, SessionProvider,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use cm_update::UpdateHandle;
 
+#[cfg(not(target_arch = "wasm32"))]
 mod clipboard;
+#[cfg(not(target_arch = "wasm32"))]
 mod controller;
 mod input;
 pub mod keys;
+#[cfg(not(target_arch = "wasm32"))]
 mod selection;
 pub mod terminal_renderer;
 pub mod tree;
@@ -51,6 +57,7 @@ pub use generated_ui::{
     ToastEntry,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use controller::run;
 pub use terminal_renderer::{
     CellMetrics, Rgb, TerminalFontSystem, TerminalRenderer, TerminalTheme,
@@ -69,6 +76,7 @@ pub use terminal_renderer::{
 /// only the *code that acts on* `AppConfig::agent_mode` (the Settings UI
 /// wiring, the indicator, the execute-gate) is feature-gated. A build without
 /// the `agent-mode` feature simply never constructs a `Some(_)` here.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub struct AgentModeConfig {
     /// The user-facing (agent-connects-here) loopback port the proxy is
@@ -109,6 +117,7 @@ pub struct BuildIdentity {
     pub details: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AgentModeConfig {
     /// True while at least one agent-driven write-tool call is in flight.
     /// The execute-scope launch gate refuses a launch when this is true AND
@@ -128,6 +137,7 @@ impl AgentModeConfig {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl std::fmt::Debug for AgentModeConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentModeConfig")
@@ -141,6 +151,7 @@ impl std::fmt::Debug for AgentModeConfig {
 /// `repo` and `secrets` are held as `Arc<dyn Trait>` so the controller can
 /// share them across closures without lifetime issues. The binary creates the
 /// concrete adapters (`SqliteRepository`, `KeyringStore`) and boxes them here.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct AppConfig {
     /// The SQLite-backed connection and credential repository.
     pub repo: Arc<dyn ConnectionRepository>,
@@ -197,6 +208,7 @@ pub struct AppConfig {
     pub update: Option<UpdateHandle>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl std::fmt::Debug for AppConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppConfig").finish_non_exhaustive()
@@ -217,7 +229,7 @@ impl std::fmt::Debug for AppConfig {
 /// callbacks' captured `Rc`/`Arc` handles release) - keep it alive for the
 /// duration of a test scenario, same as the real `run` keeps its `Ctx`
 /// alive for the duration of the event loop.
-#[cfg(any(test, feature = "ui-introspection"))]
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "ui-introspection")))]
 pub struct TestHarness {
     /// The live, wired `AppWindow`. Query/drive it with
     /// `i_slint_backend_testing::ElementHandle`/`ElementRoot` the same way
@@ -232,14 +244,14 @@ pub struct TestHarness {
     _keepalive: Box<dyn std::any::Any>,
 }
 
-#[cfg(any(test, feature = "ui-introspection"))]
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "ui-introspection")))]
 impl std::fmt::Debug for TestHarness {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TestHarness").finish_non_exhaustive()
     }
 }
 
-#[cfg(any(test, feature = "ui-introspection"))]
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "ui-introspection")))]
 impl TestHarness {
     /// Whether the active terminal pane currently owns a text selection.
     /// Intended for pointer-boundary tests; production code consumes the
@@ -276,7 +288,7 @@ impl TestHarness {
 /// Panics if the underlying `AppWindow::new` fails (see
 /// [`controller::build_for_test`]'s panic doc) - acceptable for a test-only
 /// entry point; a failed harness construction should abort that test loudly.
-#[cfg(any(test, feature = "ui-introspection"))]
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "ui-introspection")))]
 pub fn build_for_test(config: AppConfig) -> TestHarness {
     let config_store = config.config_store.clone();
     let (ui, ctx, redraw) = controller::build_for_test(config);

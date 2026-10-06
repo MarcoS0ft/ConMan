@@ -7,42 +7,28 @@ publish.workspace = true
 
 [dependencies]
 cm-core = { path = "../cm-core" }
+# Slint 1.17. Native windowing/GPU backends remain selected by composition roots.
+slint = { version = "=1.17.0", default-features = false, features = ["std", "compat-1-2"] }
+# Shared pure shaping/rasterization; platform fallback features are target-specific below.
+cosmic-text = { version = "=0.19.0", default-features = false, features = ["std", "swash"] }
+unicode-script = "0.5"
+tracing = "0.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cm-update = { path = "../cm-update" }
 cm-storage = { path = "../cm-storage" }
-# cm-platform: OS accent-color read at startup + live watch.
 cm-platform = { path = "../cm-platform" }
-# The local terminal session (PTY + libghostty engine, on its own threads). Brings in the
-# zig-built engine via its default `engine-libghostty` feature.
 cm-session = { path = "../cm-session" }
-# Slint 1.17. Default features stay off here: cm-ui defines the UI components and the
-# headless renderer, but the windowing backend + GPU renderer are selected by the `conman`
-# binary (feature unification). This keeps `cargo test -p cm-ui` free of any display/GL
-# requirement. `std` + `compat-1-2` are enough to compile the generated component code and
-# the renderer's `SharedPixelBuffer`/`Image` value types.
-slint = { version = "1.17", default-features = false, features = ["std", "compat-1-2"] }
-# Terminal shaping, installed-font fallback, and mask/color glyph rasterization.
-cosmic-text = { version = "=0.19.0", default-features = false, features = [
-    "std",
-    "swash",
-    "fontconfig",
-] }
-# Required by cosmic-text's public Fallback trait method signature. This is already
-# transitive through cosmic-text; no second version or additional implementation is added.
-unicode-script = "0.5"
-# arboard: cross-platform clipboard access for RDP CLIPRDR bidirectional sync.
-arboard = { version = "3", features = ["wayland-data-control"] }
-# Structured logging facade. The composition root (`conman`) installs
-# the actual subscriber; libraries only ever call the `tracing::*` macros.
-tracing = "0.1"
-# serde_json: already a workspace dependency (cm-core, cm-storage, cm-session).
-# A direct, non-optional dependency: the import/export dialog
-# wiring (`controller/import_export.rs`) parses the export envelope directly
-# to report a skipped-secrets count in the summary toast.
+# Native import/export wiring reports skipped secrets from the storage envelope.
 serde_json = "1"
-# rfd: native file-open/save dialogs for the Import/Export palette actions. Default features (`xdg-portal` +
-# `wayland` on Linux) talk to the desktop portal via a bundled blocking mini-executor;
-# no GTK3 linkage and no dependency on the workspace's `tokio` runtime.
+# Native RDP clipboard sync and import/export file dialogs.
+arboard = { version = "3", features = ["wayland-data-control"] }
 rfd = "0.17"
+cosmic-text = { version = "=0.19.0", default-features = false, features = ["std", "swash", "fontconfig"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+cosmic-text = { version = "=0.19.0", default-features = false, features = ["std", "swash", "wasm-web"] }
+web-time = "=1.1.0"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -81,7 +67,7 @@ i-slint-backend-testing = "=1.17.0"
 
 [build-dependencies]
 # Compiles `ui/app.slint` into Rust (consumed via `slint::include_modules!`).
-slint-build = "1.17"
+slint-build = "=1.17.0"
 
 [lints]
 workspace = true
