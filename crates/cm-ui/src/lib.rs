@@ -23,6 +23,7 @@ use cm_core::{
 #[cfg(not(target_arch = "wasm32"))]
 use cm_update::UpdateHandle;
 
+mod application_ui;
 #[cfg(not(target_arch = "wasm32"))]
 mod clipboard;
 #[cfg(not(target_arch = "wasm32"))]
@@ -53,6 +54,9 @@ mod generated_ui {
 // Re-export the Slint-generated types used by the controller and by
 // cm-platform or tests. `Theme` is internal and not re-exported here;
 // appearance is driven via the alias properties on `AppWindow` instead.
+pub use application_ui::{
+    ApplicationUiController, CommonApplicationUiConfig, UiAttachError, attach_application_ui,
+};
 pub use generated_ui::{
     AppWindow, ConnRow, CredRow, KbdPromptRow, PaletteAction, PaneCell, RecentItem, TabItem,
     ToastEntry,

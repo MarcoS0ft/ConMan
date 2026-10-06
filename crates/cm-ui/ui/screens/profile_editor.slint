@@ -88,8 +88,12 @@ export component ProfileEditor inherits Rectangle {
     // group-name-list[0] is always "Root (no group)"; the rest are group names
     // in sort order. form.selected-group-idx indexes into this list.
     in property <[string]> group-name-list;
+    in property <bool> save-pending: false;
+    in property <bool> mutation-blocked: false;
+    in property <string> save-error: "";
     callback save();
     callback cancel();
+    callback form-edited();
 
     // no dialog role in Slint 1.17 — groupbox + "<Title> dialog".
     accessible-role: groupbox;
@@ -149,6 +153,7 @@ export component ProfileEditor inherits Rectangle {
                     label: "Name";
                     placeholder: "Connection name";
                     text <=> root.form.name;
+                    edited(_) => { root.form-edited(); }
                 }
 
                 // ── Group (move between groups) ───────────────────────
@@ -165,6 +170,7 @@ export component ProfileEditor inherits Rectangle {
                         model: root.group-name-list;
                         current-index <=> root.form.selected-group-idx;
                         accessible-label: "Group";
+                        selected(_) => { root.form-edited(); }
                     }
                 }
 
@@ -187,6 +193,7 @@ export component ProfileEditor inherits Rectangle {
                         // saves the right value (mirrors QuickConnectForm's
                         // `changed kind` handler, screens/dialogs.slint).
                         changed(new-kind) => {
+                            root.form-edited();
                             if (new-kind == 1 && (root.form.port == "22" || root.form.port == "23")) {
                                 root.form.port = "3389";
                             } else if (new-kind == 2 && (root.form.port == "22" || root.form.port == "3389")) {
@@ -225,11 +232,13 @@ export component ProfileEditor inherits Rectangle {
                     label: "Host";
                     placeholder: "hostname or IP address";
                     text <=> root.form.host;
+                    edited(_) => { root.form-edited(); }
                 }
                 if root.form.kind != 3 : profile-port-field := FormField {
                     label: "Port";
                     placeholder: root.form.kind == 0 ? "22" : root.form.kind == 1 ? "3389" : "23";
                     text <=> root.form.port;
+                    edited(_) => { root.form-edited(); }
                 }
 
                 // ── Username (SSH + RDP) ──────────────────────────────
@@ -257,6 +266,7 @@ export component ProfileEditor inherits Rectangle {
                         label: "Username";
                         placeholder: "login username";
                         text <=> root.form.username;
+                        edited(_) => { root.form-edited(); }
                     }
                 }
 
@@ -273,6 +283,7 @@ export component ProfileEditor inherits Rectangle {
                     SegmentedControl {
                         options: ["Public Key", "Password", "Agent"];
                         selected <=> root.form.auth-method;
+                        changed(_) => { root.form-edited(); }
                     }
                 }
 
@@ -287,11 +298,13 @@ export component ProfileEditor inherits Rectangle {
                     label: "Domain";
                     placeholder: "(optional, e.g. CORP)";
                     text <=> root.form.rdp-domain;
+                    edited(_) => { root.form-edited(); }
                 }
                 if root.form.kind == 1 : profile-rdp-resolution-field := FormField {
                     label: "Resolution";
                     placeholder: "1280x720";
                     text <=> root.form.rdp-resolution;
+                    edited(_) => { root.form-edited(); }
                 }
 
                 if root.form.kind == 2 : profile-telnet-warning := Text {
@@ -328,6 +341,7 @@ export component ProfileEditor inherits Rectangle {
                     SegmentedControl {
                         options: ["Reference", "Inline"];
                         selected <=> root.form.cred-mode;
+                        changed(_) => { root.form-edited(); }
                     }
 
                     if root.form.cred-mode == 0 : VerticalLayout {
@@ -336,6 +350,7 @@ export component ProfileEditor inherits Rectangle {
                             model: root.cred-name-list;
                             current-index <=> root.form.selected-cred-idx;
                             accessible-label: "Credential";
+                            selected(_) => { root.form-edited(); }
                         }
                         // Show the effective (possibly inherited) credential
                         // (name here; its username is the read-only
@@ -389,6 +404,7 @@ export component ProfileEditor inherits Rectangle {
                                 : "••••••••";
                             password: true;
                             text <=> root.form.inline-password;
+                            edited(_) => { root.form-edited(); }
                         }
                     }
 
@@ -402,6 +418,13 @@ export component ProfileEditor inherits Rectangle {
         }
 
         // ── Actions ──────────────────────────────────────────────────
+        if root.save-error != "" : Text {
+            text: root.save-error;
+            color: Theme.color-error;
+            font-size: Theme.font-sm;
+            font-family: Theme.font-family;
+            wrap: word-wrap;
+        }
         HorizontalLayout {
             spacing: Theme.space-3;
             alignment: end;
@@ -411,8 +434,8 @@ export component ProfileEditor inherits Rectangle {
                 clicked => { root.cancel(); }
             }
             profile-save-btn := PrimaryButton {
-                text: "Save";
-                enabled: root.form.name != "";
+                text: root.save-pending ? "Saving…" : "Save";
+                enabled: root.form.name != "" && !root.save-pending && !root.mutation-blocked;
                 clicked => { root.save(); }
             }
         }
@@ -432,8 +455,12 @@ export component GroupEditor inherits Rectangle {
     // Flat list of group names for the parent picker.
     // group-name-list[0] = "Root (no parent)"; the rest are sorted group names.
     in property <[string]> group-name-list;
+    in property <bool> save-pending: false;
+    in property <bool> mutation-blocked: false;
+    in property <string> save-error: "";
     callback save();
     callback cancel();
+    callback form-edited();
 
     // no dialog role in Slint 1.17 — groupbox + "<Title> dialog".
     accessible-role: groupbox;
@@ -465,6 +492,7 @@ export component GroupEditor inherits Rectangle {
             label: "Name";
             placeholder: "Group name";
             text <=> root.form.name;
+            edited(_) => { root.form-edited(); }
         }
 
         // ── Parent group (move between groups) ────────────────────────
@@ -481,6 +509,7 @@ export component GroupEditor inherits Rectangle {
                 model: root.group-name-list;
                 current-index <=> root.form.selected-parent-idx;
                 accessible-label: "Parent Group";
+                selected(_) => { root.form-edited(); }
             }
         }
 
@@ -504,9 +533,17 @@ export component GroupEditor inherits Rectangle {
                 model: root.cred-name-list;
                 current-index <=> root.form.default-cred-idx;
                 accessible-label: "Default Credential";
+                selected(_) => { root.form-edited(); }
             }
         }
 
+        if root.save-error != "" : Text {
+            text: root.save-error;
+            color: Theme.color-error;
+            font-size: Theme.font-sm;
+            font-family: Theme.font-family;
+            wrap: word-wrap;
+        }
         HorizontalLayout {
             spacing: Theme.space-3;
             alignment: end;
@@ -515,8 +552,8 @@ export component GroupEditor inherits Rectangle {
                 clicked => { root.cancel(); }
             }
             group-save-btn := PrimaryButton {
-                text: "Save";
-                enabled: root.form.name != "";
+                text: root.save-pending ? "Saving…" : "Save";
+                enabled: root.form.name != "" && !root.save-pending && !root.mutation-blocked;
                 clicked => { root.save(); }
             }
         }

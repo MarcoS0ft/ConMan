@@ -2074,6 +2074,28 @@ export component AppWindow inherits Window {
     callback agent-mode-scope-write-changed(bool);
     callback agent-mode-scope-execute-changed(bool);
 
+    // Shared C1 workspace lifecycle and mutation settlement state.
+    in property <bool> workspace-loading: false;
+    in property <string> workspace-load-error: "";
+    in property <bool> workspace-refresh-required: false;
+    in property <bool> workspace-refresh-pending: false;
+    in property <bool> profile-save-pending: false;
+    in property <string> profile-save-error: "";
+    in property <bool> group-save-pending: false;
+    in property <string> group-save-error: "";
+    in property <bool> cred-save-pending: false;
+    in property <string> cred-save-error: "";
+    in property <bool> preferences-saving: false;
+    in property <string> preferences-save-error: "";
+    callback retry-workspace-refresh();
+    callback profile-form-edited();
+    callback group-form-edited();
+    callback cred-form-edited();
+    callback profile-editor-cancelled();
+    callback group-editor-cancelled();
+    callback cred-editor-cancelled();
+    callback cred-folder-editor-cancelled();
+
     // ── Profile editor modal ───────────────────────────────────
     in-out property <bool>        profile-editor-open: false;
     in-out property <ConnProfile> profile-form;
@@ -2325,13 +2347,50 @@ export component AppWindow inherits Window {
                             glyph: "\u{EA80}";   // New folder / group
                             size: 24px; glyph-size: Theme.icon-sm;
                             tooltip: "New group";
-                            clicked => { root.new-group(0); }
+                            enabled: !root.workspace-refresh-required;
+                            clicked => { root.new-group(""); }
                         }
                         new-connection-btn := IconButton {
                             glyph: "\u{EA60}";   // Add connection
                             size: 24px; glyph-size: Theme.icon-sm;
                             tooltip: "New connection";
-                            clicked => { root.new-connection(0); }
+                            enabled: !root.workspace-refresh-required;
+                            clicked => { root.new-connection(""); }
+                        }
+                    }
+                    if root.workspace-loading : HorizontalLayout {
+                        padding-left: Theme.space-3; padding-right: Theme.space-3;
+                        Text {
+                            text: "Loading workspace…";
+                            color: Theme.color-text-secondary;
+                            font-size: Theme.font-sm;
+                            font-family: Theme.font-family;
+                        }
+                    }
+                    if root.workspace-load-error != "" : HorizontalLayout {
+                        padding-left: Theme.space-3; padding-right: Theme.space-3;
+                        Text {
+                            text: root.workspace-load-error;
+                            color: Theme.color-error;
+                            font-size: Theme.font-xs;
+                            font-family: Theme.font-family;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    if root.workspace-refresh-required : HorizontalLayout {
+                        padding-left: Theme.space-3; padding-right: Theme.space-3;
+                        Text {
+                            text: "Workspace changed; refresh before editing.";
+                            color: Theme.color-error;
+                            font-size: Theme.font-xs;
+                            font-family: Theme.font-family;
+                            horizontal-stretch: 1;
+                        }
+                        SecondaryButton {
+                            text: root.workspace-refresh-pending ? "Refreshing…" : "Retry";
+                            enabled: !root.workspace-refresh-pending;
+                            clicked => { root.retry-workspace-refresh(); }
                         }
                     }
                     // Search/filter box.
@@ -2406,8 +2465,8 @@ export component AppWindow inherits Window {
                                 }
                             }
                             MenuSeparator {}
-                            MenuItem { title: "New connection"; activated => { root.new-connection(0); } }
-                            MenuItem { title: "New group"; activated => { root.new-group(0); } }
+                            MenuItem { title: "New connection"; enabled: !root.workspace-refresh-required; activated => { root.new-connection(""); } }
+                            MenuItem { title: "New group"; enabled: !root.workspace-refresh-required; activated => { root.new-group(""); } }
                         }
                         conn-tree-focus := FocusScope {
                             width: 100%; height: 100%;
@@ -2519,7 +2578,43 @@ export component AppWindow inherits Window {
                             glyph: "\u{EA60}";   // New credential
                             size: 24px; glyph-size: Theme.icon-sm;
                             tooltip: "New credential";
-                            clicked => { root.new-cred(0); }
+                            enabled: !root.workspace-refresh-required;
+                            clicked => { root.new-cred(""); }
+                        }
+                    }
+                    if root.workspace-loading : HorizontalLayout {
+                        padding-left: Theme.space-3; padding-right: Theme.space-3;
+                        Text {
+                            text: "Loading workspace…";
+                            color: Theme.color-text-secondary;
+                            font-size: Theme.font-sm;
+                            font-family: Theme.font-family;
+                        }
+                    }
+                    if root.workspace-load-error != "" : HorizontalLayout {
+                        padding-left: Theme.space-3; padding-right: Theme.space-3;
+                        Text {
+                            text: root.workspace-load-error;
+                            color: Theme.color-error;
+                            font-size: Theme.font-xs;
+                            font-family: Theme.font-family;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    if root.workspace-refresh-required : HorizontalLayout {
+                        padding-left: Theme.space-3; padding-right: Theme.space-3;
+                        Text {
+                            text: "Workspace changed; refresh before editing.";
+                            color: Theme.color-error;
+                            font-size: Theme.font-xs;
+                            font-family: Theme.font-family;
+                            horizontal-stretch: 1;
+                        }
+                        SecondaryButton {
+                            text: root.workspace-refresh-pending ? "Refreshing…" : "Retry";
+                            enabled: !root.workspace-refresh-pending;
+                            clicked => { root.retry-workspace-refresh(); }
                         }
                     }
                     // Search/filter box.
@@ -2585,7 +2680,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             MenuSeparator {}
-                            MenuItem { title: "New credential"; activated => { root.new-cred(0); } }
+            MenuItem { title: "New credential"; enabled: !root.workspace-refresh-required; activated => { root.new-cred(""); } }
                             MenuItem { title: "New folder"; activated => { root.new-cred-folder(""); } }
                         }
                         cred-tree-focus := FocusScope {
@@ -3503,11 +3598,16 @@ export component AppWindow inherits Window {
         dismissed => {
             root.profile-form.inline-password = "";
             root.profile-editor-open = false;
+            root.profile-editor-cancelled();
         }
         profile-editor-dialog := ProfileEditor {
             form <=> root.profile-form;
             cred-name-list: root.cred-name-list;
             group-name-list: root.group-name-list;
+            save-pending: root.profile-save-pending;
+            mutation-blocked: root.workspace-refresh-required;
+            save-error: root.profile-save-error;
+            form-edited => { root.profile-form-edited(); }
             save   => { root.profile-save(); }
             // Inline password otherwise lingers in `profile-form` until the
             // next editor-open (save/open already clear it - see
@@ -3516,6 +3616,7 @@ export component AppWindow inherits Window {
             cancel => {
                 root.profile-form.inline-password = "";
                 root.profile-editor-open = false;
+                root.profile-editor-cancelled();
             }
         }
     }
@@ -3523,38 +3624,47 @@ export component AppWindow inherits Window {
     // ── Group editor modal ──────────────────────────────────────────
     Modal {
         open: root.group-editor-open;
-        dismissed => { root.group-editor-open = false; }
+        dismissed => { root.group-editor-open = false; root.group-editor-cancelled(); }
         group-editor-dialog := GroupEditor {
             form <=> root.group-form;
             cred-name-list: root.cred-name-list;
             group-name-list: root.group-name-list;
+            save-pending: root.group-save-pending;
+            mutation-blocked: root.workspace-refresh-required;
+            save-error: root.group-save-error;
+            form-edited => { root.group-form-edited(); }
             save   => { root.group-save(); }
-            cancel => { root.group-editor-open = false; }
+            cancel => { root.group-editor-open = false; root.group-editor-cancelled(); }
         }
     }
 
     // ── Credential editor modal ─────────────────────────────────────
     Modal {
         open: root.cred-editor-open;
-        dismissed => { root.cred-editor-open = false; }
+        dismissed => { root.cred-editor-open = false; root.cred-editor-cancelled(); }
         cred-editor-dialog := CredEditor {
             form <=> root.cred-form;
             folder-name-list: root.folder-name-list;
+            save-pending: root.cred-save-pending;
+            mutation-blocked: root.workspace-refresh-required;
+            save-error: root.cred-save-error;
+            form-edited => { root.cred-form-edited(); }
             save   => { root.cred-save(); }
-            cancel => { root.cred-editor-open = false; }
+            cancel => { root.cred-editor-open = false; root.cred-editor-cancelled(); }
         }
     }
     Modal {
         open: root.cred-folder-editor-open;
-        dismissed => { root.cred-folder-editor-open = false; }
+        dismissed => { root.cred-folder-editor-open = false; root.cred-folder-editor-cancelled(); }
         cred-folder-editor-dialog := CredFolderEditor {
             form <=> root.cred-folder-form;
             parent-name-list: root.cred-folder-parent-name-list;
             save-pending: root.cred-folder-save-pending;
+            mutation-blocked: root.workspace-refresh-required;
             save-error: root.cred-folder-save-error;
             save => { root.cred-folder-save(); }
             form-edited => { root.cred-folder-form-edited(); }
-            cancel => { root.cred-folder-editor-open = false; }
+            cancel => { root.cred-folder-editor-open = false; root.cred-folder-editor-cancelled(); }
         }
     }
 
