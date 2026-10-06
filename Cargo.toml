@@ -4,6 +4,7 @@ members = [
     "crates/cm-build-info",
     "crates/cm-cli",
     "crates/cm-core",
+    "crates/cm-web-protocol",
     "crates/cm-storage",
     "crates/cm-secrets",
     "crates/cm-session",

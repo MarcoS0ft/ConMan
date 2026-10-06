@@ -474,6 +474,8 @@ pub enum AppError {
     SessionFailed {
         reason: SessionFailureKind,
     },
+    /// Accepted work that the service can prove was never dispatched.
+    ServiceStopping,
     TransportUncertain {
         request_id: RequestId,
     },
@@ -1183,6 +1185,7 @@ fn add_app_error(total: &mut usize, value: &AppError) -> Result<(), SubmitError>
         | AppError::SecretStoreUnavailable
         | AppError::SecretMutationFailed
         | AppError::SessionFailed { .. }
+        | AppError::ServiceStopping
         | AppError::TransportUncertain { .. }
         | AppError::RevisionExhausted => {}
     }
@@ -1605,6 +1608,33 @@ mod tests {
         assert!(
             matches!(mailbox.try_recv(), Some(AppEvent::Completed { request_id, .. }) if request_id == ids[0])
         );
+        assert_eq!(mailbox.accept(AppCommand::Bootstrap).unwrap().get(), 65);
+    }
+
+    #[test]
+    fn service_stopping_completes_accepted_undispatched_work_from_reserved_credit() {
+        let mut mailbox = ApplicationMailbox::default();
+        let ids: Vec<_> = (0..MAX_ACCEPTED_REQUESTS)
+            .map(|_| mailbox.accept(AppCommand::Bootstrap).unwrap())
+            .collect();
+        assert_eq!(mailbox.commands.len(), MAX_ACCEPTED_REQUESTS);
+
+        for id in &ids {
+            mailbox
+                .enqueue_completion(*id, Err(AppError::ServiceStopping))
+                .expect("every accepted request reserved its error completion");
+        }
+        assert!(mailbox.commands.is_empty());
+        assert_eq!(mailbox.events.len(), MAX_ACCEPTED_REQUESTS);
+        for id in ids {
+            assert!(matches!(
+                mailbox.try_recv(),
+                Some(AppEvent::Completed {
+                    request_id,
+                    result: Err(AppError::ServiceStopping),
+                }) if request_id == id
+            ));
+        }
         assert_eq!(mailbox.accept(AppCommand::Bootstrap).unwrap().get(), 65);
     }
 

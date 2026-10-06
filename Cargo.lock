@@ -1302,6 +1302,15 @@ name = "cm-update-macos"
 version = "0.1.0"
 
 [[package]]
+name = "cm-web-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"

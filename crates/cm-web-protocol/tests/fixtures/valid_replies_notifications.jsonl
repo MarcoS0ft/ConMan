@@ -1,0 +1,4 @@
+{"request_id":"00000000-0000-4000-8000-000000000001","gateway_epoch":"49d2f963-2bc2-4b47-95f0-7dce77e973f0","lease_generation":"2","result":{"type":"challenge_responded"},"error":null}
+{"request_id":"00000000-0000-4000-8000-000000000001","gateway_epoch":"49d2f963-2bc2-4b47-95f0-7dce77e973f0","lease_generation":"2","result":null,"error":{"code":"queue_full","message":"The request queue is full.","retry":"never","details":null}}
+{"gateway_epoch":"49d2f963-2bc2-4b47-95f0-7dce77e973f0","lease_generation":"3","notification":{"type":"session_changed","session_id":"b4204de7-4dcb-4dd9-8f36-9117e42a18ac","session_generation":"1","status":{"type":"connected"}}}
+{"request_id":"00000000-0000-4000-8000-000000000001","gateway_epoch":"49d2f963-2bc2-4b47-95f0-7dce77e973f0","lease_generation":"2","result":null,"error":{"code":"service_stopping","message":"The service is stopping.","retry":"never","details":null}}
