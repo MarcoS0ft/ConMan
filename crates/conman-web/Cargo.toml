@@ -1,0 +1,22 @@
+[package]
+name = "conman-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cm-ui = { path = "../cm-ui" }
+slint = { version = "=1.17.0", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-femtovg",
+] }
+wasm-bindgen = "=0.2.126"
+
+[lints]
+workspace = true

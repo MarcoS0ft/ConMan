@@ -1,0 +1,67 @@
+:root {
+  color-scheme: dark light;
+  font: 16px/1.5 system-ui, sans-serif;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: #111827;
+  color: #f3f4f6;
+}
+
+body > canvas#canvas {
+  position: fixed;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#browser-startup {
+  position: fixed;
+  z-index: 2147483647;
+  inset: 0;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 0.75rem;
+  padding: 2rem;
+  background: #111827;
+  color: #f3f4f6;
+  text-align: center;
+  pointer-events: all;
+}
+
+#browser-startup h1,
+#browser-startup p {
+  max-width: 44rem;
+  margin: 0;
+}
+
+#browser-startup button {
+  min-height: 2.5rem;
+  padding: 0.4rem 1rem;
+  border: 1px solid #9ca3af;
+  border-radius: 0.25rem;
+  background: #1f2937;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+#browser-startup button:focus-visible {
+  outline: 3px solid #60a5fa;
+  outline-offset: 2px;
+}
+
+html[data-browser-state="inert-shell"] body > canvas,
+html[data-browser-state="context-lost"] body > canvas {
+  pointer-events: none !important;
+}

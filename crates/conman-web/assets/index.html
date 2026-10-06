@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <title>Connection Manager</title>
+    <link rel="stylesheet" href="/assets/bootstrap.css">
+    <script type="module" src="/assets/bootstrap.js"></script>
+  </head>
+  <body>
+    <canvas id="canvas" width="1" height="1" aria-hidden="true" inert></canvas>
+    <main id="browser-startup" aria-labelledby="startup-title">
+      <h1 id="startup-title">Connection Manager</h1>
+      <p id="startup-status" role="status" aria-live="polite">Checking the browser application…</p>
+      <p id="startup-detail"></p>
+      <button id="reload-button" type="button" hidden>Reload application</button>
+    </main>
+  </body>
+</html>
