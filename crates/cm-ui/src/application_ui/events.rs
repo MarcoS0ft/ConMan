@@ -60,6 +60,7 @@ fn handle_action(
             ui.set_workspace_refresh_required(true);
             ui.set_workspace_load_error(format!("Workspace refresh failed: {error:?}").into());
             shared.borrow_mut().refresh_required = true;
+            release_committed_editor_after_refresh_failure(ui, shared, &error);
         }
         (PendingUiAction::Bootstrap, Err(error)) => {
             ui.set_workspace_loading(false);
@@ -207,7 +208,10 @@ fn handle_action(
                 error,
             })),
         ) => {
-            if matches!(error, AppError::RevisionConflict { .. }) {
+            if matches!(
+                error,
+                AppError::RevisionConflict { .. } | AppError::PartialRequiresReconcile { .. }
+            ) {
                 require_refresh(ui, shared);
             }
             super::preferences::settled(
@@ -274,7 +278,10 @@ fn handle_action(
             })),
         ) => {
             shared.borrow_mut().revision = Some(current_revision);
-            if matches!(error, AppError::RevisionConflict { .. }) {
+            if matches!(
+                error,
+                AppError::RevisionConflict { .. } | AppError::PartialRequiresReconcile { .. }
+            ) {
                 require_refresh(ui, shared);
             }
             settle_editor_failure(
@@ -374,10 +381,17 @@ fn commit_mutation(
     request_id: RequestId,
     editor: Option<super::state::EditorCorrelation>,
     revision: cm_core::application::WorkspaceRevision,
-    _result: MutationResult,
+    result: MutationResult,
 ) {
-    shared.borrow_mut().revision = Some(revision);
-    settle_editor_success(ui, shared, request_id, editor);
+    {
+        let mut state = shared.borrow_mut();
+        state.revision = Some(revision);
+        state.committed_editor = Some(super::CommittedEditor {
+            request_id,
+            ticket: editor,
+            result,
+        });
+    }
     // A mutation result supplies identity, not the full authoritative DTO.
     // Gate subsequent mutations until the accepted refresh reconciles it.
     require_refresh(ui, shared);
@@ -445,28 +459,6 @@ fn settle_uncertain_action(
             super::push_toast(ui, shared, message);
         }
         PendingUiAction::QueryOutcome { .. } => unreachable!("nested outcome query"),
-    }
-}
-
-fn settle_editor_success(
-    ui: &crate::AppWindow,
-    shared: &super::state::SharedUiState,
-    request_id: RequestId,
-    ticket: Option<super::state::EditorCorrelation>,
-) {
-    let Some(ticket) = ticket else { return };
-    let mut state = shared.borrow_mut();
-    let Some(active) = state.editor_mut(ticket.kind).as_mut() else {
-        return;
-    };
-    if active.instance != ticket.instance || active.pending != Some(request_id) {
-        return;
-    }
-    active.pending = None;
-    super::set_editor_pending(ui, ticket.kind, false);
-    if active.edit_generation == ticket.edit_generation {
-        *state.editor_mut(ticket.kind) = None;
-        close_editor(ui, ticket.kind);
     }
 }
 
@@ -561,11 +553,119 @@ fn install_workspace(
         state.refresh_required = false;
     }
     super::workspace::install_workspace_models(ui, &value);
+    reconcile_committed_editor(ui, shared);
     ui.set_workspace_loading(false);
     ui.set_workspace_refresh_required(false);
     ui.set_workspace_refresh_pending(false);
     ui.set_workspace_load_error("".into());
     super::preferences::after_workspace_refresh(ui, shared);
+}
+
+fn reconcile_committed_editor(ui: &crate::AppWindow, shared: &super::state::SharedUiState) {
+    let committed = shared.borrow_mut().committed_editor.take();
+    let Some(committed) = committed else { return };
+    let Some(ticket) = committed.ticket else {
+        return;
+    };
+    let mut state = shared.borrow_mut();
+    let Some(active) = state.editor_mut(ticket.kind).as_mut() else {
+        return;
+    };
+    if active.instance != ticket.instance
+        || active.pending.is_some_and(|id| id != committed.request_id)
+    {
+        return;
+    }
+    active.pending = None;
+    super::set_editor_pending(ui, ticket.kind, false);
+    let identity_matches = apply_committed_identity(ui, ticket.kind, &committed.result);
+    if identity_matches && active.edit_generation == ticket.edit_generation {
+        *state.editor_mut(ticket.kind) = None;
+        close_editor(ui, ticket.kind);
+    } else if !identity_matches {
+        super::set_editor_error(
+            ui,
+            ticket.kind,
+            "The application returned an unexpected saved identity. Refresh and retry.",
+        );
+        drop(state);
+        super::push_toast(
+            ui,
+            shared,
+            "The application returned an unexpected saved identity.",
+        );
+    }
+}
+
+fn apply_committed_identity(
+    ui: &crate::AppWindow,
+    kind: super::state::EditorKind,
+    result: &MutationResult,
+) -> bool {
+    let id = match (kind, result) {
+        (super::state::EditorKind::Profile, MutationResult::ConnectionId(id)) => {
+            Some(crate::domain_ui_id::connection_id_text(*id))
+        }
+        (super::state::EditorKind::Group, MutationResult::GroupId(id)) => {
+            Some(crate::domain_ui_id::group_id_text(*id))
+        }
+        (super::state::EditorKind::Credential, MutationResult::CredentialId(id)) => {
+            Some(crate::domain_ui_id::credential_id_text(*id))
+        }
+        (super::state::EditorKind::CredentialFolder, MutationResult::CredentialFolderId(id)) => {
+            Some(crate::domain_ui_id::credential_folder_id_text(*id))
+        }
+        _ => None,
+    };
+    let Some(id) = id else { return false };
+    match kind {
+        super::state::EditorKind::Profile => {
+            let mut form = ui.get_profile_form();
+            form.id = id.clone();
+            ui.set_profile_form(form);
+        }
+        super::state::EditorKind::Group => {
+            let mut form = ui.get_group_form();
+            form.id = id.clone();
+            ui.set_group_form(form);
+        }
+        super::state::EditorKind::Credential => {
+            let mut form = ui.get_cred_form();
+            form.id = id.clone();
+            ui.set_cred_form(form);
+        }
+        super::state::EditorKind::CredentialFolder => {
+            let mut form = ui.get_cred_folder_form();
+            form.id = id;
+            ui.set_cred_folder_form(form);
+        }
+    }
+    true
+}
+
+fn release_committed_editor_after_refresh_failure(
+    ui: &crate::AppWindow,
+    shared: &super::state::SharedUiState,
+    error: &AppError,
+) {
+    let committed = shared.borrow().committed_editor.clone();
+    let Some(committed) = committed else { return };
+    let Some(ticket) = committed.ticket else {
+        return;
+    };
+    let mut state = shared.borrow_mut();
+    if let Some(active) = state.editor_mut(ticket.kind).as_mut()
+        && active.instance == ticket.instance
+        && active.pending == Some(committed.request_id)
+    {
+        active.pending = None;
+        super::set_editor_pending(ui, ticket.kind, false);
+        super::set_editor_error(
+            ui,
+            ticket.kind,
+            &format!("Saved, but workspace refresh failed: {error:?}. Retry refresh."),
+        );
+    }
 }
 
 pub(super) fn require_refresh(ui: &crate::AppWindow, shared: &super::state::SharedUiState) {
@@ -834,6 +934,210 @@ mod tests {
     }
 
     #[test]
+    fn partial_secret_failure_gates_editor_and_latest_preferences_until_refresh() {
+        let (ui, app, shared) = setup();
+        let ticket = shared.borrow_mut().open_editor(EditorKind::Profile);
+        let request = submit_action(
+            &app,
+            &shared,
+            PendingUiAction::Mutation {
+                editor: Some(ticket),
+            },
+        );
+        shared
+            .borrow_mut()
+            .editor_mut(EditorKind::Profile)
+            .as_mut()
+            .unwrap()
+            .edit_generation += 1;
+        deliver(
+            &app,
+            &ui,
+            &shared,
+            request,
+            Ok(AppResult::MutationOutcome(MutationOutcome::Failed {
+                current_revision: WorkspaceRevision(8),
+                error: AppError::PartialRequiresReconcile {
+                    metadata_committed: true,
+                    current_revision: WorkspaceRevision(8),
+                    affected: Box::new([]),
+                    affected_total: 0,
+                    affected_truncated: false,
+                },
+            })),
+        );
+        assert!(shared.borrow().refresh_required);
+        assert_eq!(shared.borrow().profile_editor.unwrap().pending, None);
+
+        let preference_request = submit_action(
+            &app,
+            &shared,
+            PendingUiAction::SetPreferences { generation: 9 },
+        );
+        {
+            let mut state = shared.borrow_mut();
+            state.preferences = Some(prefs());
+            state.desired_preferences = Some(prefs());
+            state.preference_generation = 9;
+            state.preferences_in_flight = Some((preference_request, 9));
+        }
+        deliver(
+            &app,
+            &ui,
+            &shared,
+            preference_request,
+            Ok(AppResult::MutationOutcome(MutationOutcome::Failed {
+                current_revision: WorkspaceRevision(8),
+                error: AppError::PartialRequiresReconcile {
+                    metadata_committed: true,
+                    current_revision: WorkspaceRevision(8),
+                    affected: Box::new([]),
+                    affected_total: 0,
+                    affected_truncated: false,
+                },
+            })),
+        );
+        assert!(shared.borrow().refresh_required);
+        assert!(shared.borrow().desired_preferences.is_some());
+        assert_eq!(shared.borrow().preferences_in_flight, None);
+    }
+
+    #[test]
+    fn successful_editor_result_updates_new_draft_identity_after_refresh() {
+        let (ui, app, shared) = setup();
+        let ticket = shared.borrow_mut().open_editor(EditorKind::Profile);
+        let request = submit_action(
+            &app,
+            &shared,
+            PendingUiAction::Mutation {
+                editor: Some(ticket),
+            },
+        );
+        shared
+            .borrow_mut()
+            .editor_mut(EditorKind::Profile)
+            .as_mut()
+            .unwrap()
+            .edit_generation += 1;
+        deliver(
+            &app,
+            &ui,
+            &shared,
+            request,
+            Ok(AppResult::MutationOutcome(MutationOutcome::Committed {
+                revision: WorkspaceRevision(2),
+                result: MutationResult::ConnectionId(cm_core::ConnectionId::new(42)),
+            })),
+        );
+        assert_eq!(
+            shared.borrow().profile_editor.unwrap().pending,
+            Some(request)
+        );
+        assert!(shared.borrow().refresh_required);
+
+        let refresh = shared
+            .borrow()
+            .pending
+            .iter()
+            .find_map(|(request, action)| {
+                matches!(action, PendingUiAction::RefreshWorkspace).then_some(*request)
+            })
+            .expect("commit queues a workspace refresh");
+        deliver(
+            &app,
+            &ui,
+            &shared,
+            refresh,
+            Ok(AppResult::Workspace(WorkspaceDto {
+                revision: WorkspaceRevision(2),
+                connections: vec![],
+                groups: vec![],
+                credentials: vec![],
+                credential_folders: vec![],
+            })),
+        );
+        assert_eq!(ui.get_profile_form().id.as_str(), "42");
+        let active = shared.borrow().profile_editor.unwrap();
+        assert_eq!(active.instance, ticket.instance);
+        assert_eq!(active.pending, None);
+        assert!(!shared.borrow().refresh_required);
+    }
+
+    #[test]
+    fn failed_reconciliation_refresh_retains_committed_identity_for_retry() {
+        let (ui, app, shared) = setup();
+        let ticket = shared.borrow_mut().open_editor(EditorKind::Profile);
+        let request = submit_action(
+            &app,
+            &shared,
+            PendingUiAction::Mutation {
+                editor: Some(ticket),
+            },
+        );
+        shared
+            .borrow_mut()
+            .editor_mut(EditorKind::Profile)
+            .as_mut()
+            .unwrap()
+            .edit_generation += 1;
+        deliver(
+            &app,
+            &ui,
+            &shared,
+            request,
+            Ok(AppResult::MutationOutcome(MutationOutcome::Committed {
+                revision: WorkspaceRevision(2),
+                result: MutationResult::ConnectionId(cm_core::ConnectionId::new(77)),
+            })),
+        );
+        let first_refresh = shared
+            .borrow()
+            .pending
+            .iter()
+            .find_map(|(request, action)| {
+                matches!(action, PendingUiAction::RefreshWorkspace).then_some(*request)
+            })
+            .expect("commit queues a workspace refresh");
+        deliver(
+            &app,
+            &ui,
+            &shared,
+            first_refresh,
+            Err(AppError::PersistenceFailed),
+        );
+        assert!(shared.borrow().committed_editor.is_some());
+        assert_eq!(shared.borrow().profile_editor.unwrap().pending, None);
+        assert!(ui.get_workspace_refresh_required());
+
+        submit_refresh(&ui, &shared);
+        let retry = shared
+            .borrow()
+            .pending
+            .iter()
+            .find_map(|(request, action)| {
+                matches!(action, PendingUiAction::RefreshWorkspace).then_some(*request)
+            })
+            .expect("manual retry queues a workspace refresh");
+        deliver(
+            &app,
+            &ui,
+            &shared,
+            retry,
+            Ok(AppResult::Workspace(WorkspaceDto {
+                revision: WorkspaceRevision(2),
+                connections: vec![],
+                groups: vec![],
+                credentials: vec![],
+                credential_folders: vec![],
+            })),
+        );
+        assert_eq!(ui.get_profile_form().id.as_str(), "77");
+        assert_eq!(shared.borrow().profile_editor.unwrap().edit_generation, 1);
+        assert!(shared.borrow().committed_editor.is_none());
+        assert!(!shared.borrow().refresh_required);
+    }
+
+    #[test]
     fn failed_workspace_refresh_preserves_draft_and_allows_retry() {
         let (ui, app, shared) = setup();
         let ticket = shared.borrow_mut().open_editor(EditorKind::Profile);
@@ -901,6 +1205,47 @@ mod tests {
         );
         assert!(!shared.borrow().refresh_required);
         assert!(shared.borrow().preferences_in_flight.is_some());
+    }
+
+    #[test]
+    fn stale_preference_success_never_replaces_newer_generation() {
+        let (ui, app, shared) = setup();
+        let first = submit_action(
+            &app,
+            &shared,
+            PendingUiAction::SetPreferences { generation: 1 },
+        );
+        let mut older = prefs();
+        older.font_size = 12;
+        let mut latest = prefs();
+        latest.font_size = 18;
+        {
+            let mut state = shared.borrow_mut();
+            state.preferences = Some(older.clone());
+            state.desired_preferences = Some(latest.clone());
+            state.preference_generation = 2;
+            state.preferences_in_flight = Some((first, 1));
+        }
+        deliver(
+            &app,
+            &ui,
+            &shared,
+            first,
+            Ok(AppResult::MutationOutcome(MutationOutcome::Committed {
+                revision: WorkspaceRevision(2),
+                result: MutationResult::Preferences(older),
+            })),
+        );
+        let state = shared.borrow();
+        assert_eq!(state.preferences.as_ref().unwrap().font_size, 12);
+        assert_eq!(state.preferences_in_flight.unwrap().1, 2);
+        assert_eq!(state.desired_preferences.as_ref().unwrap().font_size, 18);
+        assert!(
+            state
+                .pending
+                .values()
+                .any(|action| matches!(action, PendingUiAction::SetPreferences { generation: 2 }))
+        );
     }
 
     #[test]

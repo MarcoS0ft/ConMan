@@ -554,25 +554,15 @@ fn wire_profile_save(ui: &crate::AppWindow, shared: &SharedUiState) {
         } else {
             InlineSecretIntent::Replace(cm_core::Secret::from_string(password))
         };
-        let Some(revision) = state.borrow().revision else {
-            return;
-        };
         let correlation = editor_ticket(&state, super::state::EditorKind::Profile);
-        let accepted = super::submit(
+        let accepted = submit_editor_mutation(
             &ui,
             &state,
-            AppCommand::Mutate {
-                meta: MutationMeta {
-                    expected_revision: revision,
-                },
-                operation: WorkspaceMutation::UpsertConnection {
-                    value: connection,
-                    secret_intent,
-                },
+            WorkspaceMutation::UpsertConnection {
+                value: connection,
+                secret_intent,
             },
-            PendingUiAction::Mutation {
-                editor: correlation,
-            },
+            correlation,
         );
         if accepted.is_some() {
             form.inline_password = SharedString::default();

@@ -60,6 +60,13 @@ pub(super) enum PendingUiAction {
     },
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct CommittedEditor {
+    pub request_id: RequestId,
+    pub ticket: Option<EditorCorrelation>,
+    pub result: cm_core::application::MutationResult,
+}
+
 /// Keeps the shared port state, event timer and Toast model alive for a window.
 pub struct ApplicationUiController {
     _config: CommonApplicationUiConfig,
