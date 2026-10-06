@@ -32,6 +32,12 @@ function isWinitControlFlow(error) {
   );
 }
 
+function isJsonContentType(value) {
+  if (typeof value !== "string") return false;
+  const mediaType = value.split(";", 1)[0].trim();
+  return mediaType.toLowerCase() === "application/json";
+}
+
 function observeCanvas(canvas) {
   if (canvas.dataset.contextLossObserved === "true") return;
   canvas.dataset.contextLossObserved = "true";
@@ -54,7 +60,7 @@ async function readManifest() {
     headers: { Accept: "application/json" },
   });
   if (!response.ok) throw new Error("The gateway build manifest is unavailable.");
-  if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) {
+  if (!isJsonContentType(response.headers.get("Content-Type"))) {
     throw new Error("The gateway returned the wrong manifest media type.");
   }
 
