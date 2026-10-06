@@ -13,7 +13,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use cm_core::{AppStateService, ConnectionId, SessionTabEntry, SessionTabSnapshot};
+use cm_core::{AppStateService, SessionTabEntry, SessionTabSnapshot};
 
 use super::*;
 
@@ -35,9 +35,7 @@ pub(super) fn persist_session_tabs(state: &Rc<RefCell<State>>) {
             // connection id (reopened via the credentialed connect path).
             // Everything else (local shells, quick-connect, reattached
             // sessions) restores as a fresh local shell.
-            Some(id) if t.is_remote => {
-                SessionTabEntry::Connection(ConnectionId::new(i64::from(id)))
-            }
+            Some(id) if t.is_remote => SessionTabEntry::Connection(id),
             _ => SessionTabEntry::Local,
         })
         .collect();
@@ -105,6 +103,7 @@ pub(super) fn restore_session_tabs(ctx: &Ctx, snap: SessionTabSnapshot) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cm_core::ConnectionId;
 
     // `persist_session_tabs`/`restore_session_tabs` need a live `AppWindow`
     // (Slint component) and are exercised end-to-end by the xvfb restore
@@ -116,23 +115,29 @@ mod tests {
         // Mirrors the closure in `persist_session_tabs` without needing a
         // live `Tab` (which owns a boxed `Session` trait object) -
         // regression-proofs the exact rule in prose form.
-        fn entry_for(origin_connection_id: Option<i32>, is_remote: bool) -> SessionTabEntry {
+        fn entry_for(
+            origin_connection_id: Option<ConnectionId>,
+            is_remote: bool,
+        ) -> SessionTabEntry {
             match origin_connection_id {
-                Some(id) if is_remote => {
-                    SessionTabEntry::Connection(ConnectionId::new(i64::from(id)))
-                }
+                Some(id) if is_remote => SessionTabEntry::Connection(id),
                 _ => SessionTabEntry::Local,
             }
         }
 
-        assert_eq!(
-            entry_for(Some(7), true),
-            SessionTabEntry::Connection(ConnectionId::new(7))
-        );
+        for id in [i64::MAX, i64::MIN, -1, 4_294_967_297] {
+            assert_eq!(
+                entry_for(Some(ConnectionId::new(id)), true),
+                SessionTabEntry::Connection(ConnectionId::new(id))
+            );
+        }
         // Local-shell tab (no origin id at all).
         assert_eq!(entry_for(None, false), SessionTabEntry::Local);
         // A local connection profile origin (`is_remote: false`) also
         // degrades to `Local` - there's nothing remote to re-resolve.
-        assert_eq!(entry_for(Some(9), false), SessionTabEntry::Local);
+        assert_eq!(
+            entry_for(Some(ConnectionId::new(9)), false),
+            SessionTabEntry::Local
+        );
     }
 }

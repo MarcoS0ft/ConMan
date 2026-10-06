@@ -8,6 +8,10 @@ use cm_core::{
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
+use crate::domain_ui_id::{
+    credential_folder_id_text, credential_id_text, parse_credential_folder_id,
+    parse_credential_form_id, parse_credential_id, parse_optional_credential_folder_id,
+};
 use crate::keys::KeysPanel;
 use crate::tree::build_cred_name_list;
 use crate::{AppWindow, CredRow};
@@ -48,8 +52,10 @@ fn wire_toggle_cred_row(ctx: &Ctx) {
             if let Some(row) = flat.get(idx as usize)
                 && row.is_folder
             {
-                st.keys_panel.toggle_expand(row.id as i64);
-                refresh_cred_model(&st, &cred_model);
+                if let Ok(id) = crate::domain_ui_id::parse_credential_folder_id(row.id.as_str()) {
+                    st.keys_panel.toggle_expand(id.get());
+                    refresh_cred_model(&st, &cred_model);
+                }
             }
         }
     });
@@ -66,15 +72,14 @@ fn wire_new_cred(ctx: &Ctx) {
             // was triggered.
             let selected_folder_idx = {
                 let st = state.borrow();
-                let fid = if folder_id == 0 {
-                    None
-                } else {
-                    Some(CredentialFolderId::new(folder_id as i64))
+                let Ok(fid) = parse_optional_credential_folder_id(folder_id.as_str()) else {
+                    return;
                 };
+
                 folder_name_idx(fid, st.keys_panel.folders())
             };
             let form = CredFormData {
-                id: 0,
+                id: SharedString::from(""),
                 name: SharedString::from("New Credential"),
                 kind: 0,
                 username: SharedString::from(""),
@@ -97,10 +102,8 @@ fn wire_new_cred_folder(ctx: &Ctx) {
         let weak = ctx.ui.as_weak();
         move |parent_folder_id| {
             let Some(_ui) = weak.upgrade() else { return };
-            let fid = if parent_folder_id == 0 {
-                None
-            } else {
-                Some(CredentialFolderId::new(parent_folder_id as i64))
+            let Ok(fid) = parse_optional_credential_folder_id(parent_folder_id.as_str()) else {
+                return;
             };
             let sort = {
                 let st = state.borrow();
@@ -138,13 +141,11 @@ fn wire_edit_cred(ctx: &Ctx) {
         let weak = ctx.ui.as_weak();
         move |cred_id| {
             let Some(ui) = weak.upgrade() else { return };
+            let Ok(cred_id) = parse_credential_id(cred_id.as_str()) else {
+                return;
+            };
             let st = state.borrow();
-            let Some(cred) = st
-                .keys_panel
-                .credentials()
-                .iter()
-                .find(|c| c.id.get() == cred_id as i64)
-            else {
+            let Some(cred) = st.keys_panel.credentials().iter().find(|c| c.id == cred_id) else {
                 return;
             };
             let kind = match cred.kind {
@@ -152,12 +153,15 @@ fn wire_edit_cred(ctx: &Ctx) {
                 CredentialKind::SshKey => 1,
                 CredentialKind::SshKeyWithPassphrase => 2,
             };
-            let raw_folder_id = cred.folder_id.map(|f| f.get() as i32).unwrap_or(0);
+            let raw_folder_id = cred
+                .folder_id
+                .map(credential_folder_id_text)
+                .unwrap_or_default();
             // Resolve the credential's current folder to a combo-box index so
             // the picker shows the correct folder when the editor opens.
             let selected_folder_idx = folder_name_idx(cred.folder_id, st.keys_panel.folders());
             let form = CredFormData {
-                id: cred_id,
+                id: credential_id_text(cred.id),
                 name: SharedString::from(cred.name.as_str()),
                 kind,
                 username: SharedString::from(cred.username.as_deref().unwrap_or("")),
@@ -182,9 +186,15 @@ fn wire_delete_cred_row(ctx: &Ctx) {
         move |id, is_folder| {
             let mut st = state.borrow_mut();
             let result = if is_folder {
-                repo_del.delete_credential_folder(CredentialFolderId::new(id as i64))
+                let Ok(folder_id) = parse_credential_folder_id(id.as_str()) else {
+                    return;
+                };
+                repo_del.delete_credential_folder(folder_id)
             } else {
-                repo_del.delete_credential(CredentialId::new(id as i64))
+                let Ok(credential_id) = parse_credential_id(id.as_str()) else {
+                    return;
+                };
+                repo_del.delete_credential(credential_id)
             };
             if let Err(e) = result {
                 tracing::warn!("delete cred/folder failed: {e}");
@@ -212,6 +222,23 @@ fn wire_cred_save(ctx: &Ctx) {
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let mut form = ui.get_cred_form();
+            let Ok(form_id) = parse_credential_form_id(form.id.as_str()) else {
+                push_error_toast(
+                    &toast_model,
+                    &toast_next_id,
+                    "Invalid credential ID".to_owned(),
+                );
+                return;
+            };
+            let Ok(_raw_folder_id) = parse_optional_credential_folder_id(form.folder_id.as_str())
+            else {
+                push_error_toast(
+                    &toast_model,
+                    &toast_next_id,
+                    "Invalid credential folder ID".to_owned(),
+                );
+                return;
+            };
             // Resolve folder from the combo index (selected-folder-idx) so that
             // a move-between-folders edit is honoured, not the stale raw folder_id.
             let fid = {
@@ -224,7 +251,7 @@ fn wire_cred_save(ctx: &Ctx) {
                 _ => CredentialKind::Password,
             };
             let cred = Credential {
-                id: CredentialId::new(form.id as i64),
+                id: form_id,
                 name: form.name.to_string(),
                 kind,
                 folder_id: fid,
@@ -323,7 +350,10 @@ pub(super) fn refresh_cred_model(state: &State, cred_model: &Rc<VecModel<CredRow
     let usage = credential_usage_counts(state.conn_tree.connections());
     for row in flat.iter_mut() {
         if !row.is_folder {
-            let count = usage.get(&(row.id as i64)).copied().unwrap_or(0);
+            let Ok(credential_id) = parse_credential_id(row.id.as_str()) else {
+                continue;
+            };
+            let count = usage.get(&credential_id.get()).copied().unwrap_or(0);
             row.used_by_label = SharedString::from(used_by_label(count).as_str());
         }
     }

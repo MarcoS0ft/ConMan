@@ -27,6 +27,7 @@ use cm_update::UpdateHandle;
 mod clipboard;
 #[cfg(not(target_arch = "wasm32"))]
 mod controller;
+mod domain_ui_id;
 mod input;
 pub mod keys;
 #[cfg(not(target_arch = "wasm32"))]

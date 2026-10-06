@@ -203,7 +203,7 @@ fn wire_tab_duplicate(ctx: &Ctx) {
                         st.conn_tree
                             .connections()
                             .iter()
-                            .find(|c| c.id.get() as i32 == conn_id)
+                            .find(|c| c.id == conn_id)
                             .cloned()
                     };
                     if let Some(conn) = conn {
@@ -268,7 +268,7 @@ pub(super) struct PushTabArgs {
     pub(super) initial_status: &'static str,
     /// The stored connection id this tab was launched from, if any (
     /// see `Tab::origin_connection_id`).
-    pub(super) origin_connection_id: Option<i32>,
+    pub(super) origin_connection_id: Option<cm_core::ConnectionId>,
     /// See `Tab::is_empty`. `false` for every real connect path.
     pub(super) is_empty: bool,
     /// See `Tab::identity` ( #3). Whatever the caller is about to (or

@@ -1910,19 +1910,16 @@ fn wire_row_activated(ctx: &Ctx) {
             if row.is_group {
                 return; // groups are toggled by on_toggle_conn_row
             }
-            // Look up the connection by id.
-            let conn = {
-                let st = state.borrow();
-                st.conn_tree
-                    .connections()
-                    .iter()
-                    .find(|c| c.id.get() as i32 == row.id)
-                    .cloned()
-            };
-            let Some(conn) = conn else {
-                tabs::open_local_tab(&state, &tab_model, &ui);
+            let Ok(connection_id) = crate::domain_ui_id::parse_connection_id(row.id.as_str())
+            else {
                 return;
             };
+            // Look up the connection by its checked, full-width identity.
+            let conn = {
+                let st = state.borrow();
+                st.conn_tree.conn_by_id(connection_id.get()).cloned()
+            };
+            let Some(conn) = conn else { return };
             launch_saved_connection(
                 &state,
                 &tab_model,
@@ -1974,7 +1971,7 @@ pub(super) fn launch_saved_connection(
     }
     // remember which stored profile this tab came from so the
     // ErrorOverlay "Edit…" button can reopen it on failure.
-    let origin_connection_id = Some(conn.id.get() as i32);
+    let origin_connection_id = Some(conn.id);
     match &conn.settings {
         ConnectionSettings::Local(_) => tabs::open_local_tab(state, tab_model, ui),
         ConnectionSettings::Telnet(s) => {
@@ -2124,7 +2121,7 @@ fn apply_saved_profile_label(
     tab_model: &Rc<VecModel<TabItem>>,
     ui: &AppWindow,
     tab_count_before: usize,
-    origin_connection_id: Option<i32>,
+    origin_connection_id: Option<cm_core::ConnectionId>,
     label: &str,
 ) {
     let tab_idx = {
@@ -3020,7 +3017,7 @@ fn push_auth_failed_tab(
     title: String,
     identity: String,
     reason: String,
-    origin_connection_id: Option<i32>,
+    origin_connection_id: Option<cm_core::ConnectionId>,
 ) {
     push_failed_remote_tab(
         state,
@@ -3043,7 +3040,7 @@ fn push_failed_remote_tab(
     title: String,
     identity: String,
     reason: String,
-    origin_connection_id: Option<i32>,
+    origin_connection_id: Option<cm_core::ConnectionId>,
     kind: String,
     insecure_transport: bool,
 ) {
@@ -3133,7 +3130,7 @@ pub(super) fn open_ssh_tab(
     auth: SshAuthInput,
     provenance: AuthProvenance,
     verifier: Arc<dyn HostKeyVerifier>,
-    origin_connection_id: Option<i32>,
+    origin_connection_id: Option<cm_core::ConnectionId>,
 ) {
     let size = state.borrow().current_grid();
     let terminal_options = TerminalOptions {
@@ -3234,7 +3231,7 @@ pub(super) fn open_telnet_tab(
     tab_model: &Rc<VecModel<TabItem>>,
     ui: &AppWindow,
     settings: TelnetSettings,
-    origin_connection_id: Option<i32>,
+    origin_connection_id: Option<cm_core::ConnectionId>,
 ) {
     let size = state.borrow().current_grid();
     let terminal_options = TerminalOptions {
@@ -3348,7 +3345,7 @@ pub(super) fn open_rdp_tab(
     auth: RdpAuthInput,
     provenance: AuthProvenance,
     verifier: Arc<dyn CertVerifier>,
-    origin_connection_id: Option<i32>,
+    origin_connection_id: Option<cm_core::ConnectionId>,
 ) {
     // #10: the pane's live pixel size (when known) wins over whatever
     // resolution the settings carried in (persisted profile / quick-connect

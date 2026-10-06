@@ -12,6 +12,10 @@ use cm_core::{
 use cm_session::{PaneLayout, SessionStatus};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
+use crate::domain_ui_id::{
+    connection_id_text, group_id_text, parse_connection_form_id, parse_connection_id,
+    parse_group_form_id, parse_group_id, parse_optional_group_id,
+};
 use crate::keys::KeysPanel;
 use crate::tree::cred_name_idx;
 use crate::{AppWindow, ConnRow};
@@ -59,8 +63,10 @@ fn wire_toggle_conn_row(ctx: &Ctx) {
             if let Some(row) = flat.get(idx as usize)
                 && row.is_group
             {
-                st.conn_tree.toggle_expand(row.id as i64);
-                refresh_conn_model(&st, &conn_model);
+                if let Ok(id) = parse_group_id(row.id.as_str()) {
+                    st.conn_tree.toggle_expand(id.get());
+                    refresh_conn_model(&st, &conn_model);
+                }
             }
         }
     });
@@ -83,8 +89,10 @@ fn wire_select_conn_row(ctx: &Ctx) {
             if let Some(row) = flat.get(idx as usize)
                 && !row.is_group
             {
-                st.conn_tree.select_conn(row.id as i64);
-                refresh_conn_model(&st, &conn_model);
+                if let Ok(id) = parse_connection_id(row.id.as_str()) {
+                    st.conn_tree.select_conn(id.get());
+                    refresh_conn_model(&st, &conn_model);
+                }
             }
         }
     });
@@ -97,16 +105,14 @@ fn wire_new_connection(ctx: &Ctx) {
         move |group_id| {
             let Some(ui) = weak.upgrade() else { return };
             let st = state.borrow();
-            let gid = if group_id == 0 {
-                None
-            } else {
-                Some(GroupId::new(group_id as i64))
+            let Ok(gid) = parse_optional_group_id(group_id.as_str()) else {
+                return;
             };
             let selected_group_idx = group_name_idx(gid, st.conn_tree.groups());
             let form = ConnProfile {
-                id: 0,
+                id: SharedString::from(""),
                 name: SharedString::from("New Connection"),
-                group_id,
+                group_id: gid.map(group_id_text).unwrap_or_default(),
                 kind: 0,
                 host: SharedString::from(""),
                 port: SharedString::from("22"),
@@ -140,16 +146,14 @@ fn wire_new_group(ctx: &Ctx) {
         move |parent_id| {
             let Some(ui) = weak.upgrade() else { return };
             let st = state.borrow();
-            let pid = if parent_id == 0 {
-                None
-            } else {
-                Some(GroupId::new(parent_id as i64))
+            let Ok(pid) = parse_optional_group_id(parent_id.as_str()) else {
+                return;
             };
             let selected_parent_idx = group_name_idx(pid, st.conn_tree.groups());
             let form = GroupForm {
-                id: 0,
+                id: SharedString::from(""),
                 name: SharedString::from("New Group"),
-                parent_id,
+                parent_id: pid.map(group_id_text).unwrap_or_default(),
                 default_cred_idx: 0,
                 selected_parent_idx,
             };
@@ -203,8 +207,11 @@ fn wire_edit_conn(ctx: &Ctx) {
         let weak = ctx.ui.as_weak();
         move |conn_id| {
             let Some(ui) = weak.upgrade() else { return };
+            let Ok(conn_id) = parse_connection_id(conn_id.as_str()) else {
+                return;
+            };
             let st = state.borrow();
-            let Some(conn) = st.conn_tree.conn_by_id(conn_id as i64) else {
+            let Some(conn) = st.conn_tree.conn_by_id(conn_id.get()) else {
                 return;
             };
             let (kind, host, port, mut username, auth_method, mut rdp_domain, rdp_resolution) =
@@ -237,9 +244,9 @@ fn wire_edit_conn(ctx: &Ctx) {
                 .unwrap_or_default();
             let selected_group_idx = group_name_idx(conn.group_id, st.conn_tree.groups());
             let form = ConnProfile {
-                id: conn_id,
+                id: connection_id_text(conn.id),
                 name: SharedString::from(conn.name.as_str()),
-                group_id: conn.group_id.map(|g| g.get() as i32).unwrap_or(0),
+                group_id: conn.group_id.map(group_id_text).unwrap_or_default(),
                 kind,
                 host: SharedString::from(host.as_str()),
                 port: SharedString::from(port.as_str()),
@@ -270,8 +277,11 @@ fn wire_edit_group(ctx: &Ctx) {
         let weak = ctx.ui.as_weak();
         move |group_id| {
             let Some(ui) = weak.upgrade() else { return };
+            let Ok(group_id) = parse_group_id(group_id.as_str()) else {
+                return;
+            };
             let st = state.borrow();
-            let Some(group) = st.conn_tree.group_by_id(group_id as i64) else {
+            let Some(group) = st.conn_tree.group_by_id(group_id.get()) else {
                 return;
             };
             let default_cred_idx = cred_name_idx(
@@ -281,9 +291,9 @@ fn wire_edit_group(ctx: &Ctx) {
             );
             let selected_parent_idx = group_name_idx(group.parent_id, st.conn_tree.groups());
             let form = GroupForm {
-                id: group_id,
+                id: group_id_text(group.id),
                 name: SharedString::from(group.name.as_str()),
-                parent_id: group.parent_id.map(|g| g.get() as i32).unwrap_or(0),
+                parent_id: group.parent_id.map(group_id_text).unwrap_or_default(),
                 default_cred_idx,
                 selected_parent_idx,
             };
@@ -296,7 +306,7 @@ fn wire_edit_group(ctx: &Ctx) {
 
 // "Duplicate" from the tree context menu. Builds a fresh (id == 0)
 // `Connection` cloned from `src`, ready for the exact same `upsert_connection` repo
-// call the profile editor's "New Connection" path already makes (form.id == 0 in
+// call the profile editor's "New Connection" path already makes (form.id.is_empty() in
 // `wire_profile_save`) — no new repo/port surface, just a second UI-side caller of
 // the existing insert path with a cloned settings blob. Pulled out as a pure
 // function so the mapping is unit-testable without a live Slint window (cm-ui's
@@ -397,8 +407,11 @@ fn wire_duplicate_conn_row(ctx: &Ctx) {
         let repo_dup = ctx.repo.clone();
         let secrets_dup = ctx.secrets.clone();
         move |id| {
+            let Ok(id) = parse_connection_id(id.as_str()) else {
+                return;
+            };
             let mut st = state.borrow_mut();
-            let Some(src) = st.conn_tree.conn_by_id(id as i64).cloned() else {
+            let Some(src) = st.conn_tree.conn_by_id(id.get()).cloned() else {
                 return;
             };
             let sort = st.conn_tree.next_sort_in_group(src.group_id);
@@ -460,6 +473,9 @@ fn wire_connect_in_split_row(ctx: &Ctx) {
         let weak = ctx.ui.as_weak();
         move |id| {
             let Some(ui) = weak.upgrade() else { return };
+            let Ok(id) = parse_connection_id(id.as_str()) else {
+                return;
+            };
             panes::connect_in_split(
                 &state,
                 &tab_model,
@@ -470,7 +486,7 @@ fn wire_connect_in_split_row(ctx: &Ctx) {
                 &secrets,
                 &toast_model,
                 &toast_next_id,
-                id as i64,
+                id.get(),
                 PaneLayout::HSplit,
             );
         }
@@ -494,7 +510,9 @@ fn wire_delete_conn_row(ctx: &Ctx) {
             let Some(ui) = weak.upgrade() else { return };
             let st = state.borrow();
             let target = if is_group {
-                let group_id = GroupId::new(id as i64);
+                let Ok(group_id) = parse_group_id(id.as_str()) else {
+                    return;
+                };
                 let Some(group) = st.conn_tree.group_by_id(group_id.get()) else {
                     return;
                 };
@@ -512,7 +530,9 @@ fn wire_delete_conn_row(ctx: &Ctx) {
                     connection_count,
                 )
             } else {
-                let connection_id = ConnectionId::new(id as i64);
+                let Ok(connection_id) = parse_connection_id(id.as_str()) else {
+                    return;
+                };
                 let Some(connection) = st.conn_tree.conn_by_id(connection_id.get()) else {
                     return;
                 };
@@ -673,9 +693,20 @@ fn wire_profile_save(ctx: &Ctx) {
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let mut form = ui.get_profile_form();
-            // Resolve group_id from the dropdown index (selected-group-idx).
-            // Falls back to the raw form.group_id when the index is out-of-range
-            // (e.g. on an older saved form with no group list loaded yet).
+            let Ok(form_id) = parse_connection_form_id(form.id.as_str()) else {
+                push_error_toast(
+                    &toast_model,
+                    &toast_next_id,
+                    "Invalid connection ID".to_owned(),
+                );
+                return;
+            };
+            let Ok(_raw_group_id) = parse_optional_group_id(form.group_id.as_str()) else {
+                push_error_toast(&toast_model, &toast_next_id, "Invalid group ID".to_owned());
+                return;
+            };
+            // The picker index is UI-local; the form string is still parsed
+            // above so malformed bridge state can never silently become Root.
             let group_id = {
                 let st = state.borrow();
                 group_id_from_name_idx(form.selected_group_idx, st.conn_tree.groups())
@@ -690,11 +721,11 @@ fn wire_profile_save(ctx: &Ctx) {
             };
             let sort = {
                 let st = state.borrow();
-                if form.id == 0 {
+                if form_id == ConnectionId::UNSAVED {
                     st.conn_tree.next_sort_in_group(group_id)
                 } else {
                     st.conn_tree
-                        .conn_by_id(form.id as i64)
+                        .conn_by_id(form_id.get())
                         .map(|c| c.sort)
                         .unwrap_or(0)
                 }
@@ -716,15 +747,15 @@ fn wire_profile_save(ctx: &Ctx) {
             let created_at = {
                 let st = state.borrow();
                 st.conn_tree
-                    .conn_by_id(form.id as i64)
+                    .conn_by_id(form_id.get())
                     .map(|c| c.created_at)
                     .unwrap_or(now)
             };
             // Item (d): was this connection Inline *before* this save?
-            // (`form.id == 0` - a brand-new connection - can't have been.)
+            // (`form_id == ConnectionId::UNSAVED` - a brand-new connection - can't have been.)
             let old_was_inline = {
                 let st = state.borrow();
-                st.conn_tree.conn_by_id(form.id as i64).is_some_and(|c| {
+                st.conn_tree.conn_by_id(form_id.get()).is_some_and(|c| {
                     matches!(c.credential_source, Some(CredentialSource::Inline { .. }))
                 })
             };
@@ -747,7 +778,7 @@ fn wire_profile_save(ctx: &Ctx) {
                 form.inline_has_secret,
             );
             let conn = match Connection::new(
-                ConnectionId::new(form.id as i64),
+                form_id,
                 group_id,
                 form.name.to_string(),
                 kind,
@@ -818,10 +849,24 @@ fn wire_group_save(ctx: &Ctx) {
         let state = ctx.state.clone();
         let conn_model = ctx.conn_model.clone();
         let repo_gs = ctx.repo.clone();
+        let toast_model = ctx.toast_model.clone();
+        let toast_next_id = ctx.toast_next_id.clone();
         let weak = ctx.ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let form = ui.get_group_form();
+            let Ok(form_id) = parse_group_form_id(form.id.as_str()) else {
+                push_error_toast(&toast_model, &toast_next_id, "Invalid group ID".to_owned());
+                return;
+            };
+            let Ok(_raw_parent_id) = parse_optional_group_id(form.parent_id.as_str()) else {
+                push_error_toast(
+                    &toast_model,
+                    &toast_next_id,
+                    "Invalid parent group ID".to_owned(),
+                );
+                return;
+            };
             // Resolve parent_id from the dropdown index (selected-parent-idx).
             // Reject any parent choice that would form a cycle: the chosen parent
             // must not be the group itself AND must not be any of its descendants.
@@ -832,12 +877,8 @@ fn wire_group_save(ctx: &Ctx) {
                 let resolved =
                     group_id_from_name_idx(form.selected_parent_idx, st.conn_tree.groups());
                 resolved.filter(|&gid| {
-                    form.id == 0
-                        || !is_ancestor_or_self(
-                            GroupId::new(form.id as i64),
-                            gid,
-                            st.conn_tree.groups(),
-                        )
+                    form_id == GroupId::UNSAVED
+                        || !is_ancestor_or_self(form_id, gid, st.conn_tree.groups())
                 })
             };
             let default_credential = {
@@ -850,17 +891,17 @@ fn wire_group_save(ctx: &Ctx) {
             };
             let sort = {
                 let st = state.borrow();
-                if form.id == 0 {
+                if form_id == GroupId::UNSAVED {
                     st.conn_tree.next_group_sort_in_parent(parent_id)
                 } else {
                     st.conn_tree
-                        .group_by_id(form.id as i64)
+                        .group_by_id(form_id.get())
                         .map(|g| g.sort)
                         .unwrap_or(0)
                 }
             };
             let group = Group {
-                id: GroupId::new(form.id as i64),
+                id: form_id,
                 parent_id,
                 name: form.name.to_string(),
                 sort,
@@ -887,8 +928,11 @@ fn wire_reorder_conn_row(ctx: &Ctx) {
         let conn_model = ctx.conn_model.clone();
         let repo_rcr = ctx.repo.clone();
         move |conn_id, direction| {
+            let Ok(conn_id) = parse_connection_id(conn_id.as_str()) else {
+                return;
+            };
             let mut st = state.borrow_mut();
-            let Some(conn) = st.conn_tree.conn_by_id(conn_id as i64).cloned() else {
+            let Some(conn) = st.conn_tree.conn_by_id(conn_id.get()).cloned() else {
                 return;
             };
             let group_id = conn.group_id;
@@ -958,8 +1002,11 @@ fn wire_reorder_group_row(ctx: &Ctx) {
         let repo_rgr = ctx.repo.clone();
         let weak_rgr = ctx.ui.as_weak();
         move |group_id, direction| {
+            let Ok(group_id) = parse_group_id(group_id.as_str()) else {
+                return;
+            };
             let mut st = state.borrow_mut();
-            let Some(grp) = st.conn_tree.group_by_id(group_id as i64).cloned() else {
+            let Some(grp) = st.conn_tree.group_by_id(group_id.get()).cloned() else {
                 return;
             };
             let parent_id = grp.parent_id;
@@ -1091,9 +1138,12 @@ fn overlay_live_status(state: &State, mut row: ConnRow) -> ConnRow {
     if row.is_group {
         return row;
     }
+    let Ok(row_id) = parse_connection_id(row.id.as_str()) else {
+        return row;
+    };
     let mut best: Option<&'static str> = None;
     for tab in &state.tabs {
-        if tab.origin_connection_id != Some(row.id) {
+        if tab.origin_connection_id != Some(row_id) {
             continue;
         }
         match tab.session.status() {
@@ -1343,9 +1393,9 @@ mod tests {
 
     // ── Connection-tree refresh behavior ───────────────────────────────
 
-    fn conn_row(id: i32, label: &str, selected: bool) -> ConnRow {
+    fn conn_row(id: i64, label: &str, selected: bool) -> ConnRow {
         ConnRow {
-            id,
+            id: SharedString::from(id.to_string()),
             label: SharedString::from(label),
             host: SharedString::from("host"),
             kind: SharedString::from("SSH"),
@@ -1727,9 +1777,9 @@ mod tests {
     // tests below - keeps each test focused on the field(s) it actually varies.
     fn base_profile_form() -> ConnProfile {
         ConnProfile {
-            id: 0,
+            id: SharedString::from(""),
             name: SharedString::from("Test"),
-            group_id: 0,
+            group_id: SharedString::from(""),
             kind: 0,
             host: SharedString::from("10.0.0.1"),
             port: SharedString::from("2222"),

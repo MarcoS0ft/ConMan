@@ -15,6 +15,7 @@ use cm_core::{
 use slint::SharedString;
 
 use crate::CredRow;
+use crate::domain_ui_id::{credential_folder_id_text, credential_id_text};
 
 /// Maximum folder-nesting depth (cycle guard).
 const MAX_DEPTH: usize = 64;
@@ -109,13 +110,27 @@ impl KeysPanel {
         out
     }
 
+    fn folder_move_flags(&self, folder: &CredentialFolder) -> (bool, bool) {
+        let mut siblings: Vec<&CredentialFolder> = self
+            .folders
+            .iter()
+            .filter(|sibling| sibling.parent_id == folder.parent_id)
+            .collect();
+        siblings.sort_by_key(|sibling| (sibling.sort, sibling.id.get()));
+        let Some(index) = siblings.iter().position(|sibling| sibling.id == folder.id) else {
+            return (false, false);
+        };
+        (index > 0, index + 1 < siblings.len())
+    }
+
     fn push_folder(&self, folder: &CredentialFolder, depth: usize, out: &mut Vec<CredRow>) {
         if depth >= MAX_DEPTH {
             return;
         }
         let expanded = self.expanded.contains(&folder.id.get());
+        let (can_move_up, can_move_down) = self.folder_move_flags(folder);
         out.push(CredRow {
-            id: folder.id.get() as i32,
+            id: credential_folder_id_text(folder.id),
             label: SharedString::from(folder.name.as_str()),
             kind: SharedString::from(""),
             username: SharedString::from(""),
@@ -124,6 +139,8 @@ impl KeysPanel {
             selected: false,
             depth: depth as i32,
             used_by_label: SharedString::from(""),
+            can_move_up,
+            can_move_down,
         });
 
         if !expanded {
@@ -161,7 +178,7 @@ impl KeysPanel {
             CredentialKind::SshKeyWithPassphrase => "SSH Key+PP",
         };
         CredRow {
-            id: cred.id.get() as i32,
+            id: credential_id_text(cred.id),
             label: SharedString::from(cred.name.as_str()),
             kind: SharedString::from(kind_str),
             username: SharedString::from(cred.username.as_deref().unwrap_or("")),
@@ -172,6 +189,8 @@ impl KeysPanel {
             // Filled in by `keys_ctl::refresh_cred_model`, which has the
             // connection list this (connection-unaware) panel doesn't.
             used_by_label: SharedString::from(""),
+            can_move_up: false,
+            can_move_down: false,
         }
     }
 
@@ -266,8 +285,9 @@ impl KeysPanel {
         if !self.folder_has_match(folder, q, matching_cred_ids, 0) {
             return;
         }
+        let (can_move_up, can_move_down) = self.folder_move_flags(folder);
         out.push(CredRow {
-            id: folder.id.get() as i32,
+            id: credential_folder_id_text(folder.id),
             label: SharedString::from(folder.name.as_str()),
             kind: SharedString::from(""),
             username: SharedString::from(""),
@@ -276,6 +296,8 @@ impl KeysPanel {
             selected: false,
             depth: depth as i32,
             used_by_label: SharedString::from(""),
+            can_move_up,
+            can_move_down,
         });
         let mut sub_folders: Vec<&CredentialFolder> = self
             .folders
@@ -386,6 +408,22 @@ mod tests {
             folder_id: folder_id.map(CredentialFolderId::new),
             username: Some("user".to_owned()),
         }
+    }
+
+    #[test]
+    fn flat_rows_preserve_signed_i64_credential_and_folder_ids() {
+        let panel = KeysPanel::new(
+            vec![folder(i64::MIN, None, "negative folder")],
+            vec![cred(
+                i64::MAX,
+                None,
+                "maximum credential",
+                CredentialKind::Password,
+            )],
+        );
+        let rows = panel.flat();
+        assert_eq!(rows[0].id.as_str(), i64::MIN.to_string());
+        assert_eq!(rows[1].id.as_str(), i64::MAX.to_string());
     }
 
     #[test]

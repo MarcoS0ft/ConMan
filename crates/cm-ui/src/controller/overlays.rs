@@ -6,6 +6,7 @@ use cm_session::SessionStatus;
 use slint::{ComponentHandle, Model, SharedString};
 
 use crate::AppWindow;
+use crate::domain_ui_id::connection_id_text;
 
 use super::*;
 
@@ -88,7 +89,7 @@ fn wire_edit_failed_profile(ctx: &Ctx) {
                 st.tabs.get(st.active).and_then(|t| t.origin_connection_id)
             };
             match resolve_edit_action(origin) {
-                EditAction::EditConnection(id) => ui.invoke_edit_conn(id),
+                EditAction::EditConnection(id) => ui.invoke_edit_conn(connection_id_text(id)),
                 EditAction::QuickConnect => ui.invoke_quick_connect(),
             }
         }
@@ -101,11 +102,13 @@ fn wire_edit_failed_profile(ctx: &Ctx) {
 /// this codebase, e.g. `palette::dispatch_palette_action`).
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum EditAction {
-    EditConnection(i32),
+    EditConnection(cm_core::ConnectionId),
     QuickConnect,
 }
 
-pub(super) fn resolve_edit_action(origin_connection_id: Option<i32>) -> EditAction {
+pub(super) fn resolve_edit_action(
+    origin_connection_id: Option<cm_core::ConnectionId>,
+) -> EditAction {
     match origin_connection_id {
         Some(id) => EditAction::EditConnection(id),
         None => EditAction::QuickConnect,
@@ -236,10 +239,12 @@ mod tests {
 
     #[test]
     fn resolve_edit_action_with_origin_edits_that_profile() {
-        assert_eq!(
-            resolve_edit_action(Some(42)),
-            EditAction::EditConnection(42)
-        );
+        for id in [i64::MAX, i64::MIN, -1, 4_294_967_297] {
+            assert_eq!(
+                resolve_edit_action(Some(cm_core::ConnectionId::new(id))),
+                EditAction::EditConnection(cm_core::ConnectionId::new(id))
+            );
+        }
     }
 
     #[test]

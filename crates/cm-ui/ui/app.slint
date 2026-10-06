@@ -14,7 +14,7 @@ import { Launchpad, RecentItem } from "screens/launchpad.slint";
 import {
     ConnProfile, GroupForm, ProfileEditor, GroupEditor
 } from "screens/profile_editor.slint";
-import { CredFormData, CredEditor } from "screens/cred_editor.slint";
+import { CredFormData, CredEditor, CredFolderFormData, CredFolderEditor } from "screens/cred_editor.slint";
 
 // ── Models ────────────────────────────────────────────────────────────────
 // Toast entry for background-event notifications.
@@ -73,7 +73,7 @@ export struct PaneCell {
 // Flattened connection-tree row. `depth` drives left-indent (16 px per level).
 // Rust flattens the group/connection tree into this list honouring expand/collapse.
 export struct ConnRow {
-    id: int,
+    id: string,
     label: string,
     host: string,
     kind: string,      // "SSH" | "RDP" | "LOCAL" | "" (groups)
@@ -86,7 +86,7 @@ export struct ConnRow {
 
 // Flattened credential-folder row for the Keys panel. Mirrors ConnRow shape.
 export struct CredRow {
-    id: int,
+    id: string,
     label: string,
     kind: string,      // "Password" | "SSH Key" | "SSH Key+PP" | "" (folder)
     username: string,
@@ -99,6 +99,8 @@ export struct CredRow {
     // by N connections") - precomputed in Rust (keys_ctl::refresh_cred_model)
     // rather than formatted in.slint, matching `kind`'s existing pattern.
     used-by-label: string,
+    can-move-up: bool,
+    can-move-down: bool,
 }
 
 component TerminalScrollbar inherits Rectangle {
@@ -1149,6 +1151,7 @@ component ConnectionRow inherits Rectangle {
 // ── CredTreeRow — Keys panel tree row ─────────────────────────────────────
 component CredTreeRow inherits Rectangle {
     in property <CredRow> data;
+    in property <bool> reorder-pending: false;
     // keyboard-navigation cursor highlight.
     in property <bool> highlighted: false;
     // position within the flattened folder tree, supplied by the `for` loop.
@@ -1157,6 +1160,10 @@ component CredTreeRow inherits Rectangle {
     callback activated();
     callback toggled();
     callback new-sub();
+    callback new-folder-sub();
+    callback edit-folder();
+    callback move-up();
+    callback move-down();
     callback delete-clicked();
 
     // same list-item rationale as ConnectionRow — label is the
@@ -1182,10 +1189,14 @@ component CredTreeRow inherits Rectangle {
     // `move-up-hover` etc. on ConnectionRow for the full mechanism/why)
     // keeps the combined signal stable across that boundary.
     property <bool> new-cred-hover: false;
+    property <bool> new-folder-hover: false;
     property <bool> edit-cred-hover: false;
+    property <bool> move-up-hover: false;
+    property <bool> move-down-hover: false;
     property <bool> delete-cred-hover: false;
     property <bool> action-hover: touch.has-hover
-        || root.new-cred-hover || root.edit-cred-hover || root.delete-cred-hover;
+        || root.new-cred-hover || root.new-folder-hover || root.edit-cred-hover
+        || root.move-up-hover || root.move-down-hover || root.delete-cred-hover;
 
     height: Theme.tree-row-height;
     border-radius: Theme.radius-sm;
@@ -1328,6 +1339,35 @@ component CredTreeRow inherits Rectangle {
                 clicked => { root.new-sub(); }
                 hover-changed(h) => { root.new-cred-hover = h; }
             }
+            if data.is-folder : new-folder-btn := IconButton {
+                glyph: "\u{EA60}";
+                size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                tooltip: "New subfolder";
+                clicked => { root.new-folder-sub(); }
+                hover-changed(h) => { root.new-folder-hover = h; }
+            }
+            if data.is-folder : edit-folder-btn := IconButton {
+                glyph: "\u{F03EB}";
+                size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                tooltip: "Edit folder";
+                clicked => { root.edit-folder(); }
+            }
+            if data.is-folder : move-up-btn := IconButton {
+                glyph: "\u{F062}";
+                size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                enabled: data.can-move-up && !root.reorder-pending;
+                tooltip: "Move folder up";
+                clicked => { root.move-up(); }
+                hover-changed(h) => { root.move-up-hover = h; }
+            }
+            if data.is-folder : move-down-btn := IconButton {
+                glyph: "\u{F063}";
+                size: Theme.icon-btn; glyph-size: Theme.icon-xs;
+                enabled: data.can-move-down && !root.reorder-pending;
+                tooltip: "Move folder down";
+                clicked => { root.move-down(); }
+                hover-changed(h) => { root.move-down-hover = h; }
+            }
             if !data.is-folder : edit-cred-btn := IconButton {
                 glyph: "\u{F03EB}";
                 size: Theme.icon-btn; glyph-size: Theme.icon-xs;
@@ -1359,6 +1399,24 @@ component CredTreeRow inherits Rectangle {
             if !data.is-folder : MenuItem {
                 title: "Edit";
                 activated => { root.activated(); }
+            }
+            if data.is-folder : MenuItem {
+                title: "New subfolder";
+                activated => { root.new-folder-sub(); }
+            }
+            if data.is-folder : MenuItem {
+                title: "Edit folder";
+                activated => { root.edit-folder(); }
+            }
+            if data.is-folder : MenuItem {
+                title: "Move up";
+                enabled: data.can-move-up && !root.reorder-pending;
+                activated => { root.move-up(); }
+            }
+            if data.is-folder : MenuItem {
+                title: "Move down";
+                enabled: data.can-move-down && !root.reorder-pending;
+                activated => { root.move-down(); }
             }
             MenuSeparator {}
             MenuItem {
@@ -2030,6 +2088,14 @@ export component AppWindow inherits Window {
     in-out property <bool>         cred-editor-open: false;
     in-out property <CredFormData> cred-form;
     callback cred-save();
+    in-out property <bool> cred-folder-editor-open: false;
+    in-out property <CredFolderFormData> cred-folder-form;
+    in property <[string]> cred-folder-parent-name-list;
+    in property <bool> cred-folder-save-pending: false;
+    in property <string> cred-folder-save-error: "";
+    in property <bool> cred-folder-reorder-pending: false;
+    callback cred-folder-save();
+    callback cred-folder-form-edited();
 
     // ── Shell callbacks ───────────────────────────────────────────────
     callback select-tab(int);
@@ -2109,27 +2175,29 @@ export component AppWindow inherits Window {
 
     // — Connections panel CRUD.
     callback toggle-conn-row(int);       // idx → expand/collapse group
-    callback new-connection(int);        // parent group_id (0=root)
-    callback new-group(int);             // parent group_id (0=root)
-    callback edit-conn(int);             // connection id → profile editor
-    callback edit-group(int);            // group id → group editor
-    callback duplicate-conn-row(int);    // connection id
+    callback new-connection(string);        // parent group_id (0=root)
+    callback new-group(string);             // parent group_id (0=root)
+    callback edit-conn(string);             // connection id → profile editor
+    callback edit-group(string);            // group id → group editor
+    callback duplicate-conn-row(string);    // connection id
     // Connection id → open into the active tab's next pane slot. SSH/Local/RDP
     // are all supported.
-    callback connect-in-split-row(int);
-    callback delete-conn-row(int, bool); // id, is_group
+    callback connect-in-split-row(string);
+    callback delete-conn-row(string, bool); // id, is_group
     // — Reorder (up/down within the same parent) + move-between-groups.
     // Reorder is wired from hover ↑/↓ buttons; move-between-groups is exposed
     // via the group/parent-group ComboBoxes in the profile and group editors.
-    callback reorder-conn-row(int, int);  // conn_id, direction (-1=up, +1=down)
-    callback reorder-group-row(int, int); // group_id, direction
+    callback reorder-conn-row(string, int);  // conn_id, direction (-1=up, +1=down)
+    callback reorder-group-row(string, int); // group_id, direction
 
     // — Keys panel CRUD.
     callback toggle-cred-row(int);        // idx → expand/collapse folder
-    callback new-cred-folder(int);        // parent_folder_id (0=root)
-    callback new-cred(int);               // folder_id (0=root)
-    callback edit-cred(int);              // credential id
-    callback delete-cred-row(int, bool);  // id, is_folder
+    callback new-cred-folder(string);        // parent_folder_id (0=root)
+    callback edit-cred-folder(string);
+    callback reorder-cred-folder(string, int);
+    callback new-cred(string);               // folder_id (0=root)
+    callback edit-cred(string);              // credential id
+    callback delete-cred-row(string, bool);  // id, is_folder
 
     callback key-input(string, int, int);
     callback pointer(int, int, length, length, int);
@@ -2445,7 +2513,7 @@ export component AppWindow inherits Window {
                             glyph: "\u{EA80}";   // New folder
                             size: 24px; glyph-size: Theme.icon-sm;
                             tooltip: "New folder";
-                            clicked => { root.new-cred-folder(0); }
+                            clicked => { root.new-cred-folder(""); }
                         }
                         new-credential-btn := IconButton {
                             glyph: "\u{EA60}";   // New credential
@@ -2490,6 +2558,24 @@ export component AppWindow inherits Window {
                                 title: "Edit";
                                 activated => { root.edit-cred(credentials[cred-tree-focus.kb-idx].id); }
                             }
+                            if cred-tree-focus.kb-idx >= 0 && cred-tree-focus.kb-idx < credentials.length && credentials[cred-tree-focus.kb-idx].is-folder : MenuItem {
+                                title: "New subfolder";
+                                activated => { root.new-cred-folder(credentials[cred-tree-focus.kb-idx].id); }
+                            }
+                            if cred-tree-focus.kb-idx >= 0 && cred-tree-focus.kb-idx < credentials.length && credentials[cred-tree-focus.kb-idx].is-folder : MenuItem {
+                                title: "Edit folder";
+                                activated => { root.edit-cred-folder(credentials[cred-tree-focus.kb-idx].id); }
+                            }
+                            if cred-tree-focus.kb-idx >= 0 && cred-tree-focus.kb-idx < credentials.length && credentials[cred-tree-focus.kb-idx].is-folder : MenuItem {
+                                title: "Move up";
+                                enabled: credentials[cred-tree-focus.kb-idx].can-move-up && !root.cred-folder-reorder-pending;
+                                activated => { root.reorder-cred-folder(credentials[cred-tree-focus.kb-idx].id, -1); }
+                            }
+                            if cred-tree-focus.kb-idx >= 0 && cred-tree-focus.kb-idx < credentials.length && credentials[cred-tree-focus.kb-idx].is-folder : MenuItem {
+                                title: "Move down";
+                                enabled: credentials[cred-tree-focus.kb-idx].can-move-down && !root.cred-folder-reorder-pending;
+                                activated => { root.reorder-cred-folder(credentials[cred-tree-focus.kb-idx].id, 1); }
+                            }
                             if cred-tree-focus.kb-idx >= 0 && cred-tree-focus.kb-idx < credentials.length : MenuItem {
                                 title: "Delete";
                                 activated => {
@@ -2500,7 +2586,7 @@ export component AppWindow inherits Window {
                             }
                             MenuSeparator {}
                             MenuItem { title: "New credential"; activated => { root.new-cred(0); } }
-                            MenuItem { title: "New folder"; activated => { root.new-cred-folder(0); } }
+                            MenuItem { title: "New folder"; activated => { root.new-cred-folder(""); } }
                         }
                         cred-tree-focus := FocusScope {
                             width: 100%; height: 100%;
@@ -2514,7 +2600,8 @@ export component AppWindow inherits Window {
                                     accept
                                 } else if (e.text == Key.Return) {
                                     if (self.kb-idx >= 0 && self.kb-idx < credentials.length) {
-                                        root.edit-cred(credentials[self.kb-idx].id);
+                                        if (credentials[self.kb-idx].is-folder) { root.toggle-cred-row(self.kb-idx); }
+                                        else { root.edit-cred(credentials[self.kb-idx].id); }
                                     }
                                     accept
                                 } else if (e.text == Key.Escape) {
@@ -2532,12 +2619,20 @@ export component AppWindow inherits Window {
                                 width: 100%; height: 100%;
                                 for cred[idx] in credentials: cred-row := CredTreeRow {
                                     data: cred;
+                                    reorder-pending: root.cred-folder-reorder-pending;
                                     row-index: idx;
                                     row-count: credentials.length;
                                     highlighted: idx == cred-tree-focus.kb-idx;
-                                    activated      => { root.edit-cred(cred.id); }
+                                    activated      => {
+                                        if (cred.is-folder) { root.toggle-cred-row(idx); }
+                                        else { root.edit-cred(cred.id); }
+                                    }
                                     toggled        => { root.toggle-cred-row(idx); }
                                     new-sub        => { root.new-cred(cred.id); }
+                                    new-folder-sub => { root.new-cred-folder(cred.id); }
+                                    edit-folder    => { root.edit-cred-folder(cred.id); }
+                                    move-up        => { root.reorder-cred-folder(cred.id, -1); }
+                                    move-down      => { root.reorder-cred-folder(cred.id, 1); }
                                     delete-clicked => {
                                         root.delete-cred-row(cred.id, cred.is-folder);
                                     }
@@ -3447,6 +3542,19 @@ export component AppWindow inherits Window {
             folder-name-list: root.folder-name-list;
             save   => { root.cred-save(); }
             cancel => { root.cred-editor-open = false; }
+        }
+    }
+    Modal {
+        open: root.cred-folder-editor-open;
+        dismissed => { root.cred-folder-editor-open = false; }
+        cred-folder-editor-dialog := CredFolderEditor {
+            form <=> root.cred-folder-form;
+            parent-name-list: root.cred-folder-parent-name-list;
+            save-pending: root.cred-folder-save-pending;
+            save-error: root.cred-folder-save-error;
+            save => { root.cred-folder-save(); }
+            form-edited => { root.cred-folder-form-edited(); }
+            cancel => { root.cred-folder-editor-open = false; }
         }
     }
 

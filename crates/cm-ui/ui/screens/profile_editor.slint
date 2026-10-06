@@ -36,9 +36,9 @@ import { ComboBox, ScrollView } from "std-widgets.slint";
 // `inline-has-secret` whether a keychain entry already exists for this
 // connection's Inline password (drives the placeholder hint only).
 export struct ConnProfile {
-    id: int,
+    id: string,
     name: string,
-    group-id: int,
+    group-id: string,
     kind: int,
     host: string,
     port: string,
@@ -62,9 +62,9 @@ export struct ConnProfile {
 // `selected-parent-idx` is an index into AppWindow.group-name-list;
 // 0 = "Root (no parent)".
 export struct GroupForm {
-    id: int,
+    id: string,
     name: string,
-    parent-id: int,
+    parent-id: string,
     default-cred-idx: int,
     selected-parent-idx: int,
 }
@@ -93,7 +93,7 @@ export component ProfileEditor inherits Rectangle {
 
     // no dialog role in Slint 1.17 — groupbox + "<Title> dialog".
     accessible-role: groupbox;
-    accessible-label: (root.form.id == 0 ? "New connection" : "Edit connection") + " dialog";
+    accessible-label: (root.form.id == "" ? "New connection" : "Edit connection") + " dialog";
 
     width: 520px;
     // Nearly-fill the Modal's centering region vertically, leaving a small
@@ -121,7 +121,7 @@ export component ProfileEditor inherits Rectangle {
 
         // ── Title ──────────────────────────────────────────────────────
         Text {
-            text: root.form.id == 0 ? "New Connection" : "Edit Connection";
+            text: root.form.id == "" ? "New Connection" : "Edit Connection";
             color: Theme.color-text;
             font-size: Theme.font-lg;
             font-family: Theme.font-family;
@@ -437,7 +437,7 @@ export component GroupEditor inherits Rectangle {
 
     // no dialog role in Slint 1.17 — groupbox + "<Title> dialog".
     accessible-role: groupbox;
-    accessible-label: (root.form.id == 0 ? "New group" : "Group settings") + " dialog";
+    accessible-label: (root.form.id == "" ? "New group" : "Group settings") + " dialog";
 
     width: 520px;
     background: Theme.color-overlay;
@@ -454,7 +454,7 @@ export component GroupEditor inherits Rectangle {
         spacing: Theme.space-5;
 
         Text {
-            text: root.form.id == 0 ? "New Group" : "Group Settings";
+            text: root.form.id == "" ? "New Group" : "Group Settings";
             color: Theme.color-text;
             font-size: Theme.font-lg;
             font-family: Theme.font-family;

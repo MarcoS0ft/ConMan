@@ -21,11 +21,11 @@ import { ComboBox } from "std-widgets.slint";
 // `secret` TRANSIENT — cleared by Rust after cred-save fires
 // `passphrase` TRANSIENT — cleared by Rust after cred-save fires
 export struct CredFormData {
-    id: int,
+    id: string,
     name: string,
     kind: int,
     username: string,
-    folder-id: int,
+    folder-id: string,
     // 1-based index into AppWindow.folder-name-list; 0 = "Root (no folder)".
     // Bound two-way to the folder ComboBox; resolved to a DB id in on_cred_save.
     selected-folder-idx: int,
@@ -49,7 +49,7 @@ export component CredEditor inherits Rectangle {
 
     // no dialog role in Slint 1.17 — groupbox + "<Title> dialog".
     accessible-role: groupbox;
-    accessible-label: (root.form.id == 0 ? "New credential" : "Edit credential") + " dialog";
+    accessible-label: (root.form.id == "" ? "New credential" : "Edit credential") + " dialog";
 
     width: 520px;
     background: Theme.color-overlay;
@@ -67,7 +67,7 @@ export component CredEditor inherits Rectangle {
 
         // ── Title ─────────────────────────────────────────────────────
         Text {
-            text: root.form.id == 0 ? "New Credential" : "Edit Credential";
+            text: root.form.id == "" ? "New Credential" : "Edit Credential";
             color: Theme.color-text;
             font-size: Theme.font-lg;
             font-family: Theme.font-family;
@@ -158,6 +158,92 @@ export component CredEditor inherits Rectangle {
             cred-save-btn := PrimaryButton {
                 text: "Save";
                 enabled: root.form.name != "";
+                clicked => { root.save(); }
+            }
+        }
+    }
+}
+
+// ── Credential-folder editor ───────────────────────────────────────────────
+// CredentialFolder identity and optional parent cross the Slint boundary only
+// as canonical decimal strings. Empty ID means a new folder; empty parent means
+// root. Picker indices remain local UI integers.
+export struct CredFolderFormData {
+    id: string,
+    name: string,
+    parent-id: string,
+    selected-parent-idx: int,
+}
+
+export component CredFolderEditor inherits Rectangle {
+    in-out property <CredFolderFormData> form;
+    in property <[string]> parent-name-list;
+    in property <bool> save-pending: false;
+    in property <string> save-error: "";
+    callback save();
+    callback cancel();
+    callback form-edited();
+
+    accessible-role: groupbox;
+    accessible-label: (root.form.id == "" ? "New credential folder" : "Edit credential folder") + " dialog";
+
+    width: 480px;
+    background: Theme.color-overlay;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.color-stroke;
+    TouchArea {}
+
+    VerticalLayout {
+        padding: Theme.space-6;
+        spacing: Theme.space-5;
+        Text {
+            text: root.form.id == "" ? "New Credential Folder" : "Edit Credential Folder";
+            color: Theme.color-text;
+            font-size: Theme.font-lg;
+            font-family: Theme.font-family;
+            font-weight: 700;
+        }
+        folder-name-field := FormField {
+            label: "Name";
+            placeholder: "e.g. Production keys";
+            text <=> root.form.name;
+            edited(_) => { root.form-edited(); }
+        }
+        VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: "Parent folder";
+                color: Theme.color-text-secondary;
+                font-size: Theme.font-sm;
+                font-family: Theme.font-family;
+                font-weight: 600;
+            }
+            ComboBox {
+                model: root.parent-name-list;
+                current-index <=> root.form.selected-parent-idx;
+                accessible-label: "Parent folder";
+                selected(_) => { root.form-edited(); }
+            }
+        }
+        if root.save-error != "" : Text {
+            text: root.save-error;
+            color: Theme.color-error;
+            font-size: Theme.font-sm;
+            font-family: Theme.font-family;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            alignment: end;
+            padding-top: Theme.space-2;
+            SecondaryButton {
+                text: "Cancel";
+                clicked => { root.cancel(); }
+            }
+            PrimaryButton {
+                text: root.save-pending ? "Saving…" : "Save";
+                enabled: !root.save-pending && root.form.name != "";
                 clicked => { root.save(); }
             }
         }

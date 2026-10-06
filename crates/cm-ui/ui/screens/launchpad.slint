@@ -8,7 +8,7 @@ import { StatusDot } from "../components.slint";
 import { LineEdit, ScrollView } from "std-widgets.slint";
 
 export struct RecentItem {
-    id: int,
+    id: string,
     name: string,
     meta: string,     // "2m ago" etc.
     kind: string,     // "SSH" | "RDP" | "TELNET" | "LOCAL"

@@ -145,7 +145,7 @@ struct ExtraPaneState {
     /// resolved authentication material.
     connect_info: Option<ConnectInfo>,
     is_remote: bool,
-    origin_connection_id: Option<i32>,
+    origin_connection_id: Option<cm_core::ConnectionId>,
     identity: String,
     title: String,
     insecure_transport: bool,
@@ -272,7 +272,7 @@ struct Tab {
     /// have no profile to edit. Drives the ErrorOverlay "Edit…" button:
     /// with an id, it opens that profile's editor; without one, it
     /// falls back to quick-connect (the only thing there ever was to edit).
-    origin_connection_id: Option<i32>,
+    origin_connection_id: Option<cm_core::ConnectionId>,
     // Split-pane support.
     /// Pane layout and focus tracking.
     pane_group: PaneGroup,

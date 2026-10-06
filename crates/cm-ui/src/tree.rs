@@ -22,6 +22,7 @@ use cm_core::{
 use slint::SharedString;
 
 use crate::ConnRow;
+use crate::domain_ui_id::{connection_id_text, group_id_text, parse_connection_id, parse_group_id};
 
 /// Maximum recursion depth when flattening (guards against cycles in a
 /// corrupt tree; a valid N-node tree has paths of at most N steps).
@@ -138,7 +139,7 @@ impl ConnectionTree {
         }
         let expanded = self.expanded.contains(&group.id.get());
         out.push(ConnRow {
-            id: group.id.get() as i32,
+            id: group_id_text(group.id),
             label: SharedString::from(group.name.as_str()),
             host: SharedString::from(""),
             kind: SharedString::from(""),
@@ -180,7 +181,7 @@ impl ConnectionTree {
         let selected = self.selected_conn_id == Some(conn.id.get());
         let (host, kind_str) = conn_host_kind(&conn.settings);
         ConnRow {
-            id: conn.id.get() as i32,
+            id: connection_id_text(conn.id),
             label: SharedString::from(conn.name.as_str()),
             host: SharedString::from(host.as_str()),
             kind: SharedString::from(kind_str),
@@ -285,7 +286,7 @@ impl ConnectionTree {
             return;
         }
         out.push(ConnRow {
-            id: group.id.get() as i32,
+            id: group_id_text(group.id),
             label: SharedString::from(group.name.as_str()),
             host: SharedString::from(""),
             kind: SharedString::from(""),
@@ -325,12 +326,13 @@ impl ConnectionTree {
         let flat = self.flat();
         let row = flat.get(flat_idx)?;
         if row.is_group {
-            Some(row.id as i64)
+            parse_group_id(row.id.as_str()).ok().map(|id| id.get())
         } else {
+            let id = parse_connection_id(row.id.as_str()).ok()?;
             self.connections
                 .iter()
-                .find(|c| c.id.get() == row.id as i64)
-                .and_then(|c| c.group_id.map(|g| g.get()))
+                .find(|connection| connection.id == id)
+                .and_then(|connection| connection.group_id.map(|group| group.get()))
         }
     }
 
@@ -339,9 +341,9 @@ impl ConnectionTree {
     }
 
     /// The row id and is_group flag at a flat index.
-    pub fn row_at_flat_idx(&self, flat_idx: usize) -> Option<(i32, bool)> {
+    pub fn row_at_flat_idx(&self, flat_idx: usize) -> Option<(SharedString, bool)> {
         let flat = self.flat();
-        flat.get(flat_idx).map(|r| (r.id, r.is_group))
+        flat.get(flat_idx).map(|r| (r.id.clone(), r.is_group))
     }
 
     /// Look up a group by id.
@@ -565,6 +567,21 @@ mod tests {
     }
 
     // ── flatten tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn flat_rows_preserve_signed_i64_connection_and_group_ids() {
+        let tree = ConnectionTree::new(
+            vec![make_group(i64::MIN, None, "negative", 0)],
+            vec![
+                make_ssh(i64::MAX, None, "maximum", 0),
+                make_ssh(-1, None, "minus-one", 1),
+            ],
+        );
+        let rows = tree.flat();
+        assert_eq!(rows[0].id.as_str(), i64::MIN.to_string());
+        assert_eq!(rows[1].id.as_str(), i64::MAX.to_string());
+        assert_eq!(rows[2].id.as_str(), "-1");
+    }
 
     #[test]
     fn flat_empty_tree() {

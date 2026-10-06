@@ -12,6 +12,7 @@ use cm_core::Connection;
 use slint::{ComponentHandle, Model, SharedString};
 
 use crate::RecentItem;
+use crate::domain_ui_id::{connection_id_text, parse_connection_id};
 use crate::tree::conn_host_kind;
 
 use super::*;
@@ -70,7 +71,7 @@ fn wire_open_recent(ctx: &Ctx) {
             let Some(conn_id) = conn_id else { return };
             let conn = {
                 let st = state.borrow();
-                st.conn_tree.conn_by_id(conn_id as i64).cloned()
+                st.conn_tree.conn_by_id(conn_id.get()).cloned()
             };
             let Some(conn) = conn else { return };
             sessions::launch_saved_connection(
@@ -94,11 +95,11 @@ fn wire_open_recent(ctx: &Ctx) {
 /// list at click time may be the true recents or a live search-filtered
 /// list, so this always resolves against *whatever* is currently displayed,
 /// never a stale/cached recents snapshot.
-fn recent_id_at(items: &[RecentItem], idx: i32) -> Option<i32> {
+fn recent_id_at(items: &[RecentItem], idx: i32) -> Option<cm_core::ConnectionId> {
     usize::try_from(idx)
         .ok()
         .and_then(|i| items.get(i))
-        .map(|item| item.id)
+        .and_then(|item| parse_connection_id(item.id.as_str()).ok())
 }
 
 // Recents / search content
@@ -160,7 +161,7 @@ fn search_items(st: &State, query: &str, limit: usize) -> Vec<RecentItem> {
 fn recent_item_for(conn: &Connection, meta: String, status: &'static str) -> RecentItem {
     let (_, kind) = conn_host_kind(&conn.settings);
     RecentItem {
-        id: conn.id.get() as i32,
+        id: connection_id_text(conn.id),
         name: SharedString::from(conn.name.clone()),
         meta: SharedString::from(meta),
         kind: SharedString::from(kind),
@@ -174,7 +175,7 @@ fn status_for(st: &State, conn_id: i64) -> &'static str {
     let tab = st
         .tabs
         .iter()
-        .find(|t| t.origin_connection_id == Some(conn_id as i32));
+        .find(|t| t.origin_connection_id == Some(cm_core::ConnectionId::new(conn_id)));
     match tab.map(|t| t.session.status()) {
         Some(cm_session::SessionStatus::Connecting) => "connecting",
         Some(cm_session::SessionStatus::Connected) => "connected",
@@ -232,9 +233,9 @@ mod tests {
         assert_eq!(relative_time_secs(100, 500), "just now");
     }
 
-    fn item(id: i32) -> RecentItem {
+    fn item(id: i64) -> RecentItem {
         RecentItem {
-            id,
+            id: SharedString::from(id.to_string()),
             name: SharedString::from("x"),
             meta: SharedString::from(""),
             kind: SharedString::from("SSH"),
@@ -245,9 +246,42 @@ mod tests {
     #[test]
     fn recent_id_at_resolves_by_position_not_id() {
         let items = vec![item(42), item(7), item(99)];
-        assert_eq!(recent_id_at(&items, 0), Some(42));
-        assert_eq!(recent_id_at(&items, 1), Some(7));
-        assert_eq!(recent_id_at(&items, 2), Some(99));
+        assert_eq!(
+            recent_id_at(&items, 0),
+            Some(cm_core::ConnectionId::new(42))
+        );
+        assert_eq!(recent_id_at(&items, 1), Some(cm_core::ConnectionId::new(7)));
+        assert_eq!(
+            recent_id_at(&items, 2),
+            Some(cm_core::ConnectionId::new(99))
+        );
+    }
+
+    #[test]
+    fn recent_id_at_preserves_signed_i64_and_rejects_malformed_row_identity() {
+        let items = vec![item(i64::MAX), item(i64::MIN), item(4_294_967_297)];
+        assert_eq!(
+            recent_id_at(&items, 0),
+            Some(cm_core::ConnectionId::new(i64::MAX))
+        );
+        assert_eq!(
+            recent_id_at(&items, 1),
+            Some(cm_core::ConnectionId::new(i64::MIN))
+        );
+        assert_eq!(
+            recent_id_at(&items, 2),
+            Some(cm_core::ConnectionId::new(4_294_967_297))
+        );
+        let malformed = vec![RecentItem {
+            id: SharedString::from("01"),
+            ..item(1)
+        }];
+        assert_eq!(recent_id_at(&malformed, 0), None);
+        let wrong_sentinel = vec![RecentItem {
+            id: SharedString::from("0"),
+            ..item(1)
+        }];
+        assert_eq!(recent_id_at(&wrong_sentinel, 0), None);
     }
 
     #[test]

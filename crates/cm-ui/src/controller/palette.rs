@@ -153,9 +153,9 @@ pub(super) fn dispatch_palette_action(
                 cred_name_idx(None, st.keys_panel.credentials(), st.keys_panel.folders());
             drop(st);
             let form = ConnProfile {
-                id: 0,
+                id: SharedString::from(""),
                 name: SharedString::from(""),
-                group_id: 0,
+                group_id: SharedString::from(""),
                 kind: 0, // SSH
                 host: SharedString::from(""),
                 port: SharedString::from("22"),
@@ -183,9 +183,9 @@ pub(super) fn dispatch_palette_action(
                 cred_name_idx(None, st.keys_panel.credentials(), st.keys_panel.folders());
             drop(st);
             let form = ConnProfile {
-                id: 0,
+                id: SharedString::from(""),
                 name: SharedString::from(""),
-                group_id: 0,
+                group_id: SharedString::from(""),
                 kind: 1, // RDP
                 host: SharedString::from(""),
                 port: SharedString::from("3389"),
@@ -210,9 +210,9 @@ pub(super) fn dispatch_palette_action(
             let selected_group_idx = tree_ctl::group_name_idx(None, st.conn_tree.groups());
             drop(st);
             let form = ConnProfile {
-                id: 0,
+                id: SharedString::from(""),
                 name: SharedString::from(""),
-                group_id: 0,
+                group_id: SharedString::from(""),
                 kind: 2,
                 host: SharedString::from(""),
                 port: SharedString::from("23"),
