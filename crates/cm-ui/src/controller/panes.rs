@@ -1762,7 +1762,6 @@ mod tests {
     use super::*;
     use crate::terminal_renderer::TerminalTheme;
     use cm_core::terminal::GridSnapshot;
-    use std::sync::mpsc;
 
     /// A `Session` that records every `send_input` call — the "mock sink"
     /// the API contract asks broadcast-targeting tests to assert against.
@@ -1785,7 +1784,7 @@ mod tests {
         }
 
         fn new_with_resize_sink() -> RecordingSessionParts {
-            let (_tx, rx) = mpsc::channel::<GridSnapshot>();
+            let (_tx, rx) = cm_core::latest::latest_channel::<GridSnapshot>();
             let sent = Arc::new(Mutex::new(Vec::new()));
             let resized = Arc::new(Mutex::new(Vec::new()));
             (
@@ -1804,7 +1803,7 @@ mod tests {
         /// `is_rdp` cell without needing a reachable RDP host (see the
         /// RDP-in-pane behavior without a reachable host.
         fn new_rdp() -> Self {
-            let (_tx, rx) = mpsc::channel::<cm_session::FrameUpdate>();
+            let (_tx, rx) = cm_core::latest::latest_channel::<cm_session::FrameUpdate>();
             Self {
                 surface: Surface::Framebuffer(rx),
                 sent: Arc::new(Mutex::new(Vec::new())),

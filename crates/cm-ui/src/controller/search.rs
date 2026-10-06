@@ -480,7 +480,7 @@ mod tests {
     }
     impl NoopSession {
         fn new() -> Self {
-            let (_tx, rx) = std::sync::mpsc::channel();
+            let (_tx, rx) = cm_core::latest::latest_channel();
             Self {
                 surface: cm_session::Surface::TerminalGrid(rx),
             }

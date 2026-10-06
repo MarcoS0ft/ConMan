@@ -823,7 +823,6 @@ pub(super) fn apply_settled_resize(state: &Rc<RefCell<State>>, ui: &AppWindow) {
 mod tests {
     use super::*;
     use cm_session::{ExitStatus, SessionInput};
-    use std::sync::mpsc;
 
     /// A session whose `status` is fixed at construction, for exercising
     /// [`disposition`] against every [`SessionStatus`] variant without a real
@@ -835,7 +834,7 @@ mod tests {
 
     impl FakeSession {
         fn with_status(status: SessionStatus) -> Self {
-            let (_tx, rx) = mpsc::channel::<cm_core::terminal::GridSnapshot>();
+            let (_tx, rx) = cm_core::latest::latest_channel::<cm_core::terminal::GridSnapshot>();
             Self {
                 status,
                 surface: Surface::TerminalGrid(rx),

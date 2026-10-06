@@ -3,10 +3,11 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use cm_core::latest::LatestReceiver;
 use cm_core::terminal::GridSnapshot;
 use cm_core::{
     Connection, ConnectionSettings, CredentialPurpose, Group, LocalSettings, RdpSettings, Secret,
@@ -2617,12 +2618,11 @@ pub(super) fn visible_search_highlights(
     (visible, current_idx)
 }
 
-pub(crate) fn drain_latest<T>(rx: &Receiver<T>) -> Option<T> {
-    let mut latest = None;
-    while let Ok(v) = rx.try_recv() {
-        latest = Some(v);
-    }
-    latest
+/// Take at most one newly-published surface value. Empty and closed surfaces
+/// both return `None`; callers keep rendering their prior visible value and
+/// let the independent `SessionStatus` path own lifecycle transitions.
+pub(crate) fn drain_latest<T>(rx: &LatestReceiver<T>) -> Option<T> {
+    rx.try_recv_latest().ok().flatten()
 }
 
 // Stored-credential resolution
@@ -4852,7 +4852,6 @@ pub(super) fn wire_tick(ctx: &Ctx) -> Timer {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::mpsc;
 
     use cm_core::{
         Cell, CellAttrs, Color, ConnectionId, ConnectionKind, Credential, CredentialError,
@@ -4861,12 +4860,21 @@ mod tests {
 
     #[test]
     fn drain_latest_keeps_only_the_last() {
-        let (tx, rx) = mpsc::channel::<i32>();
+        let (tx, rx) = cm_core::latest::latest_channel::<i32>();
         assert_eq!(drain_latest(&rx), None);
-        tx.send(1).unwrap();
-        tx.send(2).unwrap();
-        tx.send(3).unwrap();
+        tx.publish(1).unwrap();
+        tx.publish(2).unwrap();
+        tx.publish(3).unwrap();
         assert_eq!(drain_latest(&rx), Some(3));
+        assert_eq!(drain_latest(&rx), None);
+    }
+
+    #[test]
+    fn drain_latest_consumes_final_value_before_closed_surface() {
+        let (tx, rx) = cm_core::latest::latest_channel::<i32>();
+        tx.publish(41).unwrap();
+        drop(tx);
+        assert_eq!(drain_latest(&rx), Some(41));
         assert_eq!(drain_latest(&rx), None);
     }
 

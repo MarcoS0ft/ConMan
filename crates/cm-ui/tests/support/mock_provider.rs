@@ -8,9 +8,10 @@
 //! ever actually connects, so there is nothing to race or wait on.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
+use cm_core::latest::{LatestSender, latest_channel};
 use cm_core::rdp::{CertVerifier, RdpAuthInput};
 use cm_core::ssh::{HostKeyVerifier, SshAuthInput};
 use cm_core::{
@@ -20,13 +21,10 @@ use cm_core::{
 };
 
 /// A [`Session`] whose lifecycle is entirely driven by a shared status cell
-/// the test holds a clone of. The surface channel's sender is dropped
-/// immediately -- a permanently-empty (and, once dropped, permanently
-/// disconnected) `Receiver` is exactly what `drain_latest`/the tick loop
-/// already treat "nothing new this tick" as (see
-/// `controller/sessions.rs::drain_latest`), so this never errors, it just
-/// never renders anything -- fine, since terminal content is out of scope
-/// for the element suites (screenshots/`cm-session` own that).
+/// the test holds a clone of. The provider retains the unique surface sender
+/// so tests can publish explicitly; until then, its slot remains empty and
+/// the UI retains its current visible value. Dropping the provider closes
+/// the surface after any final pending value is consumed.
 pub(crate) struct ScriptedSession {
     status: Arc<Mutex<SessionStatus>>,
     surface: Surface,
@@ -46,11 +44,11 @@ struct ScriptedSessionShared {
 impl ScriptedSession {
     fn new(
         status: Arc<Mutex<SessionStatus>>,
-        terminal_outputs: Arc<Mutex<Vec<Sender<GridSnapshot>>>>,
+        terminal_outputs: Arc<Mutex<Vec<LatestSender<GridSnapshot>>>>,
         session_id: usize,
         shared: ScriptedSessionShared,
     ) -> Self {
-        let (tx, rx) = channel();
+        let (tx, rx) = latest_channel();
         terminal_outputs
             .lock()
             .expect("ScriptedSession terminal output mutex poisoned")
@@ -65,11 +63,11 @@ impl ScriptedSession {
 
     fn new_rdp(
         status: Arc<Mutex<SessionStatus>>,
-        rdp_outputs: Arc<Mutex<Vec<Sender<FrameUpdate>>>>,
+        rdp_outputs: Arc<Mutex<Vec<LatestSender<FrameUpdate>>>>,
         session_id: usize,
         shared: ScriptedSessionShared,
     ) -> Self {
-        let (tx, rx) = channel::<FrameUpdate>();
+        let (tx, rx) = latest_channel::<FrameUpdate>();
         rdp_outputs
             .lock()
             .expect("ScriptedSession RDP output mutex poisoned")
@@ -147,8 +145,8 @@ pub(crate) struct MockSessionProvider {
     telnet_connect_calls: AtomicUsize,
     inputs: Arc<Mutex<Vec<SessionInput>>>,
     shutdowns: Arc<AtomicUsize>,
-    terminal_outputs: Arc<Mutex<Vec<Sender<GridSnapshot>>>>,
-    rdp_outputs: Arc<Mutex<Vec<Sender<FrameUpdate>>>>,
+    terminal_outputs: Arc<Mutex<Vec<LatestSender<GridSnapshot>>>>,
+    rdp_outputs: Arc<Mutex<Vec<LatestSender<FrameUpdate>>>>,
     next_session_id: AtomicUsize,
     tagged_inputs: Arc<Mutex<Vec<(usize, SessionInput)>>>,
     search_requests: Arc<AtomicUsize>,
@@ -314,7 +312,7 @@ impl MockSessionProvider {
             .expect("MockSessionProvider terminal output mutex poisoned")
             .get(session_index)
             .expect("scripted terminal session index")
-            .send(snapshot)
+            .publish(snapshot)
             .expect("scripted terminal receiver must remain live");
     }
 
@@ -324,7 +322,7 @@ impl MockSessionProvider {
             .expect("MockSessionProvider RDP output mutex poisoned")
             .get(rdp_index)
             .expect("scripted RDP session index")
-            .send(FrameUpdate {
+            .publish(FrameUpdate {
                 width,
                 height,
                 rgba: vec![0; usize::from(width) * usize::from(height) * 4],
