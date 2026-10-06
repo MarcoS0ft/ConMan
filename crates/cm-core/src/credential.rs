@@ -147,6 +147,13 @@ impl CredentialRef {
     pub fn purpose_str(&self) -> Option<&str> {
         self.account.rsplit(':').next()
     }
+
+    /// Backing capacity used by the reference when held in an application command.
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.service
+            .capacity()
+            .saturating_add(self.account.capacity())
+    }
 }
 
 // Secret
@@ -180,6 +187,11 @@ impl Secret {
     /// Borrows the raw secret bytes. Use sparingly and never log the result.
     pub fn expose(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Allocated backing capacity for exhaustive in-crate queue accounting.
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.bytes.capacity()
     }
 }
 

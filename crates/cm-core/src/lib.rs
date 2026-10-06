@@ -13,6 +13,7 @@
 //! / [`CredentialFolderId::UNSAVED`] (`== 0`).
 
 mod app_settings;
+pub mod application;
 mod connection;
 mod credential;
 mod error;
@@ -58,4 +59,16 @@ pub use settings::{
 pub use terminal::{
     Cell, CellAttrs, Color, CursorShape, CursorState, GridSnapshot, Key, KeyEvent, KeyModifiers,
     MouseAction, MouseButton, MouseEvent, TerminalEngine, TerminalSize,
+};
+
+pub use application::{
+    AppCommand, AppError, AppEvent, AppNotification, AppResult, Application, ApplicationMailbox,
+    ApplicationSessionStatus, BootstrapDto, Capability, ChallengeId, ChallengeKind,
+    ChallengeResponse, CredentialSecretIntent, CriticalOverflow, EffectiveLimits,
+    GatewayPreferences, ImportCounts, ImportFormat, ImportPreviewDto, ImportStatsDto,
+    ImportWarningCode, ImportWarningDto, InlineSecretIntent, MutationMeta, MutationOutcome,
+    MutationResult, NotificationError, OverflowAction, PreviewId, RequestId, ResultClass,
+    SearchCursor, SearchDirection, SearchMatch, SearchResultsDto, SecretChange, SecretRefId,
+    SessionDto, SessionFailureKind, SessionId, SessionTarget, SubmitError, UnknownOutcomeReason,
+    WorkspaceDto, WorkspaceMutation, WorkspaceRevision,
 };
