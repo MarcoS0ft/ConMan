@@ -8,7 +8,11 @@ is implemented. Winit binds the single HTML-owned `#canvas` render target;
 the W1 shield keeps that canvas inert and hidden from assistive technology.
 
 The static files are `assets/index.html`, `assets/bootstrap.js`, and
-`assets/bootstrap.css`. The package root is `/`; wasm-bindgen's `--target web`
+`assets/bootstrap.css`. The canvas uses viewport-owned CSS dimensions with
+`!important` so Winit’s inline pixel sizing cannot freeze it at the initial
+window size. Winit observes the canvas size and updates the Slint/WebGL backing
+surface when the browser viewport changes; the startup shield remains layered
+over the canvas. The package root is `/`; wasm-bindgen's `--target web`
 output is served below `/assets/pkg/`, including only exact snippet import
 paths present in its generated JS. The gateway package route manifest maps
 each exact path to a digest and MIME type and verifies bytes before serving.
