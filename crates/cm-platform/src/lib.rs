@@ -26,6 +26,7 @@ pub mod linux_update;
 mod safe_lock;
 pub mod secure_temp;
 pub mod single_instance;
+pub mod workspace_lock;
 
 pub use config::{
     ConfigDiagnostic, ConfigDiagnosticLevel, ConfigDocument, TextConfigStore, read_config_file,
@@ -33,6 +34,7 @@ pub use config::{
 };
 pub use console::{stderr_supports_ansi, write_stderr_line, write_stdout_line};
 pub use error::PlatformError;
+pub use workspace_lock::{WorkspaceGuard, WorkspaceLockError};
 
 use std::path::PathBuf;
 use std::process::Command;
