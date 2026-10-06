@@ -5,7 +5,7 @@
 //! `open_empty_tab` branch deterministically (an in-memory repo with no
 //! session-tab snapshot to restore).
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 mod support;
 

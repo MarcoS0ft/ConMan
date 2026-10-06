@@ -6,7 +6,7 @@
 //! One process, one `#[test]`, scenarios run sequentially, each against its
 //! own fresh [`support::harness`].
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 mod support;
 

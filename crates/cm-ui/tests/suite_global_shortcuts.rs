@@ -1,6 +1,6 @@
 //! Real Slint key-boundary coverage for application shortcuts across focus owners.
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 mod support;
 

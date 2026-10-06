@@ -11,7 +11,7 @@
 //! for-pixel; pixel-level recoloring is outside this layer's reach because the
 //! testing backend provides no rendered pixels.
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 mod support;
 

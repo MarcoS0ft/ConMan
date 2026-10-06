@@ -4,7 +4,7 @@
 //! `TouchArea`. They do not invoke `AppWindow::pointer` directly: Slint's
 //! buttonless move translation is the behavior that regressed.
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 mod support;
 

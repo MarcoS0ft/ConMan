@@ -9,7 +9,7 @@
 //! by controller unit tests because the integration harness cannot invoke the
 //! native file picker.
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 mod support;
 

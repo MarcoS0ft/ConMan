@@ -13,7 +13,7 @@
 //! *path* to these callbacks is a separate, real-input concern out of an
 //! in-process element suite's reach (MCP's `dispatch_key_event` layer).
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 mod support;
 

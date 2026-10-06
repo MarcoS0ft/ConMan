@@ -1,6 +1,6 @@
 //! Windows-shaped Slint modifier-token coverage for terminal sessions.
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 mod support;
 

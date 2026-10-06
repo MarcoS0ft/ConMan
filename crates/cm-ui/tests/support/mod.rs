@@ -15,7 +15,7 @@
 //! debug info this feature turns on (every `ElementHandle` query would come
 //! back empty).
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 #![allow(dead_code)] // not every suite uses every helper.
 
 pub(crate) mod mock_provider;

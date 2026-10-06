@@ -1,7 +1,7 @@
 //! Saved profiles keep their user-facing names in the tab strip.
 //! and active-session label. Quick Connect remains endpoint-derived.
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 mod support;
 

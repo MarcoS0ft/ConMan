@@ -23,7 +23,7 @@
 //! `ConnectionRow::action-hover` (app.slint) plus the full green run of the
 //! existing suites (proving no regression), not on a new automated test.
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 mod support;
 

@@ -1,5 +1,5 @@
 //! Pointer-driven scrollbar geometry, paging, dragging, and fading regressions.
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 mod support;
 

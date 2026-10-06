@@ -15,7 +15,7 @@
 //! own fresh [`support::harness`] -- a fresh in-memory repo + a fresh
 //! `AppWindow` -- so scenarios never see each other's state).
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 mod support;
 

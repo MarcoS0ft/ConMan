@@ -13,7 +13,7 @@
 //!
 //! Run with: `cargo test -p cm-ui --features ui-introspection`
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 use std::collections::HashSet;
 use std::ops::ControlFlow;

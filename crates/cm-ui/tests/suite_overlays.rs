@@ -14,7 +14,7 @@
 //! forever, by construction, not by racing a real handshake against a
 //! timeout.
 
-#![cfg(feature = "ui-introspection")]
+#![cfg(all(feature = "ui-introspection", not(target_arch = "wasm32")))]
 
 mod support;
 
