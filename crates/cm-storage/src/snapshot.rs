@@ -205,6 +205,14 @@ fn read_connections(
                 "expected 0 or 1",
             ));
         }
+        validate_credential_source_columns(
+            source_tag,
+            credential_id,
+            inline_username,
+            inline_domain,
+            inline_has_secret,
+            id_raw,
+        )?;
         let retained_bytes = name
             .len()
             .checked_add(inline_username.map_or(0, str::len))
@@ -555,6 +563,48 @@ fn validate_public_key_ref(
     Ok(())
 }
 
+fn validate_credential_source_columns(
+    source_tag: &str,
+    credential_id: Option<i64>,
+    inline_username: Option<&str>,
+    inline_domain: Option<&str>,
+    inline_has_secret: i64,
+    id: i64,
+) -> Result<(), WorkspaceSnapshotError> {
+    let canonical = match source_tag {
+        "inherit" => {
+            credential_id.is_none()
+                && inline_username.is_none()
+                && inline_domain.is_none()
+                && inline_has_secret == 0
+        }
+        "object" => {
+            credential_id.is_some()
+                && inline_username.is_none()
+                && inline_domain.is_none()
+                && inline_has_secret == 0
+        }
+        "inline" => credential_id.is_none() && inline_username.is_some(),
+        "prompt" => {
+            credential_id.is_none()
+                && inline_username.is_none()
+                && inline_domain.is_none()
+                && inline_has_secret == 0
+        }
+        _ => return Ok(()),
+    };
+    if canonical {
+        Ok(())
+    } else {
+        Err(row_persistence(
+            "connections",
+            "cred_source_kind",
+            id,
+            "inconsistent credential-source columns",
+        ))
+    }
+}
+
 fn sql_error(error: rusqlite::Error) -> WorkspaceSnapshotError {
     WorkspaceSnapshotError::Persistence(RepositoryError::Backend(error.to_string()))
 }
@@ -753,6 +803,77 @@ mod tests {
                 .load_workspace_snapshot(WorkspaceRevision(0), WorkspaceResultOverhead::Workspace),
             Err(WorkspaceSnapshotError::Persistence(_))
         ));
+    }
+
+    #[test]
+    fn malformed_credential_source_column_combinations_are_rejected() {
+        let malformed = [
+            ("object", None, None, None, 0),
+            ("inherit", Some(1), None, None, 0),
+            ("inline", Some(1), Some("user"), None, 0),
+            ("prompt", Some(1), None, None, 0),
+            ("inherit", None, Some("user"), None, 0),
+            ("object", Some(1), None, Some("domain"), 0),
+            ("prompt", None, None, None, 1),
+            ("inline", None, None, None, 0),
+        ];
+        for (kind, credential_id, username, domain, has_secret) in malformed {
+            let repository = SqliteRepository::open_in_memory().unwrap();
+            {
+                let conn = repository.lock().unwrap();
+                conn.execute(
+                    "INSERT INTO credentials(id,name,kind) VALUES (1,'credential','password')",
+                    [],
+                )
+                .unwrap();
+                insert_base_connection(
+                    &conn,
+                    "local",
+                    &settings_json(&ConnectionSettings::Local(LocalSettings::default())),
+                );
+                conn.execute(
+                    "UPDATE connections SET cred_source_kind=?1, credential_id=?2, \
+                     inline_username=?3, inline_domain=?4, inline_has_secret=?5",
+                    params![kind, credential_id, username, domain, has_secret],
+                )
+                .unwrap();
+            }
+            let error = repository
+                .load_workspace_snapshot(WorkspaceRevision(0), WorkspaceResultOverhead::Workspace)
+                .unwrap_err();
+            assert!(matches!(&error, WorkspaceSnapshotError::Persistence(_)));
+            let diagnostic = error.to_string();
+            assert!(!diagnostic.contains("user"));
+            assert!(!diagnostic.contains("domain"));
+        }
+    }
+
+    #[test]
+    fn canonical_object_source_round_trips_in_snapshot() {
+        let repository = SqliteRepository::open_in_memory().unwrap();
+        {
+            let conn = repository.lock().unwrap();
+            conn.execute(
+                "INSERT INTO credentials(id,name,kind) VALUES (7,'credential','password')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO connections(kind,name,settings_json,cred_source_kind,credential_id) \
+                 VALUES ('local','profile',?1,'object',7)",
+                [settings_json(&ConnectionSettings::Local(
+                    LocalSettings::default(),
+                ))],
+            )
+            .unwrap();
+        }
+        let snapshot = repository
+            .load_workspace_snapshot(WorkspaceRevision(0), WorkspaceResultOverhead::Workspace)
+            .unwrap();
+        assert_eq!(
+            snapshot.connections[0].credential_source,
+            Some(CredentialSource::Object(CredentialId::new(7)))
+        );
     }
 
     fn fill_one_table(conn: &SqliteConnection, table: &str, count: usize) {
