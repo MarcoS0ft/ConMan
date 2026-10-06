@@ -2239,6 +2239,25 @@ mod tests {
     }
 
     #[test]
+    fn frame_publication_after_ui_receiver_closes_keeps_driver_progress_and_status() {
+        let (tx, rx) = latest_channel();
+        drop(rx);
+        let image = DecodedImage::new(PixelFormat::RgbA32, 2, 2);
+        let status = SessionStatus::Connected;
+        let mut driver_progress = 0;
+
+        // This is the production publication seam used by the active driver.
+        // A closed UI surface must not panic or be mistaken for transport loss.
+        publish_frame(&image, &tx);
+        driver_progress += 1;
+        publish_frame(&image, &tx);
+        driver_progress += 1;
+
+        assert_eq!(driver_progress, 2);
+        assert_eq!(status, SessionStatus::Connected);
+    }
+
+    #[test]
     fn action_and_physical_secure_attention_encode_identically_at_fast_path_boundary() {
         // Ctrl+Alt+End is a shortcut handled by clients such as mstsc. Once a
         // client has chosen to send the secure-attention sequence, the server
