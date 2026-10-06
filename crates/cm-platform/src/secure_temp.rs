@@ -735,7 +735,8 @@ struct StartupLeafDirectory {
 #[cfg(unix)]
 fn cleanup_stale_process_roots_unix(base: &std::fs::File) -> Result<(), SecureTempError> {
     let mut budget = STARTUP_ENTRY_BUDGET;
-    for name in read_directory_names(base, &mut budget)? {
+    let names = read_directory_names(base, &mut budget)?;
+    for name in names {
         if !is_process_instance_name(&name) {
             continue;
         }
@@ -882,16 +883,25 @@ fn read_directory_names(
     use std::ffi::CStr;
     use std::os::fd::AsRawFd as _;
 
-    // SAFETY: dup returns an independently owned descriptor on success.
-    let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
-    if duplicate < 0 {
+    let dot = c".";
+    // SAFETY: `directory` is a live directory descriptor. Opening `.` creates
+    // an independent open-file description, so readdir cannot consume the
+    // caller's directory offset (unlike dup, which shares it).
+    let iterator = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            dot.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if iterator < 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    // SAFETY: fdopendir consumes the duplicate descriptor on success.
-    let stream = unsafe { libc::fdopendir(duplicate) };
+    // SAFETY: fdopendir consumes the newly opened iterator descriptor on success.
+    let stream = unsafe { libc::fdopendir(iterator) };
     if stream.is_null() {
-        // SAFETY: fdopendir did not consume duplicate on failure.
-        unsafe { libc::close(duplicate) };
+        // SAFETY: fdopendir did not consume iterator on failure.
+        unsafe { libc::close(iterator) };
         return Err(std::io::Error::last_os_error().into());
     }
     let mut names = Vec::new();
@@ -1684,12 +1694,34 @@ mod tests {
             unsafe { libc::futimens(process.as_raw_fd(), times.as_ptr()) },
             0
         );
-
         let unknown = create_new_private_child(&base, "unknown").unwrap();
         drop(unknown);
         cleanup_stale_process_roots_unix(&base).unwrap();
         assert!(!temporary.path().join("conman/cliprdr/123-1-0").exists());
         assert!(temporary.path().join("conman/cliprdr/unknown").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_directory_scans_start_from_an_independent_offset() {
+        use std::os::fd::FromRawFd as _;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root_fd = open_directory_nofollow(temporary.path()).unwrap();
+        // SAFETY: helper returned one newly-owned descriptor.
+        let root = unsafe { std::fs::File::from_raw_fd(root_fd) };
+        let conman = open_or_create_private_child(&root, "conman").unwrap();
+        let base = open_or_create_private_child(&conman, "cliprdr").unwrap();
+        let _entry = create_new_private_child(&base, "123-1-0").unwrap();
+
+        let mut first_budget = STARTUP_ENTRY_BUDGET;
+        let mut second_budget = STARTUP_ENTRY_BUDGET;
+        let mut first = read_directory_names(&base, &mut first_budget).unwrap();
+        let mut second = read_directory_names(&base, &mut second_budget).unwrap();
+        first.sort();
+        second.sort();
+        assert_eq!(first, ["123-1-0"]);
+        assert_eq!(second, first);
     }
 
     #[cfg(windows)]
