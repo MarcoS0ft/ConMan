@@ -8,7 +8,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::path::Path;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread::{self, JoinHandle};
@@ -17,7 +16,7 @@ use cm_core::application::{
     AppCommand, AppError, AppEvent, AppNotification, AppResult, Application,
     ApplicationFailureKind, ApplicationMailbox, RequestId, ResultClass, SubmitError,
 };
-use cm_platform::{WorkspaceGuard, WorkspaceLockError};
+use cm_platform::WorkspaceGuard;
 
 const CHANNEL_CAPACITY: usize = 64;
 const PUMP_BUDGET: usize = 64;
@@ -38,8 +37,7 @@ pub trait NativeCommandBackend: Send + 'static {
     ) -> Result<AppResult, AppError>;
 }
 
-/// Error reported while constructing a backend after acquiring workspace
-/// ownership.
+/// Error reported while constructing a backend with workspace ownership held.
 #[derive(Debug)]
 pub struct BackendInitError {
     message: String,
@@ -65,7 +63,6 @@ impl std::error::Error for BackendInitError {}
 /// Failure to construct the native service.
 #[derive(Debug)]
 pub enum ServiceStartError {
-    Workspace(WorkspaceLockError),
     Backend(BackendInitError),
     Worker(io::Error),
 }
@@ -73,7 +70,6 @@ pub enum ServiceStartError {
 impl fmt::Display for ServiceStartError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Workspace(error) => write!(formatter, "workspace ownership failed: {error}"),
             Self::Backend(error) => {
                 write!(formatter, "native backend initialization failed: {error}")
             }
@@ -85,7 +81,6 @@ impl fmt::Display for ServiceStartError {
 impl std::error::Error for ServiceStartError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Workspace(error) => Some(error),
             Self::Backend(error) => Some(error),
             Self::Worker(error) => Some(error),
         }
@@ -198,21 +193,28 @@ pub struct NativeApplicationService {
 }
 
 impl NativeApplicationService {
-    /// Acquire the canonical workspace before invoking the backend factory.
-    pub fn start<B, F>(workspace: &Path, backend_factory: F) -> Result<Self, ServiceStartError>
+    /// Start from workspace ownership acquired by the host before it opens any
+    /// mutable workspace resource. The factory may consume prepared resources
+    /// captured by the host while that guard remains held.
+    pub fn start<B, F>(
+        workspace_guard: WorkspaceGuard,
+        backend_factory: F,
+    ) -> Result<Self, ServiceStartError>
     where
         B: NativeCommandBackend,
         F: FnOnce() -> Result<B, BackendInitError>,
     {
-        let workspace_guard =
-            WorkspaceGuard::acquire(workspace).map_err(ServiceStartError::Workspace)?;
         let backend = backend_factory().map_err(ServiceStartError::Backend)?;
+        let resources = WorkerResources {
+            backend: Some(backend),
+            workspace_guard: Some(workspace_guard),
+        };
 
         let (dispatch_tx, dispatch_rx) = mpsc::sync_channel(CHANNEL_CAPACITY);
         let (completion_tx, completion_rx) = mpsc::sync_channel(CHANNEL_CAPACITY);
         let worker = thread::Builder::new()
             .name("conman-app-service".to_owned())
-            .spawn(move || worker_main(backend, workspace_guard, dispatch_rx, completion_tx))
+            .spawn(move || worker_main(resources, dispatch_rx, completion_tx))
             .map_err(ServiceStartError::Worker)?;
 
         Ok(Self {
@@ -497,15 +499,10 @@ impl<B> Drop for WorkerResources<B> {
 }
 
 fn worker_main<B: NativeCommandBackend>(
-    backend: B,
-    workspace_guard: WorkspaceGuard,
+    mut resources: WorkerResources<B>,
     dispatch_rx: Receiver<WorkItem>,
     completion_tx: SyncSender<Completion>,
 ) {
-    let mut resources = WorkerResources {
-        backend: Some(backend),
-        workspace_guard: Some(workspace_guard),
-    };
     while let Ok(work) = dispatch_rx.recv() {
         debug_assert_eq!(work.result_class, result_class_for(&work.command));
         let result = resources
@@ -552,7 +549,8 @@ mod tests {
     use cm_core::application::{
         Capability, ImportFormat, SearchCursor, SearchDirection, SessionId,
     };
-    use std::path::PathBuf;
+    use cm_platform::WorkspaceLockError;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier, mpsc};
     use std::time::{Duration, Instant};
@@ -598,7 +596,8 @@ mod tests {
     }
 
     fn start_failure_service(workspace: &Path) -> NativeApplicationService {
-        NativeApplicationService::start(workspace, || Ok(FailureBackend)).unwrap()
+        let guard = WorkspaceGuard::acquire(workspace).unwrap();
+        NativeApplicationService::start(guard, || Ok(FailureBackend)).unwrap()
     }
 
     fn request_control() -> AppCommand {
@@ -657,30 +656,121 @@ mod tests {
     }
 
     #[test]
-    fn startup_acquires_guard_before_calling_backend_factory() {
+    fn backend_factory_runs_while_host_acquired_guard_is_held() {
         let workspace = TempDir::new();
         let canonical = workspace.canonical();
         let mut invoked = false;
-        let service = NativeApplicationService::start(&canonical, || {
+        let guard = WorkspaceGuard::acquire(&canonical).unwrap();
+        let service = NativeApplicationService::start(guard, || {
+            assert!(matches!(
+                WorkspaceGuard::acquire(&canonical),
+                Err(WorkspaceLockError::AlreadyOwned)
+            ));
             invoked = true;
             Ok(FailureBackend)
         })
         .unwrap();
         assert!(invoked);
-
-        let mut second_factory_called = false;
-        let second = NativeApplicationService::start(&canonical, || {
-            second_factory_called = true;
-            Ok(FailureBackend)
-        });
         assert!(matches!(
-            second,
-            Err(ServiceStartError::Workspace(
-                WorkspaceLockError::AlreadyOwned
-            ))
+            WorkspaceGuard::acquire(&canonical),
+            Err(WorkspaceLockError::AlreadyOwned)
         ));
-        assert!(!second_factory_called);
         drop(service);
+    }
+
+    struct PreparedResourceDropProbe {
+        workspace: PathBuf,
+        guard_was_held: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for PreparedResourceDropProbe {
+        fn drop(&mut self) {
+            self.guard_was_held.store(
+                matches!(
+                    WorkspaceGuard::acquire(&self.workspace),
+                    Err(WorkspaceLockError::AlreadyOwned)
+                ),
+                Ordering::SeqCst,
+            );
+        }
+    }
+
+    #[test]
+    fn backend_factory_error_drops_prepared_resources_before_workspace_guard() {
+        let workspace = TempDir::new();
+        let canonical = workspace.canonical();
+        let guard_was_held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let prepared = PreparedResourceDropProbe {
+            workspace: canonical.clone(),
+            guard_was_held: Arc::clone(&guard_was_held),
+        };
+
+        let result: Result<NativeApplicationService, _> = NativeApplicationService::start(
+            WorkspaceGuard::acquire(&canonical).unwrap(),
+            move || {
+                std::hint::black_box(&prepared);
+                Err::<FailureBackend, _>(BackendInitError::new("prepared backend rejected"))
+            },
+        );
+
+        assert!(matches!(result, Err(ServiceStartError::Backend(_))));
+        assert!(guard_was_held.load(Ordering::SeqCst));
+        drop(WorkspaceGuard::acquire(&canonical).expect("guard released after failed start"));
+    }
+
+    struct DropOrderBackend {
+        workspace: PathBuf,
+        dropped_while_guard_held: mpsc::SyncSender<bool>,
+    }
+
+    impl NativeCommandBackend for DropOrderBackend {
+        fn execute(
+            &mut self,
+            _request_id: RequestId,
+            _command: AppCommand,
+        ) -> Result<AppResult, AppError> {
+            Ok(AppResult::SessionClosed)
+        }
+    }
+
+    impl Drop for DropOrderBackend {
+        fn drop(&mut self) {
+            let _ = self.dropped_while_guard_held.send(matches!(
+                WorkspaceGuard::acquire(&self.workspace),
+                Err(WorkspaceLockError::AlreadyOwned)
+            ));
+        }
+    }
+
+    #[test]
+    fn backend_teardown_precedes_guard_release_on_normal_and_emergency_shutdown() {
+        for normal_shutdown in [false, true] {
+            let workspace = TempDir::new();
+            let canonical = workspace.canonical();
+            let (dropped_tx, dropped_rx) = mpsc::sync_channel(1);
+            let backend_workspace = canonical.clone();
+            let mut service = NativeApplicationService::start(
+                WorkspaceGuard::acquire(&canonical).unwrap(),
+                move || {
+                    Ok(DropOrderBackend {
+                        workspace: backend_workspace,
+                        dropped_while_guard_held: dropped_tx,
+                    })
+                },
+            )
+            .unwrap();
+
+            if normal_shutdown {
+                service.begin_shutdown();
+                wait_for_shutdown(&mut service);
+                service.finish_shutdown().unwrap();
+            } else {
+                drop(service);
+            }
+
+            assert!(dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+            drop(WorkspaceGuard::acquire(&canonical).expect("guard released after backend drop"));
+        }
     }
 
     #[test]
@@ -841,8 +931,11 @@ mod tests {
     #[test]
     fn worker_panic_settles_dispatched_work_as_uncertain() {
         let workspace = TempDir::new();
-        let mut service =
-            NativeApplicationService::start(&workspace.canonical(), || Ok(PanicBackend)).unwrap();
+        let mut service = NativeApplicationService::start(
+            WorkspaceGuard::acquire(&workspace.canonical()).unwrap(),
+            || Ok(PanicBackend),
+        )
+        .unwrap();
         let app = service.application();
         for _ in 0..CHANNEL_CAPACITY {
             app.submit(request_control()).unwrap();
@@ -909,13 +1002,16 @@ mod tests {
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
         let release = Arc::new(Barrier::new(2));
         let worker_release = Arc::clone(&release);
-        let mut service = NativeApplicationService::start(&workspace.canonical(), || {
-            Ok(SuccessThenPanicBackend {
-                calls: 0,
-                entered_tx,
-                release: worker_release,
-            })
-        })
+        let mut service = NativeApplicationService::start(
+            WorkspaceGuard::acquire(&workspace.canonical()).unwrap(),
+            || {
+                Ok(SuccessThenPanicBackend {
+                    calls: 0,
+                    entered_tx,
+                    release: worker_release,
+                })
+            },
+        )
         .unwrap();
         let app = service.application();
         let succeeded_id = app.submit(request_control()).unwrap();
@@ -998,13 +1094,16 @@ mod tests {
         let (dropped_tx, dropped_rx) = mpsc::sync_channel(1);
         let release = Arc::new(Barrier::new(2));
         let worker_release = Arc::clone(&release);
-        let mut service = NativeApplicationService::start(&canonical, move || {
-            Ok(BlockingBackend {
-                entered_tx,
-                release: worker_release,
-                dropped_tx,
-            })
-        })
+        let mut service = NativeApplicationService::start(
+            WorkspaceGuard::acquire(&canonical).unwrap(),
+            move || {
+                Ok(BlockingBackend {
+                    entered_tx,
+                    release: worker_release,
+                    dropped_tx,
+                })
+            },
+        )
         .unwrap();
         let app = service.application();
         for _ in 0..CHANNEL_CAPACITY {
@@ -1022,17 +1121,10 @@ mod tests {
         }));
         assert!(service_stopping);
 
-        let mut factory_called = false;
         assert!(matches!(
-            NativeApplicationService::start(&canonical, || {
-                factory_called = true;
-                Ok(FailureBackend)
-            }),
-            Err(ServiceStartError::Workspace(
-                WorkspaceLockError::AlreadyOwned
-            ))
+            WorkspaceGuard::acquire(&canonical),
+            Err(WorkspaceLockError::AlreadyOwned)
         ));
-        assert!(!factory_called);
 
         release.wait();
         dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -1058,13 +1150,16 @@ mod tests {
         let (dropped_tx, dropped_rx) = mpsc::sync_channel(1);
         let release = Arc::new(Barrier::new(2));
         let worker_release = Arc::clone(&release);
-        let mut service = NativeApplicationService::start(&workspace.canonical(), move || {
-            Ok(BlockingBackend {
-                entered_tx,
-                release: worker_release,
-                dropped_tx,
-            })
-        })
+        let mut service = NativeApplicationService::start(
+            WorkspaceGuard::acquire(&workspace.canonical()).unwrap(),
+            move || {
+                Ok(BlockingBackend {
+                    entered_tx,
+                    release: worker_release,
+                    dropped_tx,
+                })
+            },
+        )
         .unwrap();
         let app = service.application();
         let request_id = app.submit(request_control()).unwrap();
@@ -1099,13 +1194,16 @@ mod tests {
         let (dropped_tx, dropped_rx) = mpsc::sync_channel(1);
         let release = Arc::new(Barrier::new(2));
         let worker_release = Arc::clone(&release);
-        let mut service = NativeApplicationService::start(&workspace.canonical(), move || {
-            Ok(BlockingBackend {
-                entered_tx,
-                release: worker_release,
-                dropped_tx,
-            })
-        })
+        let mut service = NativeApplicationService::start(
+            WorkspaceGuard::acquire(&workspace.canonical()).unwrap(),
+            move || {
+                Ok(BlockingBackend {
+                    entered_tx,
+                    release: worker_release,
+                    dropped_tx,
+                })
+            },
+        )
         .unwrap();
         let app = service.application();
         let request_id = app.submit(request_control()).unwrap();
