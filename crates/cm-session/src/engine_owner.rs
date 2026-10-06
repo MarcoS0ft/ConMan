@@ -262,7 +262,94 @@ pub(crate) fn timing(start: Instant, stage: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cm_core::latest::latest_channel;
+    use cm_core::terminal::{Cell, CellAttrs, Color, CursorShape, CursorState};
     use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct SnapshotBuffers {
+        cells_ptr: usize,
+        cells_len: usize,
+        cells_capacity: usize,
+        grapheme_ptr: usize,
+        grapheme_len: usize,
+        grapheme_capacity: usize,
+    }
+
+    fn snapshot_buffers(snapshot: &GridSnapshot) -> SnapshotBuffers {
+        let cell = &snapshot.cells[0];
+        SnapshotBuffers {
+            cells_ptr: snapshot.cells.as_ptr() as usize,
+            cells_len: snapshot.cells.len(),
+            cells_capacity: snapshot.cells.capacity(),
+            grapheme_ptr: cell.grapheme.as_ptr() as usize,
+            grapheme_len: cell.grapheme.len(),
+            grapheme_capacity: cell.grapheme.capacity(),
+        }
+    }
+
+    fn snapshot(text: &str, cell_capacity: usize, text_capacity: usize) -> GridSnapshot {
+        let mut grapheme = String::with_capacity(text_capacity);
+        grapheme.push_str(text);
+        let cell = Cell {
+            grapheme,
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: CellAttrs::empty(),
+            width: 1,
+        };
+        let mut cells = Vec::with_capacity(cell_capacity);
+        cells.push(cell);
+        GridSnapshot {
+            size: TerminalSize { rows: 1, cols: 1 },
+            cells,
+            cursor: CursorState {
+                row: 0,
+                col: 0,
+                visible: true,
+                shape: CursorShape::Block,
+            },
+            scrollback_len: 0,
+            scroll_offset: 0,
+            mouse_tracking: false,
+        }
+    }
+
+    #[test]
+    fn latest_grid_snapshot_moves_spare_buffers_and_preserves_held_consumer_value() {
+        let (tx, rx) = latest_channel();
+        let first = snapshot("first", 4, 24);
+        let first_producer = snapshot_buffers(&first);
+        assert!(first_producer.cells_capacity > first_producer.cells_len);
+        assert!(first_producer.grapheme_capacity > first_producer.grapheme_len);
+        assert!(tx.send_snapshot(first));
+        // This slot profile is captured on dequeue. Matching both pointers
+        // and capacities to the pre-publish profile proves those allocations
+        // remained the channel's pending value rather than being cloned.
+        let first_slot = rx.try_recv_latest().unwrap().unwrap();
+        let first_slot_buffers = snapshot_buffers(&first_slot);
+        assert_eq!(first_slot_buffers, first_producer);
+        let consumer_held = first_slot;
+        let first_consumer_buffers = snapshot_buffers(&consumer_held);
+        assert_eq!(first_consumer_buffers, first_producer);
+
+        // Both later publications occur while the consumer owns the first
+        // value. The unread slot replaces the middle snapshot with the newest.
+        let middle = snapshot("middle", 5, 32);
+        let middle_producer = snapshot_buffers(&middle);
+        assert!(tx.send_snapshot(middle));
+        let newest = snapshot("newest", 6, 40);
+        let newest_producer = snapshot_buffers(&newest);
+        assert!(tx.send_snapshot(newest));
+        assert_eq!(consumer_held.cells[0].grapheme, "first");
+        assert_eq!(snapshot_buffers(&consumer_held), first_consumer_buffers);
+
+        let newest_slot = rx.try_recv_latest().unwrap().unwrap();
+        let newest_slot_buffers = snapshot_buffers(&newest_slot);
+        assert_eq!(newest_slot.cells[0].grapheme, "newest");
+        assert_eq!(newest_slot_buffers, newest_producer);
+        assert_ne!(newest_slot_buffers, middle_producer);
+    }
 
     // ── wrap_paste (pure) ────────────────────────────────────────────────
 

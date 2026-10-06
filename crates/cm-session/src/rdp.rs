@@ -2160,6 +2160,7 @@ fn distinct_rgb_count(rgba: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cm_core::latest::latest_channel;
     // Only used to build `RdpAuthInput` values in these tests — the
     // production path never converts a `Secret` outside `connect` itself.
     use cm_core::Secret;
@@ -2179,6 +2180,63 @@ mod tests {
         }
     }
     use ironrdp_pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct FrameBufferProfile {
+        ptr: usize,
+        len: usize,
+        capacity: usize,
+    }
+
+    fn frame_profile(frame: &FrameUpdate) -> FrameBufferProfile {
+        FrameBufferProfile {
+            ptr: frame.rgba.as_ptr() as usize,
+            len: frame.rgba.len(),
+            capacity: frame.rgba.capacity(),
+        }
+    }
+
+    fn frame(label: u8, capacity: usize) -> FrameUpdate {
+        let mut rgba = Vec::with_capacity(capacity);
+        rgba.extend_from_slice(&[label, 2, 3, 255]);
+        FrameUpdate {
+            width: 1,
+            height: 1,
+            rgba,
+        }
+    }
+
+    #[test]
+    fn latest_frame_moves_spare_backing_buffer_and_keeps_consumer_owned_frame() {
+        let (tx, rx) = latest_channel();
+        let first = frame(1, 32);
+        let first_producer = frame_profile(&first);
+        assert!(first_producer.capacity > first_producer.len);
+        assert!(tx.publish(first).is_ok());
+        // The slot is observed immediately after dequeue; allocation identity
+        // proves the channel carried this Vec without cloning its buffer.
+        let first_slot = rx.try_recv_latest().unwrap().unwrap();
+        let first_slot_profile = frame_profile(&first_slot);
+        assert_eq!(first_slot_profile, first_producer);
+        let consumer_held = first_slot;
+        let first_consumer_profile = frame_profile(&consumer_held);
+        assert_eq!(first_consumer_profile, first_producer);
+
+        let middle = frame(2, 48);
+        let middle_producer = frame_profile(&middle);
+        assert!(tx.publish(middle).is_ok());
+        let newest = frame(3, 64);
+        let newest_producer = frame_profile(&newest);
+        assert!(tx.publish(newest).is_ok());
+        assert_eq!(consumer_held.rgba, [1, 2, 3, 255]);
+        assert_eq!(frame_profile(&consumer_held), first_consumer_profile);
+
+        let newest_slot = rx.try_recv_latest().unwrap().unwrap();
+        let newest_slot_profile = frame_profile(&newest_slot);
+        assert_eq!(newest_slot.rgba, [3, 2, 3, 255]);
+        assert_eq!(newest_slot_profile, newest_producer);
+        assert_ne!(newest_slot_profile, middle_producer);
+    }
 
     #[test]
     fn action_and_physical_secure_attention_encode_identically_at_fast_path_boundary() {
