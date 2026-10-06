@@ -23,6 +23,7 @@ pub mod import;
 pub mod json_io;
 pub mod migrations;
 pub mod repository;
+mod snapshot;
 
 pub use error::StorageError;
 pub use json_io::{
@@ -31,3 +32,4 @@ pub use json_io::{
     import, import_from_json,
 };
 pub use repository::{AtomicImportRepository, ImportTransaction, SqliteRepository};
+pub use snapshot::WorkspaceSnapshotError;

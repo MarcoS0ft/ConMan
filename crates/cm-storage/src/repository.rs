@@ -123,7 +123,9 @@ impl SqliteRepository {
         self
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>, RepositoryError> {
+    pub(super) fn lock(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>, RepositoryError> {
         self.conn
             .lock()
             .map_err(|e| RepositoryError::Backend(format!("mutex poisoned: {e}")))

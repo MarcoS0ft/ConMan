@@ -1,6 +1,11 @@
 //! Neutral, event-loop-local application port and its bounded mailbox types.
 //!
 //! This module contains no runtime, wire protocol, storage, or platform code.
+mod snapshot;
+pub use snapshot::{
+    MAX_WORKSPACE_RECORDS, MAX_WORKSPACE_ROW_DECODE_BYTES, RowDecodePermit, WorkspaceRecordCounts,
+    WorkspaceResultOverhead, WorkspaceSnapshotBuilder,
+};
 use std::{
     collections::{HashMap, VecDeque},
     marker::PhantomData,
@@ -1034,11 +1039,11 @@ impl ApplicationMailbox {
     }
 }
 
-fn add_cap(total: &mut usize, bytes: usize) -> Result<(), SubmitError> {
+pub(super) fn add_cap(total: &mut usize, bytes: usize) -> Result<(), SubmitError> {
     *total = total.checked_add(bytes).ok_or(SubmitError::ResourceLimit)?;
     Ok(())
 }
-fn add_vec<T>(total: &mut usize, value: &Vec<T>) -> Result<(), SubmitError> {
+pub(super) fn add_vec<T>(total: &mut usize, value: &Vec<T>) -> Result<(), SubmitError> {
     add_cap(
         total,
         value
@@ -1047,7 +1052,7 @@ fn add_vec<T>(total: &mut usize, value: &Vec<T>) -> Result<(), SubmitError> {
             .ok_or(SubmitError::ResourceLimit)?,
     )
 }
-fn add_string(total: &mut usize, value: &String) -> Result<(), SubmitError> {
+pub(super) fn add_string(total: &mut usize, value: &String) -> Result<(), SubmitError> {
     add_cap(total, value.capacity())
 }
 fn add_path(total: &mut usize, value: &std::path::PathBuf) -> Result<(), SubmitError> {
@@ -1126,7 +1131,7 @@ fn add_connection_settings(
     }
     Ok(())
 }
-fn add_connection(total: &mut usize, value: &Connection) -> Result<(), SubmitError> {
+pub(super) fn add_connection(total: &mut usize, value: &Connection) -> Result<(), SubmitError> {
     add_string(total, &value.name)?;
     add_connection_settings(total, &value.settings)?;
     match &value.credential_source {
@@ -1142,17 +1147,17 @@ fn add_connection(total: &mut usize, value: &Connection) -> Result<(), SubmitErr
     }
     Ok(())
 }
-fn add_group(total: &mut usize, value: &Group) -> Result<(), SubmitError> {
+pub(super) fn add_group(total: &mut usize, value: &Group) -> Result<(), SubmitError> {
     add_string(total, &value.name)
 }
-fn add_credential(total: &mut usize, value: &Credential) -> Result<(), SubmitError> {
+pub(super) fn add_credential(total: &mut usize, value: &Credential) -> Result<(), SubmitError> {
     add_string(total, &value.name)?;
     if let Some(x) = &value.username {
         add_string(total, x)?
     }
     Ok(())
 }
-fn add_folder(total: &mut usize, value: &CredentialFolder) -> Result<(), SubmitError> {
+pub(super) fn add_folder(total: &mut usize, value: &CredentialFolder) -> Result<(), SubmitError> {
     add_string(total, &value.name)
 }
 fn add_mutation_result(_total: &mut usize, value: &MutationResult) -> Result<(), SubmitError> {
