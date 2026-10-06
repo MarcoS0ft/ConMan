@@ -27,6 +27,8 @@ jobs:
       source_ref: ${{ github.event.workflow_run.head_sha }}
       run_tests: false
       sign_macos: true
+      release_tag: dev
+      release_channel: dev
     secrets:
       MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -35,6 +37,8 @@ jobs:
       NOTARIZE_API_KEY_ID: ${{ secrets.NOTARIZE_API_KEY_ID }}
       NOTARIZE_API_KEY_ISSUER: ${{ secrets.NOTARIZE_API_KEY_ISSUER }}
       NOTARIZE_API_KEY_P8_BASE64: ${{ secrets.NOTARIZE_API_KEY_P8_BASE64 }}
+      CONMAN_SPARKLE_PUBLIC_KEY_B64: ${{ secrets.CONMAN_SPARKLE_PUBLIC_KEY_B64 }}
+      CONMAN_SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.CONMAN_SPARKLE_ED25519_PRIVATE_KEY }}
 
   publish:
     name: Publish rolling dev prerelease
@@ -53,6 +57,15 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Keep feeds outside the archive glob; the release action expands
+      # each pattern independently and does not support exclusion lines.
+      - name: Separate appcast from package upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p update-feeds
+          mv dist/appcast-dev.xml update-feeds/
+
       - name: Write release notes
         shell: bash
         run: |
@@ -65,7 +78,7 @@ jobs:
             echo "- Tested by CI run: ${{ github.event.workflow_run.html_url }}"
             echo "- Release run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
-            echo "Packages include Linux DEB/RPM/AppImage/portable/static formats, a macOS DMG, and Windows NSIS/portable formats."
+            echo "Packages include Linux DEB/RPM/AppImage/portable/static formats, a macOS DMG, and Windows Velopack/portable formats."
             echo "Windows and dynamic Linux executables are compressed with checksum-verified UPX 5.2.0. The macOS app and DMG are Developer ID signed; the final DMG is notarized, stapled, and Gatekeeper-validated."
           } > release-notes.md
 
@@ -126,6 +139,13 @@ jobs:
           make_latest: false
           target_commitish: ${{ github.event.workflow_run.head_sha }}
           files: dist/*
+          fail_on_unmatched_files: true
+
+      - name: Publish rolling appcast last
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: dev
+          files: update-feeds/appcast-dev.xml
           fail_on_unmatched_files: true
 
       - name: Verify rolling release and tag revision

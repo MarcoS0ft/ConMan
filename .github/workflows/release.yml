@@ -50,6 +50,8 @@ jobs:
       expected_version: ${{ needs.validate.outputs.version }}
       run_tests: true
       sign_macos: true
+      release_tag: ${{ github.ref_name }}
+      release_channel: stable
     secrets:
       MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -58,6 +60,8 @@ jobs:
       NOTARIZE_API_KEY_ID: ${{ secrets.NOTARIZE_API_KEY_ID }}
       NOTARIZE_API_KEY_ISSUER: ${{ secrets.NOTARIZE_API_KEY_ISSUER }}
       NOTARIZE_API_KEY_P8_BASE64: ${{ secrets.NOTARIZE_API_KEY_P8_BASE64 }}
+      CONMAN_SPARKLE_PUBLIC_KEY_B64: ${{ secrets.CONMAN_SPARKLE_PUBLIC_KEY_B64 }}
+      CONMAN_SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.CONMAN_SPARKLE_ED25519_PRIVATE_KEY }}
 
   publish:
     name: Publish stable release
@@ -70,6 +74,15 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Keep feeds outside the archive glob; the release action expands
+      # each pattern independently and does not support exclusion lines.
+      - name: Separate appcast from package upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p update-feeds
+          mv dist/appcast-stable.xml update-feeds/
+
       - name: Publish stable GitHub release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
@@ -79,4 +92,11 @@ jobs:
           prerelease: false
           make_latest: true
           files: dist/*
+          fail_on_unmatched_files: true
+
+      - name: Publish stable appcast last
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: update-feeds/appcast-stable.xml
           fail_on_unmatched_files: true

@@ -25,6 +25,16 @@ on:
         required: false
         default: false
         type: boolean
+      release_tag:
+        description: Release tag used for the macOS appcast; empty disables appcast generation
+        required: false
+        default: ''
+        type: string
+      release_channel:
+        description: Appcast channel, stable or dev
+        required: false
+        default: ''
+        type: string
     secrets:
       MACOS_CERTIFICATE_P12:
         required: false
@@ -39,6 +49,10 @@ on:
       NOTARIZE_API_KEY_ISSUER:
         required: false
       NOTARIZE_API_KEY_P8_BASE64:
+        required: false
+      CONMAN_SPARKLE_PUBLIC_KEY_B64:
+        required: false
+      CONMAN_SPARKLE_ED25519_PRIVATE_KEY:
         required: false
 
 permissions:
@@ -157,6 +171,31 @@ jobs:
           echo "CONMAN_ZIG_MACOS_SDK=$sdk" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/scripts/ci" >> "$GITHUB_PATH"
 
+      - name: Fetch pinned Sparkle 2.9.4
+        if: runner.os == 'macOS'
+        id: sparkle
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="$(scripts/package/macos/fetch-sparkle.sh \
+            --output-dir "$RUNNER_TEMP/conman-sparkle")"
+          sparkle_dir="$(printf '%s\n' "$result" | sed -n 's/^SPARKLE_DIR=//p')"
+          test -n "$sparkle_dir"
+          echo "CONMAN_SPARKLE_DIR=$sparkle_dir" >> "$GITHUB_ENV"
+
+      - name: Build Sparkle 2.9.4 Rust bridge
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="$(scripts/package/macos/build-sparkle-bridge.sh \
+            --sparkle-dir "$CONMAN_SPARKLE_DIR" \
+            --output-dir "$RUNNER_TEMP/conman-sparkle-bridge")"
+          bridge="$(printf '%s\n' "$result" | sed -n 's/^BRIDGE=//p')"
+          test -f "$bridge"
+          echo "CONMAN_SPARKLE_BRIDGE=$bridge" >> "$GITHUB_ENV"
+          echo "CONMAN_SPARKLE_BRIDGE_DIR=$(dirname "$bridge")" >> "$GITHUB_ENV"
+
       - name: Bootstrap Zig 0.15.2 (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -190,26 +229,10 @@ jobs:
         shell: bash
         run: scripts/package/macos/test-installer.sh
 
-      - name: Require NSIS 3
+      - name: Bootstrap pinned Velopack 1.2.0 tooling
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          $candidate = Get-Command makensis.exe -ErrorAction SilentlyContinue
-          if (-not $candidate) {
-            $candidate = Get-Command makensis -ErrorAction SilentlyContinue
-          }
-          if (-not $candidate) {
-            $known = @(
-              "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
-              "$env:ProgramFiles\NSIS\makensis.exe"
-            ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
-            if ($known) { $candidate = Get-Item -LiteralPath $known }
-          }
-          if (-not $candidate) {
-            throw "NSIS 3 is required on the Windows packaging runner"
-          }
-          $makeNsis = if ($candidate.Source) { $candidate.Source } else { $candidate.FullName }
-          & $makeNsis /VERSION
+        run: ./scripts/package/windows/bootstrap-velopack.ps1
 
       - name: Test Windows packaging contracts
         if: runner.os == 'Windows'
@@ -250,6 +273,7 @@ jobs:
             --target-dir dist/stage \
             --output-dir dist/macos-build \
             --version '${{ steps.prepare.outputs.version }}' \
+            --revision "$(git rev-list --count HEAD)" \
             --sign-identity -
 
       - name: Build signed and notarized macOS app and DMG
@@ -263,9 +287,10 @@ jobs:
           NOTARY_KEY_BASE64: ${{ secrets.NOTARIZE_API_KEY_P8_BASE64 }}
           NOTARY_KEY_ID: ${{ secrets.NOTARIZE_API_KEY_ID }}
           NOTARY_KEY_ISSUER: ${{ secrets.NOTARIZE_API_KEY_ISSUER }}
+          CONMAN_SPARKLE_PUBLIC_KEY_B64: ${{ secrets.CONMAN_SPARKLE_PUBLIC_KEY_B64 }}
         run: |
           set -euo pipefail
-          for name in CERTIFICATE_P12_BASE64 CERTIFICATE_PASSWORD APP_PROFILE_BASE64 CLI_PROFILE_BASE64 NOTARY_KEY_BASE64 NOTARY_KEY_ID NOTARY_KEY_ISSUER; do
+          for name in CERTIFICATE_P12_BASE64 CERTIFICATE_PASSWORD APP_PROFILE_BASE64 CLI_PROFILE_BASE64 NOTARY_KEY_BASE64 NOTARY_KEY_ID NOTARY_KEY_ISSUER CONMAN_SPARKLE_PUBLIC_KEY_B64; do
             if [[ -z "${!name}" ]]; then
               echo "Required macOS release secret is missing: $name" >&2
               exit 1
@@ -328,6 +353,7 @@ jobs:
             --target-dir dist/stage \
             --output-dir dist/macos-build \
             --version '${{ steps.prepare.outputs.version }}' \
+            --revision "$(git rev-list --count HEAD)" \
             --sign-identity "$identity" \
             --app-provisioning-profile "$release_state/conman.provisionprofile" \
             --cli-provisioning-profile "$release_state/conmanctl.provisionprofile" \
@@ -342,12 +368,33 @@ jobs:
           mkdir -p dist/packages
           cp dist/macos-build/*.dmg dist/macos-build/*.dmg.sha256 dist/packages/
 
+      - name: Generate signed macOS appcast
+        if: runner.os == 'macOS' && inputs.sign_macos && inputs.release_tag != '' && inputs.release_channel != ''
+        shell: bash
+        env:
+          CONMAN_SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.CONMAN_SPARKLE_ED25519_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CONMAN_SPARKLE_ED25519_PRIVATE_KEY" ]]; then
+            echo "CONMAN_SPARKLE_ED25519_PRIVATE_KEY is required for a signed appcast" >&2
+            exit 1
+          fi
+          dmg="$(find dist/packages -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$dmg"
+          scripts/package/macos/generate-appcast.sh \
+            --channel '${{ inputs.release_channel }}' \
+            --release-tag '${{ inputs.release_tag }}' \
+            --version '${{ steps.prepare.outputs.version }}' \
+            --revision "$(git rev-list --count HEAD)" \
+            --dmg "$dmg" \
+            --output "dist/packages/appcast-${{ inputs.release_channel }}.xml"
+
       # Authenticode signing belongs between prepare_release.py and this step.
       # UPX has already finalized and verified the staged Windows executables.
-      - name: Build Windows installer and portable ZIP
+      - name: Build Velopack Windows packages and portable ZIP
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/package/windows/build.ps1 -StageDir dist/stage -OutputDir dist/packages
+        run: ./scripts/package/windows/build.ps1 -StageDir dist/stage -OutputDir dist/packages -VpkPath .cache/velopack/vpk.1.2.0.nupkg
 
       - name: Upload native release packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
