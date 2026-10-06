@@ -1451,12 +1451,21 @@ pub(super) fn submit_mutation(
     submit_editor_mutation(ui, state, operation, None);
 }
 
-fn submit_editor_mutation(
+pub(super) fn submit_editor_mutation(
     ui: &crate::AppWindow,
     state: &SharedUiState,
     operation: WorkspaceMutation,
     editor: Option<super::state::EditorCorrelation>,
 ) -> Option<cm_core::application::RequestId> {
+    if let Some(ticket) = editor
+        && state
+            .borrow()
+            .editor(ticket.kind)
+            .is_some_and(|active| active.instance == ticket.instance && active.pending.is_some())
+    {
+        super::push_toast(ui, state, "This editor already has a save in progress.");
+        return None;
+    }
     let (revision, blocked) = {
         let current = state.borrow();
         (current.revision, current.refresh_required)

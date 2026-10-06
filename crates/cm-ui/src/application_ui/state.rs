@@ -101,7 +101,10 @@ pub(crate) struct UiState {
     pub revision: Option<WorkspaceRevision>,
     pub preferences: Option<GatewayPreferences>,
     pub pending: HashMap<RequestId, PendingUiAction>,
-    pub committed_editor: Option<super::CommittedEditor>,
+    // At most `MAX_ACCEPTED` mutations can be accepted before their completions;
+    // each staged result came from one of those requests and refresh gates new
+    // writes, so this request-keyed set remains bounded by that same cap.
+    pub committed_editors: HashMap<RequestId, super::CommittedEditor>,
     pub refresh_required: bool,
     pub next_editor_instance: u64,
     pub profile_editor: Option<EditorState>,
@@ -131,7 +134,7 @@ impl UiState {
             revision: None,
             preferences: None,
             pending: HashMap::new(),
-            committed_editor: None,
+            committed_editors: HashMap::new(),
             refresh_required: false,
             next_editor_instance: 0,
             profile_editor: None,

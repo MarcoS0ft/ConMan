@@ -386,11 +386,16 @@ fn commit_mutation(
     {
         let mut state = shared.borrow_mut();
         state.revision = Some(revision);
-        state.committed_editor = Some(super::CommittedEditor {
-            request_id,
-            ticket: editor,
-            result,
-        });
+        if let Some(ticket) = editor {
+            state.committed_editors.insert(
+                request_id,
+                super::CommittedEditor {
+                    request_id,
+                    ticket: Some(ticket),
+                    result,
+                },
+            );
+        }
     }
     // A mutation result supplies identity, not the full authoritative DTO.
     // Gate subsequent mutations until the accepted refresh reconciles it.
@@ -562,8 +567,17 @@ fn install_workspace(
 }
 
 fn reconcile_committed_editor(ui: &crate::AppWindow, shared: &super::state::SharedUiState) {
-    let committed = shared.borrow_mut().committed_editor.take();
-    let Some(committed) = committed else { return };
+    let committed = std::mem::take(&mut shared.borrow_mut().committed_editors);
+    for committed in committed.into_values() {
+        reconcile_one_committed_editor(ui, shared, committed);
+    }
+}
+
+fn reconcile_one_committed_editor(
+    ui: &crate::AppWindow,
+    shared: &super::state::SharedUiState,
+    committed: super::CommittedEditor,
+) {
     let Some(ticket) = committed.ticket else {
         return;
     };
@@ -648,23 +662,29 @@ fn release_committed_editor_after_refresh_failure(
     shared: &super::state::SharedUiState,
     error: &AppError,
 ) {
-    let committed = shared.borrow().committed_editor.clone();
-    let Some(committed) = committed else { return };
-    let Some(ticket) = committed.ticket else {
-        return;
-    };
-    let mut state = shared.borrow_mut();
-    if let Some(active) = state.editor_mut(ticket.kind).as_mut()
-        && active.instance == ticket.instance
-        && active.pending == Some(committed.request_id)
-    {
-        active.pending = None;
-        super::set_editor_pending(ui, ticket.kind, false);
-        super::set_editor_error(
-            ui,
-            ticket.kind,
-            &format!("Saved, but workspace refresh failed: {error:?}. Retry refresh."),
-        );
+    let committed = shared
+        .borrow()
+        .committed_editors
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    for committed in committed {
+        let Some(ticket) = committed.ticket else {
+            continue;
+        };
+        let mut state = shared.borrow_mut();
+        if let Some(active) = state.editor_mut(ticket.kind).as_mut()
+            && active.instance == ticket.instance
+            && active.pending == Some(committed.request_id)
+        {
+            active.pending = None;
+            super::set_editor_pending(ui, ticket.kind, false);
+            super::set_editor_error(
+                ui,
+                ticket.kind,
+                &format!("Saved, but workspace refresh failed: {error:?}. Retry refresh."),
+            );
+        }
     }
 }
 
@@ -1105,7 +1125,7 @@ mod tests {
             first_refresh,
             Err(AppError::PersistenceFailed),
         );
-        assert!(shared.borrow().committed_editor.is_some());
+        assert_eq!(shared.borrow().committed_editors.len(), 1);
         assert_eq!(shared.borrow().profile_editor.unwrap().pending, None);
         assert!(ui.get_workspace_refresh_required());
 
@@ -1133,8 +1153,168 @@ mod tests {
         );
         assert_eq!(ui.get_profile_form().id.as_str(), "77");
         assert_eq!(shared.borrow().profile_editor.unwrap().edit_generation, 1);
-        assert!(shared.borrow().committed_editor.is_none());
+        assert!(shared.borrow().committed_editors.is_empty());
         assert!(!shared.borrow().refresh_required);
+    }
+
+    #[test]
+    fn two_editor_commits_waiting_on_refresh_keep_both_results() {
+        let (ui, app, shared) = setup();
+        let profile = shared.borrow_mut().open_editor(EditorKind::Profile);
+        let group = shared.borrow_mut().open_editor(EditorKind::Group);
+        let profile_request = submit_action(
+            &app,
+            &shared,
+            PendingUiAction::Mutation {
+                editor: Some(profile),
+            },
+        );
+        let group_request = submit_action(
+            &app,
+            &shared,
+            PendingUiAction::Mutation {
+                editor: Some(group),
+            },
+        );
+        shared
+            .borrow_mut()
+            .editor_mut(EditorKind::Group)
+            .as_mut()
+            .unwrap()
+            .edit_generation += 1;
+
+        deliver(
+            &app,
+            &ui,
+            &shared,
+            profile_request,
+            Ok(AppResult::MutationOutcome(MutationOutcome::Committed {
+                revision: WorkspaceRevision(2),
+                result: MutationResult::ConnectionId(cm_core::ConnectionId::new(101)),
+            })),
+        );
+        deliver(
+            &app,
+            &ui,
+            &shared,
+            group_request,
+            Ok(AppResult::MutationOutcome(MutationOutcome::Committed {
+                revision: WorkspaceRevision(3),
+                result: MutationResult::GroupId(cm_core::GroupId::new(202)),
+            })),
+        );
+        assert_eq!(shared.borrow().committed_editors.len(), 2);
+
+        let refresh = shared
+            .borrow()
+            .pending
+            .iter()
+            .find_map(|(request, action)| {
+                matches!(action, PendingUiAction::RefreshWorkspace).then_some(*request)
+            })
+            .expect("commits queue workspace refreshes");
+        deliver(
+            &app,
+            &ui,
+            &shared,
+            refresh,
+            Ok(AppResult::Workspace(WorkspaceDto {
+                revision: WorkspaceRevision(3),
+                connections: vec![],
+                groups: vec![],
+                credentials: vec![],
+                credential_folders: vec![],
+            })),
+        );
+
+        assert!(shared.borrow().committed_editors.is_empty());
+        assert_eq!(ui.get_profile_form().id.as_str(), "101");
+        assert_eq!(ui.get_group_form().id.as_str(), "202");
+        assert!(shared.borrow().profile_editor.is_none());
+        assert_eq!(
+            shared.borrow().group_editor.unwrap().instance,
+            group.instance
+        );
+        assert_eq!(shared.borrow().group_editor.unwrap().edit_generation, 1);
+    }
+
+    #[test]
+    fn wrong_saved_identity_survives_as_visible_editor_error() {
+        let (ui, app, shared) = setup();
+        let ticket = shared.borrow_mut().open_editor(EditorKind::Profile);
+        ui.set_profile_editor_open(true);
+        let request = submit_action(
+            &app,
+            &shared,
+            PendingUiAction::Mutation {
+                editor: Some(ticket),
+            },
+        );
+        deliver(
+            &app,
+            &ui,
+            &shared,
+            request,
+            Ok(AppResult::MutationOutcome(MutationOutcome::Committed {
+                revision: WorkspaceRevision(2),
+                result: MutationResult::CredentialId(cm_core::CredentialId::new(303)),
+            })),
+        );
+        let refresh = shared
+            .borrow()
+            .pending
+            .iter()
+            .find_map(|(request, action)| {
+                matches!(action, PendingUiAction::RefreshWorkspace).then_some(*request)
+            })
+            .expect("commit queues a workspace refresh");
+        deliver(
+            &app,
+            &ui,
+            &shared,
+            refresh,
+            Ok(AppResult::Workspace(WorkspaceDto {
+                revision: WorkspaceRevision(2),
+                connections: vec![],
+                groups: vec![],
+                credentials: vec![],
+                credential_folders: vec![],
+            })),
+        );
+        assert_eq!(
+            shared.borrow().profile_editor.unwrap().instance,
+            ticket.instance
+        );
+        assert_eq!(shared.borrow().profile_editor.unwrap().pending, None);
+        assert!(
+            ui.get_profile_save_error()
+                .contains("unexpected saved identity")
+        );
+        assert!(ui.get_profile_editor_open());
+    }
+
+    #[test]
+    fn controller_rejects_a_second_save_while_editor_request_is_pending() {
+        let (ui, app, shared) = setup();
+        let ticket = shared.borrow_mut().open_editor(EditorKind::Profile);
+        let _request = submit_action(
+            &app,
+            &shared,
+            PendingUiAction::Mutation {
+                editor: Some(ticket),
+            },
+        );
+        let pending_count = shared.borrow().pending.len();
+        let accepted = super::super::workspace::submit_editor_mutation(
+            &ui,
+            &shared,
+            WorkspaceMutation::DeleteConnection {
+                id: cm_core::ConnectionId::new(404),
+            },
+            Some(ticket),
+        );
+        assert_eq!(accepted, None);
+        assert_eq!(shared.borrow().pending.len(), pending_count);
     }
 
     #[test]
