@@ -157,11 +157,15 @@ fn control_records_require_the_exact_empty_control_shape() {
         (BinaryRecordType::Cancel, 0x02),
         (BinaryRecordType::Ack, 0x04),
     ] {
-        let header = header(TransferKindDto::ClipboardText, record_type, 7, 0, 0, 0);
-        let encoded =
-            encode_binary_record_header(&header, &[], TransferDirection::BrowserToGateway).unwrap();
-        assert_eq!(encoded[5], flag);
-        assert!(parse_binary_record(&encoded, TransferDirection::BrowserToGateway).is_ok());
+        for direction in [
+            TransferDirection::BrowserToGateway,
+            TransferDirection::GatewayToBrowser,
+        ] {
+            let header = header(TransferKindDto::ClipboardText, record_type, 7, 0, 0, 0);
+            let encoded = encode_binary_record_header(&header, &[], direction).unwrap();
+            assert_eq!(encoded[5], flag);
+            assert!(parse_binary_record(&encoded, direction).is_ok());
+        }
     }
     let malformed = header(
         TransferKindDto::Import,
