@@ -234,19 +234,29 @@ impl NativeApplicationService {
         }
     }
 
-    /// Pump at most 64 accepted commands and 64 worker completions.
+    /// Pump at most 64 accepted commands and worker completions combined.
     pub fn pump(&mut self) -> PumpReport {
         if self.finalized {
             return PumpReport::default();
         }
 
         let mut report = PumpReport::default();
+        let mut budget = PUMP_BUDGET;
+        if self.drain_worker_completions(&mut budget, &mut report) {
+            report.closed = true;
+            if !self.stopping {
+                self.fail_service();
+            }
+            return report;
+        }
+
         if self.dispatch_tx.is_some() {
-            for _ in 0..PUMP_BUDGET {
+            while budget > 0 {
                 let next = self.shared.borrow_mut().mailbox.take_command();
                 let Some((request_id, command)) = next else {
                     break;
                 };
+                budget -= 1;
                 let result_class = result_class_for(&command);
                 let reservation = self
                     .shared
@@ -280,6 +290,8 @@ impl NativeApplicationService {
                         // has been broken. The taken request is still tracked.
                         self.set_dispatch_state(request_id, DispatchState::Queued);
                         drop(work);
+                        let disconnected = self.drain_worker_completions(&mut budget, &mut report);
+                        report.closed |= disconnected;
                         self.fail_service();
                         report.closed = true;
                         break;
@@ -287,6 +299,8 @@ impl NativeApplicationService {
                     Err(TrySendError::Disconnected(work)) => {
                         self.set_dispatch_state(request_id, DispatchState::Queued);
                         drop(work);
+                        let disconnected = self.drain_worker_completions(&mut budget, &mut report);
+                        report.closed |= disconnected;
                         self.fail_service();
                         report.closed = true;
                         break;
@@ -301,21 +315,12 @@ impl NativeApplicationService {
             self.dispatch_tx.take();
         }
 
-        for _ in 0..PUMP_BUDGET {
-            match self.completion_rx.try_recv() {
-                Ok(completion) => {
-                    self.enqueue_completion(completion.request_id, completion.result);
-                    report.completed += 1;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    if !self.stopping {
-                        self.fail_service();
-                    }
-                    report.closed = true;
-                    break;
-                }
+        let disconnected = self.drain_worker_completions(&mut budget, &mut report);
+        if disconnected {
+            if !self.stopping {
+                self.fail_service();
             }
+            report.closed = true;
         }
         report
     }
@@ -386,6 +391,29 @@ impl NativeApplicationService {
         }
     }
 
+    /// Drain at most the remaining per-pump budget. `true` means the worker
+    /// sender has disconnected and its buffered completions have been drained.
+    fn drain_worker_completions(&mut self, budget: &mut usize, report: &mut PumpReport) -> bool {
+        while *budget > 0 {
+            match self.completion_rx.try_recv() {
+                Ok(completion) => {
+                    *budget -= 1;
+                    report.completed += 1;
+                    // After emergency settlement, a still-running worker may
+                    // produce a late result for an ID already completed as
+                    // uncertain/stopping. Drop it to preserve exactly-once C1
+                    // completion semantics.
+                    if !self.failure_handled {
+                        self.enqueue_completion(completion.request_id, completion.result);
+                    }
+                }
+                Err(TryRecvError::Empty) => return false,
+                Err(TryRecvError::Disconnected) => return true,
+            }
+        }
+        false
+    }
+
     fn set_dispatch_state(&mut self, request_id: RequestId, state: DispatchState) {
         if let Some(current) = self.shared.borrow_mut().requests.get_mut(&request_id) {
             *current = state;
@@ -437,9 +465,9 @@ impl Drop for NativeApplicationService {
         if !self.finalized {
             // Emergency shutdown never blocks the owner thread. The worker
             // closure retains WorkspaceGuard through backend teardown.
-            while let Ok(completion) = self.completion_rx.try_recv() {
-                self.enqueue_completion(completion.request_id, completion.result);
-            }
+            let mut budget = PUMP_BUDGET;
+            let mut report = PumpReport::default();
+            let _ = self.drain_worker_completions(&mut budget, &mut report);
             self.fail_service();
         }
     }
@@ -852,6 +880,92 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct SuccessThenPanicBackend {
+        calls: usize,
+        entered_tx: mpsc::SyncSender<()>,
+        release: Arc<Barrier>,
+    }
+
+    impl NativeCommandBackend for SuccessThenPanicBackend {
+        fn execute(
+            &mut self,
+            _request_id: RequestId,
+            _command: AppCommand,
+        ) -> Result<AppResult, AppError> {
+            self.calls += 1;
+            if self.calls == 1 {
+                let _ = self.entered_tx.send(());
+                self.release.wait();
+                Ok(AppResult::SessionClosed)
+            } else {
+                panic!("intentional panic after successful completion");
+            }
+        }
+    }
+
+    #[test]
+    fn worker_failure_preserves_queued_success_before_settling_other_requests() {
+        let workspace = TempDir::new();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let release = Arc::new(Barrier::new(2));
+        let worker_release = Arc::clone(&release);
+        let mut service = NativeApplicationService::start(&workspace.canonical(), || {
+            Ok(SuccessThenPanicBackend {
+                calls: 0,
+                entered_tx,
+                release: worker_release,
+            })
+        })
+        .unwrap();
+        let app = service.application();
+        let succeeded_id = app.submit(request_control()).unwrap();
+        let uncertain_id = app.submit(request_control()).unwrap();
+        service.pump();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        release.wait();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !service.worker.as_ref().unwrap().is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(service.worker.as_ref().unwrap().is_finished());
+        let never_dispatched_id = app.submit(request_control()).unwrap();
+
+        let report = service.pump();
+        assert!(report.closed);
+        assert!(report.dispatched + report.completed <= PUMP_BUDGET);
+        let (completions, service_stopping) = collect_completions(&app, 3, Duration::from_secs(1));
+        assert_eq!(completions.len(), 3);
+        assert_eq!(
+            completions
+                .iter()
+                .find(|(id, _)| *id == succeeded_id)
+                .map(|(_, result)| result),
+            Some(&Ok(AppResult::SessionClosed))
+        );
+        assert_eq!(
+            completions
+                .iter()
+                .find(|(id, _)| *id == uncertain_id)
+                .map(|(_, result)| result),
+            Some(&Err(AppError::TransportUncertain {
+                request_id: uncertain_id,
+            }))
+        );
+        assert_eq!(
+            completions
+                .iter()
+                .find(|(id, _)| *id == never_dispatched_id)
+                .map(|(_, result)| result),
+            Some(&Err(AppError::ServiceStopping))
+        );
+        assert!(service_stopping);
+        assert_eq!(app.shared.borrow().mailbox.accepted_count(), 0);
+        assert!(!matches!(app.try_recv(), Some(AppEvent::Completed { .. })));
+        assert_eq!(report.completed, 1);
+    }
+
+    #[derive(Debug)]
     struct BlockingBackend {
         entered_tx: mpsc::SyncSender<()>,
         release: Arc<Barrier>,
@@ -935,6 +1049,47 @@ mod tests {
                 Err(error) => panic!("workspace guard release failed: {error}"),
             }
         }
+    }
+
+    #[test]
+    fn late_worker_result_after_emergency_settlement_is_discarded() {
+        let workspace = TempDir::new();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (dropped_tx, dropped_rx) = mpsc::sync_channel(1);
+        let release = Arc::new(Barrier::new(2));
+        let worker_release = Arc::clone(&release);
+        let mut service = NativeApplicationService::start(&workspace.canonical(), move || {
+            Ok(BlockingBackend {
+                entered_tx,
+                release: worker_release,
+                dropped_tx,
+            })
+        })
+        .unwrap();
+        let app = service.application();
+        let request_id = app.submit(request_control()).unwrap();
+        service.pump();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        // Simulate a fail-closed invariant error while native work is already
+        // executing. Its eventual result must not follow the uncertainty event.
+        service.fail_service();
+        let (completions, service_stopping) = collect_completions(&app, 1, Duration::from_secs(1));
+        assert_eq!(
+            completions,
+            vec![(request_id, Err(AppError::TransportUncertain { request_id }))]
+        );
+        assert!(service_stopping);
+
+        release.wait();
+        dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let report = service.pump();
+        assert_eq!(report.completed, 1);
+        assert!(!matches!(app.try_recv(), Some(AppEvent::Completed { .. })));
+        assert_eq!(app.shared.borrow().mailbox.accepted_count(), 0);
+        wait_for_shutdown(&mut service);
+        assert_eq!(service.poll_shutdown(), ShutdownProgress::WorkerFinished);
+        service.finish_shutdown().unwrap();
     }
 
     #[test]
