@@ -54,8 +54,9 @@ pub struct WorkspaceGuard {
 impl WorkspaceGuard {
     /// Acquire an exclusive advisory lock for a canonical, existing directory.
     ///
-    /// The `.conman` directory is created with owner-only permissions when it
-    /// is absent. Existing symlinks/reparse points and non-directory paths are
+    /// The `.conman` directory uses owner-only mode on Unix and inherits the
+    /// canonical workspace ACL on Windows. The host selects a private workspace.
+    /// Existing symlinks/reparse points and non-directory paths are
     /// rejected. The lock file is opened with `cm-platform`'s existing safe
     /// lock-file primitives before using the standard-library file lock.
     pub fn acquire(canonical_workspace: &Path) -> Result<Self, WorkspaceLockError> {

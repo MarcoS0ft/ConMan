@@ -1144,6 +1144,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cm-app-service"
+version = "0.1.0"
+dependencies = [
+ "cm-core",
+ "cm-platform",
+]
+
+[[package]]
 name = "cm-build-info"
 version = "0.1.0"
 
