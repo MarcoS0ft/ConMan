@@ -3,6 +3,10 @@ param(
     [Parameter(Mandatory)]
     [string] $Installer,
 
+    [Parameter()]
+    [ValidateSet("Setup", "Msi")]
+    [string] $InstallerKind = "Setup",
+
     [Parameter(Mandatory)]
     [ValidateSet("CurrentUser", "AllUsers")]
     [string] $InstallMode,
@@ -13,139 +17,152 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
-
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
-$installRoot = [System.IO.Path]::GetFullPath($InstallDir)
+$installRoot = [IO.Path]::GetFullPath($InstallDir)
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "../../..")).Path
-if (Test-Path -LiteralPath $installRoot) {
-    throw "Refusing to reuse an existing installer smoke directory: $installRoot"
-}
+if (Test-Path -LiteralPath $installRoot) { throw "Refusing to reuse an existing smoke directory: $installRoot" }
 
+# Velopack's per-user Setup deliberately chooses the standard LocalAppData
+# root. The per-machine MSI receives an explicit root so silent tests cannot
+# fall back to a drive-root directory (the W0 physical-host finding).
+$expectedRoot = if ($InstallerKind -eq "Setup") {
+    if ($InstallMode -ne "CurrentUser") { throw "Velopack Setup smoke must use CurrentUser" }
+    [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "com.marcos0ft.conman"))
+} else { $installRoot }
+if (Test-Path -LiteralPath $expectedRoot) {
+    throw "Refusing to touch an existing Velopack installation during smoke test: $expectedRoot"
+}
 $environmentTarget = if ($InstallMode -eq "AllUsers") { "Machine" } else { "User" }
-$registryHive = if ($InstallMode -eq "AllUsers") { "HKLM:" } else { "HKCU:" }
-$startMenuRoot = if ($InstallMode -eq "AllUsers") {
-    [Environment]::GetFolderPath("CommonPrograms")
-} else {
-    [Environment]::GetFolderPath("Programs")
-}
-$uninstallKey = Join-Path $registryHive "Software\Microsoft\Windows\CurrentVersion\Uninstall\ConMan"
-$shortcut = Join-Path $startMenuRoot "Connection Manager.lnk"
-$pathBefore = [Environment]::GetEnvironmentVariable("Path", $environmentTarget)
-$expectedPathEntry = Join-Path $installRoot "bin"
+$payloadRoot = Join-Path $expectedRoot "current"
 $installed = $false
+$msiProductCode = $null
 
-function Get-PathEntries {
-    param([AllowNull()] [string] $Value)
-    if (-not $Value) { return @() }
-    return @($Value.Split(';') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+function Get-PathRegistrySnapshot {
+    param([Parameter(Mandatory)] [ValidateSet("User", "Machine")] [string] $Target)
+
+    $hive = if ($Target -eq "Machine") {
+        [Microsoft.Win32.RegistryHive]::LocalMachine
+    } else { [Microsoft.Win32.RegistryHive]::CurrentUser }
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        $hive,
+        [Microsoft.Win32.RegistryView]::Registry64
+    )
+    $key = $base.OpenSubKey("Environment", $false)
+    try {
+        if ($null -eq $key -or $null -eq $key.GetValueNames() -or -not ($key.GetValueNames() -contains "Path")) {
+            return [pscustomobject]@{ Exists = $false; Value = $null; Kind = $null }
+        }
+        $kind = $key.GetValueKind("Path").ToString()
+        if ($kind -notin @("String", "ExpandString")) {
+            throw "$Target PATH has unsupported registry type $kind"
+        }
+        $value = $key.GetValue(
+            "Path",
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+        if ($value -isnot [string]) { throw "$Target PATH registry value is not a string" }
+        return [pscustomobject]@{ Exists = $true; Value = [string]$value; Kind = $kind }
+    } finally {
+        if ($null -ne $key) { $key.Dispose() }
+        $base.Dispose()
+    }
 }
+
+$pathBeforeSnapshot = Get-PathRegistrySnapshot $environmentTarget
 
 function Test-PathEntry {
     param([AllowNull()] [string] $Value, [string] $Entry)
-    return [bool](Get-PathEntries $Value | Where-Object {
-        $_.Equals($Entry, [StringComparison]::OrdinalIgnoreCase)
-    })
-}
-
-function Get-PathFingerprint {
-    param([AllowNull()] [string] $Value)
-    if ($null -eq $Value) { $Value = "" }
-    return [Convert]::ToHexString(
-        [Security.Cryptography.SHA256]::HashData([Text.Encoding]::Unicode.GetBytes($Value))
-    ).ToLowerInvariant()
+    if (-not $Value) { return $false }
+    return [bool]($Value.Split(';') | Where-Object { $_.Trim().Equals($Entry, [StringComparison]::OrdinalIgnoreCase) })
 }
 
 try {
-    # NSIS is a GUI-subsystem executable, so direct invocation can return before
-    # installation completes. Start-Process -Wait makes every assertion below
-    # observe the finished transaction. /D must remain the final NSIS argument.
-    $installProcess = Start-Process -FilePath $installerPath `
-        -ArgumentList "/S /$InstallMode /D=$installRoot" -Wait -PassThru
-    if ($installProcess.ExitCode -ne 0) {
-        throw "Installer exited with status $($installProcess.ExitCode) in $InstallMode mode"
+    if ($InstallerKind -eq "Setup") {
+        $installProcess = Start-Process -FilePath $installerPath -ArgumentList @("/silent") -Wait -PassThru
+    } else {
+        $arguments = @(
+            "/i", "`"$installerPath`"", "VELOPACK_INSTALLDIR=`"$installRoot`"", "/qn", "/norestart"
+        )
+        $installProcess = Start-Process -FilePath "msiexec.exe" -Verb RunAs -ArgumentList $arguments -Wait -PassThru
     }
+    if ($installProcess.ExitCode -ne 0) { throw "Velopack installer exited with status $($installProcess.ExitCode)" }
     $installed = $true
 
-    foreach ($name in @(
-        "conman.exe",
-        "ghostty-vt.dll",
-        "bin\conmanctl.exe",
-        "update-path.ps1",
-        "licenses\LICENSE-MIT",
-        "licenses\LICENSE-APACHE",
-        "licenses\NOTICE.md",
-        "licenses\JetBrainsMono-OFL.txt",
-        "licenses\SymbolsNerdFont-LICENSE-MIT.txt",
-        "Uninstall.exe"
-    )) {
-        $path = Join-Path $installRoot $name
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "Installed file missing: $path"
-        }
+    foreach ($name in @("conman.exe", "ghostty-vt.dll", "bin\conmanctl.exe", "licenses\LICENSE-MIT", "licenses\LICENSE-APACHE", "licenses\NOTICE.md", "licenses\JetBrainsMono-OFL.txt", "licenses\SymbolsNerdFont-LICENSE-MIT.txt")) {
+        $path = Join-Path $payloadRoot $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Installed payload missing: $path" }
     }
-    $licenseSources = @{
-        "licenses\LICENSE-MIT" = Join-Path $repo "LICENSE-MIT"
-        "licenses\LICENSE-APACHE" = Join-Path $repo "LICENSE-APACHE"
-        "licenses\NOTICE.md" = Join-Path $repo "crates/cm-ui/assets/fonts/NOTICE.md"
-        "licenses\JetBrainsMono-OFL.txt" = Join-Path $repo "crates/cm-ui/assets/fonts/JetBrainsMono-OFL.txt"
-        "licenses\SymbolsNerdFont-LICENSE-MIT.txt" = Join-Path $repo "crates/cm-ui/assets/fonts/SymbolsNerdFont-LICENSE-MIT.txt"
-    }
-    foreach ($relative in $licenseSources.Keys) {
-        $installedHash = (Get-FileHash -LiteralPath (Join-Path $installRoot $relative) -Algorithm SHA256).Hash
-        $sourceHash = (Get-FileHash -LiteralPath $licenseSources[$relative] -Algorithm SHA256).Hash
-        if ($installedHash -ne $sourceHash) {
-            throw "Installed license differs from its authoritative source: $relative"
-        }
-    }
-    if (-not (Test-Path -LiteralPath $uninstallKey)) {
-        throw "Add/Remove Programs key missing: $uninstallKey"
-    }
-    if (-not (Test-Path -LiteralPath $shortcut -PathType Leaf)) {
-        throw "Start menu shortcut missing: $shortcut"
-    }
-
     $pathDuring = [Environment]::GetEnvironmentVariable("Path", $environmentTarget)
-    if (-not (Test-PathEntry $pathDuring $expectedPathEntry)) {
-        throw "$expectedPathEntry was not added to the $environmentTarget PATH"
-    }
+    if (-not (Test-PathEntry $pathDuring (Join-Path $payloadRoot "bin"))) { throw "Velopack PATH hook did not add $payloadRoot\bin" }
+    & (Join-Path $payloadRoot "bin\conmanctl.exe") --version | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Installed conmanctl --version failed with status $LASTEXITCODE" }
 
-    & (Join-Path $installRoot "bin\conmanctl.exe") --version | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw "Installed conmanctl --version failed with status $LASTEXITCODE"
-    }
-}
-finally {
+    $shortcutRoot = if ($InstallMode -eq "AllUsers") {
+        [Environment]::GetFolderPath("CommonPrograms")
+    } else { [Environment]::GetFolderPath("Programs") }
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcuts = @(Get-ChildItem -LiteralPath $shortcutRoot -Filter "*.lnk" -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object {
+            try { $shell.CreateShortcut($_.FullName).TargetPath -ieq (Join-Path $payloadRoot "conman.exe") }
+            catch { $false }
+        })
+    if ($shortcuts.Count -ne 1) { throw "Expected exactly one ConMan Start Menu shortcut, found $($shortcuts.Count)" }
+
+    $arpHive = if ($InstallMode -eq "AllUsers") { "HKLM:" } else { "HKCU:" }
+    $arpBase = Join-Path $arpHive "Software\Microsoft\Windows\CurrentVersion\Uninstall"
+    $arpMatches = @(Get-ChildItem -LiteralPath $arpBase -ErrorAction SilentlyContinue |
+        Where-Object {
+            $displayName = (Get-ItemProperty -LiteralPath $_.PSPath -Name DisplayName -ErrorAction SilentlyContinue).DisplayName
+            $displayName -eq "Connection Manager"
+        })
+    if ($arpMatches.Count -ne 1) { throw "Expected one ConMan Add/Remove Programs entry, found $($arpMatches.Count)" }
+    if ($InstallerKind -eq "Msi") { $msiProductCode = [string]$arpMatches[0].PSChildName }
+} finally {
     if ($installed) {
-        $uninstaller = Join-Path $installRoot "Uninstall.exe"
-        if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
-            $uninstallProcess = Start-Process -FilePath $uninstaller `
-                -ArgumentList "/S /$InstallMode" -Wait -PassThru
-            if ($uninstallProcess.ExitCode -ne 0) {
-                Write-Error "Uninstaller exited with status $($uninstallProcess.ExitCode)"
+        if ($InstallerKind -eq "Msi" -and $msiProductCode) {
+            $uninstall = Start-Process -FilePath "msiexec.exe" -Verb RunAs -ArgumentList @(
+                "/x", $msiProductCode, "/qn", "/norestart"
+            ) -Wait -PassThru
+            if ($uninstall.ExitCode -ne 0) { Write-Error "MSI uninstall exited with status $($uninstall.ExitCode)" }
+        } else {
+            $uninstaller = Join-Path $expectedRoot "Update.exe"
+            if (-not (Test-Path -LiteralPath $uninstaller)) { $uninstaller = Join-Path $expectedRoot "current\Update.exe" }
+            if (Test-Path -LiteralPath $uninstaller) {
+                $uninstall = Start-Process -FilePath $uninstaller -ArgumentList @("uninstall", "--silent") -Wait -PassThru
+                if ($uninstall.ExitCode -ne 0) { Write-Error "Velopack uninstall exited with status $($uninstall.ExitCode)" }
             }
         }
     }
 }
 
-if (Test-Path -LiteralPath $installRoot) {
-    throw "Uninstaller left the installation directory behind: $installRoot"
-}
-if (Test-Path -LiteralPath $uninstallKey) {
-    throw "Uninstaller left the Add/Remove Programs key behind: $uninstallKey"
-}
-if (Test-Path -LiteralPath $shortcut) {
-    throw "Uninstaller left the Start menu shortcut behind: $shortcut"
-}
-$pathAfter = [Environment]::GetEnvironmentVariable("Path", $environmentTarget)
-if (Test-PathEntry $pathAfter $expectedPathEntry) {
-    throw "Uninstaller left $expectedPathEntry on the $environmentTarget PATH"
+if (Test-Path -LiteralPath $expectedRoot) { throw "Velopack uninstall left the installation root behind: $expectedRoot" }
+$pathAfterSnapshot = Get-PathRegistrySnapshot $environmentTarget
+if (Test-PathEntry $pathAfterSnapshot.Value (Join-Path $payloadRoot "bin")) { throw "Velopack uninstall left its PATH entry behind" }
+if ($pathAfterSnapshot.Exists -ne $pathBeforeSnapshot.Exists -or
+    $pathAfterSnapshot.Kind -cne $pathBeforeSnapshot.Kind -or
+    $pathAfterSnapshot.Value -cne $pathBeforeSnapshot.Value) {
+    throw "Velopack smoke test did not restore PATH text, registry type, and missing-value state byte-for-byte"
 }
 
-if ($pathAfter -cne $pathBefore) {
-    throw "Installer smoke test did not restore the $environmentTarget PATH byte-for-byte"
-}
+$shortcutRoot = if ($InstallMode -eq "AllUsers") {
+    [Environment]::GetFolderPath("CommonPrograms")
+} else { [Environment]::GetFolderPath("Programs") }
+$shell = New-Object -ComObject WScript.Shell
+$leftoverShortcuts = @(Get-ChildItem -LiteralPath $shortcutRoot -Filter "*.lnk" -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object {
+        try { $shell.CreateShortcut($_.FullName).TargetPath -ieq (Join-Path $payloadRoot "conman.exe") }
+        catch { $false }
+})
+if ($leftoverShortcuts.Count -ne 0) { throw "Velopack uninstall left a ConMan Start Menu shortcut behind" }
+$arpHive = if ($InstallMode -eq "AllUsers") { "HKLM:" } else { "HKCU:" }
+$arpBase = Join-Path $arpHive "Software\Microsoft\Windows\CurrentVersion\Uninstall"
+$leftoverArp = @(Get-ChildItem -LiteralPath $arpBase -ErrorAction SilentlyContinue |
+    Where-Object {
+        $displayName = (Get-ItemProperty -LiteralPath $_.PSPath -Name DisplayName -ErrorAction SilentlyContinue).DisplayName
+        $displayName -eq "Connection Manager"
+    })
+if ($leftoverArp.Count -ne 0) { throw "Velopack uninstall left a ConMan Add/Remove Programs entry behind" }
 
-Write-Output "PATH_BEFORE_UTF16_SHA256=$(Get-PathFingerprint $pathBefore)"
-Write-Output "PATH_AFTER_UTF16_SHA256=$(Get-PathFingerprint $pathAfter)"
-Write-Output "PATH_ENTRY_COUNT=$(@(Get-PathEntries $pathAfter).Count)"
+Write-Output "INSTALLER_KIND=$InstallerKind"
 Write-Output "INSTALL_SMOKE_OK=$InstallMode"

@@ -1,85 +1,108 @@
 #!/usr/bin/env python3
-"""Portable contract checks for the Windows package definition."""
+"""Portable contract checks for the Windows Velopack package definition."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-import shutil
-import subprocess
-import tempfile
 import unittest
 
 
 REPOSITORY = Path(__file__).resolve().parents[3]
-DEFINITION = REPOSITORY / "packaging/windows/conman.nsi"
+TOOLCHAIN = REPOSITORY / "packaging/windows/velopack-toolchain.json"
 BUILD_SCRIPT = REPOSITORY / "scripts/package/windows/build.ps1"
 VALIDATE_SCRIPT = REPOSITORY / "scripts/package/windows/validate.ps1"
-INSTALL_SMOKE = REPOSITORY / "scripts/package/windows/install-smoke.ps1"
+BOOTSTRAP_SCRIPT = REPOSITORY / "scripts/package/windows/bootstrap-velopack.ps1"
+ADAPTER = REPOSITORY / "crates/conman/src/windows_velopack.rs"
 
 
 class WindowsPackagingContracts(unittest.TestCase):
-    def test_installer_has_both_scopes_and_complete_payload(self) -> None:
-        source = DEFINITION.read_text(encoding="utf-8")
+    def test_velopack_is_pinned_to_the_w0_approved_version_and_checksum(self) -> None:
+        toolchain = json.loads(TOOLCHAIN.read_text(encoding="utf-8"))
+        self.assertEqual(toolchain["version"], "1.2.0")
+        self.assertEqual(toolchain["runtime"], "net8.0")
+        self.assertRegex(toolchain["sha256"], r"^[0-9a-f]{64}$")
+        self.assertIn("3e458a676be46d1122e522312db18411f36ea8c70e586f81a676695d43f89dbc", toolchain["sha256"])
+        self.assertNotIn("latest", toolchain["url"].lower())
+
+    def test_build_uses_one_velopack_lineage_and_no_nsis(self) -> None:
+        source = BUILD_SCRIPT.read_text(encoding="utf-8")
+        validation = VALIDATE_SCRIPT.read_text(encoding="utf-8")
+        bootstrap = BOOTSTRAP_SCRIPT.read_text(encoding="utf-8")
+        combined = "\n".join((source, validation, bootstrap))
         for required in (
-            "MULTIUSER_PAGE_INSTALLMODE",
-            "MULTIUSER_INSTALLMODE_COMMANDLINE",
-            'File "${STAGE_DIR}\\conman.exe"',
-            'File "${STAGE_DIR}\\conmanctl.exe"',
-            'File "${STAGE_DIR}\\ghostty-vt.dll"',
-            'File "update-path.ps1"',
-            'File /oname=LICENSE-MIT "..\\..\\LICENSE-MIT"',
-            'File /oname=LICENSE-APACHE "..\\..\\LICENSE-APACHE"',
-            "File /oname=NOTICE.md",
-            "File /oname=JetBrainsMono-OFL.txt",
-            "File /oname=SymbolsNerdFont-LICENSE-MIT.txt",
-            'Delete "$INSTDIR\\licenses\\LICENSE-MIT"',
-            'Delete "$INSTDIR\\licenses\\LICENSE-APACHE"',
-            'RMDir "$INSTDIR\\licenses"',
-            "-Action Add -Scope $1 -Entry",
-            "-Action Remove -Scope $1 -Entry",
-            'WriteRegDWORD ShCtx "${UNINSTALL_KEY}" "PathEntryAdded" 1',
-            'WriteRegStr ShCtx "${UNINSTALL_KEY}" "PathAddMode"',
+            "com.marcos0ft.conman",
+            '"--runtime", "win-x64"',
+            '"--msi", "true"',
+            '"--instLocation", "Either"',
+            '"--delta", "None"',
+            "-full.nupkg",
+            "-setup.exe",
+            ".msi",
+            "conmanctl.exe",
+            "ghostty-vt.dll",
+            "licenses",
+            "velopack-toolchain.json",
         ):
-            self.assertIn(required, source)
+            self.assertIn(required, combined)
+        self.assertNotIn("makensis", combined.lower())
+        self.assertNotIn("conman.nsi", combined.lower())
 
     def test_packaging_sources_contain_no_machine_specific_network_details(self) -> None:
         combined = "\n".join(
             path.read_text(encoding="utf-8")
-            for path in (DEFINITION, BUILD_SCRIPT, VALIDATE_SCRIPT, INSTALL_SMOKE)
+            for path in (BUILD_SCRIPT, VALIDATE_SCRIPT, BOOTSTRAP_SCRIPT, ADAPTER)
         )
         self.assertNotIn("10.200.", combined)
         self.assertNotIn("devlocal", combined.lower())
         self.assertNotIn("devstation", combined.lower())
 
-    @unittest.skipUnless(shutil.which("makensis"), "makensis is not installed")
-    def test_nsis_definition_compiles_with_the_required_runtime_set(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            stage = root / "stage"
-            stage.mkdir()
-            for name in ("conman.exe", "conmanctl.exe", "ghostty-vt.dll"):
-                (stage / name).write_bytes(name.encode("ascii"))
-            installer = root / "conman-setup.exe"
+    def test_package_validation_is_exact_and_portable_is_immutable(self) -> None:
+        source = VALIDATE_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("Compare-Object", source)
+        self.assertIn("bin/conmanctl.exe", source)
+        self.assertIn("Portable ZIP contents differ", source)
+        self.assertIn("sha256", source.lower())
+        self.assertIn("only installed-update asset", source)
 
-            result = subprocess.run(
-                [
-                    shutil.which("makensis") or "makensis",
-                    "-V2",
-                    "-DPRODUCT_VERSION=0.1.0-dev.1+g0123456789",
-                    f"-DSTAGE_DIR={stage}",
-                    f"-DOUTPUT_FILE={installer}",
-                    str(DEFINITION),
-                ],
-                cwd=REPOSITORY,
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
+    def test_startup_and_lifecycle_contract(self) -> None:
+        source = ADAPTER.read_text(encoding="utf-8")
+        for required in (
+            "is_internal_hook",
+            "set_auto_apply_on_startup(false)",
+            "on_after_install_fast_callback",
+            "on_after_update_fast_callback",
+            "on_before_update_fast_callback",
+            "on_before_uninstall_fast_callback",
+            "wait_exit_then_apply_updates",
+            "get_is_portable",
+            "detect_install_context",
+            "conman-path.marker",
+            "terminators",
+            "KEY_WOW64_64KEY",
+            "broadcast_environment_change",
+        ):
+            self.assertIn(required, source)
+        self.assertNotIn(".check_for_updates", source)
+        self.assertNotIn(".apply_updates_and_restart", source)
 
-            self.assertEqual(result.returncode, 0, result.stdout)
-            self.assertTrue(installer.is_file())
-            self.assertGreater(installer.stat().st_size, 0)
+    def test_no_legacy_installer_definition_remains(self) -> None:
+        self.assertFalse((REPOSITORY / "packaging/windows/conman.nsi").exists())
+
+    def test_smoke_checks_scope_metadata_and_lifecycle_artifacts(self) -> None:
+        smoke = (REPOSITORY / "scripts/package/windows/install-smoke.ps1").read_text(
+            encoding="utf-8"
+        )
+        for required in (
+            "Get-PathRegistrySnapshot",
+            "Registry64",
+            "WScript.Shell",
+            "Add/Remove Programs",
+            "PATH text, registry type",
+            "msiexec.exe",
+            "conmanctl.exe",
+        ):
+            self.assertIn(required, smoke)
 
 
 if __name__ == "__main__":

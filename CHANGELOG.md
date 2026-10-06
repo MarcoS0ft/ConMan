@@ -18,7 +18,7 @@ All notable user-facing changes to Connection Manager are documented here.
   display, and commit-derived development versions.
 - Add native Linux DEB, RPM, AppImage, portable, and static distributions;
   Developer ID-signed and notarized macOS rolling/stable DMGs with a
-  `conmanctl` installer; and Windows per-user or all-users NSIS and portable ZIP
+  `conmanctl` installer; and Windows per-user or per-machine Velopack Setup/MSI and portable ZIP
   packages. Linux and Windows executables use verified UPX compression, and
   every format carries project/font notices.
 - Add mouse tab reordering, Ctrl+Tab switching, Ctrl+0 for Home, and Ctrl+1

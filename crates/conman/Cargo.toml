@@ -94,5 +94,17 @@ libghostty-vt-sys = "=0.2.0"
 # feature is unnecessary because build.rs configures the resource explicitly.
 winresource = { version = "0.1.31", default-features = false }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Velopack is the sole installed-update engine on Windows. Keep the crate
+# pinned to the W0-approved release; cm-update remains the product authority
+# for candidate selection and signed-byte authorization.
+velopack = { version = "=1.2.0", features = ["public-utils"] }
+semver = "1"
+winreg = "0.55"
+windows-sys = { version = "0.60.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [lints]
 workspace = true

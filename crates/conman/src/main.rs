@@ -40,6 +40,8 @@ mod agent_mode;
 mod logging;
 mod render_backend;
 mod startup_error;
+#[cfg(target_os = "windows")]
+mod windows_velopack;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -67,6 +69,21 @@ use startup_error::{
 use slint as _;
 
 fn main() -> ExitCode {
+    // Velopack invokes the application with private lifecycle arguments while
+    // installing, updating, or uninstalling. Those forms must be consumed
+    // before the public GUI parser sees them; otherwise the normal parser
+    // would reject a valid installer callback as an unknown option. Keep the
+    // hook path minimal: VelopackApp performs only its local callback/layout
+    // work and terminates the hook process itself.
+    #[cfg(target_os = "windows")]
+    {
+        let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+        if windows_velopack::is_internal_hook(&raw_args) {
+            windows_velopack::run_startup_hooks();
+            return ExitCode::SUCCESS;
+        }
+    }
+
     // Parse all supported process arguments before renderer, filesystem,
     // database, keychain, or single-instance initialization. Help/version
     // remain effect-free and invalid combinations fail with usage instead of
@@ -91,6 +108,14 @@ fn main() -> ExitCode {
     if std::env::var_os(render_backend::PROBE_ENV_VAR).is_some() {
         return render_backend::run_probe_child();
     }
+
+    // Ordinary --help/--version/invalid CLI paths returned above without
+    // constructing Velopack. A real GUI launch now runs the local startup
+    // locator/hooks. Auto-apply is disabled inside the adapter because P11.1
+    // requires an explicit ready capsule and close-coordinator handoff.
+    #[cfg(target_os = "windows")]
+    windows_velopack::run_startup_hooks();
+
     let fatal_presenter = NativeStartupErrorPresenter;
 
     // Capture both CLI and environment-selected identities before the

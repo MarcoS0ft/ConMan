@@ -1,35 +1,59 @@
 # Windows packages
 
-The Windows release has two equivalent delivery formats:
+The installed Windows lineage is Velopack 1.2.0:
 
-- `conman-<version>-windows-x86_64-setup.exe` is an NSIS installer. It offers
-  per-user and all-users modes, installs the GUI and Ghostty runtime together,
-  installs `conmanctl.exe` under `bin`, and adds that `bin` directory to the
-  matching user or system `PATH`. Uninstall removes the exact PATH entry.
-- `conman-<version>-windows-x86_64.zip` is the standalone distribution containing
-  `conman.exe`, `conmanctl.exe`, `ghostty-vt.dll`, and the project/font notices
-  under `licenses`.
+- `conman-<version>-windows-x86_64-<channel>-setup.exe` is the per-user
+  one-click Setup. It installs under `%LocalAppData%` without UAC.
+- `conman-<version>-windows-x86_64-<channel>.msi` is the per-machine package.
+  It installs under the explicit Program Files root and requests ordinary UAC.
+- `conman-<version>-windows-x86_64-<channel>-full.nupkg` is the full update
+  package. It is the only installed-update asset authorized by the signed
+  `conman-update.json` manifest; Velopack does not select a channel or version.
+- `conman-<version>-windows-x86_64.zip` is the standalone portable package.
+  Portable installs are check/download-only and are never replaced in place.
 
-After `scripts/dist/prepare_release.py` has produced a `windows-x86_64` staging
-tree, build and validate both packages from PowerShell:
+The full package contains only `conman.exe`, `bin/conmanctl.exe`,
+`ghostty-vt.dll`, and the five distribution notices/licenses. Velopack owns its
+versioned layout, updater, shortcut, and uninstall registration. ConMan's
+Windows hooks own only the exact install-scope PATH fragment and the visible
+64-bit MSI ARP version entry. Configuration, SQLite state, credentials, logs,
+and update staging remain outside versioned package content.
+
+Velopack is pinned by [velopack-toolchain.json](velopack-toolchain.json),
+including the SHA-256 of the `vpk.1.2.0.nupkg` tool. Provision a runner or
+bootstrap a local cache with:
 
 ```powershell
+./scripts/package/windows/bootstrap-velopack.ps1
 ./scripts/package/windows/build.ps1 -StageDir dist/stage -OutputDir dist/packages
 ```
 
-NSIS 3 must be available. The script also accepts an explicit `-MakeNsis` path
-for provisioned runners. Official CI should run
-this script after the existing stage/compress/signing boundary, upload the setup
-executable and both SHA-256 files alongside the ZIP, and never use
-machine-specific paths.
+Pass `-VpkPath` to the checked tool package or `vpk.exe`. When a package is
+passed, the script extracts and executes only its pinned `net8.0/vpk.dll` with
+dotnet 8. There is no floating `latest` tool or network feed in the build.
 
-The opt-in installation smoke test exercises either scope, including payload,
-Start menu, Add/Remove Programs, PATH, CLI startup, and clean uninstall. Give it
-a new, narrow scratch directory that does not already exist:
+Build after `scripts/dist/prepare_release.py` has finalized the UPX binaries.
+The required signing order remains build -> UPX -> sign shipped executables ->
+Velopack package -> optionally sign Setup/MSI. Signing inputs are optional and
+must be injected only by a trusted release workflow.
+
+Validate all output with:
+
+```powershell
+./scripts/package/windows/validate.ps1 -StageDir dist/stage -OutputDir dist/packages
+```
+
+The install smoke test is intentionally opt-in and requires an isolated,
+nonexistent scratch directory. It verifies the payload, shortcut, ARP, PATH,
+CLI startup, and clean uninstall in either scope:
 
 ```powershell
 ./scripts/package/windows/install-smoke.ps1 `
-  -Installer dist/packages/conman-<version>-windows-x86_64-setup.exe `
+  -Installer dist/packages/conman-<version>-windows-x86_64-stable-setup.exe `
   -InstallMode CurrentUser `
   -InstallDir dist/install-smoke-current-user
 ```
+
+Automatic update discovery and download are not yet connected to the application.
+The shared manifest generator exists, but release workflows do not yet publish
+its manifest/signature assets. See [update status](../../docs/updates.md).

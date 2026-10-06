@@ -22,7 +22,7 @@ Rolling builds are published on the [Releases](../../releases) page for:
 
 - Linux x86_64: DEB, RPM, AppImage, portable archive, and static-musl archive.
 - macOS arm64: Developer ID-signed and notarized DMG, including `conmanctl`.
-- Windows x86_64: NSIS installer and portable ZIP.
+- Windows x86_64: Velopack Setup/MSI packages and portable ZIP.
 
 Each release includes SHA-256 checksums. Linux and Windows release executables
 are UPX-compressed and verified during packaging; macOS executables are signed

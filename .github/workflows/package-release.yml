@@ -217,7 +217,6 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
-          ./scripts/package/windows/test-update-path.ps1
           py -3 -m unittest scripts/package/windows/test_windows_packaging.py -v
 
       - name: Build release executables

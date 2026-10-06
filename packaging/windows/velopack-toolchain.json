@@ -1,0 +1,9 @@
+{
+  "version": "1.2.0",
+  "package": "vpk.1.2.0.nupkg",
+  "url": "https://api.nuget.org/v3-flatcontainer/vpk/1.2.0/vpk.1.2.0.nupkg",
+  "sha256": "3e458a676be46d1122e522312db18411f36ea8c70e586f81a676695d43f89dbc",
+  "exe_sha256": "3e0ac50b6decccf7a59fde6b6aac802554c7f0eb89e9574ed2730ff9f76cc502",
+  "runtime": "net8.0",
+  "target": "win-x64"
+}

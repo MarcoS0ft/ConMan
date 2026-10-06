@@ -15,9 +15,10 @@ addresses, account names, or machine-specific paths.
   rather than publishing an unsigned or unnotarized DMG. Local and disposable
   validation builds may continue to use an explicit ad-hoc signature, but do
   not receive access to production Keychain items.
-- Windows x86_64: an NSIS installer supporting per-user and all-users installs,
-  plus a portable ZIP. Both include `conmanctl`; the installer adds its scoped
-  `bin` directory to the matching `PATH` and removes only its own entry.
+- Windows x86_64: Velopack 1.2.0 Setup/MSI installed packages supporting
+  per-user and per-machine installs, plus a portable ZIP. Installed packages
+  include `conmanctl`; ConMan adds its scoped `bin` directory to the matching
+  `PATH` and removes only its own entry. Portable ZIPs are never replaced in place.
 
 Every format includes the project licenses and notices for bundled fonts.
 Linux and Windows release executables are compressed with the pinned UPX build
@@ -44,6 +45,7 @@ Run these commands from the repository root:
 scripts/package/linux/build-portable-container.sh dist/packages
 scripts/package/linux/build-static-container.sh dist/packages
 scripts/package/macos/release.sh --target-dir target/release --output-dir dist/packages --sign-identity -
+scripts/package/windows/bootstrap-velopack.ps1
 scripts/package/windows/build.ps1 -StageDir dist/stage -OutputDir dist/packages
 ```
 
