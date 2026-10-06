@@ -19,6 +19,7 @@ mod credential;
 mod error;
 mod ids;
 mod kind;
+pub mod latest;
 mod ports;
 pub mod rdp;
 pub mod session;
