@@ -90,8 +90,15 @@ Boolean values are exactly `true` or `false`; values are case-sensitive.
 | `confirm-quit-active-connections` | `true` (default) | Confirms before quitting while connections are active. |
 | `auto-accept-ssh-host-keys` | `false` (default) | Automatically accepts and remembers unknown or changed SSH host keys. |
 | `auto-accept-rdp-certificates` | `false` (default) | Automatically accepts and remembers RDP certificates that fail normal identity validation. |
+| `auto-check-updates` | `true` (default) | Check the selected release channel for updates once per day. |
+| `auto-download-updates` | `true` (default) | Download and prepare verified updates in the background when the platform supports it. |
+| `update-channel` | Build channel when absent (`stable` or `dev`) | Select the stable or rolling development release channel. |
 | `automation-enabled` | `false` (default) | Enables the MCP automation endpoint when the build includes agent mode. |
 | `automation-scopes` | Comma-separated subset of `read`, `write`, `execute`; empty by default | Grants MCP automation capabilities when automation is enabled. |
+
+Update preferences are stored now, but automatic updates remain unavailable
+until the platform backends and signed release manifests are connected. The
+manual check button is disabled when no update worker is present.
 
 Most visual and interaction settings apply immediately when changed through
 the UI. Settings explicitly described as affecting new sessions or the next

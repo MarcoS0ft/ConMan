@@ -18,6 +18,7 @@ enum CloseAction {
     CloseTab,
     DisconnectTab,
     ClosePane,
+    UpdateRestart,
     Quit,
 }
 
@@ -351,6 +352,91 @@ pub(super) fn request_pane_close(
     );
 }
 
+/// Request the only destructive update action.  A staged update remains
+/// untouched if the user cancels the modal; after confirmation all primary,
+/// split, and detached sessions receive their ordinary shutdown request and
+/// the backend handoff waits for a bounded graceful-drain window.
+pub(super) fn request_update_restart(state: &Rc<RefCell<State>>, ui: &AppWindow) {
+    let (ready, active) = {
+        let st = state.borrow();
+        (
+            st.update_snapshot.as_ref().is_some_and(|snapshot| {
+                matches!(
+                    snapshot.state,
+                    cm_update::UpdateState::Ready {
+                        action: cm_update::CompletionAction::RestartToApply,
+                        ..
+                    }
+                )
+            }),
+            total_active_count(&st),
+        )
+    };
+    if !ready {
+        return;
+    }
+    if active > 0 {
+        show_confirmation(
+            state,
+            ui,
+            CloseIntent {
+                action: CloseAction::UpdateRestart,
+                tab_num: None,
+                endpoint_id: None,
+            },
+            "Restart to complete update?",
+            format!(
+                "ConMan has {active} active {}. Restarting will disconnect {} before applying the update.",
+                plural_connections(active),
+                if active == 1 { "it" } else { "them" }
+            ),
+            "Restart and update",
+            false,
+        );
+    } else {
+        begin_update_shutdown(state, ui);
+    }
+}
+
+fn begin_update_shutdown(state: &Rc<RefCell<State>>, ui: &AppWindow) {
+    let mut st = state.borrow_mut();
+    if st.update_restart_deadline.is_some() {
+        return;
+    }
+    for tab in &st.tabs {
+        tab.session.shutdown();
+        for pane in &tab.extra_panes {
+            pane.session.shutdown();
+        }
+    }
+    for entry in &st.detached {
+        entry.session.shutdown();
+    }
+    st.update_restart_deadline =
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+    ui.set_update_status("Closing active sessions before restart".into());
+}
+
+/// Called from the normal redraw tick while the update restart close action
+/// is draining sessions. This function never exits the process itself; the
+/// platform backend owns the eventual handoff/relaunch.
+pub(super) fn tick_update_completion(st: &mut State, ui: &AppWindow) {
+    let Some(deadline) = st.update_restart_deadline else {
+        return;
+    };
+    if total_active_count(st) != 0 && std::time::Instant::now() < deadline {
+        return;
+    }
+    st.update_restart_deadline = None;
+    let Some(handle) = st.update.as_ref() else {
+        return;
+    };
+    if let Err(error) = handle.try_submit(cm_update::UpdateCommand::BeginCompletion) {
+        tracing::warn!(%error, "could not begin update completion after session drain");
+        ui.set_update_status("Could not restart to complete update".into());
+    }
+}
+
 fn request_quit(state: &Rc<RefCell<State>>, ui: &AppWindow) -> CloseRequestResponse {
     let (active, confirm, confirmed) = {
         let st = state.borrow();
@@ -469,6 +555,7 @@ pub(super) fn wire_close_confirmation(ctx: &Ctx) {
                     Some((SettingKey::ConfirmCloseActiveTab, false))
                 }
                 CloseAction::CloseHome => None,
+                CloseAction::UpdateRestart => None,
             })
             .flatten();
             if let Some((key, is_quit)) = preference {
@@ -534,6 +621,7 @@ pub(super) fn wire_close_confirmation(ctx: &Ctx) {
                     tabs::select_tab(&state, &ui, tab_idx as i32);
                     panes::do_close_pane(&state, &tab_model, &ui, pane_id, false);
                 }
+                CloseAction::UpdateRestart => begin_update_shutdown(&state, &ui),
                 CloseAction::Quit => {
                     state.borrow_mut().quit_confirmed = true;
                     if let Err(error) = ui.window().hide() {

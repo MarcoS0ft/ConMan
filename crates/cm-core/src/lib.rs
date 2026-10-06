@@ -32,7 +32,7 @@ pub use app_settings::{
     MAX_FONT_SIZE, MAX_SCROLLBACK_LIMIT, MIN_FONT_SIZE, RendererBackend, STATE_ACTIVE_PANEL,
     STATE_FIRST_RUN_SEEDED, STATE_RENDERER_PROBE_CACHE, STATE_SESSION_TABS, STATE_SIDE_PANEL_WIDTH,
     STATE_SIDEBAR_COLLAPSED, ScopeSet, SessionTabEntry, SessionTabSnapshot, SettingKey,
-    SettingWarning, SettingsService, StartupBehavior, TerminalTheme, ThemeMode,
+    SettingWarning, SettingsService, StartupBehavior, TerminalTheme, ThemeMode, UpdateChannel,
 };
 pub use connection::{
     Connection, CredentialSource, Group, ResolvedAuth, resolve_connection_auth,

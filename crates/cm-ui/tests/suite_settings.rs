@@ -158,6 +158,7 @@ fn stale_font_family_uses_effective_default() {
         activation_rx: None,
         first_launch: true,
         agent_mode: None,
+        update: None,
     });
     h.ui.window()
         .set_size(slint::LogicalSize::new(1600.0, 1200.0));

@@ -1984,6 +1984,23 @@ export component AppWindow inherits Window {
     in-out property <bool> settings-auto-accept-rdp-certificates: false;
     in property <string> settings-build-version: "";
     in property <string> settings-build-details: "";
+    // Shared update capsule/settings state. The controller receives only
+    // normalized snapshots from cm-update; no release metadata is parsed in
+    // Slint.
+    in-out property <bool> settings-auto-check-updates: true;
+    in-out property <bool> settings-auto-download-updates: true;
+    in-out property <int> settings-update-channel: 0; // 0 stable, 1 dev
+    in property <bool> update-available: false;
+    in property <bool> update-enabled: false;
+    in property <bool> update-can-download: false;
+    in property <bool> update-ready: false;
+    in property <string> update-version: "";
+    in property <float> update-progress: 0.0;
+    in property <string> update-status: "Updates are idle";
+    // 0 restart-to-apply, 1 system installer, 2 downloaded artifact,
+    // 3 release page, 4 externally managed.
+    in property <int> update-action: 3;
+    callback update-restart();
 
     // ── Automation / Agent mode ──────────────────────────────
     // See SettingsPanel's identically-named properties for the full doc
@@ -2079,6 +2096,11 @@ export component AppWindow inherits Window {
     callback settings-open-config();
     callback settings-reload-config();
     callback settings-copy-build-info();
+    callback settings-check-updates();
+    callback update-primary();
+    callback settings-auto-check-updates-changed(bool);
+    callback settings-auto-download-updates-changed(bool);
+    callback settings-update-channel-changed(int);
     callback settings-shell-path-changed(string);
     callback settings-shell-args-changed(string);
     callback settings-shell-cwd-changed(string);
@@ -2567,6 +2589,16 @@ export component AppWindow inherits Window {
                     auto-accept-rdp-certificates <=> root.settings-auto-accept-rdp-certificates;
                     build-version       : root.settings-build-version;
                     build-details       : root.settings-build-details;
+                    auto-check-updates  <=> root.settings-auto-check-updates;
+                    auto-download-updates <=> root.settings-auto-download-updates;
+                    update-channel      <=> root.settings-update-channel;
+                    update-status       : root.update-status;
+                    update-version      : root.update-version;
+                    update-progress     : root.update-progress;
+                    update-ready        : root.update-ready;
+                    update-enabled      : root.update-enabled;
+                    update-can-download : root.update-can-download;
+                    update-action       : root.update-action;
                     agent-mode-available            : root.agent-mode-available;
                     agent-mode-enabled               <=> root.agent-mode-enabled;
                     agent-mode-scope-read             <=> root.agent-mode-scope-read;
@@ -2597,6 +2629,11 @@ export component AppWindow inherits Window {
                     open-config() => { root.settings-open-config(); }
                     reload-config() => { root.settings-reload-config(); }
                     copy-build-info() => { root.settings-copy-build-info(); }
+                    check-updates() => { root.settings-check-updates(); }
+                    update-primary() => { root.update-primary(); }
+                    auto-check-updates-changed(v) => { root.settings-auto-check-updates-changed(v); }
+                    auto-download-updates-changed(v) => { root.settings-auto-download-updates-changed(v); }
+                    update-channel-changed(v) => { root.settings-update-channel-changed(v); }
                     agent-mode-enabled-changed(v)       => { root.agent-mode-enabled-changed(v); }
                     agent-mode-scope-read-changed(v)    => { root.agent-mode-scope-read-changed(v); }
                     agent-mode-scope-write-changed(v)   => { root.agent-mode-scope-write-changed(v); }
@@ -3183,6 +3220,40 @@ export component AppWindow inherits Window {
                             accessible-label: "Broadcast active: " + root.broadcast-target-label;
                             accessible-action-default => { root.open-broadcast-target(); }
                             clicked => { root.open-broadcast-target(); }
+                        }
+                    }
+                    // One normalized, transient update capsule. It is hidden
+                    // for idle/background-check/up-to-date/error states by the
+                    // controller and never exposes server-provided text.
+                    if update-available : Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        height: 24px;
+                        border-radius: Theme.radius-sm - 2px;
+                        background: update-ready
+                            ? Theme.color-accent-subtle
+                            : Theme.color-elevated;
+                        HorizontalLayout {
+                            padding-left: Theme.space-2; padding-right: Theme.space-2;
+                            spacing: Theme.space-1;
+                            Text {
+                                text: update-ready && update-action == 0
+                                    ? "\u{E8AC} Restart to update"
+                                    : update-version == ""
+                                        ? "Update"
+                                        : "Update " + update-version;
+                                color: update-ready && update-action == 0
+                                    ? Theme.color-accent : Theme.color-text-secondary;
+                                font-size: Theme.font-xs;
+                                font-family: Theme.font-family-mono;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if update-ready && update-action == 0 : TouchArea {
+                            accessible-role: button;
+                            accessible-label: "Restart to Complete Update";
+                            accessible-action-default => { root.update-restart(); }
+                            clicked => { root.update-restart(); }
                         }
                     }
                     // persistent active indicator - shown iff agent-mode is

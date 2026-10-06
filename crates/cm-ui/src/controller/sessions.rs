@@ -4602,6 +4602,8 @@ pub(super) fn tick(
     ui: &AppWindow,
 ) {
     let mut st = state.borrow_mut();
+    super::updates::tick(&mut st, ui);
+    super::close::tick_update_completion(&mut st, ui);
     let active = st.active;
     poll_terminal_buffer_copies(&mut st);
     let terminal_selection_cleared = tick_clipboard(&mut st);

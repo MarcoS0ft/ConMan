@@ -8,6 +8,7 @@ members = [
     "crates/cm-secrets",
     "crates/cm-session",
     "crates/cm-platform",
+    "crates/cm-update",
     "crates/cm-ui",
     "crates/conman",
     "crates/conmanctl",

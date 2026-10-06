@@ -556,6 +556,10 @@ fn build_config(
         activation_rx,
         first_launch,
         agent_mode,
+        // Platform workers replace this seam with the concrete backend once
+        // their installer mechanics are wired. Keeping the field explicit
+        // makes the UI/test composition contract compile in the meantime.
+        update: None,
     })
 }
 

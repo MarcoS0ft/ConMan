@@ -623,6 +623,15 @@ pub(super) fn apply_settings_to_ui(settings: &AppSettings, state: &AppState, ui:
     ui.set_settings_confirm_quit_active_connections(settings.confirm_quit_active_connections);
     ui.set_settings_auto_accept_ssh_host_keys(settings.auto_accept_ssh_host_keys);
     ui.set_settings_auto_accept_rdp_certificates(settings.auto_accept_rdp_certificates);
+    ui.set_settings_auto_check_updates(settings.auto_check_updates);
+    ui.set_settings_auto_download_updates(settings.auto_download_updates);
+    ui.set_settings_update_channel(
+        if settings.update_channel == Some(cm_core::UpdateChannel::Dev) {
+            1
+        } else {
+            0
+        },
+    );
     ui.set_startup_behavior(startup_index(settings.startup));
     ui.set_render_backend(render_backend_index(settings.renderer_backend));
     ui.set_active_panel(state.active_panel);

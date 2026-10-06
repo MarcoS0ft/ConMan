@@ -57,6 +57,39 @@ string_enum!(StartupBehavior { Clean => "clean", Restore => "restore" });
 string_enum!(RendererBackend {
     Auto => "auto", Software => "software", Accelerated => "accelerated"
 });
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateChannel {
+    Stable,
+    Dev,
+}
+
+impl UpdateChannel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Dev => "dev",
+        }
+    }
+}
+
+impl Display for UpdateChannel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for UpdateChannel {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "stable" => Ok(Self::Stable),
+            "dev" => Ok(Self::Dev),
+            _ => Err("unsupported UpdateChannel value"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ScopeSet {
@@ -136,6 +169,9 @@ pub enum SettingKey {
     ConfirmQuitActiveConnections,
     AutoAcceptSshHostKeys,
     AutoAcceptRdpCertificates,
+    AutoCheckUpdates,
+    AutoDownloadUpdates,
+    UpdateChannel,
     AutomationEnabled,
     AutomationScopes,
 }
@@ -160,6 +196,9 @@ pub const ALL_SETTING_KEYS: &[SettingKey] = &[
     SettingKey::ConfirmQuitActiveConnections,
     SettingKey::AutoAcceptSshHostKeys,
     SettingKey::AutoAcceptRdpCertificates,
+    SettingKey::AutoCheckUpdates,
+    SettingKey::AutoDownloadUpdates,
+    SettingKey::UpdateChannel,
     SettingKey::AutomationEnabled,
     SettingKey::AutomationScopes,
 ];
@@ -186,6 +225,9 @@ impl SettingKey {
             Self::ConfirmQuitActiveConnections => "confirm-quit-active-connections",
             Self::AutoAcceptSshHostKeys => "auto-accept-ssh-host-keys",
             Self::AutoAcceptRdpCertificates => "auto-accept-rdp-certificates",
+            Self::AutoCheckUpdates => "auto-check-updates",
+            Self::AutoDownloadUpdates => "auto-download-updates",
+            Self::UpdateChannel => "update-channel",
             Self::AutomationEnabled => "automation-enabled",
             Self::AutomationScopes => "automation-scopes",
         }
@@ -212,7 +254,10 @@ impl SettingKey {
             | Self::ConfirmQuitActiveConnections
             | Self::AutoAcceptSshHostKeys
             | Self::AutoAcceptRdpCertificates
+            | Self::AutoCheckUpdates
+            | Self::AutoDownloadUpdates
             | Self::AutomationEnabled => parse_bool(value),
+            Self::UpdateChannel => parse_enum::<UpdateChannel>(value),
             Self::AutomationScopes => ScopeSet::validate(value).map_err(str::to_owned),
             Self::FontFamily | Self::Command | Self::CommandArgs | Self::WorkingDirectory => Ok(()),
         };
@@ -284,6 +329,11 @@ pub struct AppSettings {
     pub confirm_quit_active_connections: bool,
     pub auto_accept_ssh_host_keys: bool,
     pub auto_accept_rdp_certificates: bool,
+    pub auto_check_updates: bool,
+    pub auto_download_updates: bool,
+    /// The raw user selection. `None` means use the channel implied by the
+    /// running build, while `Some(Stable)` is an explicit stable selection.
+    pub update_channel: Option<UpdateChannel>,
     pub automation: AutomationSettings,
 }
 
@@ -309,6 +359,9 @@ impl Default for AppSettings {
             confirm_quit_active_connections: true,
             auto_accept_ssh_host_keys: false,
             auto_accept_rdp_certificates: false,
+            auto_check_updates: true,
+            auto_download_updates: true,
+            update_channel: None,
             automation: AutomationSettings::default(),
         }
     }
@@ -414,6 +467,17 @@ impl<'a> SettingsService<'a> {
             s.auto_accept_rdp_certificates,
             &mut warnings,
         )?;
+        s.auto_check_updates = self.read_bool(
+            SettingKey::AutoCheckUpdates,
+            s.auto_check_updates,
+            &mut warnings,
+        )?;
+        s.auto_download_updates = self.read_bool(
+            SettingKey::AutoDownloadUpdates,
+            s.auto_download_updates,
+            &mut warnings,
+        )?;
+        s.update_channel = self.read_optional_parsed(SettingKey::UpdateChannel, &mut warnings)?;
         s.automation.enabled = self.read_bool(
             SettingKey::AutomationEnabled,
             s.automation.enabled,
@@ -492,6 +556,27 @@ impl<'a> SettingsService<'a> {
             }
         }
     }
+
+    fn read_optional_parsed<T: FromStr>(
+        &self,
+        key: SettingKey,
+        warnings: &mut Vec<SettingWarning>,
+    ) -> Result<Option<T>, AppConfigError>
+    where
+        T::Err: Display,
+    {
+        let Some(raw) = self.raw(key)? else {
+            return Ok(None);
+        };
+        match raw.parse() {
+            Ok(value) => Ok(Some(value)),
+            Err(error) => {
+                warnings.push(warning(key, raw, &error.to_string()));
+                Ok(None)
+            }
+        }
+    }
+
     fn read_bool(
         &self,
         key: SettingKey,
@@ -602,6 +687,20 @@ fn serialize_settings(settings: &AppSettings) -> Vec<(SettingKey, String)> {
         (
             SettingKey::AutoAcceptRdpCertificates,
             bool_wire(settings.auto_accept_rdp_certificates).to_owned(),
+        ),
+        (
+            SettingKey::AutoCheckUpdates,
+            bool_wire(settings.auto_check_updates).to_owned(),
+        ),
+        (
+            SettingKey::AutoDownloadUpdates,
+            bool_wire(settings.auto_download_updates).to_owned(),
+        ),
+        (
+            SettingKey::UpdateChannel,
+            settings
+                .update_channel
+                .map_or_else(String::new, |value| value.to_string()),
         ),
         (
             SettingKey::AutomationEnabled,
@@ -819,6 +918,9 @@ mod tests {
         assert!(settings.confirm_quit_active_connections);
         assert!(!settings.auto_accept_ssh_host_keys);
         assert!(!settings.auto_accept_rdp_certificates);
+        assert!(settings.auto_check_updates);
+        assert!(settings.auto_download_updates);
+        assert_eq!(settings.update_channel, None);
         assert_eq!(settings.renderer_backend, RendererBackend::Auto);
         assert_eq!(settings.automation, AutomationSettings::default());
     }
@@ -847,6 +949,9 @@ mod tests {
             confirm_quit_active_connections: false,
             auto_accept_ssh_host_keys: true,
             auto_accept_rdp_certificates: true,
+            auto_check_updates: false,
+            auto_download_updates: false,
+            update_channel: Some(UpdateChannel::Dev),
             automation: AutomationSettings {
                 enabled: true,
                 scopes: ScopeSet {
@@ -965,7 +1070,7 @@ mod tests {
 
     #[test]
     fn strict_validation_is_case_sensitive_and_checks_ranges() {
-        assert_eq!(ALL_SETTING_KEYS.len(), 21);
+        assert_eq!(ALL_SETTING_KEYS.len(), 24);
         for key in ALL_SETTING_KEYS {
             key.validate_value("").unwrap();
         }

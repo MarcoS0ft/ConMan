@@ -24,6 +24,7 @@ use cm_core::{
     TelnetSettings,
 };
 use cm_session::{CertDecision, HostKeyDecision, PaneGroup, RdpAuthInput, Session, SshAuthInput};
+use cm_update::{UpdateHandle, UpdateSnapshot};
 use slint::{ComponentHandle, Image, ModelRc, SharedString, Timer, VecModel};
 
 use crate::clipboard::PlatformClipboardHandle;
@@ -48,6 +49,7 @@ mod settings_ctl;
 mod startup;
 mod tabs;
 mod tree_ctl;
+mod updates;
 
 /// Default logical font size used in unit tests (matches `AppSettings::default.font_size`).
 #[cfg(test)]
@@ -382,6 +384,11 @@ struct State {
     /// second close request (some backends emit one while hiding) must not
     /// reopen the confirmation dialog.
     quit_confirmed: bool,
+    /// Set after the explicit update-restart confirmation while active
+    /// sessions are asked to disconnect. The close coordinator submits
+    /// `BeginCompletion` only when all endpoints are inactive or the bounded
+    /// five-second drain deadline expires.
+    update_restart_deadline: Option<std::time::Instant>,
     terminal_theme: cm_core::TerminalTheme,
     scrollback_limit: usize,
     pointer_gesture: Option<PointerGestureCapture>,
@@ -461,6 +468,10 @@ struct State {
     /// never meaningfully reads it (it's always `None` there).
     #[allow(dead_code)]
     agent_mode: Option<crate::AgentModeConfig>,
+    update: Option<UpdateHandle>,
+    update_snapshot: Option<UpdateSnapshot>,
+    update_auto_started: bool,
+    update_started_at: std::time::Instant,
 }
 
 impl Drop for State {
@@ -662,6 +673,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
     let secure_clipboard_root = config.secure_clipboard_root;
     let first_launch = config.first_launch;
     let agent_mode = config.agent_mode;
+    let update = config.update;
     let build_identity = config.build_identity;
 
     let ui = AppWindow::new()?;
@@ -786,6 +798,7 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         close_modal_global_keys: BTreeSet::new(),
         close_modal_rdp_keys: BTreeSet::new(),
         quit_confirmed: false,
+        update_restart_deadline: None,
         terminal_theme: stored_settings.terminal_theme,
         scrollback_limit: stored_settings.scrollback_limit,
         app_state: app_state.clone(),
@@ -828,6 +841,10 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
         pane_model: pane_model.clone(),
         // see the field doc comment.
         agent_mode,
+        update,
+        update_snapshot: None,
+        update_auto_started: false,
+        update_started_at: std::time::Instant::now(),
     }));
 
     settings_ctl::apply_terminal_font_settings_to_ui(&state.borrow(), &ui);
@@ -905,6 +922,13 @@ fn assemble(config: AppConfig) -> Result<(AppWindow, Ctx, Timer), slint::Platfor
     tree_ctl::wire_tree_ctl(&ctx);
     keys_ctl::wire_keys_ctl(&ctx);
     settings_ctl::wire_settings_ctl(&ctx);
+    updates::wire_settings(&ctx);
+    ctx.ui
+        .set_update_enabled(ctx.state.borrow().update.is_some());
+    if ctx.state.borrow().update.is_none() {
+        ctx.ui
+            .set_update_status("Automatic updates are unavailable in this build".into());
+    }
     palette::wire_palette(&ctx);
     overlays::wire_overlays(&ctx);
     launchpad::wire_launchpad(&ctx);

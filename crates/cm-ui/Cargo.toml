@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 cm-core = { path = "../cm-core" }
+cm-update = { path = "../cm-update" }
 cm-storage = { path = "../cm-storage" }
 # cm-platform: OS accent-color read at startup + live watch.
 cm-platform = { path = "../cm-platform" }

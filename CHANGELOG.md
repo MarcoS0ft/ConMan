@@ -25,6 +25,9 @@ All notable user-facing changes to Connection Manager are documented here.
   through Ctrl+9 for direct access to connection tabs.
 - Add secure-default, independently configurable lab-mode options to
   automatically trust and remember SSH host keys and RDP certificates.
+- Add update preferences, signed-manifest validation, and update UI foundations.
+  Automatic updates remain unavailable until concrete platform backends and
+  release-manifest publication are connected.
 
 ### Changed
 

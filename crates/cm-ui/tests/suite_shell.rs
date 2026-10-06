@@ -1163,6 +1163,7 @@ fn telnet_session_restore_dispatches_provider() {
         activation_rx: None,
         first_launch: false,
         agent_mode: None,
+        update: None,
     });
     pump_ticks(1);
     assert_eq!(provider.telnet_connect_count(), 1);

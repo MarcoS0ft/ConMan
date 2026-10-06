@@ -18,6 +18,7 @@ use std::sync::Arc;
 use cm_core::{
     AppConfigStore, AppStateRepository, ConnectionRepository, CredentialStore, SessionProvider,
 };
+use cm_update::UpdateHandle;
 
 mod clipboard;
 mod controller;
@@ -188,6 +189,12 @@ pub struct AppConfig {
     /// is the default/common case; see [`AgentModeConfig`]'s doc comment for
     /// why this field itself is never behind a `cfg`.
     pub agent_mode: Option<AgentModeConfig>,
+    /// Shared update worker. The worker owns no UI objects; snapshots are
+    /// drained by the Slint controller on its normal timer. `None` is used by
+    /// legacy test fixtures that intentionally exercise the UI without a
+    /// platform updater. Production builds also use `None` until a concrete
+    /// backend is connected; the UI disables manual checks in that case.
+    pub update: Option<UpdateHandle>,
 }
 
 impl std::fmt::Debug for AppConfig {

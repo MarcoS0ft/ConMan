@@ -13,7 +13,7 @@
 // import { SettingsPanel } from "screens/settings_panel.slint";
 
 import { Theme } from "../theme.slint";
-import { SegmentedControl, EditableFocus } from "../components.slint";
+import { SegmentedControl, EditableFocus, PrimaryButton, SecondaryButton } from "../components.slint";
 import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView } from "std-widgets.slint";
 
 // ── SectionHeader ────────────────────────────────────────────────────────────
@@ -175,6 +175,16 @@ export component SettingsPanel inherits Rectangle {
     in-out property <bool> auto-accept-rdp-certificates: false;
     in property <string> build-version: "";
     in property <string> build-details: "";
+    in-out property <bool> auto-check-updates: true;
+    in-out property <bool> auto-download-updates: true;
+    in-out property <int> update-channel: 0;
+    in property <string> update-status: "Updates are idle";
+    in property <string> update-version: "";
+    in property <float> update-progress: 0.0;
+    in property <bool> update-ready: false;
+    in property <bool> update-enabled: false;
+    in property <bool> update-can-download: false;
+    in property <int> update-action: 3;
 
     // ── Automation / Agent mode ─────────────────────────────────────
     // `agent-mode-available`: true only when this binary was actually built
@@ -218,6 +228,11 @@ export component SettingsPanel inherits Rectangle {
     callback open-config();
     callback reload-config();
     callback copy-build-info();
+    callback check-updates();
+    callback update-primary();
+    callback auto-check-updates-changed(bool);
+    callback auto-download-updates-changed(bool);
+    callback update-channel-changed(int);
     callback agent-mode-enabled-changed(bool);
     callback agent-mode-scope-read-changed(bool);
     callback agent-mode-scope-write-changed(bool);
@@ -695,6 +710,83 @@ export component SettingsPanel inherits Rectangle {
                             root.startup-behavior-changed(root.startup-behavior);
                         }
                     }
+                }
+            }
+
+            // ════ UPDATES ══════════════════════════════════════════════
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+            SectionHeader { label: "UPDATES"; }
+            Rectangle { height: 1px; background: Theme.color-stroke; }
+
+            VerticalLayout {
+                padding-left: root.content-padding; padding-right: root.content-padding;
+                padding-top: Theme.space-4; padding-bottom: Theme.space-2;
+                spacing: Theme.space-3;
+                Text {
+                    text: root.update-version == "" ? "Software updates" : "Update " + root.update-version + " is available";
+                    color: Theme.color-text; font-size: Theme.font-base;
+                    font-family: Theme.font-family; font-weight: 600;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.update-status;
+                    color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                    font-family: Theme.font-family; wrap: word-wrap;
+                }
+                CheckBox {
+                    text: "Check for updates automatically";
+                    min-width: 0px;
+                    checked <=> root.auto-check-updates;
+                    toggled => { root.auto-check-updates-changed(self.checked); }
+                    accessible-label: "Check for updates automatically";
+                }
+                CheckBox {
+                    text: "Download updates automatically";
+                    min-width: 0px;
+                    checked <=> root.auto-download-updates;
+                    toggled => { root.auto-download-updates-changed(self.checked); }
+                    accessible-label: "Download updates automatically";
+                }
+                Text { text: "Release channel"; color: Theme.color-text-secondary;
+                    font-size: Theme.font-sm; font-family: Theme.font-family; }
+                if !root.narrow-layout : SegmentedControl {
+                    options: ["Stable", "Dev"];
+                    selected <=> root.update-channel;
+                    changed(i) => { root.update-channel-changed(i); }
+                }
+                if root.narrow-layout : ComboBox {
+                    min-width: 0px;
+                    model: ["Stable", "Dev"];
+                    current-index <=> root.update-channel;
+                    accessible-label: "Release channel";
+                    selected(value) => {
+                        root.update-channel = value == "Dev" ? 1 : 0;
+                        root.update-channel-changed(root.update-channel);
+                    }
+                }
+                SecondaryButton {
+                    text: "Check for updates now";
+                    enabled: root.update-enabled;
+                    clicked => { root.check-updates(); }
+                    accessible-label: "Check for updates now";
+                }
+                if root.update-ready && root.update-action != 4 : PrimaryButton {
+                    text: root.update-action == 0 ? "Restart to Complete Update"
+                        : root.update-action == 1 ? "Finish in System Installer"
+                        : root.update-action == 2 ? "Open Downloaded Update"
+                        : "Open Release Page";
+                    clicked => { root.update-primary(); }
+                    accessible-label: self.text;
+                }
+                if root.update-can-download : SecondaryButton {
+                    text: "Download update";
+                    clicked => { root.update-primary(); }
+                    accessible-label: "Download update";
+                }
+                if root.update-version != "" : Text {
+                    text: root.update-progress > 0.0 ? "Download progress: " + round(root.update-progress * 100.0) + "%" : "A verified update is available.";
+                    color: Theme.color-text-secondary; font-size: Theme.font-sm;
+                    font-family: Theme.font-family; wrap: word-wrap;
                 }
             }
 

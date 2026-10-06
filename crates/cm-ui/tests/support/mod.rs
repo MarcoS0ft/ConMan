@@ -136,6 +136,28 @@ pub(crate) fn harness_with_agent_mode(
     Arc<dyn ConnectionRepository>,
     Arc<MockSessionProvider>,
 ) {
+    harness_with_services(first_launch, agent_mode, None)
+}
+
+pub(crate) fn harness_with_update(
+    update: cm_update::UpdateHandle,
+) -> (
+    TestHarness,
+    Arc<dyn ConnectionRepository>,
+    Arc<MockSessionProvider>,
+) {
+    harness_with_services(true, None, Some(update))
+}
+
+fn harness_with_services(
+    first_launch: bool,
+    agent_mode: Option<cm_ui::AgentModeConfig>,
+    update: Option<cm_update::UpdateHandle>,
+) -> (
+    TestHarness,
+    Arc<dyn ConnectionRepository>,
+    Arc<MockSessionProvider>,
+) {
     let sqlite =
         Arc::new(SqliteRepository::open_in_memory().expect("open in-memory SqliteRepository"));
     let repo: Arc<dyn ConnectionRepository> = sqlite.clone();
@@ -159,6 +181,7 @@ pub(crate) fn harness_with_agent_mode(
         activation_rx: None,
         first_launch,
         agent_mode,
+        update,
     };
     let harness = cm_ui::build_for_test(config);
     // The testing backend's default window is 800x600 physical px
