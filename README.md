@@ -16,6 +16,9 @@ ConMan is under active development. Rolling `dev` builds are intended for
 testing and may change without compatibility guarantees. Stable releases will
 use semantic `vMAJOR.MINOR.PATCH` tags.
 
+See the [changelog](CHANGELOG.md) for dated development checkpoints and pending
+changes.
+
 ## Downloads
 
 Rolling builds are published on the [Releases](../../releases) page for:

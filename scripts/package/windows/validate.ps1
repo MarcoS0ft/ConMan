@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "../../..")).Path
+. (Join-Path $PSScriptRoot "version.ps1")
 function Existing([string] $Path) {
     $candidate = if ([IO.Path]::IsPathRooted($Path)) { $Path } else { Join-Path $repo $Path }
     return (Resolve-Path -LiteralPath ([IO.Path]::GetFullPath($candidate))).Path
@@ -48,6 +49,27 @@ foreach ($name in @("$base.zip", "$base-$channel-full.nupkg", "$base-$channel-se
     if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw "Malformed SHA-256 file: $checksum" }
     $actual = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $Matches[1] -or $Matches[2] -cne $name) { throw "Checksum mismatch or wrong name for $artifact" }
+}
+
+# Verify the MSI database itself, not just the version supplied to vpk.
+$revision = & git -C $repo rev-list --count HEAD
+if ($LASTEXITCODE -ne 0) { throw "Could not determine the MSI build's Git revision" }
+$expectedMsiVersion = Get-ConManMsiVersion -Version ([string]$metadata.version) -Revision $revision
+$installer = New-Object -ComObject WindowsInstaller.Installer
+$database = $installer.OpenDatabase((Join-Path $output "$base-$channel.msi"), 0)
+$view = $database.OpenView("SELECT ``Value`` FROM ``Property`` WHERE ``Property`` = 'ProductVersion'")
+$record = $null
+try {
+    $view.Execute()
+    $record = $view.Fetch()
+    if ($null -eq $record -or $record.StringData(1) -cne $expectedMsiVersion) {
+        throw "MSI ProductVersion does not match expected $expectedMsiVersion"
+    }
+} finally {
+    $view.Close()
+    foreach ($comObject in @($record, $view, $database, $installer)) {
+        if ($null -ne $comObject) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($comObject) }
+    }
 }
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem

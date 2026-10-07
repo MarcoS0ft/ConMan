@@ -33,6 +33,16 @@ passed, the script extracts and executes only its pinned `net8.0/vpk.dll` with
 dotnet 8. There is no floating `latest` tool or network feed in the build.
 
 Build after `scripts/dist/prepare_release.py` has finalized the UPX binaries.
+Velopack keeps the full SemVer package version. MSI uses
+`major.minor.(2 * Git revision + stable)`, where `stable` is `1` for a stable
+version and `0` for a development build. For example, development revision 406
+is `0.1.812`; a stable `0.1.0` at that revision is `0.1.813`. Patch releases
+advance through Git revisions. This changes one of the three fields Windows
+Installer actually compares; a fourth field is ignored. Major and minor must
+fit `0..255`, and revisions must fit `1..32767`; packaging fails outside those
+bounds or when a development binary's revision differs from the checkout.
+Validation reads the generated MSI's `ProductVersion` and checks this mapping.
+
 The required signing order remains build -> UPX -> sign shipped executables ->
 Velopack package -> optionally sign Setup/MSI. Signing inputs are optional and
 must be injected only by a trusted release workflow.

@@ -17,6 +17,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "../../..")).Path
+. (Join-Path $PSScriptRoot "version.ps1")
 function Resolve-RepositoryPath {
     param([Parameter(Mandatory)] [string] $Path, [switch] $MustExist)
 
@@ -109,11 +110,11 @@ function Invoke-Vpk {
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 $vpk = Resolve-Vpk -RequestedPath $VpkPath
 $metadataChannel = Optional-Property -Object $metadata -Name "channel"
-$metadataMsiVersion = Optional-Property -Object $metadata -Name "msi_version"
 $channel = if ($metadataChannel) { [string]$metadataChannel } elseif ($metadata.version -match "-dev(?:[.+-]|$)") { "dev" } else { "stable" }
 if ($channel -notin @("stable", "dev")) { throw "Expected release channel stable or dev, got '$channel'" }
-$msiVersion = if ($metadataMsiVersion) { [string]$metadataMsiVersion } elseif ($metadata.version -match '^([0-9]+)\.([0-9]+)\.([0-9]+)') { "$($Matches[1]).$($Matches[2]).$($Matches[3]).0" } else { throw "Could not derive MSI version" }
-if ($msiVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$') { throw "Invalid MSI version '$msiVersion'" }
+$revision = & git -C $repo rev-list --count HEAD
+if ($LASTEXITCODE -ne 0) { throw "Could not determine the MSI build's Git revision" }
+$msiVersion = Get-ConManMsiVersion -Version ([string]$metadata.version) -Revision $revision
 
 $velopackStage = Join-Path ([IO.Path]::GetTempPath()) ("conman-velopack-stage-" + [guid]::NewGuid().ToString("N"))
 $velopackOutput = Join-Path ([IO.Path]::GetTempPath()) ("conman-velopack-output-" + [guid]::NewGuid().ToString("N"))

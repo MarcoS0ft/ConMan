@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import unittest
 
 
@@ -14,6 +16,53 @@ BUILD_SCRIPT = REPOSITORY / "scripts/package/windows/build.ps1"
 VALIDATE_SCRIPT = REPOSITORY / "scripts/package/windows/validate.ps1"
 BOOTSTRAP_SCRIPT = REPOSITORY / "scripts/package/windows/bootstrap-velopack.ps1"
 ADAPTER = REPOSITORY / "crates/conman/src/windows_velopack.rs"
+VERSION_SCRIPT = REPOSITORY / "scripts/package/windows/version.ps1"
+
+
+@unittest.skipUnless(shutil.which("pwsh") or shutil.which("powershell"), "PowerShell required")
+class MsiVersionTests(unittest.TestCase):
+    def version(self, version: str, revision: int) -> subprocess.CompletedProcess[str]:
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        script = (
+            "$ErrorActionPreference = 'Stop'; Set-StrictMode -Version Latest; "
+            f". '{str(VERSION_SCRIPT).replace(chr(39), chr(39) * 2)}'; "
+            f"Get-ConManMsiVersion -Version '{version}' -Revision {revision}"
+        )
+        return subprocess.run(
+            [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True, text=True, check=False,
+        )
+
+    def resolved(self, version: str, revision: int) -> tuple[int, ...]:
+        result = self.version(version, revision)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        parts = tuple(map(int, result.stdout.strip().split(".")))
+        self.assertEqual(len(parts), 3, "MSI ignores a fourth field")
+        return parts
+
+    def test_dev_builds_upgrade_using_the_first_three_fields(self) -> None:
+        old = self.resolved("0.1.0-dev.405+g0123456789", 405)
+        new = self.resolved("0.1.0-dev.406+gabcdef0123", 406)
+        self.assertEqual(new, (0, 1, 812))
+        self.assertGreater(new, old)
+
+    def test_stable_sorts_after_same_revision_dev_and_before_next_dev(self) -> None:
+        dev = self.resolved("0.1.0-dev.406+gabcdef0123", 406)
+        stable = self.resolved("0.1.0", 406)
+        next_dev = self.resolved("0.1.1-dev.407+g0123456789", 407)
+        self.assertEqual(stable, (0, 1, 813))
+        self.assertLess(dev, stable)
+        self.assertLess(stable, next_dev)
+
+    def test_bounds_fail_instead_of_wrapping_or_colliding(self) -> None:
+        self.assertEqual(self.resolved("255.255.1", 32767), (255, 255, 65535))
+        for version, revision in [
+            ("0.1.0", 32768), ("256.1.0", 1), ("0.256.0", 1),
+            ("0.1.0", 0), ("0.1.0", -1),
+            ("0.1.0-dev.405+g0123456789", 406), ("0.1.0-rc.1", 406),
+        ]:
+            with self.subTest(version=version, revision=revision):
+                self.assertNotEqual(self.version(version, revision).returncode, 0)
 
 
 class WindowsPackagingContracts(unittest.TestCase):
@@ -64,6 +113,16 @@ class WindowsPackagingContracts(unittest.TestCase):
         self.assertIn("Portable ZIP contents differ", source)
         self.assertIn("sha256", source.lower())
         self.assertIn("only installed-update asset", source)
+
+    def test_build_and_validation_share_the_msi_version_mapping(self) -> None:
+        for path in (BUILD_SCRIPT, VALIDATE_SCRIPT):
+            source = path.read_text(encoding="utf-8")
+            self.assertIn('"version.ps1"', source)
+            self.assertIn("Get-ConManMsiVersion", source)
+            self.assertIn("rev-list --count HEAD", source)
+        validation = VALIDATE_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("WindowsInstaller.Installer", validation)
+        self.assertIn("ProductVersion", validation)
 
     def test_startup_and_lifecycle_contract(self) -> None:
         source = ADAPTER.read_text(encoding="utf-8")
