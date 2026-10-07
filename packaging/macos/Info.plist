@@ -27,7 +27,7 @@
     <string>https://github.com/MarcoS0ft/ConMan/releases/latest/download/appcast-stable.xml</string>
     <!-- Sparkle key id: conman-sparkle-v1; release CI injects the public key. -->
     <key>SUPublicEDKey</key>
-    <string>REPLACE_WITH_CONMAN_SPARKLE_V1_PUBLIC_KEY</string>
+    <string>14BNIgN9LWZIAEIc5aC4cBaIW9os1ikOZbPaL9MYU20=</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
     <key>SUAutomaticallyUpdate</key>

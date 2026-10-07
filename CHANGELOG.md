@@ -13,13 +13,33 @@ follow-ups are grouped with the behavior they support rather than repeated.
 
 Add pending changes under `Unreleased`. For a stable release, move its pending
 entries into `## [MAJOR.MINOR.PATCH] - YYYY-MM-DD`, matching the Cargo version and
-`vMAJOR.MINOR.PATCH` tag. GitHub release workflows currently generate their own
-notes; they do not automatically read this file.
+`vMAJOR.MINOR.PATCH` tag. Stable GitHub releases use the matching version section below as release notes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-06
+
+### Added
+
+- First stable desktop release for Linux x86_64, macOS arm64, and Windows x86_64,
+  including saved Local, SSH, Telnet, and RDP connections, tabs and split panes,
+  reconnect, targeted input broadcast, terminal history and search, native
+  credential storage, `conman.ini` preferences, and `conmanctl` administration.
+- Import ConMan JSON/CSV, RoyalTS JSON, and encrypted mRemoteNG XML connections.
+- RDP text/file clipboard redirection, dynamic resizing, secure attention, and
+  remote cursor rendering.
+- Native Linux packages, signed/notarized macOS DMG, Windows Velopack Setup/MSI
+  packages, portable archives, checksums, and dedicated Sparkle signing.
+
+### Limitations
+
+- Automatic updates remain unavailable in the application. Browser and gateway
+  foundations do not yet provide a working web client.
+
 ### Fixed
 
+- Render remote RDP cursors correctly and return terminal views to the live
+  cursor when typing or pasting.
 - Allow SSH password logins to servers that require keyboard-interactive
   password challenges, including current FortiMail and FortiAuthenticator
   firmware, without answering OTP or password-change prompts automatically.

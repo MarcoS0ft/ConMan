@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "cm-app-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cm-core",
  "cm-platform",
@@ -1153,11 +1153,11 @@ dependencies = [
 
 [[package]]
 name = "cm-build-info"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "cm-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "click-rs",
  "cm-build-info",
@@ -1176,7 +1176,7 @@ dependencies = [
 
 [[package]]
 name = "cm-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1186,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "cm-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cm-core",
  "dirs",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "cm-secrets"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cm-core",
  "keyring",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "cm-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cm-core",
  "cm-platform",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "cm-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "cm-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "cm-core",
@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "cm-update"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "cm-core",
@@ -1307,11 +1307,11 @@ dependencies = [
 
 [[package]]
 name = "cm-update-macos"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "cm-web-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "conman"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cm-build-info",
  "cm-cli",
@@ -1388,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "conman-gateway"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2 0.5.3",
  "axum",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "conman-web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cm-ui",
  "slint",
@@ -1415,7 +1415,7 @@ dependencies = [
 
 [[package]]
 name = "conmanctl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cm-cli",
  "serde_json",
