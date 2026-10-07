@@ -91,7 +91,20 @@ if [[ -n "$identity" ]]; then
     else
         dmg_sign_args+=(--timestamp)
     fi
-    codesign "${dmg_sign_args[@]}" "$dmg"
+    # Apple's timestamp service can fail intermittently. Retry only that failure;
+    # every attempt still requires a timestamp and all other errors stop release.
+    for attempt in 1 2 3; do
+        sign_status=0
+        sign_output=$(codesign "${dmg_sign_args[@]}" "$dmg" 2>&1) || sign_status=$?
+        printf '%s\n' "$sign_output" >&2
+        [[ "$sign_status" -ne 0 ]] || break
+        if [[ "$identity" == "-" || "$attempt" -eq 3 ]] ||
+           ! printf '%s\n' "$sign_output" | grep -Eq 'A timestamp was expected but was not found|timestamp service is not available'; then
+            exit "$sign_status"
+        fi
+        echo "Retrying DMG signing after timestamp service failure ($attempt/3)" >&2
+        sleep 5
+    done
     codesign --verify --verbose=2 "$dmg"
 fi
 
