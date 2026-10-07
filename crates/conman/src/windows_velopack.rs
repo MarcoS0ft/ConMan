@@ -976,6 +976,7 @@ mod tests {
                 .download_release_entry(&unauthorized, &destination, None)
                 .is_err()
         );
-        assert!(!destination.exists());
+        // Rejecting an unauthorized request must preserve the prior authorized bytes.
+        assert_eq!(fs::read(&destination).unwrap(), b"package");
     }
 }
