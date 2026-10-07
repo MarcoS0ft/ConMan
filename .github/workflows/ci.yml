@@ -164,6 +164,10 @@ jobs:
           test -f "$bridge"
           echo "CONMAN_SPARKLE_BRIDGE=$bridge" >> "$GITHUB_ENV"
           echo "CONMAN_SPARKLE_BRIDGE_DIR=$(dirname "$bridge")" >> "$GITHUB_ENV"
+          # Cargo filters external DYLD paths; stage the test runtime at its rpath.
+          mkdir -p target/debug/Frameworks
+          cp "$bridge" target/debug/Frameworks/
+          cp -R "$CONMAN_SPARKLE_DIR" target/debug/Frameworks/
           echo "DYLD_LIBRARY_PATH=$(dirname "$bridge"):$(dirname "$CONMAN_SPARKLE_DIR"):${DYLD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Lint all targets and features
