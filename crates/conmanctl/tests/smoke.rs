@@ -11,7 +11,7 @@ fn version_is_machine_clean_and_uses_embedded_build_identity() {
     let output = conmanctl().arg("--version").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.starts_with("conmanctl 0.1.0"));
+    assert!(stdout.starts_with(concat!("conmanctl ", env!("CARGO_PKG_VERSION"))));
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
 }
 
