@@ -20,6 +20,8 @@ use cm_core::{
     TelnetSettings, TerminalSize,
 };
 
+type SharedCursor = Arc<Mutex<(RdpCursor, bool)>>;
+
 /// A [`Session`] whose lifecycle is entirely driven by a shared status cell
 /// the test holds a clone of. The provider retains the unique surface sender
 /// so tests can publish explicitly; until then, its slot remains empty and
@@ -28,7 +30,7 @@ use cm_core::{
 pub(crate) struct ScriptedSession {
     status: Arc<Mutex<SessionStatus>>,
     surface: Surface,
-    cursor: Option<Arc<Mutex<(RdpCursor, bool)>>>,
+    cursor: Option<SharedCursor>,
     shared: ScriptedSessionShared,
     session_id: usize,
 }
@@ -66,7 +68,7 @@ impl ScriptedSession {
     fn new_rdp(
         status: Arc<Mutex<SessionStatus>>,
         rdp_outputs: Arc<Mutex<Vec<LatestSender<FrameUpdate>>>>,
-        cursors: &Mutex<Vec<Arc<Mutex<(RdpCursor, bool)>>>>,
+        cursors: &Mutex<Vec<SharedCursor>>,
         session_id: usize,
         shared: ScriptedSessionShared,
     ) -> Self {
@@ -162,7 +164,7 @@ pub(crate) struct MockSessionProvider {
     shutdowns: Arc<AtomicUsize>,
     terminal_outputs: Arc<Mutex<Vec<LatestSender<GridSnapshot>>>>,
     rdp_outputs: Arc<Mutex<Vec<LatestSender<FrameUpdate>>>>,
-    cursors: Mutex<Vec<Arc<Mutex<(RdpCursor, bool)>>>>,
+    cursors: Mutex<Vec<SharedCursor>>,
     next_session_id: AtomicUsize,
     tagged_inputs: Arc<Mutex<Vec<(usize, SessionInput)>>>,
     search_requests: Arc<AtomicUsize>,

@@ -4866,6 +4866,36 @@ pub(super) fn wire_tick(ctx: &Ctx) -> Timer {
     redraw
 }
 
+/// Convert only cursor changes (or a pane/tab presentation) to a small UI image.
+pub(super) fn cursor_to_ui(cursor: Option<cm_core::RdpCursor>) -> crate::RemoteCursor {
+    match cursor {
+        Some(cm_core::RdpCursor::Bitmap {
+            width,
+            height,
+            hotspot_x,
+            hotspot_y,
+            rgba,
+        }) => {
+            let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                rgba.as_ref(),
+                u32::from(width),
+                u32::from(height),
+            );
+            crate::RemoteCursor {
+                kind: 2,
+                bitmap: Image::from_rgba8(pixels),
+                hotspot_x: i32::from(hotspot_x),
+                hotspot_y: i32::from(hotspot_y),
+            }
+        }
+        Some(cm_core::RdpCursor::Hidden) => crate::RemoteCursor {
+            kind: 1,
+            ..Default::default()
+        },
+        _ => crate::RemoteCursor::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6167,35 +6197,5 @@ mod tests {
             None,
             "later focus changes cannot restart a failed-closed bridge"
         );
-    }
-}
-
-/// Convert only cursor changes (or a pane/tab presentation) to a small UI image.
-pub(super) fn cursor_to_ui(cursor: Option<cm_core::RdpCursor>) -> crate::RemoteCursor {
-    match cursor {
-        Some(cm_core::RdpCursor::Bitmap {
-            width,
-            height,
-            hotspot_x,
-            hotspot_y,
-            rgba,
-        }) => {
-            let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-                rgba.as_ref(),
-                u32::from(width),
-                u32::from(height),
-            );
-            crate::RemoteCursor {
-                kind: 2,
-                bitmap: Image::from_rgba8(pixels),
-                hotspot_x: i32::from(hotspot_x),
-                hotspot_y: i32::from(hotspot_y),
-            }
-        }
-        Some(cm_core::RdpCursor::Hidden) => crate::RemoteCursor {
-            kind: 1,
-            ..Default::default()
-        },
-        _ => crate::RemoteCursor::default(),
     }
 }
