@@ -49,9 +49,9 @@ pub use kind::ConnectionKind;
 pub use ports::{AppConfigStore, AppStateRepository, ConnectionRepository, CredentialStore};
 pub use session::{
     ClipboardPublishResult, ClipboardSnapshot, ExitStatus, FailedSession, FrameUpdate,
-    LocalClipboardRevision, RdpClipboardCommand, RdpClipboardEvent, RdpInputEvent, RdpMouseButton,
-    RemoteClipboardContent, RemoteClipboardRevision, Session, SessionEndpointId, SessionInput,
-    SessionStatus, Surface,
+    LocalClipboardRevision, RdpClipboardCommand, RdpClipboardEvent, RdpCursor, RdpInputEvent,
+    RdpMouseButton, RemoteClipboardContent, RemoteClipboardRevision, Session, SessionEndpointId,
+    SessionInput, SessionStatus, Surface,
 };
 pub use session_ports::{SessionProvider, SessionSetupError, TerminalOptions};
 pub use settings::{

@@ -114,6 +114,9 @@ use crate::session::{
 };
 use cm_core::RdpClipboardCommand;
 
+mod cursor;
+use cursor::CursorMailbox;
+
 mod clipboard;
 use clipboard::{ClipboardBackend, ClipboardEventMailbox, ClipboardWork};
 // the auth-input and cert-verifier *contract* types moved to
@@ -443,6 +446,7 @@ fn map_finalize_error(e: ConnectorError) -> RdpError {
 #[derive(Debug)]
 pub struct RdpSession {
     surface: Surface,
+    cursor: Arc<CursorMailbox>,
     status: Arc<Mutex<SessionStatus>>,
     cmd_tx: UnboundedSender<RdpCmd>,
     driver: Mutex<Option<JoinHandle<()>>>,
@@ -464,6 +468,8 @@ impl RdpSession {
         endpoint_id: cm_core::SessionEndpointId,
         clipboard_root: Option<Arc<cm_platform::secure_temp::SecureClipboardRoot>>,
     ) -> Result<Self, RdpError> {
+        let cursor = Arc::new(CursorMailbox::default());
+        let driver_cursor = Arc::clone(&cursor);
         let (frame_tx, frame_rx) = latest_channel::<FrameUpdate>();
         let (cmd_tx, cmd_rx) = unbounded_channel::<RdpCmd>();
         let status = Arc::new(Mutex::new(SessionStatus::Connecting));
@@ -495,6 +501,7 @@ impl RdpSession {
                         verifier,
                         cert_store,
                         frame_tx,
+                        cursor: driver_cursor,
                         cmd_rx,
                         status: driver_status,
                         clipboard_events: driver_clipboard_events,
@@ -512,6 +519,7 @@ impl RdpSession {
 
         Ok(Self {
             surface: Surface::Framebuffer(frame_rx),
+            cursor,
             status,
             cmd_tx,
             driver: Mutex::new(Some(driver_handle)),
@@ -521,6 +529,14 @@ impl RdpSession {
 }
 
 impl Session for RdpSession {
+    fn rdp_cursor(&self) -> Option<cm_core::RdpCursor> {
+        Some(self.cursor.current())
+    }
+
+    fn take_rdp_cursor_update(&self) -> Option<cm_core::RdpCursor> {
+        self.cursor.take_update()
+    }
+
     fn surface(&self) -> &Surface {
         &self.surface
     }
@@ -600,6 +616,7 @@ struct DriveCtx {
     verifier: Arc<dyn CertVerifier>,
     cert_store: Arc<CertStore>,
     frame_tx: LatestSender<FrameUpdate>,
+    cursor: Arc<CursorMailbox>,
     cmd_rx: UnboundedReceiver<RdpCmd>,
     status: Arc<Mutex<SessionStatus>>,
     clipboard_events: Arc<ClipboardEventMailbox>,
@@ -1024,6 +1041,7 @@ async fn drive_inner(
         &mut input_db,
         &mut ctx.cmd_rx,
         &ctx.frame_tx,
+        &ctx.cursor,
         &ctx.status,
         t0,
     )
@@ -1222,6 +1240,7 @@ async fn active_loop<S>(
     input_db: &mut InputDatabase,
     cmd_rx: &mut UnboundedReceiver<RdpCmd>,
     frame_tx: &LatestSender<FrameUpdate>,
+    cursor: &CursorMailbox,
     status: &Arc<Mutex<SessionStatus>>,
     // §5.1 B9: connect-start Instant (from `drive_inner`), used to log
     // `ttff_ms` (time-to-first-frame) exactly once below.
@@ -1289,6 +1308,7 @@ where
                     &mut first_frame_logged,
                     t0,
                     frame_tx,
+                    cursor,
                     status,
                 )
                 .await?
@@ -1310,6 +1330,7 @@ where
                             &mut first_frame_logged,
                             t0,
                             frame_tx,
+                            cursor,
                             status,
                         )
                         .await?
@@ -1427,6 +1448,7 @@ async fn process_active_stage_pdu<S>(
     first_frame_logged: &mut bool,
     t0: std::time::Instant,
     frame_tx: &LatestSender<FrameUpdate>,
+    cursor: &CursorMailbox,
     status: &Arc<Mutex<SessionStatus>>,
 ) -> Result<PduOutcome, String>
 where
@@ -1441,6 +1463,7 @@ where
     let mut dirty = false;
     let mut reactivate: Option<Box<ConnectionActivationSequence>> = None;
     for output in outputs {
+        cursor.process(&output);
         match output {
             ActiveStageOutput::ResponseFrame(data) => {
                 framed.write_all(&data).await.map_err(|e| e.to_string())?;
@@ -1462,7 +1485,8 @@ where
                 // GraphicsUpdate) before acting on the reactivation.
                 reactivate = Some(cas);
             }
-            // Pointer / auto-detect events: ignored for MVP.
+            // Cursor shapes are published independently above. Position updates
+            // do not move the local pointer; other protocol events are unused.
             ActiveStageOutput::PointerDefault
             | ActiveStageOutput::PointerHidden
             | ActiveStageOutput::PointerPosition { .. }
@@ -1963,6 +1987,7 @@ async fn reactivate_session<S>(
     first_frame_logged: &mut bool,
     t0: std::time::Instant,
     frame_tx: &LatestSender<FrameUpdate>,
+    cursor: &CursorMailbox,
     status: &Arc<Mutex<SessionStatus>>,
 ) -> Result<ReactivationOutcome, String>
 where
@@ -1986,6 +2011,7 @@ where
             first_frame_logged,
             t0,
             frame_tx,
+            cursor,
             status,
         )
         .await?

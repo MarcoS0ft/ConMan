@@ -50,6 +50,14 @@ export struct TabItem {
 // frame image and surface kind. Drives the `pane-cells` repeater in the
 // session area — only populated (non-empty) when the active tab has more
 // than one pane; a single-pane tab keeps using `frame`/`rdp-frame`/
+// kind: 0 = local default, 1 = hidden, 2 = remote bitmap.
+export struct RemoteCursor {
+    kind: int,
+    bitmap: image,
+    hotspot-x: int,
+    hotspot-y: int,
+}
+
 export struct PaneCell {
     pane: int,
     x: float,
@@ -58,6 +66,7 @@ export struct PaneCell {
     h: float,
     frame: image,
     is-rdp: bool,
+    cursor: RemoteCursor,
     // Scrollback viewport state for this pane's overlay scrollbar
     // (`TerminalScrollbar` in `PaneSlot`): lines retained above the live
     // tail, the current offset above the tail, and the viewport height in
@@ -398,6 +407,15 @@ component TerminalSurface inherits Rectangle {
 // - No toggle-palette callback (Ctrl-K palette is handled at the AppWindow level).
 component RdpSurface inherits Rectangle {
     in property <image> frame;
+    in property <RemoteCursor> cursor;
+    clip: true;
+    property <float> desktop-scale: min(self.width / (max(1, frame.width) * 1px), self.height / (max(1, frame.height) * 1px));
+    property <length> desktop-x: (self.width - frame.width * desktop-scale * 1px) / 2;
+    property <length> desktop-y: (self.height - frame.height * desktop-scale * 1px) / 2;
+    property <bool> over-desktop: rdp-ta.has-hover && rdp-ta.mouse-x >= desktop-x
+        && rdp-ta.mouse-y >= desktop-y
+        && rdp-ta.mouse-x < desktop-x + frame.width * desktop-scale * 1px
+        && rdp-ta.mouse-y < desktop-y + frame.height * desktop-scale * 1px;
     // key-down: fired on key-pressed (key-down PDU to RDP).
     callback key-down(string /* text */, int /* special */, int /* mods */);
     // key-up: fired on key-released (key-up PDU to RDP).
@@ -499,7 +517,17 @@ component RdpSurface inherits Rectangle {
             image-rendering: pixelated;
         }
 
+        if root.cursor.kind == 2 && root.over-desktop : remote-cursor := Image {
+            source: root.cursor.bitmap;
+            x: rdp-ta.mouse-x - root.cursor.hotspot-x * root.desktop-scale * 1px;
+            y: rdp-ta.mouse-y - root.cursor.hotspot-y * root.desktop-scale * 1px;
+            width: root.cursor.bitmap.width * root.desktop-scale * 1px;
+            height: root.cursor.bitmap.height * root.desktop-scale * 1px;
+            image-fit: fill;
+        }
+
         rdp-ta := TouchArea {
+            mouse-cursor: root.over-desktop && root.cursor.kind != 0 ? MouseCursor.none : MouseCursor.default;
             pointer-event(e) => {
                 rdp-fs.focus();
                 root.pointer(
@@ -1438,6 +1466,7 @@ component PaneSlot inherits Rectangle {
     in property <bool>   is-focused;
     in property <int>    pane-index;
     in property <bool>   is-rdp;
+    in property <RemoteCursor> cursor;
     in property <int>    focus-request: 0;
     // true only when this pane is one of several in a split (the
     // repeater sets it from `pane-cells.length > 1`) - a single-pane tab has
@@ -1502,6 +1531,7 @@ component PaneSlot inherits Rectangle {
         if root.is-rdp : RdpSurface {
             width: 100%; height: 100%;
             frame: root.frame;
+            cursor: root.cursor;
             focus-request: root.is-focused ? root.focus-request : 0;
             key-down(t, s, m) => { root.key-down(t, s, m); }
             key-up(t, s, m)   => { root.key-up(t, s, m); }
@@ -1690,6 +1720,7 @@ export component AppWindow inherits Window {
     // rdp-frame: the decoded RGBA image from the active RDP session.
     // rdp-active: true while an RDP tab is the active tab.
     in property <image>     rdp-frame;
+    in property <RemoteCursor> rdp-cursor;
     in-out property <bool>  rdp-active: false;
     // ── Terminal overlay scrollbar (single-pane) ───────────────────
     // Scrollback viewport state of the active tab's primary terminal pane,
@@ -3033,6 +3064,7 @@ export component AppWindow inherits Window {
                 if rdp-active && pane-cells.length <= 1 : RdpSurface {
                     vertical-stretch: 1;
                     frame: root.rdp-frame;
+                    cursor: root.rdp-cursor;
                     focus-request: root.session-focus-request;
                     key-down(t, s, m) => { root.rdp-key-down(t, s, m); }
                     key-up(t, s, m)   => { root.rdp-key-up(t, s, m); }
@@ -3058,6 +3090,7 @@ export component AppWindow inherits Window {
                         height: cell.h * parent.height;
                         frame: cell.frame;
                         is-rdp: cell.is-rdp;
+                        cursor: cell.cursor;
                         is-focused: root.active-pane == cell.pane;
                         focus-request: root.session-focus-request;
                         pane-index: cell.pane;

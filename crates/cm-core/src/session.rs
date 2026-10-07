@@ -209,6 +209,22 @@ pub struct FrameUpdate {
     pub rgba: Vec<u8>,
 }
 
+/// Remote cursor shape, independent of desktop framebuffer updates.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RdpCursor {
+    #[default]
+    Default,
+    Hidden,
+    Bitmap {
+        width: u16,
+        height: u16,
+        hotspot_x: u16,
+        hotspot_y: u16,
+        /// Straight-alpha RGBA pixels, shared across cursor snapshots.
+        rgba: std::sync::Arc<[u8]>,
+    },
+}
+
 /// The rendering surface exposed by a [`Session`].
 ///
 /// - `TerminalGrid` — latest terminal cell snapshot (terminal sessions).
@@ -260,6 +276,15 @@ impl std::fmt::Debug for Surface {
 pub trait Session: Send {
     /// The surface channel for this session — inspect once, keep the receiver.
     fn surface(&self) -> &Surface;
+    /// Current remote cursor, retained even after its update is consumed.
+    /// Non-RDP sessions have no remote cursor.
+    fn rdp_cursor(&self) -> Option<RdpCursor> {
+        None
+    }
+    /// Consume the latest cursor change without waiting for a desktop redraw.
+    fn take_rdp_cursor_update(&self) -> Option<RdpCursor> {
+        None
+    }
     /// Current lifecycle state.
     fn status(&self) -> SessionStatus;
     /// Signal graceful shutdown and release resources.

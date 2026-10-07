@@ -448,6 +448,15 @@ fn build_pane_cells(
                     )
                 })
         };
+        let cursor = if rect.pane == 0 {
+            sessions::cursor_to_ui(tab.session.rdp_cursor())
+        } else {
+            sessions::cursor_to_ui(
+                tab.extra_panes
+                    .get(rect.pane - 1)
+                    .and_then(|ep| ep.session.rdp_cursor()),
+            )
+        };
         out.push(crate::PaneCell {
             pane: rect.pane as i32,
             x: rect.x,
@@ -456,6 +465,7 @@ fn build_pane_cells(
             h: rect.h,
             frame,
             is_rdp,
+            cursor,
             scrollback_len,
             scroll_offset,
             view_rows,

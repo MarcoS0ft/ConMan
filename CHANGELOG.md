@@ -52,6 +52,8 @@ All notable user-facing changes to Connection Manager are documented here.
 
 ### Fixed
 
+- Display remote RDP resize, divider, text, and hand cursors, preserving cursor
+  hotspots and hidden states across tabs and split panes.
 - Unify tab keyboard and mouse activation so repeated shortcuts retain focus,
   palette dismissal can reopen immediately, Home remains pinned, and tab
   dragging clearly previews its source and destination.

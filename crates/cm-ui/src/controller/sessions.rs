@@ -3437,6 +3437,7 @@ pub(super) fn open_rdp_tab(
     // doesn't touch it either. Blank it so this fresh RDP tab never briefly
     // shows the previously-active tab's last painted frame.
     ui.set_rdp_frame(Image::default());
+    ui.set_rdp_cursor(crate::RemoteCursor::default());
 }
 
 /// RDP counterpart to [`reconnect_ssh_tab`]: replaces the
@@ -3549,6 +3550,7 @@ pub(super) fn reconnect_rdp_tab(
             // here, right when the reconnect is committed to, closes that
             // window immediately rather than waiting for the next tick.
             ui.set_rdp_frame(Image::default());
+            ui.set_rdp_cursor(crate::RemoteCursor::default());
         }
         Err(e) => {
             tracing::warn!("RDP reconnect error: {e}");
@@ -3763,6 +3765,13 @@ fn tick_tab(
         }
     }
 
+    if let Some(cursor) = st.tabs[i].session.take_rdp_cursor_update()
+        && i == active
+    {
+        ui.set_rdp_cursor(cursor_to_ui(Some(cursor)));
+        panes_updated = true;
+    }
+
     // Drain the latest update for this tab's primary surface.
     match st.tabs[i].session.surface() {
         Surface::TerminalGrid(rx) => {
@@ -3799,6 +3808,14 @@ fn tick_tab(
     // (f): collect extra panes that have Exited/Failed for collapse.
     let mut extra_panes_to_close: Vec<usize> = Vec::new();
     for ep_idx in 0..st.tabs[i].extra_panes.len() {
+        if st.tabs[i].extra_panes[ep_idx]
+            .session
+            .take_rdp_cursor_update()
+            .is_some()
+            && i == active
+        {
+            panes_updated = true;
+        }
         match st.tabs[i].extra_panes[ep_idx].session.surface() {
             Surface::TerminalGrid(rx) => {
                 if let Some(snap) = drain_latest(rx) {
@@ -4763,6 +4780,7 @@ pub(super) fn render_active(st: &mut State, ui: &AppWindow) {
             }
             Surface::Framebuffer(_) => {
                 ui.set_rdp_frame(tab.last_frame.clone().unwrap_or_default());
+                ui.set_rdp_cursor(cursor_to_ui(tab.session.rdp_cursor()));
                 ui.set_rdp_active(true);
                 // RDP has no scrollback viewport — hide the terminal overlay.
                 ui.set_term_scrollback_len(0);
@@ -6149,5 +6167,35 @@ mod tests {
             None,
             "later focus changes cannot restart a failed-closed bridge"
         );
+    }
+}
+
+/// Convert only cursor changes (or a pane/tab presentation) to a small UI image.
+pub(super) fn cursor_to_ui(cursor: Option<cm_core::RdpCursor>) -> crate::RemoteCursor {
+    match cursor {
+        Some(cm_core::RdpCursor::Bitmap {
+            width,
+            height,
+            hotspot_x,
+            hotspot_y,
+            rgba,
+        }) => {
+            let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                rgba.as_ref(),
+                u32::from(width),
+                u32::from(height),
+            );
+            crate::RemoteCursor {
+                kind: 2,
+                bitmap: Image::from_rgba8(pixels),
+                hotspot_x: i32::from(hotspot_x),
+                hotspot_y: i32::from(hotspot_y),
+            }
+        }
+        Some(cm_core::RdpCursor::Hidden) => crate::RemoteCursor {
+            kind: 1,
+            ..Default::default()
+        },
+        _ => crate::RemoteCursor::default(),
     }
 }

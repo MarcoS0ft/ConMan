@@ -58,8 +58,8 @@ pub use application_ui::{
     ApplicationUiController, CommonApplicationUiConfig, UiAttachError, attach_application_ui,
 };
 pub use generated_ui::{
-    AppWindow, ConnRow, CredRow, KbdPromptRow, PaletteAction, PaneCell, RecentItem, TabItem,
-    ToastEntry,
+    AppWindow, ConnRow, CredRow, KbdPromptRow, PaletteAction, PaneCell, RecentItem, RemoteCursor,
+    TabItem, ToastEntry,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

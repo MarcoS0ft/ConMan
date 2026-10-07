@@ -15,8 +15,8 @@ use cm_core::latest::{LatestSender, latest_channel};
 use cm_core::rdp::{CertVerifier, RdpAuthInput};
 use cm_core::ssh::{HostKeyVerifier, SshAuthInput};
 use cm_core::{
-    FrameUpdate, GridSnapshot, LocalSettings, MouseEvent, RdpInputEvent, RdpSettings, Session,
-    SessionInput, SessionProvider, SessionSetupError, SessionStatus, SshSettings, Surface,
+    FrameUpdate, GridSnapshot, LocalSettings, MouseEvent, RdpCursor, RdpInputEvent, RdpSettings,
+    Session, SessionInput, SessionProvider, SessionSetupError, SessionStatus, SshSettings, Surface,
     TelnetSettings, TerminalSize,
 };
 
@@ -28,6 +28,7 @@ use cm_core::{
 pub(crate) struct ScriptedSession {
     status: Arc<Mutex<SessionStatus>>,
     surface: Surface,
+    cursor: Option<Arc<Mutex<(RdpCursor, bool)>>>,
     shared: ScriptedSessionShared,
     session_id: usize,
 }
@@ -56,6 +57,7 @@ impl ScriptedSession {
         Self {
             status,
             surface: Surface::TerminalGrid(rx),
+            cursor: None,
             session_id,
             shared,
         }
@@ -64,9 +66,12 @@ impl ScriptedSession {
     fn new_rdp(
         status: Arc<Mutex<SessionStatus>>,
         rdp_outputs: Arc<Mutex<Vec<LatestSender<FrameUpdate>>>>,
+        cursors: &Mutex<Vec<Arc<Mutex<(RdpCursor, bool)>>>>,
         session_id: usize,
         shared: ScriptedSessionShared,
     ) -> Self {
+        let cursor = Arc::new(Mutex::new((RdpCursor::Default, false)));
+        cursors.lock().unwrap().push(cursor.clone());
         let (tx, rx) = latest_channel::<FrameUpdate>();
         rdp_outputs
             .lock()
@@ -75,6 +80,7 @@ impl ScriptedSession {
         Self {
             status,
             surface: Surface::Framebuffer(rx),
+            cursor: Some(cursor),
             session_id,
             shared,
         }
@@ -82,6 +88,15 @@ impl ScriptedSession {
 }
 
 impl Session for ScriptedSession {
+    fn rdp_cursor(&self) -> Option<RdpCursor> {
+        self.cursor.as_ref().map(|c| c.lock().unwrap().0.clone())
+    }
+
+    fn take_rdp_cursor_update(&self) -> Option<RdpCursor> {
+        let mut state = self.cursor.as_ref()?.lock().unwrap();
+        std::mem::take(&mut state.1).then(|| state.0.clone())
+    }
+
     fn surface(&self) -> &Surface {
         &self.surface
     }
@@ -147,6 +162,7 @@ pub(crate) struct MockSessionProvider {
     shutdowns: Arc<AtomicUsize>,
     terminal_outputs: Arc<Mutex<Vec<LatestSender<GridSnapshot>>>>,
     rdp_outputs: Arc<Mutex<Vec<LatestSender<FrameUpdate>>>>,
+    cursors: Mutex<Vec<Arc<Mutex<(RdpCursor, bool)>>>>,
     next_session_id: AtomicUsize,
     tagged_inputs: Arc<Mutex<Vec<(usize, SessionInput)>>>,
     search_requests: Arc<AtomicUsize>,
@@ -176,6 +192,7 @@ impl MockSessionProvider {
             shutdowns: Arc::new(AtomicUsize::new(0)),
             terminal_outputs: Arc::new(Mutex::new(Vec::new())),
             rdp_outputs: Arc::new(Mutex::new(Vec::new())),
+            cursors: Mutex::new(Vec::new()),
             next_session_id: AtomicUsize::new(0),
             tagged_inputs: Arc::new(Mutex::new(Vec::new())),
             search_requests: Arc::new(AtomicUsize::new(0)),
@@ -314,6 +331,10 @@ impl MockSessionProvider {
             .expect("scripted terminal session index")
             .publish(snapshot)
             .expect("scripted terminal receiver must remain live");
+    }
+
+    pub(crate) fn publish_rdp_cursor(&self, rdp_index: usize, cursor: RdpCursor) {
+        *self.cursors.lock().unwrap()[rdp_index].lock().unwrap() = (cursor, true);
     }
 
     pub(crate) fn publish_rdp_frame(&self, rdp_index: usize, width: u16, height: u16) {
@@ -481,6 +502,7 @@ impl SessionProvider for MockSessionProvider {
         Ok(Box::new(ScriptedSession::new_rdp(
             cell,
             self.rdp_outputs.clone(),
+            &self.cursors,
             session_id,
             self.scripted_shared(),
         )))
