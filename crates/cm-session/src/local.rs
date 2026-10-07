@@ -518,6 +518,46 @@ mod tests {
     }
 
     #[test]
+    fn input_reveals_live_prompt_in_a_no_echo_pty() {
+        let session = LocalTerminalSession::spawn(
+            &sh(&[
+                "-c",
+                "stty -echo; i=0; while [ $i -lt 20 ]; do printf 'history %s\\r\\n' $i; i=$((i+1)); done; printf 'PASSWORD_PROMPT'; read answer",
+            ]),
+            TerminalSize { rows: 4, cols: 40 },
+            TerminalOptions::default(),
+        )
+        .expect("spawn");
+        assert!(wait_for_text(
+            &session,
+            "PASSWORD_PROMPT",
+            Duration::from_secs(5)
+        ));
+        // Neither input completes read, so the child emits no response.
+        for paste in [false, true] {
+            session.set_scroll(5);
+            let frozen = recv_latest_timeout(session.snapshots(), Duration::from_secs(5))
+                .expect("scroll snapshot");
+            assert_eq!(frozen.scroll_offset, 5);
+            assert!(!snapshot_contains(&frozen, "PASSWORD_PROMPT"));
+            if paste {
+                session.paste(b"secret".to_vec());
+            } else {
+                session.send_key(KeyEvent {
+                    key: Key::Char('x'),
+                    mods: Default::default(),
+                });
+            }
+            let live = recv_latest_timeout(session.snapshots(), Duration::from_secs(5))
+                .expect("input must publish without echo");
+            assert_eq!(live.scroll_offset, 0);
+            assert!(snapshot_contains(&live, "PASSWORD_PROMPT"));
+            assert!(!snapshot_contains(&live, "secret"));
+        }
+        TerminalSession::shutdown(&session);
+    }
+
+    #[test]
     fn resize_changes_snapshot_dimensions() {
         let session = LocalTerminalSession::spawn(
             &sh(&[]),

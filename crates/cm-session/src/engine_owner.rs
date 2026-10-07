@@ -219,6 +219,13 @@ pub(crate) fn run_engine_owner<T: Transport, S: SnapshotSink, C: ControlSource>(
             }
             Msg::Key(ev) => {
                 let encoded = engine.encode_key(&ev);
+                // Reveal the live cursor even when the host does not echo input.
+                if !encoded.is_empty() && scroll != ScrollState::Tail {
+                    scroll = ScrollState::Tail;
+                    if !snapshot_tx.send_snapshot(engine.snapshot(0)) {
+                        break;
+                    }
+                }
                 // Modified Enter may have a transport-specific escape sequence;
                 // replace bytes with TELNET's newline only for the canonical CR.
                 let newline_intent = matches!(ev.key, Key::Enter) && encoded == b"\r";
@@ -226,6 +233,12 @@ pub(crate) fn run_engine_owner<T: Transport, S: SnapshotSink, C: ControlSource>(
             }
             Msg::Mouse(ev) => transport.write(&engine.encode_mouse(&ev)),
             Msg::Paste(bytes) => {
+                if !bytes.is_empty() && scroll != ScrollState::Tail {
+                    scroll = ScrollState::Tail;
+                    if !snapshot_tx.send_snapshot(engine.snapshot(0)) {
+                        break;
+                    }
+                }
                 let wrapped = wrap_paste(&bytes, engine.bracketed_paste_enabled());
                 transport.write(&wrapped);
             }
@@ -499,6 +512,56 @@ mod tests {
         (0..10)
             .map(|i| Msg::Bytes(format!("L{i}\r\n").into_bytes()))
             .collect()
+    }
+
+    #[test]
+    fn typing_returns_to_tail_without_echo() {
+        for key in [Key::Char('x'), Key::Enter, Key::Left, Key::Backspace] {
+            let mut msgs = ten_numbered_lines();
+            msgs.push(Msg::SetScroll(3));
+            msgs.push(Msg::Key(KeyEvent {
+                key,
+                mods: Default::default(),
+            }));
+            let snaps = drive_snapshots(4, 10, msgs);
+            assert_eq!(snaps.last().unwrap().scroll_offset, 0, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn paste_returns_to_tail_without_echo() {
+        for bracketed in [false, true] {
+            let mut msgs = ten_numbered_lines();
+            if bracketed {
+                msgs.push(Msg::Bytes(b"\x1b[?2004h".to_vec()));
+            }
+            msgs.push(Msg::SetScroll(3));
+            msgs.push(Msg::Paste(b"hello".to_vec()));
+            let snaps = drive_snapshots(4, 10, msgs);
+            assert_eq!(snaps.last().unwrap().scroll_offset, 0);
+        }
+    }
+
+    #[test]
+    fn empty_paste_preserves_scroll_position() {
+        let mut msgs = ten_numbered_lines();
+        msgs.push(Msg::SetScroll(3));
+        msgs.push(Msg::Paste(Vec::new()));
+        let snaps = drive_snapshots(4, 10, msgs);
+        assert_eq!(snaps.last().unwrap().scroll_offset, 3);
+    }
+
+    #[test]
+    fn typing_resumes_following_subsequent_output() {
+        let mut msgs = ten_numbered_lines();
+        msgs.push(Msg::SetScroll(3));
+        msgs.push(Msg::Key(KeyEvent {
+            key: Key::Enter,
+            mods: Default::default(),
+        }));
+        msgs.push(Msg::Bytes(b"tail\r\n".to_vec()));
+        let snaps = drive_snapshots(4, 10, msgs);
+        assert_eq!(snaps.last().unwrap().scroll_offset, 0);
     }
 
     #[test]

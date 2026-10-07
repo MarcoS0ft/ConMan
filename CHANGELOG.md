@@ -6,6 +6,7 @@ All notable user-facing changes to Connection Manager are documented here.
 
 ### Added
 
+- Return terminal views to the live cursor when typing or pasting from scrollback.
 - Add an editable `conman.ini` preferences file while retaining connections,
   credentials, and machine-local application state in their appropriate stores.
 - Add `conmanctl` for connection and configuration import, export, inspection,
