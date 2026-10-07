@@ -47,7 +47,7 @@ impl std::error::Error for WorkspaceLockError {
 /// RAII owner for `<canonical-workspace>/.conman/workspace.lock`.
 #[derive(Debug)]
 pub struct WorkspaceGuard {
-    _file: File,
+    file: File,
     workspace: PathBuf,
 }
 
@@ -93,7 +93,7 @@ impl WorkspaceGuard {
             crate::safe_lock::open_lock_file(&lock_path).map_err(WorkspaceLockError::UnsafePath)?;
         match file.try_lock() {
             Ok(()) => Ok(Self {
-                _file: file,
+                file,
                 workspace: canonical,
             }),
             Err(std::fs::TryLockError::WouldBlock) => Err(WorkspaceLockError::AlreadyOwned),
@@ -105,6 +105,16 @@ impl WorkspaceGuard {
     #[must_use]
     pub fn workspace(&self) -> &Path {
         &self.workspace
+    }
+}
+
+impl Drop for WorkspaceGuard {
+    fn drop(&mut self) {
+        // A spawned child can briefly inherit the open file description before
+        // exec closes it. Release ownership now, regardless of duplicate handles.
+        if let Err(error) = self.file.unlock() {
+            tracing::warn!(%error, "failed to unlock workspace");
+        }
     }
 }
 
@@ -200,6 +210,18 @@ mod tests {
         assert!(lock_path.is_file());
         drop(next);
         assert!(lock_path.is_file());
+    }
+
+    #[test]
+    fn dropping_guard_releases_lock_with_a_duplicate_handle_alive() {
+        let workspace = TempDir::new();
+        let canonical = fs::canonicalize(workspace.path()).unwrap();
+        let guard = WorkspaceGuard::acquire(&canonical).unwrap();
+        let duplicate = guard.file.try_clone().unwrap();
+        drop(guard);
+        let next = WorkspaceGuard::acquire(&canonical).unwrap();
+        drop(next);
+        drop(duplicate);
     }
 
     #[test]

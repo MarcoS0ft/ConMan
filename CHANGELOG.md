@@ -17,7 +17,7 @@ entries into `## [MAJOR.MINOR.PATCH] - YYYY-MM-DD`, matching the Cargo version a
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-10-06
+## [0.2.0] - 2026-10-07
 
 ### Added
 
@@ -38,6 +38,8 @@ entries into `## [MAJOR.MINOR.PATCH] - YYYY-MM-DD`, matching the Cargo version a
 
 ### Fixed
 
+- Release workspace locks immediately when their guard drops, even while a
+  duplicated or briefly inherited file handle remains open.
 - Render remote RDP cursors correctly and return terminal views to the live
   cursor when typing or pasting.
 - Allow SSH password logins to servers that require keyboard-interactive
