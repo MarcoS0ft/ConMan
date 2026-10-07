@@ -335,7 +335,7 @@ impl MacosSparkleBackend {
             conman_sparkle_create(
                 &config,
                 Some(event_callback),
-                (&mut *callback_state).cast::<c_void>(),
+                std::ptr::from_mut(&mut *callback_state).cast::<c_void>(),
                 error.as_mut_ptr(),
             )
         };
@@ -415,7 +415,7 @@ impl ErrorBuffer {
             bytes: [0; MAX_ERROR_STRING],
             error: ConManSparkleError {
                 code: 0,
-                message: ptr::null_mut(),
+                message: std::ptr::null_mut(),
                 message_capacity: MAX_ERROR_STRING,
                 message_length: 0,
             },

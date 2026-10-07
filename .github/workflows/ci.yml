@@ -140,6 +140,32 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
 
+      - name: Fetch pinned Sparkle 2.9.4
+        if: runner.os == 'macOS'
+        id: sparkle
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="$(scripts/package/macos/fetch-sparkle.sh \
+            --output-dir "$RUNNER_TEMP/conman-sparkle")"
+          sparkle_dir="$(printf '%s\n' "$result" | sed -n 's/^SPARKLE_DIR=//p')"
+          test -n "$sparkle_dir"
+          echo "CONMAN_SPARKLE_DIR=$sparkle_dir" >> "$GITHUB_ENV"
+
+      - name: Build Sparkle 2.9.4 Rust bridge
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="$(scripts/package/macos/build-sparkle-bridge.sh \
+            --sparkle-dir "$CONMAN_SPARKLE_DIR" \
+            --output-dir "$RUNNER_TEMP/conman-sparkle-bridge")"
+          bridge="$(printf '%s\n' "$result" | sed -n 's/^BRIDGE=//p')"
+          test -f "$bridge"
+          echo "CONMAN_SPARKLE_BRIDGE=$bridge" >> "$GITHUB_ENV"
+          echo "CONMAN_SPARKLE_BRIDGE_DIR=$(dirname "$bridge")" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$(dirname "$bridge"):$(dirname "$CONMAN_SPARKLE_DIR"):${DYLD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+
       - name: Lint all targets and features
         if: runner.os == 'Linux'
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
