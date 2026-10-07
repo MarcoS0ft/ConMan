@@ -75,6 +75,8 @@ args=(
     "$repo_root/packaging/macos/updater/ConManSparkleBridge.swift"
 )
 swiftc "${args[@]}"
+# Rust links with -lConManSparkleBridge; keep the packaged install name intact.
+ln -sf ConManSparkleBridge.dylib "$output_dir/libConManSparkleBridge.dylib"
 
 otool -L "$bridge" | grep -Fq 'Sparkle.framework/Versions/B/Sparkle' || {
     echo "Sparkle bridge does not link the pinned Sparkle framework" >&2
