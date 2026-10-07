@@ -305,6 +305,82 @@ fn ssh_settings(port: u16, user: &str) -> SshSettings {
     }
 }
 
+#[test]
+fn password_mode_accepts_keyboard_interactive_password_and_empty_round() {
+    let dir = scratch_dir("password-kbd-fallback");
+    let (_, host_key, _) = gen_keypair(&dir, "host");
+    let mut config = SshServerConfig::new(host_key);
+    config.kbd_interactive = Some(KbdInteractiveTestConfig {
+        name: "Login",
+        instructions: "",
+        rounds: vec![
+            KbdRound {
+                prompts: vec![("Password: ", false)],
+                expected_answers: vec!["test-password".to_owned()],
+            },
+            KbdRound {
+                prompts: vec![],
+                expected_answers: vec![],
+            },
+        ],
+    });
+    let server = LoopbackSshServer::spawn(config);
+    for password in ["test-password", "wrong-password"] {
+        let session = SshTerminalSession::connect(
+            &ssh_settings(server.port, "test-user"),
+            SshAuthInput::Password(Secret::from_string(password.to_owned())),
+            Arc::new(AcceptAll),
+            known_hosts_in(&dir),
+            default_size(),
+        )
+        .expect("spawn session");
+        if password == "test-password" {
+            wait_for_connected(&session, Duration::from_secs(5));
+        } else {
+            assert!(matches!(
+                wait_for_terminal_status(&session, Duration::from_secs(5)),
+                SessionStatus::Failed(_)
+            ));
+        }
+        session.shutdown();
+    }
+    drop(server);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "opt-in: set CONMAN_LIVE_SSH_HOST/_USER/_PASSWORD/_EXPECT"]
+fn ssh_password_live_device() {
+    let (Ok(host), Ok(user), Ok(password), Ok(expected)) = (
+        std::env::var("CONMAN_LIVE_SSH_HOST"),
+        std::env::var("CONMAN_LIVE_SSH_USER"),
+        std::env::var("CONMAN_LIVE_SSH_PASSWORD"),
+        std::env::var("CONMAN_LIVE_SSH_EXPECT"),
+    ) else {
+        return;
+    };
+    let dir = scratch_dir("live-password");
+    let mut settings = ssh_settings(22, &user);
+    settings.host = host;
+    let session = SshTerminalSession::connect(
+        &settings,
+        SshAuthInput::Password(Secret::from_string(password)),
+        Arc::new(AcceptAll),
+        known_hosts_in(&dir),
+        default_size(),
+    )
+    .expect("spawn session");
+    wait_for_connected(&session, Duration::from_secs(10));
+    session.paste(b"get system status\r".to_vec());
+    assert!(
+        wait_for_text(&session, &expected, Duration::from_secs(10)),
+        "expected read-only device status output"
+    );
+    session.paste(b"exit\r".to_vec());
+    session.shutdown();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Happy path: password auth + echo round-trip
 // ---------------------------------------------------------------------------

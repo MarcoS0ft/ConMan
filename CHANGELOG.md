@@ -20,6 +20,9 @@ notes; they do not automatically read this file.
 
 ### Fixed
 
+- Allow SSH password logins to servers that require keyboard-interactive
+  password challenges, including current FortiMail and FortiAuthenticator
+  firmware, without answering OTP or password-change prompts automatically.
 - Give Windows MSI packages increasing build versions for development revisions
   and patch releases, with stable builds ordered after the same development
   revision, and verify the generated installer's version.

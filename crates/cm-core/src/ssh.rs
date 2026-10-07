@@ -27,7 +27,8 @@ use crate::credential::Secret;
 /// [`Secret`] itself provides.
 #[derive(Clone)]
 pub enum SshAuthInput {
-    /// Password authentication.
+    /// Password authentication, including one hidden password challenge when
+    /// the server offers keyboard-interactive instead of the password method.
     Password(Secret),
     /// Public-key authentication from a key file on disk, with an optional
     /// passphrase (quick-connect: the user types/picks a local path).

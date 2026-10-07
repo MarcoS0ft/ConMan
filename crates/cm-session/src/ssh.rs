@@ -14,6 +14,7 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -77,6 +78,33 @@ pub enum SshError {
 /// attempt — guards against a hostile/broken server looping the client
 /// forever; every parser loop must be bounded.
 const MAX_KBD_INTERACTIVE_ROUNDS: u32 = 16;
+
+/// Password mode can answer one ordinary, hidden password challenge. Other
+/// challenges (OTP, password changes, multiple or echoed prompts) require the
+/// explicit keyboard-interactive UI rather than reusing a stored password.
+struct PasswordChallengeHandler {
+    password: Secret,
+    answered: AtomicBool,
+}
+
+impl KbdInteractiveHandler for PasswordChallengeHandler {
+    fn respond(&self, challenge: &KbdInteractiveChallenge) -> Option<Vec<Secret>> {
+        if challenge.prompts.is_empty() {
+            return Some(Vec::new());
+        }
+        let [prompt] = challenge.prompts.as_slice() else {
+            return None;
+        };
+        let text = prompt.text.trim();
+        if prompt.echo
+            || !(text.eq_ignore_ascii_case("password:") || text.eq_ignore_ascii_case("password"))
+            || self.answered.swap(true, Ordering::Relaxed)
+        {
+            return None;
+        }
+        Some(vec![self.password.clone()])
+    }
+}
 
 /// Pads or truncates `answers` to exactly `expected` entries. Defensive: a
 /// misbehaving [`KbdInteractiveHandler`] must never desync the protocol
@@ -823,7 +851,20 @@ async fn authenticate(
                 .authenticate_password(user, password)
                 .await
                 .map_err(|e| SshError::Auth(e.to_string()))?;
-            Ok(res.success())
+            match res {
+                russh::client::AuthResult::Success => Ok(true),
+                russh::client::AuthResult::Failure {
+                    remaining_methods,
+                    partial_success: false,
+                } if remaining_methods.contains(&russh::MethodKind::KeyboardInteractive) => {
+                    let handler = PasswordChallengeHandler {
+                        password: secret,
+                        answered: AtomicBool::new(false),
+                    };
+                    keyboard_interactive_auth(handle, user, &handler).await
+                }
+                russh::client::AuthResult::Failure { .. } => Ok(false),
+            }
         }
         SshAuthInput::Key { path, passphrase } => {
             let pass = passphrase
@@ -1073,6 +1114,61 @@ async fn pump(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn password_challenge_only_answers_one_hidden_password_prompt() {
+        for (text, echo, accepted) in [
+            ("Password: ", false, true),
+            (" password ", false, true),
+            ("PASSWORD:", false, true),
+            ("Password:", true, false),
+            ("Verification code:", false, false),
+            ("New password:", false, false),
+        ] {
+            let handler = PasswordChallengeHandler {
+                password: Secret::from_string("test-secret".to_owned()),
+                answered: AtomicBool::new(false),
+            };
+            let mut challenge = KbdInteractiveChallenge {
+                name: String::new(),
+                instructions: String::new(),
+                prompts: vec![],
+            };
+            assert!(handler.respond(&challenge).unwrap().is_empty());
+            challenge.prompts.push(KbdInteractivePrompt {
+                text: text.to_owned(),
+                echo,
+            });
+            let answers = handler.respond(&challenge);
+            assert_eq!(answers.is_some(), accepted, "{text:?}, echo={echo}");
+            if let Some(answers) = answers {
+                assert_eq!(answers[0].expose(), b"test-secret");
+                assert!(
+                    handler.respond(&challenge).is_none(),
+                    "never resend the password"
+                );
+            }
+        }
+        let handler = PasswordChallengeHandler {
+            password: Secret::from_string("test-secret".to_owned()),
+            answered: AtomicBool::new(false),
+        };
+        let challenge = KbdInteractiveChallenge {
+            name: String::new(),
+            instructions: String::new(),
+            prompts: vec![
+                KbdInteractivePrompt {
+                    text: "Password:".to_owned(),
+                    echo: false,
+                },
+                KbdInteractivePrompt {
+                    text: "OTP:".to_owned(),
+                    echo: false,
+                },
+            ],
+        };
+        assert!(handler.respond(&challenge).is_none());
+    }
 
     /// A programmatic verifier for tests: always returns the configured decision
     /// and records what it was asked about.
