@@ -72,6 +72,8 @@ typedef struct ConManSparkleError {
 typedef void (*ConManSparkleEventFn)(void *context,
                                      const ConManSparkleEvent *event);
 
+/* Swift imports the ABI types without importing its own exported functions. */
+#ifndef CONMAN_SPARKLE_TYPES_ONLY
 ConManSparkle *conman_sparkle_create(const ConManSparkleConfig *config,
                                      ConManSparkleEventFn callback,
                                      void *context,
@@ -87,6 +89,7 @@ bool conman_sparkle_cancel(ConManSparkle *, ConManSparkleError *error);
 bool conman_sparkle_install_and_relaunch(ConManSparkle *,
                                          ConManSparkleError *error);
 void conman_sparkle_destroy(ConManSparkle *);
+#endif
 
 #ifdef __cplusplus
 }

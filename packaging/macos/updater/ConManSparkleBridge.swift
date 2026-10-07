@@ -16,54 +16,7 @@ private let devFeed = "https://github.com/MarcoS0ft/ConMan/releases/download/dev
 private let expectedBundleIdentifier = "com.marcos0ft.conman"
 private let expectedTeamIdentifier = "2NZRF4HQT7"
 
-public typealias ConManSparkleEventFn = @convention(c) (
-    UnsafeMutableRawPointer?, UnsafePointer<ConManSparkleEvent>?
-) -> Void
-
-// Keep these declarations layout-compatible with updater/conman_sparkle.h.
-// They are intentionally plain C-representable values: no Swift object or
-// borrowed String crosses the bridge.
-public struct ConManSparkleConfig {
-    public var channel: UInt32
-    public var automatic_download: UInt8
-    public var reserved0: UInt8
-    public var reserved1: UInt8
-    public var reserved2: UInt8
-
-    public init(channel: UInt32, automatic_download: UInt8) {
-        self.channel = channel
-        self.automatic_download = automatic_download
-        self.reserved0 = 0
-        self.reserved1 = 0
-        self.reserved2 = 0
-    }
-}
-
-public struct ConManSparkleEvent {
-    public var generation: UInt64
-    public var kind: UInt32
-    public var manual: UInt8
-    public var reserved0: UInt8
-    public var reserved1: UInt8
-    public var reserved2: UInt8
-    public var received: UInt64
-    public var total: UInt64
-    public var revision: UInt64
-    public var staging_token: UInt64
-    public var version: UnsafePointer<CChar>?
-    public var display_version: UnsafePointer<CChar>?
-    public var release_notes_url: UnsafePointer<CChar>?
-    public var info_url: UnsafePointer<CChar>?
-    public var error_code: UInt32
-    public var error_message: UnsafePointer<CChar>?
-}
-
-public struct ConManSparkleError {
-    public var code: UInt32
-    public var message: UnsafeMutablePointer<CChar>?
-    public var message_capacity: Int
-    public var message_length: Int
-}
+// ABI types are imported from conman_sparkle.h to preserve C layout.
 
 private enum EventKind {
     static let checkStarted: UInt32 = 1
@@ -366,9 +319,7 @@ private final class ConManSparkleBridge: NSObject {
                                 generation: generation,
                                 kind: kind,
                                 manual: manual ? 1 : 0,
-                                reserved0: 0,
-                                reserved1: 0,
-                                reserved2: 0,
+                                reserved: (0, 0, 0),
                                 received: received,
                                 total: total,
                                 revision: revision,
@@ -394,7 +345,7 @@ private final class ConManSparkleBridge: NSObject {
 
     private func isNoUpdateError(_ value: Error) -> Bool {
         let nsError = value as NSError
-        return nsError.domain == SUSparkleErrorDomain && nsError.code == SUNoUpdateError
+        return nsError.domain == SUSparkleErrorDomain && nsError.code == Int(SUError.noUpdateError.rawValue)
     }
 
     private func errorCode(_ value: Error) -> UInt32 {
@@ -420,8 +371,10 @@ private final class ConManSparkleBridge: NSObject {
         guard FileManager.default.isWritableFile(atPath: bundleURL.deletingLastPathComponent().path) else { return false }
         var code: SecCode?
         guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return false }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode else { return false }
         var information: CFDictionary?
-        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
+        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
               let values = information as? [String: Any],
               let identifier = values[kSecCodeInfoIdentifier as String] as? String,
               let team = values[kSecCodeInfoTeamIdentifier as String] as? String
@@ -604,7 +557,7 @@ private final class ConManSparkleUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         owner?.feedURL()
     }
 
-    func updaterShouldPromptForPermissionToCheckForUpdates(_ updater: SPUUpdater) -> Bool { false }
+    func updaterShouldPromptForPermissionToCheck(forUpdates updater: SPUUpdater) -> Bool { false }
 
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
         owner?.candidate(item)
@@ -618,7 +571,7 @@ private final class ConManSparkleUpdaterDelegate: NSObject, SPUUpdaterDelegate {
         owner?.failed(error)
     }
 
-    func updater(_ updater: SPUUpdater, userDidMakeChoice choice: SPUUserUpdateChoice, forUpdate updateItem: SUAppcastItem, state: SPUUserUpdateState) {
+    func updater(_ updater: SPUUpdater, userDidMake choice: SPUUserUpdateChoice, forUpdate updateItem: SUAppcastItem, state: SPUUserUpdateState) {
         if choice != .install { owner?.invalidateInstallReply() }
     }
 

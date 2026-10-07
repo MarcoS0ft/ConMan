@@ -60,6 +60,8 @@ fi
 mkdir -p "$output_dir"
 bridge="$output_dir/ConManSparkleBridge.dylib"
 args=(
+    -import-objc-header "$repo_root/packaging/macos/updater/conman_sparkle.h"
+    -Xcc -DCONMAN_SPARKLE_TYPES_ONLY
     -parse-as-library
     -module-name ConManSparkleBridge
     -emit-library
